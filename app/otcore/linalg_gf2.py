@@ -19,7 +19,6 @@ def mul(A: IntMat, B: IntMat) -> IntMat:
     k2, c = shape(B)
     assert k == k2, f"mul shape mismatch: {shape(A)} x {shape(B)}"
     out = [[0]*c for _ in range(r)]
-    # naive triple loop over GF(2)
     for i in range(r):
         for t in range(k):
             if A[i][t] == 0: 

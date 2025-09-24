@@ -7,43 +7,30 @@ from .hashes import content_hash_of, timestamp_iso_lisbon, run_id, APP_VERSION
 import csv, os
 
 def compose_blocks(A: Dict[str, list], B: Dict[str, list]) -> Dict[str, list]:
-    """Compose two CMap blocks degreewise: (A ∘ B)_k = A_k * B_k over GF(2)."""
     out = {}
     for k, Ak in A.items():
         Bk = B.get(k)
         if Bk is None:
             out[k] = Ak
         else:
-            # matrix mult GF(2)
-            from .linalg_gf2 import mul
             out[k] = mul(Ak, Bk)
     return out
 
 def state_hash(blocks: Dict[str, list]) -> str:
-    # Deterministic content hash of current composite blocks
     return content_hash_of({"blocks": blocks})
 
 def run_tower(schedule: List[str], cmap: CMap, shapes: Shapes, seed: str, out_csv_path: str, schedule_name: str="sched") -> None:
-    """
-    Run a schedule like ['I','C','C','I','C'] using a single Cmap for 'C' and identity for 'I'.
-    Writes CSV with seed,schedule_name,idx,hash,diverges_from_baseline_at,content_hash,run_id,run_timestamp,app_version.
-    Baseline is the same schedule but with step 0 forced to 'I'; divergence index is computed against that baseline.
-    """
-    # Build identity blocks
     I_blocks = {}
     for k, mat in cmap.blocks.__root__.items():
         n = len(mat)
-        from .linalg_gf2 import eye
         I_blocks[k] = eye(n)
     C_blocks = cmap.blocks.__root__
-    # Compute baseline hashes (step 0 -> I)
     base_blocks = I_blocks.copy()
     baseline_hashes = []
     for i, step in enumerate(schedule):
         step_blocks = I_blocks if (i==0 or step=='I') else C_blocks
         base_blocks = compose_blocks(step_blocks, base_blocks)
         baseline_hashes.append(state_hash(base_blocks))
-    # Now run actual schedule
     cur_blocks = I_blocks.copy()
     rows = []
     ts = timestamp_iso_lisbon()
@@ -57,7 +44,6 @@ def run_tower(schedule: List[str], cmap: CMap, shapes: Shapes, seed: str, out_cs
         if diverge_idx is None and h != baseline_hashes[i]:
             diverge_idx = i
         rows.append([seed, schedule_name, i, h, (diverge_idx if diverge_idx is not None else ""), content_bundle_hash, rid, ts, APP_VERSION])
-    # Write CSV
     os.makedirs(os.path.dirname(out_csv_path), exist_ok=True)
     with open(out_csv_path, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
