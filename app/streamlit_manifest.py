@@ -1,7 +1,9 @@
 
+# app/streamlit_manifest.py (top)
 import streamlit as st, json, os, tempfile, time
-from core.manifest import run_manifest, ManifestError
-from core.export import zip_report
+from app.core.manifest import run_manifest, ManifestError
+from app.core.export import zip_report
+
 
 st.set_page_config(page_title="Odd Tetra App — Manifest Runner", layout="centered")
 st.title("Odd Tetra — Manifest Runner (v0.1)")
