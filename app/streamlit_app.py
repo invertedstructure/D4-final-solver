@@ -1,11 +1,14 @@
 
+# app/streamlit_app.py (top)
 import streamlit as st, json, os, tempfile
-from core import io
-from core.hashes import bundle_content_hash, timestamp_iso_lisbon, run_id, APP_VERSION
-from core.unit_gate import unit_check
-from core.overlap_gate import overlap_check
-from core.triangle_gate import triangle_check
-from core.towers import run_tower
+
+from app.core import io
+from app.core.hashes import bundle_content_hash, timestamp_iso_lisbon, run_id, APP_VERSION
+from app.core.unit_gate import unit_check
+from app.core.overlap_gate import overlap_check
+from app.core.triangle_gate import triangle_check
+from app.core.towers import run_tower
+
 
 st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
 st.title("Odd Tetra — Phase U (v0.1 core)")
