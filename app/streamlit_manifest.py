@@ -1,8 +1,18 @@
+# --- import shim: make imports work whether CWD is repo root or app/ ---
+import sys, pathlib
+HERE = pathlib.Path(__file__).resolve().parent          # .../app
+ROOT = HERE.parent                                      # repo root
+# Ensure both app/ and repo root are importable
+for p in (str(HERE), str(ROOT)):
+    if p not in sys.path:
+        sys.path.insert(0, p)
+# -----------------------------------------------------------------------
 
-# app/streamlit_manifest.py (top)
+# streamlit_manifest.py (after the shim)
 import streamlit as st, json, os, tempfile, time
-from app.core.manifest import run_manifest, ManifestError
-from app.core.export import zip_report
+from core.manifest import run_manifest, ManifestError
+from core.export import zip_report
+
 
 
 st.set_page_config(page_title="Odd Tetra App — Manifest Runner", layout="centered")
