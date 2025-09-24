@@ -27,10 +27,12 @@ for p in (str(HERE), str(ROOT)):
         sys.path.insert(0, p)
 # -----------------------------------------------------------------------
 
-# streamlit_manifest.py (after the shim)
+# --- keep your import shim here ---
+
 import streamlit as st, json, os, tempfile, time
-from core.manifest import run_manifest, ManifestError
-from core.export import zip_report
+from otcore.manifest import run_manifest, ManifestError
+from otcore.export import zip_report
+
 
 
 
