@@ -1,32 +1,44 @@
-# --- import shim: robust loading for Streamlit Cloud (supports app/otcore or app/core) ---
-import sys, pathlib, importlib.util
+# --- robust loader with real package context for app/otcore or app/core ---
+import sys, pathlib, importlib.util, types
 
-HERE = pathlib.Path(__file__).resolve().parent            # .../app
-OTCORE = HERE / "otcore"                                  # .../app/otcore
-CORE = HERE / "core"                                      # .../app/core
-PKG = OTCORE if OTCORE.exists() else CORE
+HERE = pathlib.Path(__file__).resolve().parent   # .../app
+OTCORE = HERE / "otcore"
+CORE = HERE / "core"
+PKG_DIR = OTCORE if OTCORE.exists() else CORE
+PKG_NAME = "otcore" if OTCORE.exists() else "core"
 
-def _load_module(module_name: str, rel_path: str):
-    path = PKG / rel_path
+# Ensure a real package exists in sys.modules so that relative imports work
+if PKG_NAME not in sys.modules:
+    pkg = types.ModuleType(PKG_NAME)
+    pkg.__path__ = [str(PKG_DIR)]  # namespace package path
+    pkg.__file__ = str(PKG_DIR / "__init__.py")
+    sys.modules[PKG_NAME] = pkg
+
+def _load_pkg_module(fullname: str, rel_path: str):
+    """Load module 'PKG_NAME.rel' from file with correct package context."""
+    path = PKG_DIR / rel_path
     if not path.exists():
         raise ImportError(f"Required module file not found: {path}")
-    spec = importlib.util.spec_from_file_location(module_name, str(path))
+    spec = importlib.util.spec_from_file_location(fullname, str(path))
     mod = importlib.util.module_from_spec(spec)
+    # set package explicitly for relative imports inside the module
+    mod.__package__ = fullname.rsplit('.', 1)[0]
+    sys.modules[fullname] = mod
     spec.loader.exec_module(mod)  # type: ignore[attr-defined]
     return mod
 
-# Load modules directly by file path (no package re-exports needed)
-io = _load_module("otcore_io", "io.py")
-hashes = _load_module("otcore_hashes", "hashes.py")
-unit_gate = _load_module("otcore_unit_gate", "unit_gate.py")
-overlap_gate = _load_module("otcore_overlap_gate", "overlap_gate.py")
-triangle_gate = _load_module("otcore_triangle_gate", "triangle_gate.py")
-towers = _load_module("otcore_towers", "towers.py")
-manifest_mod = _load_module("otcore_manifest", "manifest.py")
-export_mod = _load_module("otcore_export", "export.py")
+# Load submodules under the chosen package name
+io = _load_pkg_module(f"{PKG_NAME}.io", "io.py")
+hashes = _load_pkg_module(f"{PKG_NAME}.hashes", "hashes.py")
+unit_gate = _load_pkg_module(f"{PKG_NAME}.unit_gate", "unit_gate.py")
+overlap_gate = _load_pkg_module(f"{PKG_NAME}.overlap_gate", "overlap_gate.py")
+triangle_gate = _load_pkg_module(f"{PKG_NAME}.triangle_gate", "triangle_gate.py")
+towers = _load_pkg_module(f"{PKG_NAME}.towers", "towers.py")
+manifest_mod = _load_pkg_module(f"{PKG_NAME}.manifest", "manifest.py")
+export_mod = _load_pkg_module(f"{PKG_NAME}.export", "export.py")
 
 APP_VERSION = getattr(hashes, "APP_VERSION", "v0.1-core")
-# ------------------------------------------------------------------------------------------
+# --------------------------------------------------------------------------
 
 import streamlit as st, json, os, tempfile, time
 
@@ -39,7 +51,6 @@ mf = st.file_uploader("manifest.json", type=["json"])
 
 if mf and st.button("Run manifest"):
     try:
-        # Save manifest to a temp file
         tmpdir = tempfile.mkdtemp()
         mpath = os.path.join(tmpdir, "manifest.json")
         with open(mpath, "wb") as f:
