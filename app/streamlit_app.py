@@ -27,15 +27,17 @@ for p in (str(HERE), str(ROOT)):
         sys.path.insert(0, p)
 # -----------------------------------------------------------------------
 
-# streamlit_app.py (after the shim)
+# --- keep your import shim here (adds HERE and ROOT to sys.path) ---
+
 import streamlit as st, json, os, tempfile
 
-from core import io
-from core.hashes import bundle_content_hash, timestamp_iso_lisbon, run_id, APP_VERSION
-from core.unit_gate import unit_check
-from core.overlap_gate import overlap_check
-from core.triangle_gate import triangle_check
-from core.towers import run_tower
+from otcore import io
+from otcore.hashes import bundle_content_hash, timestamp_iso_lisbon, run_id, APP_VERSION
+from otcore.unit_gate import unit_check
+from otcore.overlap_gate import overlap_check
+from otcore.triangle_gate import triangle_check
+from otcore.towers import run_tower
+
 
 
 
