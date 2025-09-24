@@ -1,3 +1,22 @@
+import importlib
+
+io = importlib.import_module('core.io')
+hashes = importlib.import_module('core.hashes')
+unit_gate = importlib.import_module('core.unit_gate')
+overlap_gate = importlib.import_module('core.overlap_gate')
+triangle_gate = importlib.import_module('core.triangle_gate')
+towers = importlib.import_module('core.towers')
+
+# then use:
+# unit_gate.unit_check(...)
+# overlap_gate.overlap_check(...)
+# triangle_gate.triangle_check(...)
+# towers.run_tower(...)
+# hashes.bundle_content_hash(...)
+# hashes.timestamp_iso_lisbon(...)
+# hashes.run_id(...)
+
+
 # --- import shim: make imports work whether CWD is repo root or app/ ---
 import sys, pathlib
 HERE = pathlib.Path(__file__).resolve().parent          # .../app
