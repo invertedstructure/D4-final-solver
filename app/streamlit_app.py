@@ -1,6 +1,6 @@
 
 import streamlit as st, json, os, tempfile
-import core.io as io
+from core import io
 from core.hashes import bundle_content_hash, timestamp_iso_lisbon, run_id, APP_VERSION
 from core.unit_gate import unit_check
 from core.overlap_gate import overlap_check
