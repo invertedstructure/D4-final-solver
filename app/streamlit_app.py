@@ -80,7 +80,19 @@ if d_shapes and d_bound and d_cmap:
             ch = hashes.bundle_content_hash(named)
             ts = hashes.timestamp_iso_lisbon()
             rid = hashes.run_id(ch, ts)
-            st.code(f"content_hash = {ch}\\nrun_timestamp = {ts}\\nrun_id = {rid}\\napp_version = {APP_VERSION}", language="bash")
+            st.code(f"content_hash = {ch}\nrun_timestamp = {ts}\nrun_id = {rid}\napp_version = {APP_VERSION}", language="bash")
+            # Quick export here too
+            if st.button("Export ./reports → report.zip (quick)"):
+                import pathlib as _pl
+                reports_dir = _pl.Path("reports")
+                if not reports_dir.exists():
+                    st.warning("No ./reports yet. Run a Tower or Manifest first.")
+                else:
+                    zpath = reports_dir / "report.zip"
+                    export_mod.zip_report(str(reports_dir), str(zpath))
+                    st.success(f"Exported: {zpath}")
+                    with open(zpath, "rb") as fz:
+                        st.download_button("Download report.zip", fz, file_name="report.zip")
     except Exception as e:
         st.error(f"Validation error: {e}")
         st.stop()
