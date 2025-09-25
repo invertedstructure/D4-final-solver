@@ -87,3 +87,18 @@ def check_boundaries_against_shapes(bounds: Boundaries, shapes: Shapes):
             continue
         if (r, c) != (n_km1, n_k):
             raise ValueError(f"∂_{k} has shape {r}x{c}; expected {n_km1}x{n_k}")
+
+def check_support_against_cmap(support: Support, cmap: CMap):
+    """Ensure each mask has same shape as the corresponding CMap block.
+       Accept either n×n or empty list when n==0."""
+    for k, mask in support.masks.items():
+        mat = cmap.blocks.__root__.get(k)
+        if mat is None:
+            raise ValueError(f"Support degree '{k}' not present in CMap")
+        # shapes must match; allow [] only if the corresponding C block is 0×0
+        rM = len(mat); cM = len(mat[0]) if rM>0 else 0
+        rS = len(mask); cS = len(mask[0]) if rS>0 else cM
+        if rM == 0 and rS == 0:
+            continue
+        if (rM, cM) != (rS, cS):
+            raise ValueError(f"Support mask at degree {k} has shape {rS}x{cS}; expected {rM}x{cM}")
