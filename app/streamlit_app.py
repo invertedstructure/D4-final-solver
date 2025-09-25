@@ -50,7 +50,7 @@ def read_json_file(file):
 
 with st.sidebar:
     st.markdown("### Upload core inputs")
-    st.caption("**Shapes (required):**\n\n```json\n{\"n\": {\"3\":3, \"2\":2, \"1\":0}}\n```\n\n**Boundaries (required):**\n\n```json\n{\"blocks\": {\"3\": [[...]], \"2\": [[...]]}}\n```\n\n**CMap / Move (required):**\n\n```json\n{\"blocks\": {\"3\": [[...]], \"2\": [[...]]}}\n```\n\n**Support (optional):** either `{degree: mask}` or `{\"masks\": {degree: mask}}`.\n\n**Triangle schema (optional):** degree-keyed `{ \"2\": {\"A\":..., \"B\":..., \"J\":...}, ... }`.")
+    st.caption("**Shapes (required):**\\n\\n```json\\n{\\\"n\\\": {\\\"3\\\":3, \\\"2\\\":2, \\\"1\\\":0}}\\n```\\n\\n**Boundaries (required):**\\n\\n```json\\n{\\\"blocks\\\": {\\\"3\\\": [[...]], \\\"2\\\": [[...]]}}\\n```\\n\\n**CMap / Move (required):**\\n\\n```json\\n{\\\"blocks\\\": {\\\"3\\\": [[...]], \\\"2\\\": [[...]]}}\\n```\\n\\n**Support (optional):** either `{degree: mask}` or `{\\\"masks\\\": {degree: mask}}`.\\n\\n**Triangle schema (optional):** degree-keyed `{ \\\"2\\\": {\\\"A\\\":..., \\\"B\\\":..., \\\"J\\\":...}, ... }`.")
     f_shapes = st.file_uploader("Shapes (shapes.json)", type=["json"], key="shapes")
     f_bound = st.file_uploader("Boundaries (boundaries.json)", type=["json"], key="bound")
     f_cmap = st.file_uploader("CMap / Move (Cmap_*.json)", type=["json"], key="cmap")
@@ -80,7 +80,7 @@ if d_shapes and d_bound and d_cmap:
             ch = hashes.bundle_content_hash(named)
             ts = hashes.timestamp_iso_lisbon()
             rid = hashes.run_id(ch, ts)
-            st.code(f"content_hash = {ch}\nrun_timestamp = {ts}\nrun_id = {rid}\napp_version = {APP_VERSION}", language="bash")
+            st.code(f"content_hash = {ch}\\nrun_timestamp = {ts}\\nrun_id = {rid}\\napp_version = {APP_VERSION}", language="bash")
             # Quick export here too
             if st.button("Export ./reports → report.zip (quick)"):
                 import pathlib as _pl
@@ -105,8 +105,10 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(["Unit", "Overlap", "Triangle", "Towers",
 
 with tab1:
     st.subheader("Unit gate")
+    enforce = st.checkbox("Enforce rep transport (c_cod = C c_dom)", value=False)
+    d_reps  = read_json_file(f_reps) if f_reps else None
     if st.button("Run Unit"):
-        out = unit_gate.unit_check(boundaries, cmap, shapes)
+        out = unit_gate.unit_check(boundaries, cmap, shapes, reps=d_reps, enforce_rep_transport=enforce)
         st.json(out)
 
 with tab2:
@@ -127,7 +129,7 @@ with tab3:
         st.info("Upload triangle schema to run.")
     else:
         if st.button("Run Triangle"):
-            out = triangle_gate.triangle_check(boundaries, triangle)
+            out = triangle_gate.triangle_check(boundaries, triangle, shapes=shapes)
             st.json(out)
 
 with tab4:
