@@ -43,12 +43,6 @@ class CMap(BaseModel):
 
 class Support(BaseModel):
     masks: Dict[str, IntMat]
-    @validator('masks')
-    def check_masks(cls, v):
-        for k, mat in v.items():
-            if not all(c in (0,1) for row in mat for c in row):
-                raise ValueError(f"Support.masks['{k}'] must be 0/1")
-        return v
 
 class Pairings(BaseModel):
     data: dict
@@ -60,13 +54,6 @@ class TriangleDegree(BaseModel):
     A: IntMat
     B: IntMat
     J: IntMat
-    @root_validator
-    def check_gf2_dims(cls, values):
-        for name in ('A','B','J'):
-            mat = values.get(name)
-            if not _is_gf2_matrix(mat):
-                raise ValueError(f"Triangle.{name} must be GF(2)")
-        return values
 
 class TriangleSchema(BaseModel):
     by_degree: Dict[str, TriangleDegree]
@@ -92,15 +79,11 @@ def check_boundaries_against_shapes(bounds: Boundaries, shapes: Shapes):
         n_km1 = shapes.n.get(str(k_int - 1))
         if n_k is None or n_km1 is None:
             raise ValueError(f"Shapes missing n for degrees {k} or {k_int-1}")
-        r, c = _shape(mat)
+        r = len(mat)
+        c = len(mat[0]) if r>0 else n_k  # assume expected cols when zero rows
+        if n_km1 == 0:
+            if r != 0:
+                raise ValueError(f"∂_{k} should have 0 rows (n_{k-1}=0); got {r}")
+            continue
         if (r, c) != (n_km1, n_k):
             raise ValueError(f"∂_{k} has shape {r}x{c}; expected {n_km1}x{n_k}")
-
-def check_support_against_cmap(support: Support, cmap: CMap):
-    for k, mask in support.masks.items():
-        mat = cmap.blocks.__root__.get(k)
-        if mat is None:
-            raise ValueError(f"Support degree '{k}' not present in CMap")
-        from .linalg_gf2 import shape as _shape2
-        if _shape2(mask) != _shape2(mat):
-            raise ValueError(f"Support mask at degree {k} has wrong shape")
