@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 from typing import Dict, Any
 from pathlib import Path
@@ -10,8 +9,21 @@ from .overlap_gate import overlap_check
 from .triangle_gate import triangle_check
 from .towers import run_tower
 from .hashes import bundle_content_hash, timestamp_iso_lisbon, run_id, APP_VERSION
+from .projector import load_projection_config, preload_projectors_from_files
 
 class ManifestError(Exception): ...
+
+def _policy_str_from_cfg(cfg: dict) -> str:
+    try:
+        layers = cfg.get("enabled_layers", [])
+        if not layers:
+            return "strict"
+        modes = cfg.get("modes", {}) or {}
+        sources = cfg.get("source", {}) or {}
+        parts = [f"{modes.get(str(k),'none')}@k={k},{sources.get(str(k),'auto')}" for k in layers]
+        return "projected(" + ",".join(parts) + ")"
+    except Exception:
+        return "strict"
 
 def run_manifest(manifest_path: str, report_dir: str) -> Dict[str, Any]:
     M = io.load_json(manifest_path)
@@ -19,13 +31,20 @@ def run_manifest(manifest_path: str, report_dir: str) -> Dict[str, Any]:
     for k in required:
         if k not in M:
             raise ManifestError(f"Manifest missing '{k}'")
+
     B = io.parse_boundaries(io.load_json(M["boundaries"]))
     S = io.parse_shapes(io.load_json(M["shapes"]))
     C = io.parse_cmap(io.load_json(M["cmap"]))
     support = io.parse_support(io.load_json(M["support"])) if M.get("support") else None
     H = io.parse_cmap(io.load_json(M["homotopy"])) if M.get("homotopy") else None
     tri = io.parse_triangle_schema(io.load_json(M["triangle_schema"])) if M.get("triangle_schema") else None
+
     io.validate_bundle(B, S, C, support)
+
+    # Projection config (optional). If file is missing or no layers enabled => strict.
+    cfg = load_projection_config("projection_config.json")
+    cache = preload_projectors_from_files(cfg)
+    policy_str = _policy_str_from_cfg(cfg)
 
     Path(report_dir).mkdir(parents=True, exist_ok=True)
     certs_dir = Path(report_dir) / "certs"
@@ -44,15 +63,36 @@ def run_manifest(manifest_path: str, report_dir: str) -> Dict[str, Any]:
     rid = run_id(content_hash, ts, APP_VERSION)
 
     unit_res = unit_check(B, C, S)
-    (certs_dir / "unit_pass.json").write_text(json.dumps({"result":unit_res,"content_hash":content_hash,"run_id":rid,"timestamp":ts,"version":APP_VERSION}, indent=2))
+    (certs_dir / "unit_pass.json").write_text(json.dumps({
+        "result": unit_res,
+        "policy": policy_str,
+        "content_hash": content_hash,
+        "run_id": rid,
+        "timestamp": ts,
+        "version": APP_VERSION
+    }, indent=2))
 
     if H:
-        overlap_res = overlap_check(B, C, H)
-        (certs_dir / "overlap_pass.json").write_text(json.dumps({"result":overlap_res,"content_hash":content_hash,"run_id":rid,"timestamp":ts,"version":APP_VERSION}, indent=2))
+        overlap_res = overlap_check(B, C, H, projection_config=cfg, projector_cache=cache)
+        (certs_dir / "overlap_pass.json").write_text(json.dumps({
+            "result": overlap_res,
+            "policy": policy_str,
+            "content_hash": content_hash,
+            "run_id": rid,
+            "timestamp": ts,
+            "version": APP_VERSION
+        }, indent=2))
 
     if tri:
         tri_res = triangle_check(B, tri)
-        (certs_dir / "triangle_pass.json").write_text(json.dumps({"result":tri_res,"content_hash":content_hash,"run_id":rid,"timestamp":ts,"version":APP_VERSION}, indent=2))
+        (certs_dir / "triangle_pass.json").write_text(json.dumps({
+            "result": tri_res,
+            "policy": policy_str,
+            "content_hash": content_hash,
+            "run_id": rid,
+            "timestamp": ts,
+            "version": APP_VERSION
+        }, indent=2))
 
     tower_summaries = []
     for sched in M["towers"]:
@@ -64,13 +104,22 @@ def run_manifest(manifest_path: str, report_dir: str) -> Dict[str, Any]:
         with open(csv_path, "r", encoding="utf-8") as f:
             r = csv.DictReader(f)
             for row in r:
-                val = row["diverges_from_baseline_at"]
+                val = row.get("diverges_from_baseline_at")
                 if val:
-                    first_div = int(val)
+                    try:
+                        first_div = int(val)
+                    except Exception:
+                        first_div = None
                     break
         tower_summaries.append({"name": name, "first_divergence": first_div, "csv": os.path.basename(csv_path)})
 
-    (certs_dir / "tower_first_divergence.json").write_text(json.dumps({"towers":tower_summaries,"content_hash":content_hash,"run_id":rid,"timestamp":ts,"version":APP_VERSION}, indent=2))
+    (certs_dir / "tower_first_divergence.json").write_text(json.dumps({
+        "towers": tower_summaries,
+        "content_hash": content_hash,
+        "run_id": rid,
+        "timestamp": ts,
+        "version": APP_VERSION
+    }, indent=2))
 
     resolved = {"manifest": M, "content_hash": content_hash, "run_id": rid, "timestamp": ts, "version": APP_VERSION}
     (Path(report_dir) / "manifest_resolved.json").write_text(json.dumps(resolved, indent=2))
@@ -85,3 +134,4 @@ def run_manifest(manifest_path: str, report_dir: str) -> Dict[str, Any]:
                 pass
 
     return {"report_dir": str(report_dir), "content_hash": content_hash, "run_id": rid, "timestamp": ts, "version": APP_VERSION}
+
