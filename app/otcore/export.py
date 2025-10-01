@@ -85,15 +85,27 @@ def write_registry_row(
 def ensure_dir(p: str):
     os.makedirs(p, exist_ok=True)
 
-def write_cert_json(payload: Dict[str, Any], out_dir: str = "certs") -> str:
+def write_cert_json(payload: Dict[str, Any], out_dir: str = "certs") -> Tuple[str, str]:
     ensure_dir(out_dir)
-    # content hash of full payload
     full_hash = hashlib.sha256(dump_canonical(payload)).hexdigest()
-    fname = f"overlap__{payload['identity']['district_id']}__{payload['policy']['policy_tag']}__{full_hash[:8]}.json"
+
+    ident = payload.get("identity", {})
+    district_id = ident.get("district_id", "D?")
+    policy_tag = ident.get("policy_tag")
+    if not policy_tag:
+        # fallback: derive from policy.label if present
+        policy_label = (payload.get("policy") or {}).get("label", "")
+        policy_tag = _slug(policy_label)
+
+    short_hash = full_hash[:12]
+    fname = f"overlap__{district_id}__{policy_tag}__{short_hash}.json"
     fpath = os.path.join(out_dir, fname)
+
     with open(fpath, "wb") as f:
         f.write(dump_canonical(payload))
+
     return fpath, full_hash
+
 
 
 
