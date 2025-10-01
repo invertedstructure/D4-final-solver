@@ -1,28 +1,6 @@
 # --- robust loader with real package context (supports app/otcore or app/core) ---
 import sys, pathlib, importlib.util, types, json, os
 import streamlit as st
-# --- force hot-load local modules from disk (bypass package cache) ---
-from pathlib import Path
-from importlib.machinery import SourceFileLoader
-
-APP_DIR = Path(__file__).resolve().parent
-OVERLAP_PATH = APP_DIR / "overlap_gate.py"
-PROJECTOR_PATH = APP_DIR / "projector.py"
-
-# Drop any cached modules with those names (avoid PKG_NAME before it's defined)
-for _name in ("overlap_gate_hot", "projector_hot"):
-    if _name in sys.modules:
-        del sys.modules[_name]
-
-# Load fresh modules directly from file
-overlap_gate = SourceFileLoader("overlap_gate_hot", str(OVERLAP_PATH)).load_module()
-projector    = SourceFileLoader("projector_hot",    str(PROJECTOR_PATH)).load_module()
-
-# Sanity: show which files are actually loaded
-st.caption(f"overlap_gate loaded from: {getattr(overlap_gate, '__file__', '<none>')}")
-st.caption(f"projector loaded from: {getattr(projector, '__file__', '<none>')}")
-
-
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -67,6 +45,22 @@ def _load_pkg_module(fullname: str, rel_path: str):
     sys.modules[fullname] = mod
     spec.loader.exec_module(mod)  # type: ignore[attr-defined]
     return mod
+    
+import sys, importlib
+
+# Always drop cached copies so we load the latest file from PKG_DIR
+for _mod in (f"{PKG_NAME}.overlap_gate", f"{PKG_NAME}.projector"):
+    if _mod in sys.modules:
+        del sys.modules[_mod]
+
+# Load modules from the package (relative imports inside them will work)
+overlap_gate = _load_pkg_module(f"{PKG_NAME}.overlap_gate", "overlap_gate.py")
+projector    = _load_pkg_module(f"{PKG_NAME}.projector",    "projector.py")
+
+# Optional: show paths in the UI so you can verify the loaded files
+st.caption(f"overlap_gate loaded from: {getattr(overlap_gate, '__file__', '<none>')}")
+st.caption(f"projector loaded from: {getattr(projector, '__file__', '<none>')}")
+
 io = _load_pkg_module(f"{PKG_NAME}.io", "io.py")
 hashes = _load_pkg_module(f"{PKG_NAME}.hashes", "hashes.py")
 unit_gate = _load_pkg_module(f"{PKG_NAME}.unit_gate", "unit_gate.py")
