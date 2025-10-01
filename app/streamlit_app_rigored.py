@@ -205,7 +205,7 @@ with tab2:
                 )
                 out = overlap_gate.overlap_check(boundaries, cmap, H)
 
-            # Results
+                        # Results
             st.json(out)
 
             # Guard warning (if file-mode drift was detected inside apply_projection)
@@ -213,63 +213,64 @@ with tab2:
                 if key.startswith("guard_warning_k"):
                     st.warning(f"[{key}] {val['msg']} | file={val['hash_file']} auto={val['hash_auto']}")
 
-            # ---- Promotion: freeze projector + log its hash ----
-# 1) check pass vector
-pass_vec = [
-    int(out.get("2", {}).get("eq", False)),
-    int(out.get("3", {}).get("eq", False)),
-]
-all_green = all(v == 1 for v in pass_vec)
+            # ---- Build pass-vector (for both normal logging and promotion gating) ----
+            pass_vec = [
+                int(out.get("2", {}).get("eq", False)),
+                int(out.get("3", {}).get("eq", False)),
+            ]
+            all_green = all(v == 1 for v in pass_vec)
 
-if all_green:
-    st.success("Green — eligible for promotion.")
-    if st.button("Promote & Freeze Projector"):
-        # Build the exact projector Π_k used (columns@k=3 from d3)
-        d3 = boundaries.blocks.__root__.get("3")
-        if d3 is None:
-            st.error("No d3 in boundaries; cannot freeze projector.")
-        else:
-            # Create Π3 from current d3 (correct-by-construction)
-            P_used = projector.projector_columns_from_dkp1(d3)
-            pj_path = "projector_D3.json"
-            pj_hash = projector.save_projector(pj_path, P_used)
-            st.info(f"Projector frozen → {pj_path} (hash={pj_hash[:12]}…)")
+            # ---- Promotion: freeze projector + log hash (only if all green) ----
+            if all_green:
+                st.success("Green — eligible for promotion.")
+                if st.button("Promote & Freeze Projector"):
+                    # Build Π3 from the current d3 (correct-by-construction)
+                    d3_now = boundaries.blocks.__root__.get("3")
+                    if d3_now is None:
+                        st.error("No d3 in boundaries; cannot freeze projector.")
+                    else:
+                        P_used = projector.projector_columns_from_dkp1(d3_now)
+                        pj_path = "projector_D3.json"
+                        pj_hash = projector.save_projector(pj_path, P_used)
+                        st.info(f"Projector frozen → {pj_path} (hash={pj_hash[:12]}…)")
 
-            # write registry row including projector hash (in notes)
+                        # OPTIONAL: flip config to file-backed for reproducibility
+                        cfg['source']['3'] = 'file'
+                        cfg.setdefault('projector_files', {})['3'] = pj_path
+                        with open("projection_config.json", "w") as _f:
+                            import json as _json
+                            _json.dump(cfg, _f, indent=2)
+                        st.toast("projection_config.json updated to file-backed mode")
+
+                        # Write a registry row including projector hash
+                        import time as _time
+                        fix_id = f"overlap-{int(_time.time())}"
+                        try:
+                            export_mod.write_registry_row(
+                                fix_id=fix_id,
+                                pass_vector=pass_vec,
+                                policy=policy_label,  # strict / projected(...)
+                                hash_d=hashes.hash_d(boundaries),
+                                hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
+                                hash_suppC=hashes.hash_suppC(cmap),
+                                hash_suppH=hashes.hash_suppH(H),
+                                notes=f"proj_hash={pj_hash}"
+                            )
+                            st.success("Registry updated with projector hash.")
+                        except Exception as e:
+                            st.error(f"Failed to write registry row: {e}")
+            else:
+                st.info("Not promoting: some checks are red.")
+
+            # ---- Normal registry write (non-promotion) ----
+            # If you still want a basic row every run (even when not promoting), keep this:
             import time
             fix_id = f"overlap-{int(time.time())}"
             try:
                 export_mod.write_registry_row(
                     fix_id=fix_id,
                     pass_vector=pass_vec,
-                    policy=policy_label,  # e.g., projected(columns@k=3,auto)
-                    hash_d=hashes.hash_d(boundaries),
-                    hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
-                    hash_suppC=hashes.hash_suppC(cmap),
-                    hash_suppH=hashes.hash_suppH(H),
-                    notes=f"proj_hash={pj_hash}"
-                )
-                st.success("Registry updated with projector hash.")
-            except Exception as e:
-                st.error(f"Failed to write registry row: {e}")
-else:
-    st.info("Not promoting: some checks are red.")
-
-            
-            
-            # ---- Build pass-vector and write registry row ----
-            pass_vec = [
-                int(out.get("2", {}).get("eq", False)),
-                int(out.get("3", {}).get("eq", False)),
-            ]
-
-            fix_id = f"overlap-{int(time.time())}"
-
-            try:
-                export_mod.write_registry_row(
-                    fix_id=fix_id,
-                    pass_vector=pass_vec,
-                    policy=policy_label,                         # strict / projected(...)
+                    policy=policy_label,  # strict / projected(...)
                     hash_d=hashes.hash_d(boundaries),
                     hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
                     hash_suppC=hashes.hash_suppC(cmap),
@@ -279,7 +280,6 @@ else:
                 st.success("Registry updated (registry.csv).")
             except Exception as e:
                 st.error(f"Failed to write registry row: {e}")
-
 
 
 with tab4:
