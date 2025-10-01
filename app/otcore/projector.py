@@ -44,25 +44,20 @@ def preload_projectors_from_files(cfg: Dict[str, Any]) -> Dict[str, List[List[in
 
 def projector_columns_from_dkp1(dkp1):
     """
-    Build a diagonal projector Π_k of shape (n_{k+1} x n_{k+1}) that keeps only 'lane' columns.
-    d_{k+1} has shape (n_k x n_{k+1}). Residual R_k is (n_{k+1} x n_{k+1}),
-    so Π_k must be n_{k+1} x n_{k+1}.
+    Build a diagonal projector Π_k of shape (n_k x n_k) that keeps only 'lane' columns.
+    Here we pass d_k (shape n_{k-1} x n_k). Residual R_k is (n_k x n_k),
+    so Π_k must be n_k x n_k.
     """
     if not dkp1 or not dkp1[0]:
         return []
-    n_k    = len(dkp1)        # rows
-    n_k1   = len(dkp1[0])     # cols  = n_{k+1}
-
-    # lane_mask[j] = 1 iff column j of d_{k+1} has any nonzero (i.e., participates in a lane)
-    lane_mask = []
-    for j in range(n_k1):
-        col_has_lane = any(dkp1[i][j] % 2 != 0 for i in range(n_k))
-        lane_mask.append(1 if col_has_lane else 0)
-
-    # n_{k+1} x n_{k+1} diagonal
-    Pi = [[1 if (i == j and lane_mask[j]) else 0 for j in range(n_k1)] for i in range(n_k1)]
-    return Pi
-
+    n_rows = len(dkp1)       # = n_{k-1}
+    n_cols = len(dkp1[0])    # = n_k  <-- projector size
+    lane_mask = [
+        1 if any(dkp1[i][j] % 2 != 0 for i in range(n_rows)) else 0
+        for j in range(n_cols)
+    ]
+    return [[1 if (i == j and lane_mask[j]) else 0 for j in range(n_cols)]
+            for i in range(n_cols)]
 
 
 # (Optional) rows-mode for real-valued math; unused in your GF(2) pass.
@@ -82,24 +77,27 @@ def projector_rows_from_dkp1_real(dkp1: List[List[float]]) -> List[List[float]]:
     P = Q @ Q.T                           # (n_k, n_k)
     return P.tolist()
 
-# ---------- projection application ----------
 
+# ---------- projection application ----------
 def apply_projection(
     Rk: List[List[int]],
     k: int,
-    boundaries,                      # Boundaries (for d_{k+1})
+    boundaries,                      # Boundaries (we'll use d_k for the mask)
     config: Optional[Dict[str, Any]] = None,
     projector_cache: Optional[Dict[str, List[List[int]]]] = None,
 ):
     """
-    Apply configured projection to residual Rk at degree k.
-    - columns: Rk <- Rk @ Π_k
-    - rows:    Rk <- P_row @ Rk   (intended for real-valued work; not used in GF(2) runs)
+    Apply configured projection to the residual Rk at degree k.
+
+    - columns: Rk <- Rk @ Π_k, where Π_k is built from the *columns of d_k*.
+      R_k is (n_k x n_k), and d_k has shape (n_{k-1} x n_k). So Π_k must be (n_k x n_k).
+    - rows:    Rk <- P_row @ Rk   (intended for real-valued work; unused in GF(2) runs)
+
     If layer k not enabled or mode is 'none', returns Rk unchanged.
     """
     cfg = config or _DEFAULT_CFG
     enabled = set(cfg.get("enabled_layers", []))
-    if k not in enabled:
+    if k not in enabled or not Rk:
         return Rk
 
     mode = cfg.get("modes", {}).get(str(k), "none")
@@ -109,21 +107,44 @@ def apply_projection(
     source = cfg.get("source", {}).get(str(k), "auto")
     cache = projector_cache or {}
 
-    # Build/load projector
+    # Build/load projector Π_k using d_k (its columns index the residual's columns)
     if source == "file" and str(k) in cache:
         P = cache[str(k)]
     else:
-        # pull d_{k+1} from boundaries
         blocks_b = boundaries.blocks.__root__
-        dkp1 = blocks_b.get(str(k + 1))
-        if dkp1 is None:
+        dk_for_mask = blocks_b.get(str(k))     # <-- use d_k (NOT d_{k+1})
+        if dk_for_mask is None:
             return Rk  # nothing to project against
         if mode == "columns":
-            P = projector_columns_from_dkp1(dkp1)
+            P = projector_columns_from_dkp1(dk_for_mask)   # returns n_k x n_k diag
         elif mode == "rows":
-            P = projector_rows_from_dkp1_real(dkp1)
+            P = projector_rows_from_dkp1_real(dk_for_mask) # left-mult (real-only)
         else:
             return Rk
+
+    # Apply Π_k with guards
+    if mode == "columns":
+        # Rk must be square and P must match its column count
+        if not Rk[0] or not P or not P[0]:
+            return Rk
+        n_cols = len(Rk[0])
+        if len(P) != n_cols or len(P[0]) != n_cols:
+            return Rk  # size mismatch → no-op
+        return mul(Rk, P)
+
+    elif mode == "rows":
+        # left multiply in float; convert back to ints if near-exact 0/1
+        try:
+            import numpy as np
+            A = np.array(P) @ np.array(Rk)
+            B = (np.abs(A) > 1e-9).astype(int).tolist()
+            return B
+        except Exception:
+            return Rk
+
+    else:
+        return Rk
+
 
         # Apply
     if not Rk:
