@@ -474,42 +474,89 @@ with tab2:
         cert_path, full_hash = export_mod.write_cert_json(cert_payload)
         st.success(f"Cert written: `{cert_path}`")
                 
-# ---------- Cert payload + write ----------
-cert_path, full_hash = export_mod.write_cert_json(cert_payload)
-st.success(f"Cert written: `{cert_path}`")
-
-# ---------- Define variables used by bundle & promotion ----------
-# pass vector / all_green (reuse the 'out' you already computed)
-pass_vec = [
-    int(out.get("2", {}).get("eq", False)),
-    int(out.get("3", {}).get("eq", False)),
-]
-all_green = all(v == 1 for v in pass_vec)
-
-# district id (use your actual selector if you have one; fallback "D3")
+# ---------- Cert payload + write (JSON-safe, standalone) ----------
 district_id = st.session_state.get("district_id", "D3")
 
-# Build a policy_block the exporter expects; include projector hash if file-backed
-cfg_eff = cfg_active  # whatever you picked from strict/projected UI
+# Make H and shapes JSON-safe
+H_local = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})
+shapes_payload = shapes.dict() if hasattr(shapes, "dict") else (shapes or {})
+
+# Effective policy (strict/projected) and projector hash (if file-backed)
+cfg_eff = cfg_active
 pj_hash = ""
 if cfg_eff.get("source", {}).get("3") == "file":
     pj_path = cfg_eff.get("projector_files", {}).get("3")
     if pj_path and os.path.exists(pj_path):
-        # small helper in projector.py; already imported as _json and projector
         pj_hash = projector._hash_matrix(_json.load(open(pj_path)))
 
 policy_block = {
-    "label": policy_label,          # e.g. "projected(columns@k=3,auto)" or "strict"
-    "policy_tag": policy_label,     # exporter uses this for filename; keep same
+    "label":          policy_label,          # e.g. "projected(columns@k=3,auto)" or "strict"
+    "policy_tag":     policy_label,          # exporter uses this for filename
     "enabled_layers": cfg_eff.get("enabled_layers", []),
-    "modes": cfg_eff.get("modes", {}),
-    "source": cfg_eff.get("source", {}),
-    "projector_hash": pj_hash,      # empty if not file-backed
+    "modes":          cfg_eff.get("modes", {}),
+    "source":         cfg_eff.get("source", {}),
+    "projector_hash": pj_hash,               # empty if not file-backed
 }
 
-# Make shapes JSON-safe (pydantic -> dict) and H local
-H_local = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})
-shapes_payload = shapes.dict() if hasattr(shapes, "dict") else shapes
+# Hash of inputs bundle for run_id
+inputs_hash = hashes.bundle_content_hash([
+    ("boundaries", boundaries.dict() if hasattr(boundaries, "dict") else {}),
+    ("cmap",       cmap.dict()       if hasattr(cmap,       "dict") else {}),
+    ("H",          H_local.dict()    if hasattr(H_local,    "dict") else {}),
+    ("shapes",     shapes_payload),
+    ("cfg",        cfg_eff),
+])
+
+# Inputs block (hashes + friendly filenames if you tracked them in session_state)
+inputs_block = {
+    "boundaries_hash": hashes.hash_d(boundaries),
+    "C_hash":          hashes.hash_suppC(cmap),
+    "H_hash":          hashes.hash_suppH(H_local),
+    "U_hash":          hashes.hash_U(shapes_payload),
+    "shapes":          shapes_payload,
+    "filenames": {
+        "boundaries": st.session_state.get("fname_boundaries", ""),
+        "cmap":       st.session_state.get("fname_cmap", ""),
+        "H":          st.session_state.get("fname_H", ""),
+        "U":          st.session_state.get("fname_shapes", ""),
+    },
+}
+
+# Checks from your solver output
+checks_block = out  # e.g. {"2":{"eq":...,"n_k":...},"3":{...}}
+
+# Graceful defaults if you didn't build these earlier
+diagnostics_block = locals().get("diagnostics_block", {})
+sig_block = locals().get("sig_block", {"d_signature": {}, "fixture_signature": "", "echo_context": ""})
+promotion = locals().get("promotion", {"eligible_for_promotion": False, "promotion_target": None, "notes": ""})
+
+# Final cert payload
+cert_payload = {
+    "identity": {
+        "district_id": district_id,
+        "run_id":      hashes.run_id(inputs_hash, hashes.timestamp_iso_lisbon()),
+        "timestamp":   hashes.timestamp_iso_lisbon(),
+        "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
+        "field":       "GF(2)",
+    },
+    "policy":          policy_block,
+    "inputs":          inputs_block,
+    "diagnostics":     diagnostics_block,
+    "checks":          checks_block,
+    "signatures":      sig_block,
+    "promotion":       promotion,
+    "artifact_hashes": {
+        "boundaries_hash": inputs_block["boundaries_hash"],
+        "C_hash":          inputs_block["C_hash"],
+        "H_hash":          inputs_block["H_hash"],
+        "U_hash":          inputs_block["U_hash"],
+        "projector_hash":  policy_block["projector_hash"],
+    },
+}
+
+cert_path, full_hash = export_mod.write_cert_json(cert_payload)
+st.success(f"Cert written: `{cert_path}`")
+
 
 # ---------- Download bundle ----------
 try:
