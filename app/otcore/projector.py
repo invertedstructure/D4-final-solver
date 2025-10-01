@@ -90,22 +90,34 @@ def apply_projection(
     Apply configured projection to the residual Rk at degree k.
 
     - columns: Rk <- Rk @ Π_k, where Π_k is built from the *columns of d_k*.
-      R_k is (n_k x n_k), and d_k has shape (n_{k-1} x n_k). So Π_k must be (n_k x n_k).
-    - rows:    Rk <- P_row @ Rk   (intended for real-valued work; unused in GF(2) runs)
-
-    If layer k not enabled or mode is 'none', returns Rk unchanged.
+      R_k is (n_k x n_k), d_k is (n_{k-1} x n_k), so Π_k must be (n_k x n_k).
     """
     cfg = config or _DEFAULT_CFG
     enabled = set(cfg.get("enabled_layers", []))
-    if k not in enabled or not Rk:
+    if not Rk or k not in enabled:
         return Rk
 
     mode = cfg.get("modes", {}).get(str(k), "none")
-    if mode == "none":
+    if mode != "columns":
+        # rows-mode is unused in GF(2) runs; fall back to no-op
         return Rk
 
-    source = cfg.get("source", {}).get(str(k), "auto")
-    cache = projector_cache or {}
+    # build Π_k from d_k (NOT d_{k+1})
+    blocks_b = boundaries.blocks.__root__
+    dk = blocks_b.get(str(k))
+    if dk is None or not dk or not dk[0]:
+        return Rk
+
+    n = len(dk[0])  # n_k = number of columns of d_k = number of columns of Rk
+    lane_mask = [1 if any(row[j] & 1 for row in dk if j < len(row)) else 0 for j in range(n)]
+    P = [[1 if (i == j and lane_mask[j]) else 0 for j in range(n)] for i in range(n)]
+
+    # size/shape guard: Rk must be n x n and P must be n x n
+    if len(Rk) != n or (Rk and len(Rk[0]) != n) or len(P) != n or len(P[0]) != n:
+        return Rk  # explicit no-op keeps behavior predictable
+
+    return mul(Rk, P)
+
 
     # Build/load projector Π_k using d_k (its columns index the residual's columns)
     if source == "file" and str(k) in cache:
