@@ -156,7 +156,22 @@ with tab1:
     if st.button("Run Unit"):
         out = unit_gate.unit_check(boundaries, cmap, shapes, reps=d_reps, enforce_rep_transport=enforce)
         st.json(out)
-        
+
+# --- run overlap under a given cfg (strict or projected) ----------------------
+def run_overlap_with_cfg(boundaries, cmap, H, cfg: dict):
+    cache = projector.preload_projectors_from_files(cfg)
+    try:
+        out = overlap_gate.overlap_check(
+            boundaries, cmap, H,
+            projection_config=cfg,
+            projector_cache=cache,
+        )
+    except TypeError:
+        # old signature → strict fallback
+        out = overlap_gate.overlap_check(boundaries, cmap, H)
+    return out, cache
+
+
 # Overlap gate (homotopy vs identity)
 with tab2:
     st.subheader("Overlap gate (homotopy vs identity)")
@@ -213,6 +228,39 @@ def run_overlap_with_cfg(cfg_run: dict):
             st.caption(f"Policy: {policy_label}")
             cache = projector.preload_projectors_from_files(cfg)
 
+            # --- A/B Compare controls -----------------------------------------------------
+st.markdown("### A/B compare (strict vs projected)")
+colA, colB = st.columns(2)
+with colA:
+    if st.button("Run A/B compare"):
+        # A: strict
+        cfg_str = cfg_strict()
+        out_strict, _ = run_overlap_with_cfg(boundaries, cmap, H, cfg_str)
+        # B: projected (use current cfg)
+        out_proj, _ = run_overlap_with_cfg(boundaries, cmap, H, cfg)
+
+        # Show side-by-side verdicts
+        klist = sorted(set(out_strict.keys()) | set(out_proj.keys()), key=int)
+        rows = []
+        for k in klist:
+            es = bool(out_strict.get(k, {}).get("eq", False))
+            ep = bool(out_proj.get(k, {}).get("eq", False))
+            rows.append((k, es, ep, int(ep) - int(es)))
+        st.write("k | eq(strict) | eq(projected) | Δ")
+        for k, es, ep, d in rows:
+            st.write(f"{k} | {int(es)} | {int(ep)} | {d}")
+
+        # Small hint: if different, show masks/supports
+        if out_proj != out_strict:
+            d3 = boundaries.blocks.__root__.get("3")
+            if d3:
+                lane_mask = [1 if any(row[j] for row in d3) else 0 for j in range(len(d3[0]))]
+                st.caption(f"k=3 lane_mask = {lane_mask}")
+
+with colB:
+    st.info("Tip: use this to confirm ker-only residuals flip from red→green in projected mode.")
+
+            
             # 3) Projector source expander (needs cfg)
             import json as _json, hashlib as _hashlib
             with st.expander("Projector source (k=3)"):
@@ -283,6 +331,91 @@ def run_overlap_with_cfg(cfg_run: dict):
                 out = overlap_gate.overlap_check(boundaries, cmap, H)
 
             st.json(out)
+
+# ---- Build pass-vector & promotion ------------------------------------------
+pass_vec = [
+    int(out.get("2", {}).get("eq", False)),
+    int(out.get("3", {}).get("eq", False)),
+]
+all_green = all(v == 1 for v in pass_vec)
+
+policy_label = policy_label_from_cfg(cfg)
+st.caption(f"Policy: {policy_label}")
+
+if all_green:
+    st.success("Green — eligible for promotion.")
+    if policy_label == "strict":
+        # Strict promotion: just log the strict anchor
+        if st.button("Promote (strict anchor)"):
+            import time as _time
+            fix_id = f"overlap-{int(_time.time())}"
+            try:
+                export_mod.write_registry_row(
+                    fix_id=fix_id,
+                    pass_vector=pass_vec,
+                    policy=policy_label,  # "strict"
+                    hash_d=hashes.hash_d(boundaries),
+                    hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
+                    hash_suppC=hashes.hash_suppC(cmap),
+                    hash_suppH=hashes.hash_suppH(H),
+                    notes=""
+                )
+                st.success("Registry updated (strict anchor).")
+            except Exception as e:
+                st.error(f"Failed to write registry row: {e}")
+
+    else:
+        # Projected promotion: freeze projector + log hash, with auto/file toggle
+        flip_to_file = st.checkbox("After promotion, switch to FILE-backed projector", value=True, key="flip_to_file_k3")
+        keep_auto   = st.checkbox("…or keep AUTO (don’t lock now)", value=False, key="keep_auto_k3")
+
+        if st.button("Promote & Freeze Projector"):
+            d3_now = boundaries.blocks.__root__.get("3")
+            if d3_now is None:
+                st.error("No d3 in boundaries; cannot freeze projector.")
+            else:
+                P_used = projector.projector_columns_from_dkp1(d3_now)
+                pj_path = cfg.get("projector_files", {}).get("3", "projector_D3.json")
+                pj_hash = projector.save_projector(pj_path, P_used)
+                st.info(f"Projector frozen → {pj_path} (hash={pj_hash[:12]}…)")
+
+                # flip config per user choice
+                import json as _json
+                if flip_to_file and not keep_auto:
+                    cfg.setdefault("source", {})["3"] = "file"
+                    cfg.setdefault("projector_files", {})["3"] = pj_path
+                    with open("projection_config.json", "w") as _f:
+                        _json.dump(cfg, _f, indent=2)
+                    st.toast("projection_config.json → FILE-backed (k=3)")
+                else:
+                    cfg.setdefault("source", {})["3"] = "auto"
+                    if "projector_files" in cfg and "3" in cfg["projector_files"]:
+                        del cfg["projector_files"]["3"]
+                    with open("projection_config.json", "w") as _f:
+                        _json.dump(cfg, _f, indent=2)
+                    st.toast("projection_config.json → AUTO (k=3)")
+
+                # registry row with projector hash
+                import time as _time
+                fix_id = f"overlap-{int(_time.time())}"
+                try:
+                    export_mod.write_registry_row(
+                        fix_id=fix_id,
+                        pass_vector=pass_vec,
+                        policy=policy_label,  # projected(...)
+                        hash_d=hashes.hash_d(boundaries),
+                        hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
+                        hash_suppC=hashes.hash_suppC(cmap),
+                        hash_suppH=hashes.hash_suppH(H),
+                        notes=f"proj_hash={pj_hash}"
+                    )
+                    st.success("Registry updated with projector hash.")
+                except Exception as e:
+                    st.error(f"Failed to write registry row: {e}")
+else:
+    st.info("Not promoting: some checks are red.")
+
+
 
             # 5) Build pass-vector NOW that `out` exists
             pass_vec = [
