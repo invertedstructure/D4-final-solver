@@ -8,6 +8,49 @@ from pathlib import Path
 from .io import dump_canonical
 from .hashes import APP_VERSION, bundle_content_hash, timestamp_iso_lisbon
 
+# --- plain-obj serializer helpers --------------------------------------------
+def _maybe_blocks(obj):
+    # pydantic Boundaries/CMap-style -> {"blocks": {...}}
+    b = getattr(getattr(obj, "blocks", None), "__root__", None)
+    return {"blocks": b} if b is not None else None
+
+def to_plain(x):
+    if x is None:
+        return None
+    # common primitives
+    if isinstance(x, (str, int, float, bool)):
+        return x
+    if isinstance(x, dict):
+        return {k: to_plain(v) for k, v in x.items()}
+    if isinstance(x, (list, tuple)):
+        return [to_plain(v) for v in x]
+    # pydantic-like .dict()
+    if hasattr(x, "dict"):
+        try:
+            return x.dict()
+        except Exception:
+            pass
+    # pydantic v2
+    if hasattr(x, "model_dump"):
+        try:
+            return x.model_dump()
+        except Exception:
+            pass
+    # special “blocks” holder
+    blk = _maybe_blocks(x)
+    if blk is not None:
+        return blk
+    # numpy arrays
+    try:
+        import numpy as _np
+        if isinstance(x, _np.ndarray):
+            return x.tolist()
+    except Exception:
+        pass
+    # fallback
+    return str(x)
+
+
 # ---------- small utils ----------
 
 def ensure_dir(d: str) -> None:
@@ -117,3 +160,49 @@ def write_cert_json(payload: Dict[str, Any], out_dir: str = "certs") -> Tuple[st
         f.write(dump_canonical(payload))
 
     return fpath, full_hash
+    import io as _io
+import os, zipfile, json as _json
+
+def build_download_bundle(*, 
+    boundaries, cmap, H, shapes, 
+    policy_block: dict, 
+    cert_path: str,
+    out_zip: str = "overlap_bundle.zip"
+) -> str:
+    """
+    Writes a zip with:
+      - boundaries.json, cmap.json, H.json, shapes.json
+      - policy.json (the policy snapshot you used)
+      - cert.json (the cert you just wrote)
+    Returns the absolute path to the zip.
+    """
+    # normalize everything to plain JSON-serializable structures
+    b_plain = to_plain(boundaries)
+    c_plain = to_plain(cmap)
+    h_plain = to_plain(H)
+    u_plain = to_plain(shapes)
+    pol_plain = to_plain(policy_block)
+
+    # read cert content into memory
+    cert_bytes = b""
+    try:
+        with open(cert_path, "rb") as f:
+            cert_bytes = f.read()
+    except Exception:
+        cert_bytes = _json.dumps({"error": "cert not found", "path": cert_path}).encode("utf-8")
+
+    # absolute zip path next to cert
+    zip_path = os.path.join(os.path.dirname(cert_path), out_zip)
+
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as z:
+        z.writestr("boundaries.json", _json.dumps(b_plain, indent=2))
+        z.writestr("cmap.json",       _json.dumps(c_plain, indent=2))
+        z.writestr("H.json",          _json.dumps(h_plain, indent=2))
+        z.writestr("shapes.json",     _json.dumps(u_plain, indent=2))
+        z.writestr("policy.json",     _json.dumps(pol_plain, indent=2))
+        z.writestr("cert.json",       cert_bytes)
+
+    return zip_path
+
+
+
