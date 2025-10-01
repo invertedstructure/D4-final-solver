@@ -472,12 +472,12 @@ with tab2:
         }
         cert_path, full_hash = export_mod.write_cert_json(cert_payload)
         st.success(f"Cert written: `{cert_path}`")
-                    # ---------- Cert payload + write ----------
-                cert_path, full_hash = export_mod.write_cert_json(cert_payload)
-                    st.success(f"Cert written: `{cert_path}`")
+                 # ---------- Cert payload + write ----------
+        cert_path, full_hash = export_mod.write_cert_json(cert_payload)
+        st.success(f"Cert written: `{cert_path}`")
                     
-                    # ---------- Download bundle (place this block here) ----------
-                    H_local = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})
+                 # ---------- Download bundle (place this block here) ----------
+         H_local = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})
                     try:
                         bundle_path = export_mod.build_download_bundle(
                             boundaries=boundaries,
@@ -498,9 +498,6 @@ with tab2:
                             )
                     except Exception as e:
                         st.error(f"Could not build download bundle: {e}")
-
-
-
 
 
 
