@@ -565,7 +565,58 @@ cert_payload = {
 }
 
 cert_path, full_hash = export_mod.write_cert_json(cert_payload)
-st.success(f"Cert written: `{cert_path}`")
+if st.checkbox("Show download bundle", value=False, key="show_bundle"):
+    try:
+        # only proceed if the variables exist
+        if 'boundaries' in locals() and 'cmap' in locals():
+            H_local = io.parse_cmap(d_H) if 'd_H' in locals() and d_H else io.parse_cmap({"blocks": {}})
+
+            boundaries_payload = _safe_dict(boundaries)
+            cmap_payload       = _safe_dict(cmap)
+            H_payload          = _safe_dict(H_local)
+            shapes_payload     = _safe_dict(shapes) if 'shapes' in locals() else {}
+
+            # minimal policy stub if one wasn’t built above
+            _pj_hash = ""
+            if 'cfg_active' in locals() and cfg_active.get("source", {}).get("3") == "file":
+                pj_path = cfg_active.get("projector_files", {}).get("3")
+                if pj_path and os.path.exists(pj_path):
+                    _pj_hash = projector._hash_matrix(_json.load(open(pj_path)))
+
+            _policy_block = {
+                "label":        policy_label if 'policy_label' in locals() else "strict",
+                "policy_tag":   policy_label if 'policy_label' in locals() else "strict",
+                "enabled_layers": (cfg_active.get("enabled_layers", []) if 'cfg_active' in locals() else []),
+                "modes":          (cfg_active.get("modes", {}) if 'cfg_active' in locals() else {}),
+                "source":         (cfg_active.get("source", {}) if 'cfg_active' in locals() else {}),
+                "projector_hash": _pj_hash,
+            }
+
+            district_id = st.session_state.get("district_id", "D3")
+            out_zip_name = f"overlap_bundle__{district_id}__{_policy_block['policy_tag'].replace(' ','_')}__{(full_hash or '')[:12]}.zip"
+
+            bundle_zip = export_mod.build_overlap_bundle(
+                boundaries=boundaries_payload,
+                cmap=cmap_payload,
+                H=H_payload,
+                shapes=shapes_payload,
+                policy_block=_policy_block,
+                cert_path=cert_path,
+                out_zip=out_zip_name,
+            )
+
+            with open(bundle_zip, "rb") as f:
+                st.download_button(
+                    label="⬇️ Download overlap bundle",
+                    data=f.read(),
+                    file_name=os.path.basename(bundle_zip),
+                    mime="application/zip",
+                    key="dl_overlap_bundle",
+                )
+        else:
+            st.info("Bundle skipped (inputs not in scope).")
+    except Exception as e:
+        st.caption(f"Bundle muted: {e}")
 
 
 # ---------- Build & show download bundle ----------
