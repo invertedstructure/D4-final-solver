@@ -1,6 +1,7 @@
 # --- robust loader with real package context (supports app/otcore or app/core) ---
 import sys, pathlib, importlib.util, types
 import streamlit as st
+import json
 
 # Streamlit MUST be configured before ANY other st.* call:
 st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
