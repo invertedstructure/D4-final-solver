@@ -43,28 +43,27 @@ def preload_projectors_from_files(cfg: Dict[str, Any]) -> Dict[str, List[List[in
 
 # ---------- projector builders ----------
 
-def projector_columns_from_dkp1(dkp1: List[List[int]]) -> List[List[int]]:
+def projector_columns_from_dkp1(dkp1):
     """
-    Build a diagonal projector Π_k (n_{k+1} x n_{k+1}) that keeps only 'lane' columns,
-    where a 'lane' is any column of d_{k+1} with a nonzero entry over GF(2).
-
-    d_{k+1} has shape (n_k x n_{k+1}).  Residual R_k is (n_{k+1} x n_{k+1}),
+    Build a diagonal projector Π_k of shape (n_{k+1} x n_{k+1}) that keeps only 'lane' columns.
+    d_{k+1} has shape (n_k x n_{k+1}). Residual R_k is (n_{k+1} x n_{k+1}),
     so Π_k must be n_{k+1} x n_{k+1}.
     """
     if not dkp1 or not dkp1[0]:
         return []
-    n_rows = len(dkp1)            # = n_k
-    n_cols = len(dkp1[0])         # = n_{k+1}  <-- we need this size
+    n_k    = len(dkp1)        # rows
+    n_k1   = len(dkp1[0])     # cols  = n_{k+1}
 
     # lane_mask[j] = 1 iff column j of d_{k+1} has any nonzero (i.e., participates in a lane)
     lane_mask = []
-    for j in range(n_cols):
-        col_has_lane = any(dkp1[i][j] % 2 != 0 for i in range(n_rows))
+    for j in range(n_k1):
+        col_has_lane = any(dkp1[i][j] % 2 != 0 for i in range(n_k))
         lane_mask.append(1 if col_has_lane else 0)
 
-    # Build Π_k as n_{k+1} x n_{k+1} diagonal
-    Pi = [[1 if (i == j and lane_mask[j]) else 0 for j in range(n_cols)] for i in range(n_cols)]
+    # n_{k+1} x n_{k+1} diagonal
+    Pi = [[1 if (i == j and lane_mask[j]) else 0 for j in range(n_k1)] for i in range(n_k1)]
     return Pi
+
 
 
 # (Optional) rows-mode for real-valued math; unused in your GF(2) pass.
@@ -130,9 +129,19 @@ def apply_projection(
     # Apply
     if not Rk:
         return Rk
-    if mode == "columns":
-        # GF(2) right multiply
+      if mode == "columns":
+        # Guard: Rk must be square and P must match its column count
+        if not Rk or not Rk[0] or not P or not P[0]:
+            return Rk
+        n_rows = len(Rk)
+        n_cols = len(Rk[0])
+        if len(P) != n_cols or len(P[0]) != n_cols:
+            # Fallback: do nothing if sizes don't align (or build an identity of size n_cols)
+            # from .linalg_gf2 import eye
+            # return mul(Rk, eye(n_cols))
+            return Rk
         return mul(Rk, P)
+          
     elif mode == "rows":
         # left multiply in float; convert back to ints if near-exact 0/1
         try:
