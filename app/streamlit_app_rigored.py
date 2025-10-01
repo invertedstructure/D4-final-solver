@@ -568,29 +568,54 @@ cert_path, full_hash = export_mod.write_cert_json(cert_payload)
 st.success(f"Cert written: `{cert_path}`")
 
 
-# ---------- Build & show download bundle ----------
-import os
-
+# ---------- Build & show download bundle (robust, JSON-safe) ----------
 try:
-    bundle_path = export_mod.build_overlap_download_bundle(
-        boundaries=boundaries,
-        cmap=cmap,
-        H=H_local,                               # <-- use H_local (parsed dict-backed CMap)
-        shapes=shapes_payload,                   # <-- use shapes_payload (dict), not the Pydantic model
+    # 1) inputs again, but JSON-safe
+    boundaries_payload = boundaries.dict() if hasattr(boundaries, "dict") else boundaries
+    cmap_payload       = cmap.dict()       if hasattr(cmap, "dict")       else cmap
+
+    # homotopy: always build a LOCAL object for this run (no global H)
+    H_local = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})
+    H_payload = H_local.dict() if hasattr(H_local, "dict") else H_local
+
+    # shapes: convert pydantic -> dict (this is what removes the serialization error)
+    shapes_payload = shapes.dict() if hasattr(shapes, "dict") else shapes
+
+    # policy block for bundle footer (already computed above)
+    policy_block = {
+        "label":        policy_label,                 # "strict" or "projected(...)"
+        "policy_tag":   policy_label,                 # exporter uses this for filename
+        "enabled_layers": cfg_active.get("enabled_layers", []),
+        "modes":          cfg_active.get("modes", {}),
+        "source":         cfg_active.get("source", {}),
+        "projector_hash": policy_block.get("projector_hash","") if 'policy_block' in locals() else ""
+    }
+
+    # district id and out_zip name
+    district_id = st.session_state.get("district_id", "D3")
+    out_zip_name = f"overlap_bundle__{district_id}__{policy_label.replace(' ','_')}__{cert._short(full_hash)}.zip"
+
+    # call exporter (it will write JSON files + zip them)
+    bundle_zip = export_mod.build_overlap_bundle(
+        boundaries=boundaries_payload,
+        cmap=cmap_payload,
+        H=H_payload,
+        shapes=shapes_payload,
         policy_block=policy_block,
         cert_path=cert_path,
-        out_zip=f"overlap_bundle__{district_id}__{policy_block['policy_tag']}__{full_hash[:12]}.zip",
-        cfg_snapshot=cfg_active,                 # nice to include the projection_config used
+        out_zip=out_zip_name
     )
-    st.success(f"Bundle ready: `{os.path.basename(bundle_path)}`")
-    with open(bundle_path, "rb") as fh:
+
+    # present download button
+    with open(bundle_zip, "rb") as f:
         st.download_button(
-            "⬇️ Download overlap bundle",
-            fh,
-            file_name=os.path.basename(bundle_path),
+            label="⬇️ Download overlap bundle (inputs + cert)",
+            data=f.read(),
+            file_name=os.path.basename(bundle_zip),
             mime="application/zip",
-            key="dl_overlap_bundle",
+            key="dl_overlap_bundle"
         )
+
 except Exception as e:
     st.error(f"Could not build download bundle: {e}")
 
