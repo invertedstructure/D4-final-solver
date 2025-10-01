@@ -291,53 +291,75 @@ with colA:
         # B: projected (use current cfg)
         out_proj, _ = run_overlap_with_cfg(boundaries, cmap, H, cfg)
 
-        # --- optional: write both certs from A/B ---
+       # --- optional: write both certs from A/B ---
 if st.checkbox("Write both certs (strict & projected)", value=False):
-    cert_s = write_overlap_cert(out=out_strict, policy_label=policy_label_from_cfg(cfg_strict()), boundaries=boundaries, cmap=cmap, H=H, pj_hash=None)
+    cert_s = write_overlap_cert(
+        out=out_strict,
+        policy_label=policy_label_from_cfg(cfg_strict()),
+        boundaries=boundaries,
+        cmap=cmap,
+        H=H,
+        pj_hash=None,
+    )
     # projector hash for projected path (file-mode only)
     pj_hash_proj = ""
     if cfg_proj.get("source", {}).get("3") == "file":
         pj_path = cfg_proj.get("projector_files", {}).get("3")
         if pj_path and os.path.exists(pj_path):
             pj_hash_proj = projector._hash_matrix(_json.load(open(pj_path)))
-    cert_p = write_overlap_cert(out=out_proj, policy_label=policy_label_from_cfg(cfg_proj), boundaries=boundaries, cmap=cmap, H=H, pj_hash=pj_hash_proj)
+
+    cert_p = write_overlap_cert(
+        out=out_proj,
+        policy_label=policy_label_from_cfg(cfg_proj),
+        boundaries=boundaries,
+        cmap=cmap,
+        H=H,
+        pj_hash=pj_hash_proj,
+    )
     st.success(f"Saved: `{cert_s}` and `{cert_p}`")
 
+    # --- optional: log both rows to registry ---
     if st.checkbox("Also log both to registry.csv", value=False):
-    import time as _time
-    # row 1: strict
-    try:
-        export_mod.write_registry_row(
-            fix_id=f"compare-strict-{int(_time.time())}",
-            pass_vector=[int(out_strict.get("2", {}).get("eq", False)),
-                         int(out_strict.get("3", {}).get("eq", False))],
-            policy=policy_label_from_cfg(cfg_strict()),
-            hash_d=hashes.hash_d(boundaries),
-            hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
-            hash_suppC=hashes.hash_suppC(cmap),
-            hash_suppH=hashes.hash_suppH(H),
-            notes="A/B compare strict"
-        )
-        st.toast("registry: added strict row")
-    except Exception as e:
-        st.error(f"registry(strict) failed: {e}")
+        import time as _time
 
-    # row 2: projected
-    try:
-        export_mod.write_registry_row(
-            fix_id=f"compare-proj-{int(_time.time())}",
-            pass_vector=[int(out_proj.get("2", {}).get("eq", False)),
-                         int(out_proj.get("3", {}).get("eq", False))],
-            policy=policy_label_from_cfg(cfg_proj),
-            hash_d=hashes.hash_d(boundaries),
-            hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
-            hash_suppC=hashes.hash_suppC(cmap),
-            hash_suppH=hashes.hash_suppH(H),
-            notes="A/B compare projected"
-        )
-        st.toast("registry: added projected row")
-    except Exception as e:
-        st.error(f"registry(projected) failed: {e}")
+        # row 1: strict
+        try:
+            export_mod.write_registry_row(
+                fix_id=f"compare-strict-{int(_time.time())}",
+                pass_vector=[
+                    int(out_strict.get("2", {}).get("eq", False)),
+                    int(out_strict.get("3", {}).get("eq", False)),
+                ],
+                policy=policy_label_from_cfg(cfg_strict()),
+                hash_d=hashes.hash_d(boundaries),
+                hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
+                hash_suppC=hashes.hash_suppC(cmap),
+                hash_suppH=hashes.hash_suppH(H),
+                notes="A/B compare strict",
+            )
+            st.toast("registry: added strict row")
+        except Exception as e:
+            st.error(f"registry(strict) failed: {e}")
+
+        # row 2: projected
+        try:
+            export_mod.write_registry_row(
+                fix_id=f"compare-proj-{int(_time.time())}",
+                pass_vector=[
+                    int(out_proj.get("2", {}).get("eq", False)),
+                    int(out_proj.get("3", {}).get("eq", False)),
+                ],
+                policy=policy_label_from_cfg(cfg_proj),
+                hash_d=hashes.hash_d(boundaries),
+                hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
+                hash_suppC=hashes.hash_suppC(cmap),
+                hash_suppH=hashes.hash_suppH(H),
+                notes="A/B compare projected",
+            )
+            st.toast("registry: added projected row")
+        except Exception as e:
+            st.error(f"registry(projected) failed: {e}")
+
 
 
 
