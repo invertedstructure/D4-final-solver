@@ -45,25 +45,27 @@ def preload_projectors_from_files(cfg: Dict[str, Any]) -> Dict[str, List[List[in
 
 def projector_columns_from_dkp1(dkp1: List[List[int]]) -> List[List[int]]:
     """
-    Build a diagonal projector Π_k (n_k x n_k) that keeps only 'lane' columns,
-    where a 'lane' is any col of d_{k+1} with a nonzero entry over GF(2).
-    d_{k+1} has shape (n_k x n_{k+1}). We need an n_k x n_k diag to mask residual columns.
+    Build a diagonal projector Π_k (n_{k+1} x n_{k+1}) that keeps only 'lane' columns,
+    where a 'lane' is any column of d_{k+1} with a nonzero entry over GF(2).
+
+    d_{k+1} has shape (n_k x n_{k+1}).  Residual R_k is (n_{k+1} x n_{k+1}),
+    so Π_k must be n_{k+1} x n_{k+1}.
     """
     if not dkp1 or not dkp1[0]:
-        return []  # nothing to project
-    n_k = len(dkp1)             # rows of d_{k+1}
-    # We mask residual columns using whether that column participates in any lane in d_{k+1}.
-    # For most chain complexes in your app, residual R_k is n_k x n_k (square).
-    # Use the presence of any non-zero in each residual column index j< n_k by checking
-    # if any row has a nonzero at that residual column position (safe choice for square case).
+        return []
+    n_rows = len(dkp1)            # = n_k
+    n_cols = len(dkp1[0])         # = n_{k+1}  <-- we need this size
+
+    # lane_mask[j] = 1 iff column j of d_{k+1} has any nonzero (i.e., participates in a lane)
     lane_mask = []
-    for j in range(n_k):
-        col_has_lane = any(row[j] % 2 != 0 for row in dkp1 if j < len(row))
+    for j in range(n_cols):
+        col_has_lane = any(dkp1[i][j] % 2 != 0 for i in range(n_rows))
         lane_mask.append(1 if col_has_lane else 0)
 
-    # Build diagonal projector Π_k
-    Pi = [[1 if (i == j and lane_mask[j]) else 0 for j in range(n_k)] for i in range(n_k)]
+    # Build Π_k as n_{k+1} x n_{k+1} diagonal
+    Pi = [[1 if (i == j and lane_mask[j]) else 0 for j in range(n_cols)] for i in range(n_cols)]
     return Pi
+
 
 # (Optional) rows-mode for real-valued math; unused in your GF(2) pass.
 def projector_rows_from_dkp1_real(dkp1: List[List[float]]) -> List[List[float]]:
