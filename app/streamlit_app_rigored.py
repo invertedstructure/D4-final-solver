@@ -27,6 +27,26 @@ st.caption(f"overlap_gate loaded from: {getattr(overlap_gate, '__file__', '<none
 st.caption(f"projector loaded from: {getattr(projector, '__file__', '<none>')}")
 
 
+APP_DIR = Path(__file__).resolve().parent
+
+OVERLAP_PATH = APP_DIR / "overlap_gate.py"
+PROJECTOR_PATH = APP_DIR / "projector.py"
+
+# Drop any cached modules with those names
+for _name in ("overlap_gate_hot", "projector_hot"):
+    if _name in sys.modules:
+        del sys.modules[_name]
+
+
+# Load fresh modules directly from file
+overlap_gate = SourceFileLoader("overlap_gate_hot", str(OVERLAP_PATH)).load_module()
+projector    = SourceFileLoader("projector_hot",    str(PROJECTOR_PATH)).load_module()
+
+# Sanity: show which files are actually loaded
+st.caption(f"overlap_gate loaded from: {getattr(overlap_gate, '__file__', '<none>')}")
+st.caption(f"projector loaded from: {getattr(projector, '__file__', '<none>')}")
+
+
 HERE = pathlib.Path(__file__).resolve().parent
 OTCORE = HERE / "otcore"
 CORE = HERE / "core"
