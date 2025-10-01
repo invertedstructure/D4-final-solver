@@ -47,6 +47,7 @@ st.caption(f"projector loaded from: {getattr(projector, '__file__', '<none>')}")
 
 
 HERE = pathlib.Path(__file__).resolve().parent
+PKG_NAME = "otcore" if (HERE / "otcore").exists() else ("core" if (HERE / "core").exists() else "app")
 OTCORE = HERE / "otcore"
 CORE = HERE / "core"
 PKG_DIR = OTCORE if OTCORE.exists() else CORE
