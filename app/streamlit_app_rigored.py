@@ -505,67 +505,69 @@ cert_payload = {
 cert_path, full_hash = export_mod.write_cert_json(cert_payload)
 st.success(f"Cert written: `{cert_path}`")
 
+# ---- Pass vector & promotion panel ---------------------------------
+pass_vec = [
+    int(out.get("2", {}).get("eq", False)),
+    int(out.get("3", {}).get("eq", False)),
+]
+all_green = all(v == 1 for v in pass_vec)
 
-            # pass vector
-            pass_vec = [
-                int(out.get("2", {}).get("eq", False)),
-                int(out.get("3", {}).get("eq", False)),
-            ]
-            all_green = all(v == 1 for v in pass_vec)
+if all_green:
+    st.success("Green — eligible for promotion.")
+    colA, colB = st.columns(2)
+    with colA:
+        flip_to_file = st.checkbox(
+            "Switch to FILE-backed projector after promotion",
+            value=True, key="flip_to_file_k3"
+        )
+    with colB:
+        keep_auto = st.checkbox(
+            "…or keep AUTO (don’t lock now)",
+            value=False, key="keep_auto_k3"
+        )
 
-            # Promotion panel
-            if all_green:
-                st.success("Green — eligible for promotion.")
-                flip_to_file = st.checkbox(
-                    "After promotion, switch to FILE-backed projector",
-                    value=True, key="flip_to_file_k3"
-                )
-                keep_auto = st.checkbox(
-                    "…or keep AUTO (don’t lock now)",
-                    value=False, key="keep_auto_k3"
-                )
+    if st.button("Promote & Freeze Projector"):
+        d3_now = boundaries.blocks.__root__.get("3")
+        if d3_now is None:
+            st.error("No d3 in boundaries; cannot freeze projector.")
+        else:
+            # Freeze the exact Π3 used now
+            P_used = projector.projector_columns_from_dkp1(d3_now)
+            pj_path = cfg_file.get("projector_files", {}).get("3", "projector_D3.json")
+            pj_hash = projector.save_projector(pj_path, P_used)
+            st.info(f"Projector frozen → {pj_path} (hash={pj_hash[:12]}…)")
 
-                if st.button("Promote & Freeze Projector"):
-                    d3_now = boundaries.blocks.__root__.get("3")
-                    if d3_now is None:
-                        st.error("No d3 in boundaries; cannot freeze projector.")
-                    else:
-                        # freeze the exact Π3
-                        P_used = projector.projector_columns_from_dkp1(d3_now)
-                        pj_path = cfg_file.get("projector_files", {}).get("3", "projector_D3.json")
-                        pj_hash = projector.save_projector(pj_path, P_used)
-                        st.info(f"Projector frozen → {pj_path} (hash={pj_hash[:12]}…)")
-
-                        # flip config or keep auto
-                        if flip_to_file and not keep_auto:
-                            cfg_file.setdefault("source", {})["3"] = "file"
-                            cfg_file.setdefault("projector_files", {})["3"] = pj_path
-                        else:
-                            cfg_file.setdefault("source", {})["3"] = "auto"
-                            if "projector_files" in cfg_file and "3" in cfg_file["projector_files"]:
-                                del cfg_file["projector_files"]["3"]
-                        with open("projection_config.json", "w") as _f:
-                            _json.dump(cfg_file, _f, indent=2)
-
-                        # registry row
-                        import time as _time
-                        fix_id = f"overlap-{int(_time.time())}"
-                        try:
-                            export_mod.write_registry_row(
-                                fix_id=fix_id,
-                                pass_vector=pass_vec,
-                                policy=policy_label,  # strict / projected(...)
-                                hash_d=hashes.hash_d(boundaries),
-                                hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
-                                hash_suppC=hashes.hash_suppC(cmap),
-                                hash_suppH=hashes.hash_suppH(H),
-                                notes=f"proj_hash={pj_hash}"
-                            )
-                            st.success("Registry updated with projector hash.")
-                        except Exception as e:
-                            st.error(f"Failed to write registry row: {e}")
+            # Update projection_config.json
+            if flip_to_file and not keep_auto:
+                cfg_file.setdefault("source", {})["3"] = "file"
+                cfg_file.setdefault("projector_files", {})["3"] = pj_path
             else:
-                st.info("Not promoting: some checks are red.")
+                cfg_file.setdefault("source", {})["3"] = "auto"
+                if "projector_files" in cfg_file and "3" in cfg_file["projector_files"]:
+                    del cfg_file["projector_files"]["3"]
+            with open("projection_config.json", "w") as _f:
+                _json.dump(cfg_file, _f, indent=2)
+
+            # Write registry row
+            import time as _time
+            fix_id = f"overlap-{int(_time.time())}"
+            try:
+                export_mod.write_registry_row(
+                    fix_id=fix_id,
+                    pass_vector=pass_vec,
+                    policy=policy_label,  # strict / projected(...)
+                    hash_d=hashes.hash_d(boundaries),
+                    hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
+                    hash_suppC=hashes.hash_suppC(cmap),
+                    hash_suppH=hashes.hash_suppH(H),
+                    notes=f"proj_hash={pj_hash}"
+                )
+                st.success("Registry updated with projector hash.")
+            except Exception as e:
+                st.error(f"Failed to write registry row: {e}")
+else:
+    st.info("Not promoting: some checks are red.")
+
 
     # --- A/B compare (strict vs projected) ------------------------------------
     st.markdown("### A/B: strict vs projected")
