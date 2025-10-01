@@ -303,6 +303,43 @@ if st.checkbox("Write both certs (strict & projected)", value=False):
     cert_p = write_overlap_cert(out=out_proj, policy_label=policy_label_from_cfg(cfg_proj), boundaries=boundaries, cmap=cmap, H=H, pj_hash=pj_hash_proj)
     st.success(f"Saved: `{cert_s}` and `{cert_p}`")
 
+    if st.checkbox("Also log both to registry.csv", value=False):
+    import time as _time
+    # row 1: strict
+    try:
+        export_mod.write_registry_row(
+            fix_id=f"compare-strict-{int(_time.time())}",
+            pass_vector=[int(out_strict.get("2", {}).get("eq", False)),
+                         int(out_strict.get("3", {}).get("eq", False))],
+            policy=policy_label_from_cfg(cfg_strict()),
+            hash_d=hashes.hash_d(boundaries),
+            hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
+            hash_suppC=hashes.hash_suppC(cmap),
+            hash_suppH=hashes.hash_suppH(H),
+            notes="A/B compare strict"
+        )
+        st.toast("registry: added strict row")
+    except Exception as e:
+        st.error(f"registry(strict) failed: {e}")
+
+    # row 2: projected
+    try:
+        export_mod.write_registry_row(
+            fix_id=f"compare-proj-{int(_time.time())}",
+            pass_vector=[int(out_proj.get("2", {}).get("eq", False)),
+                         int(out_proj.get("3", {}).get("eq", False))],
+            policy=policy_label_from_cfg(cfg_proj),
+            hash_d=hashes.hash_d(boundaries),
+            hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
+            hash_suppC=hashes.hash_suppC(cmap),
+            hash_suppH=hashes.hash_suppH(H),
+            notes="A/B compare projected"
+        )
+        st.toast("registry: added projected row")
+    except Exception as e:
+        st.error(f"registry(projected) failed: {e}")
+
+
 
         # Show side-by-side verdicts
         klist = sorted(set(out_strict.keys()) | set(out_proj.keys()), key=int)
