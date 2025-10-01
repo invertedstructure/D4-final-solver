@@ -1,10 +1,8 @@
-# app/otcore/cert_helpers.py
 from __future__ import annotations
-from typing import Dict, List, Tuple, Any
-from .linalg_gf2 import mul, add, zeros, eye
-from . import hashes
+from typing import Dict, Any, List, Optional
 import json, hashlib
 from pathlib import Path
+
 
 def short_id_from_hash(h: str, n: int = 8) -> str:
     return h[:n]
