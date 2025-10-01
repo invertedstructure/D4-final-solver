@@ -324,24 +324,25 @@ else:
     st.info("Not promoting: some checks are red.")
 
 
-            # ---- Normal registry write (non-promotion) ----
-            # If you still want a basic row every run (even when not promoting), keep this:
-            import time
-            fix_id = f"overlap-{int(time.time())}"
-            try:
-                export_mod.write_registry_row(
-                    fix_id=fix_id,
-                    pass_vector=pass_vec,
-                    policy=policy_label,  # strict / projected(...)
-                    hash_d=hashes.hash_d(boundaries),
-                    hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
-                    hash_suppC=hashes.hash_suppC(cmap),
-                    hash_suppH=hashes.hash_suppH(H),
-                    notes=""
-                )
-                st.success("Registry updated (registry.csv).")
-            except Exception as e:
-                st.error(f"Failed to write registry row: {e}")
+        # ---- Normal registry write (non-promotion) ----
+# If you still want a basic row every run (even when not promoting), keep this:
+import time
+fix_id = f"overlap-{int(time.time())}"
+try:
+    export_mod.write_registry_row(
+        fix_id=fix_id,
+        pass_vector=pass_vec,
+        policy=policy_label,  # strict / projected(...)
+        hash_d=hashes.hash_d(boundaries),
+        hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
+        hash_suppC=hashes.hash_suppC(cmap),
+        hash_suppH=hashes.hash_suppH(H),
+        notes=""
+    )
+    st.success("Registry updated (registry.csv).")
+except Exception as e:
+    st.error(f"Failed to write registry row: {e}")
+
 
 
 with tab4:
