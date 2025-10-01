@@ -1,6 +1,8 @@
 from __future__ import annotations
-import os, zipfile, csv, json
+import os, zipfile, csv, json, hashlib
 from pathlib import Path
+
+from .io import dump_canonical
 
 
 def zip_report(report_dir: str, out_zip_path: str) -> str:
