@@ -1,6 +1,8 @@
 from __future__ import annotations
 import os, zipfile, csv, json, hashlib
 from pathlib import Path
+import re, hashlib
+
 
 from .io import dump_canonical
 
@@ -13,6 +15,13 @@ def zip_report(report_dir: str, out_zip_path: str) -> str:
                 arc = os.path.relpath(full, report_dir)
                 z.write(full, arc)
     return out_zip_path
+    
+    def _slug(s: str) -> str:
+    s = (s or "").strip()
+    if not s:
+        return "unknown"
+    return re.sub(r"[^A-Za-z0-9_]+", "_", s).strip("_") or "unknown"
+
 
 # ---------------- registry CSV (tiny helper) ----------------
 from datetime import datetime
