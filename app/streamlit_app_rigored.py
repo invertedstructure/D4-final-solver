@@ -6,6 +6,18 @@ import json
 # Streamlit MUST be configured before ANY other st.* call:
 st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
 
+# --- policy label helper (UI + logging) ---
+def policy_label_from_cfg(cfg: dict) -> str:
+    if not cfg or not cfg.get("enabled_layers"):
+        return "strict"
+    parts = []
+    for kk in sorted(cfg["enabled_layers"]):
+        mode = cfg.get("modes", {}).get(str(kk), "none")
+        src  = cfg.get("source", {}).get(str(kk), "auto")
+        parts.append(f"{mode}@k={kk},{src}")
+    return "projected(" + ";".join(parts) + ")"
+
+
 # 1) Locate package dir and set PKG_NAME
 HERE = pathlib.Path(__file__).resolve().parent
 OTCORE = HERE / "otcore"
