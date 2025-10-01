@@ -523,7 +523,17 @@ inputs_block = {
 }
 
 # Checks from your solver output
-checks_block = out  # e.g. {"2":{"eq":...,"n_k":...},"3":{...}}
+try:
+    checks_block = out  # set earlier when you ran overlap_check
+except NameError:
+    # If we're outside the button scope, recompute once so the cert still works
+    _cache = projector.preload_projectors_from_files(cfg_active)
+    checks_block = overlap_gate.overlap_check(
+        boundaries, cmap, H_local,
+        projection_config=cfg_active if cfg_active.get("enabled_layers") else None,
+        projector_cache=_cache,
+    )
+
 
 # Graceful defaults if you didn't build these earlier
 diagnostics_block = locals().get("diagnostics_block", {})
