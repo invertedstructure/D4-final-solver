@@ -53,10 +53,12 @@ def overlap_check(
         eq3 = (R3p == zeros(n3, n3))
         out["3"] = {"eq": bool(eq3), "n_k": n3}
 
+    
+
     # ---- k = 2 ----
-    # In your fixtures, d2 = 0 and C2 = I, so this is identically zero,
-    # but we still compute it so projected mode can be toggled consistently.
-    d2 = blocks_b.get("2")
+    # In your fixtures, often d2 = 0 and C2 = I; still compute robustly:
+    d3 = blocks_b.get("3")                # for d3 @ H2
+    d2 = blocks_b.get("2")                # for H1 @ d2
     C2 = blocks_c.get("2")
     H1 = blocks_h.get("1")
     H2 = blocks_h.get("2")  # reused
@@ -64,19 +66,25 @@ def overlap_check(
     if C2 is not None:
         n2, _ = _mat_size(C2)
         I2 = eye(n2)
-        # d2 may be missing => treat as zeros of the right shape
-        if d2 is None:
-            d2 = zeros(n2, n2)
-        if H1 is None:
-            # shape-compatible zeros for H1
-            d2_rows, d2_cols = _mat_size(d2)
-            H1 = zeros(d2_cols, d2_rows) if d2_rows and d2_cols else zeros(n2, n2)
 
-        # Strict residual at k=2: R2 = d2@H2 + H1@d2 - (C2 - I2)
-        # Over GF(2), subtraction == addition
-        R2 = add(add(mul(d2, H2 if H2 is not None else zeros(_mat_size(d2)[1], 0)),
-                     mul(H1, d2)),
-                 add(C2, I2))
+        # Term A: d3 @ H2 if shapes align, else zero(n2, n2)
+        termA = zeros(n2, n2)
+        if d3 is not None and H2 is not None:
+            r3, c3 = _mat_size(d3)   # d3: (n2 x n3) in your 4D bottom-row fixtures
+            rH2, cH2 = _mat_size(H2) # H2: (n3 x n2)
+            if c3 == rH2 and r3 == n2 and cH2 == n2:
+                termA = mul(d3, H2)
+
+        # Term B: H1 @ d2 if shapes align, else zero(n2, n2)
+        termB = zeros(n2, n2)
+        if H1 is not None and d2 is not None:
+            rH1, cH1 = _mat_size(H1) # H1: (n2 x n1)
+            r2,  c2  = _mat_size(d2) # d2: (n1 x n2)
+            if cH1 == r2 and rH1 == n2 and c2 == n2:
+                termB = mul(H1, d2)
+
+        # Strict residual at k=2: R2 = (d3@H2 + H1@d2) - (C2 - I2)  ==  add(termA, termB) + (C2 + I2) over GF(2)
+        R2  = add(add(termA, termB), add(C2, I2))
         R2p = apply_projection(R2, 2, boundaries, cfg, cache)
         eq2 = (R2p == zeros(n2, n2))
         out["2"] = {"eq": bool(eq2), "n_k": n2}
