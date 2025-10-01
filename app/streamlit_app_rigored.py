@@ -25,7 +25,7 @@ def _load_pkg_module(fullname: str, rel_path: str):
     sys.modules[fullname] = mod
     spec.loader.exec_module(mod)  # type: ignore[attr-defined]
     return mod
-
+projector = _load_pkg_module(f"{PKG_NAME}.projector", "projector.py")
 io = _load_pkg_module(f"{PKG_NAME}.io", "io.py")
 hashes = _load_pkg_module(f"{PKG_NAME}.hashes", "hashes.py")
 unit_gate = _load_pkg_module(f"{PKG_NAME}.unit_gate", "unit_gate.py")
@@ -110,18 +110,56 @@ with tab1:
     if st.button("Run Unit"):
         out = unit_gate.unit_check(boundaries, cmap, shapes, reps=d_reps, enforce_rep_transport=enforce)
         st.json(out)
-
+        
 with tab2:
     st.subheader("Overlap gate (homotopy vs identity)")
     f_H = st.file_uploader("Homotopy H (H_corrected.json)", type=["json"], key="H_corr")
     d_H = read_json_file(f_H) if f_H else None
+
     if st.button("Run Overlap"):
         if not d_H:
             st.error("Upload H_corrected.json")
         else:
-            H = io.parse_cmap(d_H)  # reuse CMap schema for H blocks
-            out = overlap_gate.overlap_check(boundaries, cmap, H)
+            # Parse H using the same CMap schema
+            H = io.parse_cmap(d_H)
+
+            # --- DEBUG 0: Is the projection config visible from CWD? ---
+            import os
+            st.write("cfg file in CWD:", os.path.exists("projection_config.json"))
+
+            # --- Load projection config via the dynamically loaded module ---
+            cfg = projector.load_projection_config("projection_config.json")
+            st.json({"cfg": cfg})  # <-- you should see enabled_layers etc here
+
+            # Preload any file-based projectors
+            cache = projector.preload_projectors_from_files(cfg)
+
+            # --- Optional: show policy tag ---
+            layers = cfg.get("enabled_layers", [])
+            modes = cfg.get("modes", {})
+            sources = cfg.get("source", {})
+            if layers:
+                policy_str = "projected(" + ",".join(
+                    f"{modes.get(str(k),'none')}@k={k},{sources.get(str(k),'auto')}" for k in layers
+                ) + ")"
+            else:
+                policy_str = "strict"
+            st.caption(f"Policy: {policy_str}")
+
+            # --- DEBUG 1: show lane mask for k=3 so we know if there IS a ker column ---
+            d3 = boundaries.blocks.__root__.get('3')
+            if d3 is not None:
+                lane_mask = [1 if any(row[j] for row in d3) else 0 for j in range(len(d3[0]))]
+                st.write("k=3 lane_mask (1=lane, 0=ker):", lane_mask)
+
+            # --- Run overlap with projection config wired in ---
+            out = overlap_gate.overlap_check(
+                boundaries, cmap, H,
+                projection_config=cfg,
+                projector_cache=cache
+            )
             st.json(out)
+
 
 with tab3:
     st.subheader("Triangle gate")
