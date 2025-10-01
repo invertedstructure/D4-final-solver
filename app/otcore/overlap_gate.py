@@ -1,9 +1,9 @@
 from __future__ import annotations
-
 from typing import Dict, Optional
-from .projector import apply_projection
 from .schemas import Boundaries, CMap
 from .linalg_gf2 import mul, add, zeros, eye
+from .projector import apply_projection
+
 
 def _mat_size(M):
     """Return (rows, cols) for a list-of-lists matrix; (0,0) if None/empty."""
