@@ -14,7 +14,12 @@ st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
 # --- Policy helpers -----------------------------------------------------------
 def cfg_strict():
     # strict = no projection anywhere
-    return {"enabled_layers": [], "modes": {}, "source": {}, "projector_files": {}}
+    return {
+        "enabled_layers": [],
+        "modes": {},
+        "source": {},
+        "projector_files": {},
+    }
 
 def cfg_projected_base():
     # default projected: columns @ k=3, auto source
@@ -34,7 +39,9 @@ def policy_label_from_cfg(cfg: dict) -> str:
         src  = cfg.get("source", {}).get(str(kk), "auto")
         parts.append(f"{mode}@k={kk},{src}")
     return "projected(" + "; ".join(parts) + ")"
-    def _stamp_filename(state_key: str, f):
+
+# --- File helpers -------------------------------------------------------------
+def _stamp_filename(state_key: str, f):
     """Remember the uploaded filename in session_state for certs/registry."""
     if f is not None:
         st.session_state[state_key] = getattr(f, "name", "")
@@ -42,19 +49,14 @@ def policy_label_from_cfg(cfg: dict) -> str:
         st.session_state.pop(state_key, None)
 
 def read_json_file(f):
-    if not f: 
+    if not f:
         return None
     try:
+        import json  # make sure json is imported at top too
         return json.load(f)
     except Exception as e:
         st.error(f"Failed to parse JSON: {e}")
         return None
-        
-        def _stamp_filename(state_key: str, f):
-    if f is not None:
-        st.session_state[state_key] = getattr(f, "name", "")
-    else:
-        st.session_state.pop(state_key, None)
 
 
 
