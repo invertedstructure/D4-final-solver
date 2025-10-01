@@ -185,30 +185,34 @@ import json as _json, hashlib as _hashlib
 with st.expander("Projector source (k=3)"):
     cur_src = cfg.get("source", {}).get("3", "auto")
     cur_file = cfg.get("projector_files", {}).get("3", "projector_D3.json")
-    st.write(f"Current: source.3 = **{cur_src}**", f"(file: `{cur_file}`)" if cur_src=="file" else "")
+    st.write(
+        f"Current: source.3 = **{cur_src}**",
+        f"(file: `{cur_file}`)" if cur_src == "file" else ""
+    )
 
     mode_choice = st.radio(
         "Choose source for k=3",
         options=["auto", "file"],
-        index=0 if cur_src=="auto" else 1,
+        index=0 if cur_src == "auto" else 1,
         horizontal=True,
         key="proj_src_choice_k3",
     )
-    file_path = st.text_input("Projector file", value=cur_file, disabled=(mode_choice=="auto"))
+    file_path = st.text_input(
+        "Projector file", value=cur_file, disabled=(mode_choice == "auto")
+    )
 
     if st.button("Apply projector source"):
         cfg.setdefault("source", {})["3"] = mode_choice
         if mode_choice == "file":
             cfg.setdefault("projector_files", {})["3"] = file_path
         else:
-            # flip back to auto → optionally remove stale file entry
             if "projector_files" in cfg and "3" in cfg["projector_files"]:
                 del cfg["projector_files"]["3"]
         with open("projection_config.json", "w") as _f:
             _json.dump(cfg, _f, indent=2)
         st.success(f"projection_config.json updated → source.3 = {mode_choice}")
 
-    # Optional guard button: compare file-backed Π3 to auto Π3
+    # Optional guard to check drift between file and auto Π3
     if cur_src == "file" and st.button("Validate file vs auto Π3"):
         d3_now = boundaries.blocks.__root__.get("3")
         if d3_now is None:
@@ -229,6 +233,7 @@ with st.expander("Projector source (k=3)"):
                     st.success(f"OK: projector matches auto (hash={h_auto[:12]}…)")
                 else:
                     st.warning(f"DRIFT: file {cur_file} hash={h_file[:12]}… vs auto hash={h_auto[:12]}…")
+
 
             
             # --- Sanity: which overlap_gate is actually loaded?
