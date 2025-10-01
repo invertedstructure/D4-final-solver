@@ -30,17 +30,21 @@ def residual_tag_for(lanes: List[int], ker: List[int]) -> str:
     if ker:           return "ker"
     return "none"
 
-def k3_strict_residual(boundaries, cmap, H) -> List[List[int]]:
+def k3_strict_residual(boundaries, cmap, H):
     # R3 = H2 @ d3 + (C3 + I3)
     blocks_b = boundaries.blocks.__root__
     blocks_c = cmap.blocks.__root__
-    blocks_h = H.blocks.__root__
-    d3 = blocks_b.get("3"); C3 = blocks_c.get("3"); H2 = blocks_h.get("2")
+
+    blocks_h = getattr(H, "blocks", None)
+    blocks_h = getattr(blocks_h, "__root__", None) if blocks_h is not None else None
+
+    d3 = blocks_b.get("3")
+    C3 = blocks_c.get("3")
+    H2 = blocks_h.get("2") if blocks_h else None
     if d3 is None or C3 is None or H2 is None:
-        return []
-    n3 = len(C3)
-    I3 = eye(n3)
-    return add(mul(H2, d3), add(C3, I3))
+        return []  # graceful no-op
+    ...
+
 
 def k3_projected_residual(R3_strict: List[List[int]], d3) -> List[List[int]]:
     # Π3 from d3 columns; R3p = R3 @ Π3
