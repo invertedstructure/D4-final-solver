@@ -30,6 +30,10 @@ io = _load_pkg_module(f"{PKG_NAME}.io", "io.py")
 hashes = _load_pkg_module(f"{PKG_NAME}.hashes", "hashes.py")
 unit_gate = _load_pkg_module(f"{PKG_NAME}.unit_gate", "unit_gate.py")
 overlap_gate = _load_pkg_module(f"{PKG_NAME}.overlap_gate", "overlap_gate.py")
+import importlib
+overlap_gate = _load_pkg_module(f"{PKG_NAME}.overlap_gate", "overlap_gate.py")
+importlib.reload(overlap_gate)  # force-refresh so new signature is active
+projector   = _load_pkg_module(f"{PKG_NAME}.projector", "projector.py")
 triangle_gate = _load_pkg_module(f"{PKG_NAME}.triangle_gate", "triangle_gate.py")
 towers = _load_pkg_module(f"{PKG_NAME}.towers", "towers.py")
 export_mod = _load_pkg_module(f"{PKG_NAME}.export", "export.py")
@@ -120,21 +124,20 @@ with tab2:
         if not d_H:
             st.error("Upload H_corrected.json")
         else:
-            # Parse H using the same CMap schema
-            H = io.parse_cmap(d_H)
+            H = io.parse_cmap(d_H)  # reuse CMap schema for H blocks
 
-            # --- DEBUG 0: Is the projection config visible from CWD? ---
+            # --- Show actual working directory & files there ---
             import os
+            st.write("cwd:", os.getcwd())
+            st.write("files in cwd:", os.listdir("."))
             st.write("cfg file in CWD:", os.path.exists("projection_config.json"))
 
-            # --- Load projection config via the dynamically loaded module ---
+            # --- Load projection config ---
             cfg = projector.load_projection_config("projection_config.json")
-            st.json({"cfg": cfg})  # <-- you should see enabled_layers etc here
-
-            # Preload any file-based projectors
+            st.json({"cfg": cfg})  # you should see enabled_layers/modes here if found
             cache = projector.preload_projectors_from_files(cfg)
 
-            # --- Optional: show policy tag ---
+            # Policy tag
             layers = cfg.get("enabled_layers", [])
             modes = cfg.get("modes", {})
             sources = cfg.get("source", {})
@@ -146,19 +149,26 @@ with tab2:
                 policy_str = "strict"
             st.caption(f"Policy: {policy_str}")
 
-            # --- DEBUG 1: show lane mask for k=3 so we know if there IS a ker column ---
+            # Lane mask peek for k=3 (to see ker columns)
             d3 = boundaries.blocks.__root__.get('3')
             if d3 is not None:
                 lane_mask = [1 if any(row[j] for row in d3) else 0 for j in range(len(d3[0]))]
                 st.write("k=3 lane_mask (1=lane, 0=ker):", lane_mask)
 
-            # --- Run overlap with projection config wired in ---
-            out = overlap_gate.overlap_check(
-                boundaries, cmap, H,
-                projection_config=cfg,
-                projector_cache=cache
-            )
+            # --- Run overlap; fallback to strict if old module signature is still loaded ---
+            try:
+                out = overlap_gate.overlap_check(
+                    boundaries, cmap, H,
+                    projection_config=cfg,
+                    projector_cache=cache
+                )
+            except TypeError:
+                # Old module still in memory; run strict and warn
+                out = overlap_gate.overlap_check(boundaries, cmap, H)
+                st.warning("overlap_gate is running in STRICT mode (old module loaded). "
+                           "Hard-restart the app so the new projection-aware function is used.")
             st.json(out)
+
 
 
 with tab3:
