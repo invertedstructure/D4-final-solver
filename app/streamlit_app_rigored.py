@@ -15,6 +15,13 @@ import zipfile
 st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
 
 # --- Policy helpers -----------------------------------------------------------
+def _safe_dict(x):
+    try:
+        return x.dict()
+    except Exception:
+        return x
+
+
 def cfg_strict():
     # strict = no projection anywhere
     return {
