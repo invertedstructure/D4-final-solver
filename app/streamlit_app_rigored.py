@@ -477,7 +477,7 @@ with tab2:
         st.success(f"Cert written: `{cert_path}`")
                     
                  # ---------- Download bundle (place this block here) ----------
-         H_local = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})
+             H_local = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})
                     try:
                         bundle_path = export_mod.build_download_bundle(
                             boundaries=boundaries,
