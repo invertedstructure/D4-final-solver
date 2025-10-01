@@ -2,6 +2,8 @@
 import sys, pathlib, importlib.util, types
 import streamlit as st
 import json
+import json as _json
+import hashlib as _hashlib
 
 # Streamlit MUST be configured before ANY other st.* call:
 st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
@@ -384,9 +386,9 @@ if st.checkbox("Write both certs (strict & projected)", value=False):
 with colB:
     st.info("Tip: use this to confirm ker-only residuals flip from red→green in projected mode.")
 
-            
+
+    
             # 3) Projector source expander (needs cfg)
-            import json as _json, hashlib as _hashlib
             with st.expander("Projector source (k=3)"):
                 cur_src  = cfg.get("source", {}).get("3", "auto")
                 cur_file = cfg.get("projector_files", {}).get("3", "projector_D3.json")
