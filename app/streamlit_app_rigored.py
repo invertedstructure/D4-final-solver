@@ -144,6 +144,7 @@ with tab1:
         out = unit_gate.unit_check(boundaries, cmap, shapes, reps=d_reps, enforce_rep_transport=enforce)
         st.json(out)
         
+# Overlap gate (homotopy vs identity)
 with tab2:
     st.subheader("Overlap gate (homotopy vs identity)")
     f_H = st.file_uploader("Homotopy H (H_corrected.json)", type=["json"], key="H_corr")
@@ -153,100 +154,70 @@ with tab2:
         if not d_H:
             st.error("Upload H_corrected.json")
         else:
-            H = io.parse_cmap(d_H)  # reuse CMap schema for H blocks
+            # 1) Parse H
+            H = io.parse_cmap(d_H)
 
-            # --- Show actual working directory & files there ---
-            import os, inspect, time
-            st.write("cwd:", os.getcwd())
-            st.write("files in cwd:", os.listdir("."))
-            st.write("cfg file in CWD:", os.path.exists("projection_config.json"))
-
-            # --- Load projection config ---
+            # 2) Load projection config + cache
             cfg = projector.load_projection_config("projection_config.json")
             policy_label = policy_label_from_cfg(cfg)
             st.caption(f"Policy: {policy_label}")
-            st.json({"cfg": cfg})
             cache = projector.preload_projectors_from_files(cfg)
 
-            # Policy badge (string)
-            layers  = cfg.get("enabled_layers", [])
-            modes   = cfg.get("modes", {})
-            sources = cfg.get("source", {})
-            if layers:
-                policy_str = "projected(" + ",".join(
-                    f"{modes.get(str(k),'none')}@k={k},{sources.get(str(k),'auto')}" for k in layers
-                ) + ")"
-            else:
-                policy_str = "strict"
-            st.caption(f"Policy: {policy_str}")
+            # 3) Projector source expander (needs cfg)
+            import json as _json, hashlib as _hashlib
+            with st.expander("Projector source (k=3)"):
+                cur_src  = cfg.get("source", {}).get("3", "auto")
+                cur_file = cfg.get("projector_files", {}).get("3", "projector_D3.json")
+                st.write(
+                    f"Current: source.3 = **{cur_src}**",
+                    f"(file: `{cur_file}`)" if cur_src == "file" else ""
+                )
 
-import json as _json, hashlib as _hashlib
+                mode_choice = st.radio(
+                    "Choose source for k=3",
+                    options=["auto", "file"],
+                    index=0 if cur_src == "auto" else 1,
+                    horizontal=True,
+                    key="proj_src_choice_k3",
+                )
+                file_path = st.text_input(
+                    "Projector file", value=cur_file, disabled=(mode_choice == "auto")
+                )
 
-with st.expander("Projector source (k=3)"):
-    cur_src = cfg.get("source", {}).get("3", "auto")
-    cur_file = cfg.get("projector_files", {}).get("3", "projector_D3.json")
-    st.write(
-        f"Current: source.3 = **{cur_src}**",
-        f"(file: `{cur_file}`)" if cur_src == "file" else ""
-    )
+                if st.button("Apply projector source"):
+                    cfg.setdefault("source", {})["3"] = mode_choice
+                    if mode_choice == "file":
+                        cfg.setdefault("projector_files", {})["3"] = file_path
+                    else:
+                        if "projector_files" in cfg and "3" in cfg["projector_files"]:
+                            del cfg["projector_files"]["3"]
+                    with open("projection_config.json", "w") as _f:
+                        _json.dump(cfg, _f, indent=2)
+                    st.success(f"projection_config.json updated → source.3 = {mode_choice}")
 
-    mode_choice = st.radio(
-        "Choose source for k=3",
-        options=["auto", "file"],
-        index=0 if cur_src == "auto" else 1,
-        horizontal=True,
-        key="proj_src_choice_k3",
-    )
-    file_path = st.text_input(
-        "Projector file", value=cur_file, disabled=(mode_choice == "auto")
-    )
+                # Optional drift guard
+                if cur_src == "file" and st.button("Validate file vs auto Π3"):
+                    d3_now = boundaries.blocks.__root__.get("3")
+                    if d3_now is None:
+                        st.error("No d3 in boundaries; cannot validate.")
+                    else:
+                        autoP = projector.projector_columns_from_dkp1(d3_now)
+                        try:
+                            with open(cur_file, "r") as _pf:
+                                fileP = _json.load(_pf)
+                        except Exception as e:
+                            st.error(f"Could not load {cur_file}: {e}")
+                            fileP = None
 
-    if st.button("Apply projector source"):
-        cfg.setdefault("source", {})["3"] = mode_choice
-        if mode_choice == "file":
-            cfg.setdefault("projector_files", {})["3"] = file_path
-        else:
-            if "projector_files" in cfg and "3" in cfg["projector_files"]:
-                del cfg["projector_files"]["3"]
-        with open("projection_config.json", "w") as _f:
-            _json.dump(cfg, _f, indent=2)
-        st.success(f"projection_config.json updated → source.3 = {mode_choice}")
+                        if fileP is not None:
+                            h_auto = _hashlib.sha256(_json.dumps(autoP, sort_keys=True).encode()).hexdigest()
+                            h_file = _hashlib.sha256(_json.dumps(fileP, sort_keys=True).encode()).hexdigest()
+                            if h_auto == h_file:
+                                st.success(f"OK: projector matches auto (hash={h_auto[:12]}…)")
+                            else:
+                                st.warning(f"DRIFT: file {cur_file} hash={h_file[:12]}… vs auto hash={h_auto[:12]}…")
 
-    # Optional guard to check drift between file and auto Π3
-    if cur_src == "file" and st.button("Validate file vs auto Π3"):
-        d3_now = boundaries.blocks.__root__.get("3")
-        if d3_now is None:
-            st.error("No d3 in boundaries; cannot validate.")
-        else:
-            autoP = projector.projector_columns_from_dkp1(d3_now)
-            try:
-                with open(cur_file, "r") as _pf:
-                    fileP = _json.load(_pf)
-            except Exception as e:
-                st.error(f"Could not load {cur_file}: {e}")
-                fileP = None
-
-            if fileP is not None:
-                h_auto = _hashlib.sha256(_json.dumps(autoP, sort_keys=True).encode()).hexdigest()
-                h_file = _hashlib.sha256(_json.dumps(fileP, sort_keys=True).encode()).hexdigest()
-                if h_auto == h_file:
-                    st.success(f"OK: projector matches auto (hash={h_auto[:12]}…)")
-                else:
-                    st.warning(f"DRIFT: file {cur_file} hash={h_file[:12]}… vs auto hash={h_auto[:12]}…")
-
-
-            
-            # --- Sanity: which overlap_gate is actually loaded?
-            st.write("overlap_gate.__file__ =", getattr(overlap_gate, "__file__", "<none>"))
-            st.write("overlap_check signature =", str(inspect.signature(overlap_gate.overlap_check)))
-
-            # Lane mask peek for k=3 (to see ker columns)
-            d3 = boundaries.blocks.__root__.get('3')
-            if d3 is not None:
-                lane_mask = [1 if any(row[j] for row in d3) else 0 for j in range(len(d3[0]))]
-                st.write("k=3 lane_mask (1=lane, 0=ker):", lane_mask)
-
-            # --- Run overlap; if projection kwargs aren't accepted, fall back and warn
+            # 4) Run overlap (produces `out`)
             try:
                 out = overlap_gate.overlap_check(
                     boundaries, cmap, H,
@@ -261,92 +232,79 @@ with st.expander("Projector source (k=3)"):
                 )
                 out = overlap_gate.overlap_check(boundaries, cmap, H)
 
-                        # Results
             st.json(out)
 
-            # Guard warning (if file-mode drift was detected inside apply_projection)
-            for key, val in list(cache.items()):
-                if key.startswith("guard_warning_k"):
-                    st.warning(f"[{key}] {val['msg']} | file={val['hash_file']} auto={val['hash_auto']}")
+            # 5) Build pass-vector NOW that `out` exists
+            pass_vec = [
+                int(out.get("2", {}).get("eq", False)),
+                int(out.get("3", {}).get("eq", False)),
+            ]
+            all_green = all(v == 1 for v in pass_vec)
 
-  # ---- Build pass-vector ----
-pass_vec = [
-    int(out.get("2", {}).get("eq", False)),
-    int(out.get("3", {}).get("eq", False)),
-]
-all_green = all(v == 1 for v in pass_vec)
+            # 6) Promotion: freeze projector + optional auto→file flip
+            if all_green:
+                st.success("Green — eligible for promotion.")
+                flip_to_file = st.checkbox("After promotion, switch to FILE-backed projector", value=True, key="flip_to_file_k3")
+                force_back_to_auto = st.checkbox("…or keep AUTO (don’t lock now)", value=False, key="keep_auto_k3")
 
-# ---- Promotion: freeze projector + log hash (only if all green) ----
-if all_green:
-    st.success("Green — eligible for promotion.")
-    flip_to_file = st.checkbox("After promotion, switch to FILE-backed projector", value=True, key="flip_to_file_k3")
-    force_back_to_auto = st.checkbox("…or keep AUTO (don’t lock now)", value=False, key="keep_auto_k3")
+                if st.button("Promote & Freeze Projector"):
+                    d3_now = boundaries.blocks.__root__.get("3")
+                    if d3_now is None:
+                        st.error("No d3 in boundaries; cannot freeze projector.")
+                    else:
+                        P_used = projector.projector_columns_from_dkp1(d3_now)
+                        pj_path = cfg.get("projector_files", {}).get("3", "projector_D3.json")
+                        pj_hash = projector.save_projector(pj_path, P_used)
+                        st.info(f"Projector frozen → {pj_path} (hash={pj_hash[:12]}…)")
 
-    if st.button("Promote & Freeze Projector"):
-        d3_now = boundaries.blocks.__root__.get("3")
-        if d3_now is None:
-            st.error("No d3 in boundaries; cannot freeze projector.")
-        else:
-            # Always freeze the exact Π3 used now (correct by construction)
-            P_used = projector.projector_columns_from_dkp1(d3_now)
-            pj_path = cfg.get("projector_files", {}).get("3", "projector_D3.json")
-            pj_hash = projector.save_projector(pj_path, P_used)
-            st.info(f"Projector frozen → {pj_path} (hash={pj_hash[:12]}…)")
+                        # config flip
+                        if flip_to_file and not force_back_to_auto:
+                            cfg.setdefault("source", {})["3"] = "file"
+                            cfg.setdefault("projector_files", {})["3"] = pj_path
+                        else:
+                            cfg.setdefault("source", {})["3"] = "auto"
+                            if "projector_files" in cfg and "3" in cfg["projector_files"]:
+                                del cfg["projector_files"]["3"]
+                        with open("projection_config.json", "w") as _f:
+                            _json.dump(cfg, _f, indent=2)
 
-            # Optionally flip config: file-backed or back to auto
-            if flip_to_file and not force_back_to_auto:
-                cfg.setdefault("source", {})["3"] = "file"
-                cfg.setdefault("projector_files", {})["3"] = pj_path
-                with open("projection_config.json", "w") as _f:
-                    _json.dump(cfg, _f, indent=2)
-                st.toast("projection_config.json → FILE-backed (k=3)")
+                        # registry with projector hash
+                        import time as _time
+                        fix_id = f"overlap-{int(_time.time())}"
+                        try:
+                            export_mod.write_registry_row(
+                                fix_id=fix_id,
+                                pass_vector=pass_vec,
+                                policy=policy_label,
+                                hash_d=hashes.hash_d(boundaries),
+                                hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
+                                hash_suppC=hashes.hash_suppC(cmap),
+                                hash_suppH=hashes.hash_suppH(H),
+                                notes=f"proj_hash={pj_hash}"
+                            )
+                            st.success("Registry updated with projector hash.")
+                        except Exception as e:
+                            st.error(f"Failed to write registry row: {e}")
             else:
-                cfg.setdefault("source", {})["3"] = "auto"
-                if "projector_files" in cfg and "3" in cfg["projector_files"]:
-                    del cfg["projector_files"]["3"]
-                with open("projection_config.json", "w") as _f:
-                    _json.dump(cfg, _f, indent=2)
-                st.toast("projection_config.json → AUTO (k=3)")
+                st.info("Not promoting: some checks are red.")
 
-            # Registry row including projector hash
-            import time as _time
-            fix_id = f"overlap-{int(_time.time())}"
+            # 7) Normal registry write (every run)
+            import time
+            fix_id = f"overlap-{int(time.time())}"
             try:
                 export_mod.write_registry_row(
                     fix_id=fix_id,
                     pass_vector=pass_vec,
-                    policy=policy_label,  # strict / projected(...)
+                    policy=policy_label,
                     hash_d=hashes.hash_d(boundaries),
                     hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
                     hash_suppC=hashes.hash_suppC(cmap),
                     hash_suppH=hashes.hash_suppH(H),
-                    notes=f"proj_hash={pj_hash}"
+                    notes=""
                 )
-                st.success("Registry updated with projector hash.")
+                st.success("Registry updated (registry.csv).")
             except Exception as e:
                 st.error(f"Failed to write registry row: {e}")
-else:
-    st.info("Not promoting: some checks are red.")
-
-
-        # ---- Normal registry write (non-promotion) ----
-# If you still want a basic row every run (even when not promoting), keep this:
-import time
-fix_id = f"overlap-{int(time.time())}"
-try:
-    export_mod.write_registry_row(
-        fix_id=fix_id,
-        pass_vector=pass_vec,
-        policy=policy_label,  # strict / projected(...)
-        hash_d=hashes.hash_d(boundaries),
-        hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
-        hash_suppC=hashes.hash_suppC(cmap),
-        hash_suppH=hashes.hash_suppH(H),
-        notes=""
-    )
-    st.success("Registry updated (registry.csv).")
-except Exception as e:
-    st.error(f"Failed to write registry row: {e}")
 
 
 
