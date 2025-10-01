@@ -2,6 +2,9 @@
 import sys, pathlib, importlib.util, types
 import streamlit as st
 
+# Streamlit MUST be configured before ANY other st.* call:
+st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
+
 # 1) Locate package dir and set PKG_NAME
 HERE = pathlib.Path(__file__).resolve().parent
 OTCORE = HERE / "otcore"
@@ -37,10 +40,6 @@ for _mod in (f"{PKG_NAME}.overlap_gate", f"{PKG_NAME}.projector"):
 overlap_gate = _load_pkg_module(f"{PKG_NAME}.overlap_gate", "overlap_gate.py")
 projector    = _load_pkg_module(f"{PKG_NAME}.projector",    "projector.py")
 
-# Optional: show the exact files to verify we loaded the package versions
-st.caption(f"overlap_gate loaded from: {getattr(overlap_gate, '__file__', '<none>')}")
-st.caption(f"projector loaded from: {getattr(projector, '__file__', '<none>')}")
-
 # 4) Load the rest of your modules from the same package
 io            = _load_pkg_module(f"{PKG_NAME}.io",            "io.py")
 hashes        = _load_pkg_module(f"{PKG_NAME}.hashes",        "hashes.py")
@@ -53,10 +52,13 @@ APP_VERSION = getattr(hashes, "APP_VERSION", "v0.1-core")
 # -----------------------------------------------------------------------------
 
 
-st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
+# (After set_page_config you can safely use other st.* calls)
 st.title("Odd Tetra — Phase U (v0.1 core)")
 st.caption("Schemas + deterministic hashes + timestamped run IDs + Gates + Towers")
 
+# Optional debug: show exactly which files were loaded
+st.caption(f"overlap_gate loaded from: {getattr(overlap_gate, '__file__', '<none>')}")
+st.caption(f"projector loaded from: {getattr(projector, '__file__', '<none>')}")
 
 def read_json_file(file):
     if not file: return None
