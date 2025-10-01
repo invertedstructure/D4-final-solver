@@ -473,18 +473,51 @@ with tab2:
         }
         cert_path, full_hash = export_mod.write_cert_json(cert_payload)
         st.success(f"Cert written: `{cert_path}`")
-                 # ---------- Cert payload + write ----------
-        cert_path, full_hash = export_mod.write_cert_json(cert_payload)
-        st.success(f"Cert written: `{cert_path}`")
-                    
-                 # ---------- Download bundle (place this block here) ----------
-    H_local = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})
+                
+# ---------- Cert payload + write ----------
+cert_path, full_hash = export_mod.write_cert_json(cert_payload)
+st.success(f"Cert written: `{cert_path}`")
+
+# ---------- Define variables used by bundle & promotion ----------
+# pass vector / all_green (reuse the 'out' you already computed)
+pass_vec = [
+    int(out.get("2", {}).get("eq", False)),
+    int(out.get("3", {}).get("eq", False)),
+]
+all_green = all(v == 1 for v in pass_vec)
+
+# district id (use your actual selector if you have one; fallback "D3")
+district_id = st.session_state.get("district_id", "D3")
+
+# Build a policy_block the exporter expects; include projector hash if file-backed
+cfg_eff = cfg_active  # whatever you picked from strict/projected UI
+pj_hash = ""
+if cfg_eff.get("source", {}).get("3") == "file":
+    pj_path = cfg_eff.get("projector_files", {}).get("3")
+    if pj_path and os.path.exists(pj_path):
+        # small helper in projector.py; already imported as _json and projector
+        pj_hash = projector._hash_matrix(_json.load(open(pj_path)))
+
+policy_block = {
+    "label": policy_label,          # e.g. "projected(columns@k=3,auto)" or "strict"
+    "policy_tag": policy_label,     # exporter uses this for filename; keep same
+    "enabled_layers": cfg_eff.get("enabled_layers", []),
+    "modes": cfg_eff.get("modes", {}),
+    "source": cfg_eff.get("source", {}),
+    "projector_hash": pj_hash,      # empty if not file-backed
+}
+
+# Make shapes JSON-safe (pydantic -> dict) and H local
+H_local = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})
+shapes_payload = shapes.dict() if hasattr(shapes, "dict") else shapes
+
+# ---------- Download bundle ----------
 try:
     bundle_path = export_mod.build_download_bundle(
         boundaries=boundaries,
         cmap=cmap,
         H=H_local,
-        shapes=shapes,
+        shapes=shapes_payload,   # <- JSON-serializable now
         policy_block=policy_block,
         cert_path=cert_path,
         out_zip=f"overlap_bundle__{district_id}__{policy_block['policy_tag']}__{full_hash[:12]}.zip",
