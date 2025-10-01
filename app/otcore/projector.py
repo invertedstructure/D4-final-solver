@@ -1,106 +1,146 @@
-# projector.py
-from __future__ import annotations
-from typing import Dict, Any, Optional
-import json, os
+# app/otcore/projector.py
 
-def projector_columns_from_dkp1(dkp1):
+from __future__ import annotations
+import json
+from typing import Dict, Optional, List, Any
+
+from .linalg_gf2 import mul, zeros  # use your existing GF(2) ops
+
+# ---------- config helpers ----------
+
+_DEFAULT_CFG = {
+    "enabled_layers": [],
+    "modes": {},             # e.g., {"3": "columns", "2": "none"}
+    "source": {},            # e.g., {"3": "auto", "2": "auto"}
+    "projector_files": {}    # e.g., {"3": "projector_D3.json", "2": "projector_D2.json"}
+}
+
+def load_projection_config(path: str) -> Dict[str, Any]:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        # normalize types (keys as strings)
+        data = {**_DEFAULT_CFG, **(data or {})}
+        data["modes"] = {str(k): v for k, v in data.get("modes", {}).items()}
+        data["source"] = {str(k): v for k, v in data.get("source", {}).items()}
+        data["projector_files"] = {str(k): v for k, v in data.get("projector_files", {}).items()}
+        return data
+    except Exception:
+        # no config = strict mode
+        return dict(_DEFAULT_CFG)
+
+def preload_projectors_from_files(cfg: Dict[str, Any]) -> Dict[str, List[List[int]]]:
+    cache: Dict[str, List[List[int]]] = {}
+    proj_files = cfg.get("projector_files", {})
+    for k, fpath in proj_files.items():
+        try:
+            with open(fpath, "r", encoding="utf-8") as f:
+                cache[str(k)] = json.load(f)
+        except Exception:
+            # ignore missing/non-json
+            pass
+    return cache
+
+# ---------- projector builders ----------
+
+def projector_columns_from_dkp1(dkp1: List[List[int]]) -> List[List[int]]:
     """
-    Build a columns projector Π_k = diag(lane_mask) over GF(2),
-    where lane_mask[j] = 1 iff column j of d_{k+1} has any 1s.
-    dkp1 is a list-of-lists matrix for d_{k+1} with shape (n_k, n_{k+1}).
-    Returns a square (n_{k+1} x n_{k+1}) list-of-lists matrix.
+    Build a diagonal projector Π_k (n_k x n_k) that keeps only 'lane' columns,
+    where a 'lane' is any col of d_{k+1} with a nonzero entry over GF(2).
+    d_{k+1} has shape (n_k x n_{k+1}). We need an n_k x n_k diag to mask residual columns.
     """
-    if dkp1 is None:
-        return None
-    n_rows = len(dkp1)
-    n_cols = len(dkp1[0]) if n_rows else 0
+    if not dkp1 or not dkp1[0]:
+        return []  # nothing to project
+    n_k = len(dkp1)             # rows of d_{k+1}
+    # We mask residual columns using whether that column participates in any lane in d_{k+1}.
+    # For most chain complexes in your app, residual R_k is n_k x n_k (square).
+    # Use the presence of any non-zero in each residual column index j< n_k by checking
+    # if any row has a nonzero at that residual column position (safe choice for square case).
     lane_mask = []
-    for j in range(n_cols):
-        has_lane = any((dkp1[i][j] & 1) for i in range(n_rows))
-        lane_mask.append(1 if has_lane else 0)
-    Pi = [[1 if (i == j and lane_mask[j] == 1) else 0 for j in range(n_cols)] for i in range(n_cols)]
+    for j in range(n_k):
+        col_has_lane = any(row[j] % 2 != 0 for row in dkp1 if j < len(row))
+        lane_mask.append(1 if col_has_lane else 0)
+
+    # Build diagonal projector Π_k
+    Pi = [[1 if (i == j and lane_mask[j]) else 0 for j in range(n_k)] for i in range(n_k)]
     return Pi
 
-def projector_rows_from_dkp1_real(dkp1):
-    """
-    Optional (future): orthogonal projector onto im(d_{k+1}) over R.
-    Not used in GF(2) runs; here for completeness.
-    Returns P_row with shape (n_k x n_k) as list-of-lists.
-    """
+# (Optional) rows-mode for real-valued math; unused in your GF(2) pass.
+def projector_rows_from_dkp1_real(dkp1: List[List[float]]) -> List[List[float]]:
     try:
         import numpy as np
     except Exception:
-        return None
-    if dkp1 is None:
-        return None
-    A = np.array(dkp1, dtype=float)
+        # Fallback: identity (no projection) if numpy not available
+        if not dkp1:
+            return []
+        n_k = len(dkp1)
+        return [[1.0 if i == j else 0.0 for j in range(n_k)] for i in range(n_k)]
+    A = np.array(dkp1, dtype=float)       # shape (n_k, n_{k+1})
     if A.size == 0:
-        return (np.zeros((0,0))).tolist()
-    Q, _ = np.linalg.qr(A)
-    P = Q @ Q.T
+        return []
+    Q, _ = np.linalg.qr(A)                # Q: (n_k, r)
+    P = Q @ Q.T                           # (n_k, n_k)
     return P.tolist()
 
-def load_projection_config(path: str) -> Dict[str, Any]:
-    """
-    Load a JSON config describing which layers to project and how.
-    If the file doesn't exist, returns a config that disables projection.
-    """
-    if not path or not os.path.exists(path):
-        return {"enabled_layers": [], "modes": {}, "source": {}, "projector_files": {}}
-    with open(path, "r", encoding="utf-8") as f:
-        return json.load(f)
+# ---------- projection application ----------
 
-def preload_projectors_from_files(cfg: Dict[str, Any]) -> Dict[str, Any]:
+def apply_projection(
+    Rk: List[List[int]],
+    k: int,
+    boundaries,                      # Boundaries (for d_{k+1})
+    config: Optional[Dict[str, Any]] = None,
+    projector_cache: Optional[Dict[str, List[List[int]]]] = None,
+):
     """
-    If cfg['source'][k] == 'file', preload the projector matrix for that k from cfg['projector_files'][k].
-    Expects each file to contain a square matrix (list of lists).
+    Apply configured projection to residual Rk at degree k.
+    - columns: Rk <- Rk @ Π_k
+    - rows:    Rk <- P_row @ Rk   (intended for real-valued work; not used in GF(2) runs)
+    If layer k not enabled or mode is 'none', returns Rk unchanged.
     """
-    out: Dict[str, Any] = {}
-    files = cfg.get("projector_files", {}) or {}
-    for k, fpath in files.items():
-        try:
-            if os.path.exists(fpath):
-                with open(fpath, "r", encoding="utf-8") as f:
-                    out[str(k)] = json.load(f)
-        except Exception:
-            pass
-    return out
-
-def apply_projection_GF2(Rk, k: int, boundaries, cfg: Dict[str, Any], cache: Optional[Dict[str, Any]] = None):
-    """
-    Decide and (optionally) return a columns projector for residual Rk at degree k.
-    For GF(2) we project columns: Rk_proj = Rk @ Π_k.
-    Returns either:
-      - (Rk, Π_k)  when projection is enabled and a projector is available
-      - Rk         unchanged when projection is disabled or no projector
-    Caller should multiply with GF(2) matmul.
-    """
-    cache = cache or {}
+    cfg = config or _DEFAULT_CFG
     enabled = set(cfg.get("enabled_layers", []))
     if k not in enabled:
         return Rk
 
-    modes = (cfg.get("modes", {}) or {})
-    sources = (cfg.get("source", {}) or {})
-    mode = modes.get(str(k), "none")
-    source = sources.get(str(k), "auto")
-
+    mode = cfg.get("modes", {}).get(str(k), "none")
     if mode == "none":
         return Rk
 
-    P = None
-    if source == "file":
-        P = cache.get(str(k))
+    source = cfg.get("source", {}).get(str(k), "auto")
+    cache = projector_cache or {}
+
+    # Build/load projector
+    if source == "file" and str(k) in cache:
+        P = cache[str(k)]
     else:
-        dkp1 = boundaries.blocks.__root__.get(str(k+1))
+        # pull d_{k+1} from boundaries
+        blocks_b = boundaries.blocks.__root__
+        dkp1 = blocks_b.get(str(k + 1))
+        if dkp1 is None:
+            return Rk  # nothing to project against
         if mode == "columns":
             P = projector_columns_from_dkp1(dkp1)
         elif mode == "rows":
-            # rows-mode isn't meaningful over GF(2) here; skip
+            P = projector_rows_from_dkp1_real(dkp1)
+        else:
             return Rk
 
-    if P is None:
+    # Apply
+    if not Rk:
         return Rk
-
-    # Signal to caller to do GF(2) right-multiply: Rk @ P
-    return (Rk, P)
+    if mode == "columns":
+        # GF(2) right multiply
+        return mul(Rk, P)
+    elif mode == "rows":
+        # left multiply in float; convert back to ints if near-exact 0/1
+        try:
+            import numpy as np
+            A = np.array(P) @ np.array(Rk)
+            # Optional snap to {0,1}
+            B = (np.abs(A) > 1e-9).astype(int).tolist()
+            return B
+        except Exception:
+            # fallback: no-op if numpy absent
+            return Rk
+    else:
+        return Rk
