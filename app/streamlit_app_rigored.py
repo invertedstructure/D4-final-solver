@@ -6,7 +6,20 @@ import json
 # Streamlit MUST be configured before ANY other st.* call:
 st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
 
-# --- policy label helper (UI + logging) ---
+# --- Policy helpers -----------------------------------------------------------
+def cfg_strict():
+    # strict = no projection anywhere
+    return {"enabled_layers": [], "modes": {}, "source": {}, "projector_files": {}}
+
+def cfg_projected_base():
+    # default projected: columns @ k=3, auto source
+    return {
+        "enabled_layers": [3],
+        "modes": {"3": "columns"},
+        "source": {"3": "auto"},
+        "projector_files": {"3": "projector_D3.json"},
+    }
+
 def policy_label_from_cfg(cfg: dict) -> str:
     if not cfg or not cfg.get("enabled_layers"):
         return "strict"
@@ -15,7 +28,7 @@ def policy_label_from_cfg(cfg: dict) -> str:
         mode = cfg.get("modes", {}).get(str(kk), "none")
         src  = cfg.get("source", {}).get(str(kk), "auto")
         parts.append(f"{mode}@k={kk},{src}")
-    return "projected(" + ";".join(parts) + ")"
+    return "projected(" + "; ".join(parts) + ")"
 
 
 # 1) Locate package dir and set PKG_NAME
@@ -150,6 +163,43 @@ with tab2:
     f_H = st.file_uploader("Homotopy H (H_corrected.json)", type=["json"], key="H_corr")
     d_H = read_json_file(f_H) if f_H else None
 
+# --- Policy toggle UI ---------------------------------------------------------
+st.markdown("### Policy")
+policy_choice = st.radio(
+    "Choose policy",
+    ["strict", "projected(columns@k=3)"],
+    horizontal=True,
+    key="policy_choice_k3",
+)
+
+# Build cfg based on choice + current file/auto setting (if any)
+cfg_file = projector.load_projection_config("projection_config.json")
+cfg_proj = cfg_projected_base()
+# keep your existing file/auto decision if present
+if cfg_file.get("source", {}).get("3") in ("file", "auto"):
+    cfg_proj["source"]["3"] = cfg_file["source"]["3"]
+if "projector_files" in cfg_file and "3" in cfg_file["projector_files"]:
+    cfg_proj["projector_files"]["3"] = cfg_file["projector_files"]["3"]
+
+cfg_active = cfg_strict() if policy_choice == "strict" else cfg_proj
+policy_label = policy_label_from_cfg(cfg_active)
+st.caption(f"Policy: **{policy_label}**")
+
+cache = projector.preload_projectors_from_files(cfg_active)
+
+# --- one-run helper -----------------------------------------------------------
+def run_overlap_with_cfg(cfg_run: dict):
+    try:
+        return overlap_gate.overlap_check(
+            boundaries, cmap, H,
+            projection_config=cfg_run,
+            projector_cache=cache
+        )
+    except TypeError:
+        # fallback for old signature
+        return overlap_gate.overlap_check(boundaries, cmap, H)
+
+    
     if st.button("Run Overlap"):
         if not d_H:
             st.error("Upload H_corrected.json")
