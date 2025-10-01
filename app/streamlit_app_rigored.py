@@ -618,6 +618,12 @@ st.success(f"Cert written: `{cert_path}`")
                     st.toast("registry: added strict & projected rows")
                 except Exception as e:
                     st.error(f"registry write failed: {e}")
+                    
+                    # at the end of tab2 block, after you compute cfg_active
+                    st.session_state["cfg_active"] = cfg_active
+
+
+
 with tab3:
     st.subheader("Triangle gate (Echo)")
 
