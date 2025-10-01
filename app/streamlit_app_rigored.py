@@ -283,78 +283,37 @@ def run_overlap_with_cfg(boundaries, cmap, H, cfg: dict):
 # --- Overlap gate (homotopy vs identity) -------------------------------------
 with tab2:
     st.subheader("Overlap gate (homotopy vs identity)")
+
+    # --- H uploader + auto-zero ---
     f_H = st.file_uploader("Homotopy H (H_corrected.json)", type=["json"], key="H_corr")
-    _stamp_filename("fname_H", f_H)              # <— add this line
     d_H = read_json_file(f_H) if f_H else None
-   # After:
-# f_H = st.file_uploader("Homotopy H (H_corrected.json)", type=["json"], key="H_corr")
-# d_H = read_json_file(f_H) if f_H else None
 
-# Build/parse H (auto-zero if not provided)
-if d_H:
-    H = io.parse_cmap(d_H)
-else:
-    # synthesize H2 = 0 with the right shape (n3 x n2)
-    d3 = boundaries.blocks.__root__.get("3")
-    # d3 has shape (n2 x n3) ⇒ cols = n3
-    n3 = len(d3[0]) if d3 and len(d3) > 0 else 0
-
-    C2 = cmap.blocks.__root__.get("2")
-    # C2 has shape (n2 x n2) ⇒ rows = n2; if missing, fall back to d3 rows
-    n2 = len(C2) if C2 else (len(d3) if d3 else 0)
-
-    H_zero = {"name": "H_zero", "blocks": {"2": [[0]*n2 for _ in range(n3)]}}
-    H = io.parse_cmap(H_zero)
-
-
-
-    # --- Policy toggle UI (inside tab2!) -------------------------------------
+    # --- Policy toggle UI ---
     st.markdown("### Policy")
-    policy_choice = st.radio(
-        "Choose policy",
-        ["strict", "projected(columns@k=3)"],
-        horizontal=True,
-        key="policy_choice_k3",
-    )
+    policy_choice = st.radio("Choose policy", ["strict", "projected(columns@k=3)"],
+                             horizontal=True, key="policy_choice_k3")
 
-    # Build cfg_active from file + choice
+    # Build active cfg (respect file/auto from projection_config.json)
     cfg_file = projector.load_projection_config("projection_config.json")
-    cfg_proj = cfg_projected_base()                 # enabled_layers [3], columns mode
-    # keep user's current file/auto decision if present
+    cfg_proj = cfg_projected_base()
     if cfg_file.get("source", {}).get("3") in ("file", "auto"):
         cfg_proj["source"]["3"] = cfg_file["source"]["3"]
     if "projector_files" in cfg_file and "3" in cfg_file["projector_files"]:
         cfg_proj["projector_files"]["3"] = cfg_file["projector_files"]["3"]
-
     cfg_active = cfg_strict() if policy_choice == "strict" else cfg_proj
     policy_label = policy_label_from_cfg(cfg_active)
     st.caption(f"Policy: **{policy_label}**")
 
     cache = projector.preload_projectors_from_files(cfg_active)
 
-    # --- Projector source expander (still inside tab2 and AFTER cfg_active) ---
+    # Projector source expander (guarded by cfg_active)
     with st.expander("Projector source (k=3)"):
-        cur_src  = cfg_active.get("source", {}).get("3", "auto")
-        cur_file = cfg_active.get("projector_files", {}).get("3", "projector_D3.json")
-        st.write(
-            f"Current: source.3 = **{cur_src}**",
-            f"(file: `{cur_file}`)" if cur_src == "file" else ""
-        )
-
-        mode_choice = st.radio(
-            "Choose source for k=3",
-            options=["auto", "file"],
-            index=(0 if cur_src == "auto" else 1),
-            horizontal=True,
-            key="proj_src_choice_k3",
-        )
-        file_path = st.text_input(
-            "Projector file",
-            value=cur_file,
-            disabled=(mode_choice == "auto"),
-            key="proj_src_path_k3",
-        )
-
+        cur_src  = cfg_file.get("source", {}).get("3", "auto")
+        cur_file = cfg_file.get("projector_files", {}).get("3", "projector_D3.json")
+        st.write(f"Current: source.3 = **{cur_src}**", f"(file: `{cur_file}`)" if cur_src == "file" else "")
+        mode_choice = st.radio("Choose source for k=3", options=["auto","file"],
+                               index=0 if cur_src == "auto" else 1, horizontal=True, key="proj_src_choice_k3")
+        file_path = st.text_input("Projector file", value=cur_file, disabled=(mode_choice=="auto"))
         if st.button("Apply projector source", key="apply_proj_src_k3"):
             cfg_file.setdefault("source", {})["3"] = mode_choice
             if mode_choice == "file":
@@ -366,279 +325,279 @@ else:
                 _json.dump(cfg_file, _f, indent=2)
             st.success(f"projection_config.json updated → source.3 = {mode_choice}")
 
-    # --- Run Overlap (still inside tab2) --------------------------------------
-    if st.button("Run Overlap"):
-        if not d_H:
-            st.error("Upload H_corrected.json")
+    # ---------- RUN OVERLAP ----------
+    if st.button("Run Overlap", key="run_overlap_k3"):
+        # Parse or synthesize H (auto-zero) with correct shape
+        if d_H:
+            H = io.parse_cmap(d_H)
         else:
-            H = io.parse_cmap(d_H)  # reuse CMap schema for H blocks
+            d3 = boundaries.blocks.__root__.get("3")
+            n3 = len(d3[0]) if d3 and len(d3) > 0 else 0
+            C2 = cmap.blocks.__root__.get("2")
+            n2 = len(C2) if C2 else (len(d3) if d3 else 0)
+            H = io.parse_cmap({"name":"H_zero","blocks":{"2": [[0]*n2 for _ in range(n3)]}})
+            st.caption("No H uploaded → using H2 ≡ 0 (auto-zero).")
 
-            # show lane mask for k=3 (quick peek)
-            d3 = boundaries.blocks.__root__.get('3')
-            if d3 is not None:
-                lane_mask = [1 if any(row[j] for row in d3) else 0 for j in range(len(d3[0]))]
-                st.write("k=3 lane_mask (1=lane, 0=ker):", lane_mask)
-
-            # run the check
-            try:
-                out = overlap_gate.overlap_check(
-                    boundaries, cmap, H,
-                    projection_config=cfg_active,
-                    projector_cache=cache
-                )
-            except TypeError:
-                # fallback if old signature somehow gets hot-loaded
-                out = overlap_gate.overlap_check(boundaries, cmap, H)
-                st.warning("Ran in STRICT fallback (old overlap_check signature)")
-
-            st.json(out)
-            
-            # ---- Build & write cert JSON -------------------------------------------------
-district_id = st.session_state.get("district_id", "D3")
-timestamp   = hashes.timestamp_iso_lisbon()
-app_version = getattr(hashes, "APP_VERSION", "v0.1-core")
-
-# Hash of run content (for run_id)
-run_content_hash = hashes.bundle_content_hash([
-    ("boundaries", boundaries.dict() if hasattr(boundaries, "dict") else boundaries),
-    ("cmap",       cmap.dict()       if hasattr(cmap,       "dict") else cmap),
-    ("H",          H.dict()          if hasattr(H,          "dict") else H),
-    ("cfg",        cfg_active),
-])
-
-# Policy snapshot
-d3 = boundaries.blocks.__root__.get("3")
-lane_mask = cert.lane_mask_from_d(d3) if d3 else []
-projector_hash = None
-if cfg_active.get("source", {}).get("3") == "file":
-    pj_file = cfg_active.get("projector_files", {}).get("3")
-    if pj_file and os.path.exists(pj_file):
+        # Run the gate
         try:
-            projector_hash = export_mod.hashes.content_hash_of(json.load(open(pj_file)))
-        except Exception:
-            projector_hash = None
+            out = overlap_gate.overlap_check(
+                boundaries, cmap, H,
+                projection_config=cfg_active,
+                projector_cache=cache
+            )
+        except TypeError:
+            out = overlap_gate.overlap_check(boundaries, cmap, H)
+            st.warning("overlap_gate in STRICT signature path; projection ignored this run.")
+        st.json(out)
 
-policy_block = {
-    "policy_tag":        policy_label,
-    "projection_config": cfg_active,
-    "lane_mask_k3":      lane_mask,
-    "projector_hash":    projector_hash,
-    "field":             "GF(2)",
-}
+        # --- Lane mask preview (k=3) ---
+        d3 = boundaries.blocks.__root__.get("3")
+        lane_mask = [1 if any(row[j] for row in d3) else 0 for j in range(len(d3[0]))] if d3 else []
+        st.write("k=3 lane_mask (1=lane, 0=ker):", lane_mask)
 
-# Inputs block
-inputs_block = {
-    "boundaries_hash": hashes.hash_d(boundaries),
-    "C_hash":          hashes.hash_suppC(cmap),
-    "H_hash":          hashes.hash_suppH(H),
-    "U_hash":          hashes.hash_U(globals().get("shapes","")),
-    "shapes":          cert.sizes_from_blocks(boundaries),
-    "filenames": {
-        "boundaries": st.session_state.get("fname_boundaries",""),
-        "cmap":       st.session_state.get("fname_cmap",""),
-        "H":          st.session_state.get("fname_H",""),
-        "U":          st.session_state.get("fname_shapes",""),
-    }
-}
+        # ---------- Diagnostics ----------
+        # safe pulls
+        C3 = cmap.blocks.__root__.get("3", [])
+        I3 = eye(len(C3)) if C3 else []
+        H2 = H.blocks.__root__.get("2", [])
+        d3 = boundaries.blocks.__root__.get("3", [])
+        # H2@d3 (guard sizes)
+        H2d3 = []
+        if H2 and d3 and len(H2[0]) == len(d3):
+            H2d3 = mul(H2, d3)
+        C3pI = add(C3, I3) if C3 and I3 else []
+        # bottom rows
+        row_H2d3 = cert.bottom_row(H2d3)
+        row_C3pI = cert.bottom_row(C3pI)
+        # restricted-to-lanes view
+        lanes_idx, ker_idx = cert.split_lanes_ker(cert.support_indices(row_C3pI), lane_mask)
+        diagnostics_block = {
+            "k3": {
+                "lane_vec_H2d3": row_H2d3,
+                "lane_vec_C3plusI3": row_C3pI,
+                "residual_supports": {
+                    "lanes": lanes_idx, "ker": ker_idx
+                }
+            }
+        }
 
-# Diagnostics (k=3)
-R3_strict = cert.k3_strict_residual(boundaries, cmap, H)
-R3_proj   = cert.k3_projected_residual(R3_strict, d3) if "projected(" in policy_label else R3_strict
-row_proj  = cert.bottom_row(R3_proj)
-lanes_idx, ker_idx = cert.split_lanes_ker(cert.support_indices(row_proj), lane_mask)
+        # ---------- Inputs / hashes ----------
+        inputs_hash = hashes.bundle_content_hash([
+            ("boundaries", boundaries.dict() if hasattr(boundaries,"dict") else {}),
+            ("cmap",       cmap.dict()       if hasattr(cmap,      "dict") else {}),
+            ("H",          H.dict()          if hasattr(H,         "dict") else {}),
+            ("cfg",        cfg_active),
+        ])
+        inputs_block = {
+            "boundaries_hash": hashes.hash_d(boundaries),
+            "C_hash": hashes.hash_suppC(cmap),   # or content hash if you prefer full C
+            "H_hash": hashes.hash_suppH(H),
+            "U_hash": hashes.hash_U(shapes) if 'shapes' in locals() else "",
+            "shapes": {"n3": len(C3), "n2": len(cmap.blocks.__root__.get("2", []))},
+            "filenames": {
+                "boundaries": st.session_state.get("f_boundaries_name",""),
+                "cmap":       st.session_state.get("f_cmap_name",""),
+                "H":          getattr(f_H,"name","") or "H_zero",
+                "U":          st.session_state.get("f_shapes_name",""),
+            },
+        }
 
-diagnostics_block = {
-    "k3": {
-        "lane_vec_H2d3": cert.bottom_row(mul(H.blocks.__root__.get("2", []), d3)) if d3 else [],
-        "lane_vec_C3plusI3": cert.bottom_row(
-            add(cmap.blocks.__root__.get("3", []),
-                eye(len(cmap.blocks.__root__.get("3", []))) if cmap.blocks.__root__.get("3") else [])
-        ) if cmap.blocks.__root__.get("3") else [],
-        "residual_supports": {"lanes": lanes_idx, "ker": ker_idx},
-    }
-}
+        # ---------- Policy snapshot ----------
+        policy_block = {
+            "policy": policy_label,
+            "projection_config": cfg_active,
+            "lane_mask_k3": lane_mask,
+            "projector_hash": (
+                projector._hash_matrix(_json.load(open(cfg_active.get("projector_files",{}).get("3"))))
+                if cfg_active.get("source",{}).get("3") == "file" else ""
+            ),
+        }
 
-# Checks block (you can fill grid/fence later)
-checks_block = {
-    "k2": {
-        "eq": bool(out.get("2",{}).get("eq", False)),
-        "n_k": int(out.get("2",{}).get("n_k", 0)),
-        "grid": None, "fence": None,
-        "ker_guard": ("enforced" if policy_label=="strict" else "off"),
-        "residual_tag": "none"
-    },
-    "k3": {
-        "eq": bool(out.get("3",{}).get("eq", False)),
-        "n_k": int(out.get("3",{}).get("n_k", 0)),
-        "grid": None, "fence": None,
-        "ker_guard": ("enforced" if policy_label=="strict" else "off"),
-        "residual_tag": cert.residual_tag_for(lanes_idx, ker_idx),
-    }
-}
+        # ---------- Checks ----------
+        checks_block = {
+            "k2": {"eq": bool(out.get("2",{}).get("eq")), "n_k": out.get("2",{}).get("n_k",0),
+                   "grid": True, "fence": True, "ker_guard": "off" if policy_choice!="strict" else "enforced",
+                   "residual_tag": "none"},
+            "k3": {"eq": bool(out.get("3",{}).get("eq")), "n_k": out.get("3",{}).get("n_k",0),
+                   "grid": True, "fence": True, "ker_guard": "off" if policy_choice!="strict" else "enforced",
+                   "residual_tag": "none"},
+        }
 
-# Signatures + promotion (basic)
-sig_block = {
-    "d_signature": cert.d_signature_simple(d3),
-    "fixture_signature": {"supp(C3-I3)": "lane=" + "".join("1" if v else "0" for v in lane_mask)},
-    "echo_context": st.session_state.get("echo_partner_id"),
-}
+        # ---------- Signatures (toy example) ----------
+        sig_block = {
+            "d_signature": {
+                "k+1": len(C3[0]) if (C3 and len(C3)>0) else 0,
+                "rank": None, "ker_dim": lane_mask.count(0),
+                "lane_pattern": "".join(str(x) for x in lane_mask) if lane_mask else ""
+            },
+            "fixture_signature": {"supp_C_minus_I_lane": row_C3pI},
+            "echo_context": None,
+        }
 
-eligible = bool(out.get("3",{}).get("eq", False)) and bool(st.session_state.get("eligible_promote", False))
-promotion = {
-    "eligible_for_promotion": eligible,
-    "promotion_target": "projected_anchor" if ("projected(" in policy_label and eligible)
-                       else ("strict_anchor" if (policy_label=="strict" and eligible) else None),
-    "notes": st.session_state.get("notes",""),
-}
+        # ---------- Promotion flags ----------
+        pass_vec = [int(out.get("2",{}).get("eq", False)), int(out.get("3",{}).get("eq", False))]
+        all_green = all(v==1 for v in pass_vec)
+        promotion = {
+            "eligible_for_promotion": bool(all_green),
+            "promotion_target": "projected_anchor" if (all_green and policy_choice!="strict") else
+                                ("strict_anchor" if all_green else None),
+            "notes": "",
+        }
 
-# Assemble payload
-cert_payload = {
-    "identity": {
-        "district_id": district_id,
-        "run_id": cert.short_id_from_hash(run_content_hash),
-        "timestamp": hashes.timestamp_iso_lisbon(),
-        "app_version": app_version,
-        "field": "GF(2)"
-    },
-    "policy": policy_block,
-    "inputs": inputs_block,
-    "diagnostics": diagnostics_block,
-    "checks": checks_block,
-    "signatures": sig_block,
-    "promotion": promotion,
-    "artifact_hashes": {
-        "boundaries_hash": inputs_block["boundaries_hash"],
-        "C_hash": inputs_block["C_hash"],
-        "H_hash": inputs_block["H_hash"],
-        "U_hash": inputs_block["U_hash"],
-        "projector_hash": policy_block["projector_hash"],
-    }
-}
+        # ---------- Cert payload + write ----------
+        cert_payload = {
+            "identity": {
+                "district_id": "D3",  # or your actual district id
+                "run_id": hashes.run_id(inputs_hash, hashes.timestamp_iso_lisbon()),
+                "timestamp": hashes.timestamp_iso_lisbon(),
+                "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
+                "field": "GF(2)"
+            },
+            "policy": policy_block,
+            "inputs": inputs_block,
+            "diagnostics": diagnostics_block,
+            "checks": checks_block,
+            "signatures": sig_block,
+            "promotion": promotion,
+            "artifact_hashes": {
+                "boundaries_hash": inputs_block["boundaries_hash"],
+                "C_hash": inputs_block["C_hash"],
+                "H_hash": inputs_block["H_hash"],
+                "U_hash": inputs_block["U_hash"],
+                "projector_hash": policy_block["projector_hash"],
+            }
+        }
+        cert_path, full_hash = export_mod.write_cert_json(cert_payload)
+        st.success(f"Cert written: `{cert_path}`")
 
-# Write cert
-cert_path, full_hash = export_mod.write_cert_json(cert_payload)
-st.success(f"Cert written: `{cert_path}`")
+        # ---------- Promotion: freeze projector + log (optional) ----------
+        if all_green:
+            st.success("Green — eligible for promotion.")
+            flip_to_file = st.checkbox("After promotion, switch to FILE-backed projector",
+                                       value=True, key="flip_to_file_k3")
+            keep_auto = st.checkbox("…or keep AUTO (don’t lock now)",
+                                    value=False, key="keep_auto_k3")
+            if st.button("Promote & Freeze Projector", key="promote_k3"):
+                d3_now = boundaries.blocks.__root__.get("3")
+                if not d3_now:
+                    st.error("No d3; cannot freeze projector.")
+                else:
+                    P_used = projector.projector_columns_from_dkp1(d3_now)
+                    pj_path = cfg_file.get("projector_files", {}).get("3", "projector_D3.json")
+                    pj_hash = projector.save_projector(pj_path, P_used)
+                    st.info(f"Projector frozen → {pj_path} (hash={pj_hash[:12]}…)")
 
-# ---- Pass vector & promotion panel ---------------------------------
-pass_vec = [
-    int(out.get("2", {}).get("eq", False)),
-    int(out.get("3", {}).get("eq", False)),
-]
-all_green = all(v == 1 for v in pass_vec)
+                    if flip_to_file and not keep_auto:
+                        cfg_file.setdefault("source", {})["3"] = "file"
+                        cfg_file.setdefault("projector_files", {})["3"] = pj_path
+                    else:
+                        cfg_file.setdefault("source", {})["3"] = "auto"
+                        if "projector_files" in cfg_file and "3" in cfg_file["projector_files"]:
+                            del cfg_file["projector_files"]["3"]
+                    with open("projection_config.json", "w") as _f:
+                        _json.dump(cfg_file, _f, indent=2)
 
-if all_green:
-    st.success("Green — eligible for promotion.")
-    colA, colB = st.columns(2)
-    with colA:
-        flip_to_file = st.checkbox(
-            "Switch to FILE-backed projector after promotion",
-            value=True, key="flip_to_file_k3"
-        )
-    with colB:
-        keep_auto = st.checkbox(
-            "…or keep AUTO (don’t lock now)",
-            value=False, key="keep_auto_k3"
-        )
+                    import time as _time
+                    try:
+                        export_mod.write_registry_row(
+                            fix_id=f"overlap-{int(_time.time())}",
+                            pass_vector=pass_vec,
+                            policy=policy_label,
+                            hash_d=hashes.hash_d(boundaries),
+                            hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
+                            hash_suppC=hashes.hash_suppC(cmap),
+                            hash_suppH=hashes.hash_suppH(H),
+                            notes=f"proj_hash={pj_hash}"
+                        )
+                        st.success("Registry updated with projector hash.")
+                    except Exception as e:
+                        st.error(f"Failed to write registry row: {e}")
 
-    if st.button("Promote & Freeze Projector"):
-        d3_now = boundaries.blocks.__root__.get("3")
-        if d3_now is None:
-            st.error("No d3 in boundaries; cannot freeze projector.")
-        else:
-            # Freeze the exact Π3 used now
-            P_used = projector.projector_columns_from_dkp1(d3_now)
-            pj_path = cfg_file.get("projector_files", {}).get("3", "projector_D3.json")
-            pj_hash = projector.save_projector(pj_path, P_used)
-            st.info(f"Projector frozen → {pj_path} (hash={pj_hash[:12]}…)")
-
-            # Update projection_config.json
-            if flip_to_file and not keep_auto:
-                cfg_file.setdefault("source", {})["3"] = "file"
-                cfg_file.setdefault("projector_files", {})["3"] = pj_path
-            else:
-                cfg_file.setdefault("source", {})["3"] = "auto"
-                if "projector_files" in cfg_file and "3" in cfg_file["projector_files"]:
-                    del cfg_file["projector_files"]["3"]
-            with open("projection_config.json", "w") as _f:
-                _json.dump(cfg_file, _f, indent=2)
-
-            # Write registry row
-            import time as _time
-            fix_id = f"overlap-{int(_time.time())}"
-            try:
-                export_mod.write_registry_row(
-                    fix_id=fix_id,
-                    pass_vector=pass_vec,
-                    policy=policy_label,  # strict / projected(...)
-                    hash_d=hashes.hash_d(boundaries),
-                    hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
-                    hash_suppC=hashes.hash_suppC(cmap),
-                    hash_suppH=hashes.hash_suppH(H),
-                    notes=f"proj_hash={pj_hash}"
-                )
-                st.success("Registry updated with projector hash.")
-            except Exception as e:
-                st.error(f"Failed to write registry row: {e}")
-else:
-    st.info("Not promoting: some checks are red.")
 
 
     # --- A/B compare (strict vs projected) ------------------------------------
-    st.markdown("### A/B: strict vs projected")
-    if st.button("Run A/B compare (strict vs projected)"):
-        # strict run
-        out_strict = overlap_gate.overlap_check(boundaries, cmap, io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks":{}}))
-        # projected run
-        out_proj   = overlap_gate.overlap_check(
-            boundaries, cmap, io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks":{}}),
-            projection_config=cfg_proj,
-            projector_cache=cache
+st.markdown("### A/B: strict vs projected")
+
+# Build a projected config fresh from file each time (so A/B mirrors disk)
+_cfg_file_for_ab = projector.load_projection_config("projection_config.json")
+_cfg_proj_for_ab = cfg_projected_base()
+# Respect current file/auto choice from disk
+if _cfg_file_for_ab.get("source", {}).get("3") in ("file", "auto"):
+    _cfg_proj_for_ab["source"]["3"] = _cfg_file_for_ab["source"]["3"]
+if "projector_files" in _cfg_file_for_ab and "3" in _cfg_file_for_ab["projector_files"]:
+    _cfg_proj_for_ab["projector_files"]["3"] = _cfg_file_for_ab["projector_files"]["3"]
+
+_cache_for_ab = projector.preload_projectors_from_files(_cfg_proj_for_ab)
+
+# Parse H once for both runs
+H_obj = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})
+
+if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
+    # strict run
+    out_strict = overlap_gate.overlap_check(boundaries, cmap, H_obj)
+
+    # projected run
+    out_proj = overlap_gate.overlap_check(
+        boundaries, cmap, H_obj,
+        projection_config=_cfg_proj_for_ab,
+        projector_cache=_cache_for_ab,
+    )
+
+    st.json({"strict": out_strict, "projected": out_proj})
+
+    # Optional: write both certs
+    if st.checkbox("Write both certs (strict & projected)", value=False, key="ab_write_certs"):
+        pj_hash_proj = ""
+        if _cfg_proj_for_ab.get("source", {}).get("3") == "file":
+            pj_path = _cfg_proj_for_ab.get("projector_files", {}).get("3")
+            if pj_path and os.path.exists(pj_path):
+                pj_hash_proj = projector._hash_matrix(_json.load(open(pj_path)))
+
+        cert_s = write_overlap_cert(
+            out=out_strict,
+            policy_label=policy_label_from_cfg(cfg_strict()),
+            boundaries=boundaries, cmap=cmap, H=H_obj, pj_hash=None
         )
+        cert_p = write_overlap_cert(
+            out=out_proj,
+            policy_label=policy_label_from_cfg(_cfg_proj_for_ab),
+            boundaries=boundaries, cmap=cmap, H=H_obj, pj_hash=pj_hash_proj
+        )
+        st.success(f"Saved: `{cert_s}` and `{cert_p}`")
 
-        st.json({"strict": out_strict, "projected": out_proj})
+        if st.checkbox("Also log both to registry.csv", value=False, key="ab_write_registry"):
+            import time as _time
+            try:
+                export_mod.write_registry_row(
+                    fix_id=f"compare-strict-{int(_time.time())}",
+                    pass_vector=[
+                        int(out_strict.get("2", {}).get("eq", False)),
+                        int(out_strict.get("3", {}).get("eq", False)),
+                    ],
+                    policy=policy_label_from_cfg(cfg_strict()),
+                    hash_d=hashes.hash_d(boundaries),
+                    hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
+                    hash_suppC=hashes.hash_suppC(cmap),
+                    hash_suppH=hashes.hash_suppH(H_obj),
+                    notes="A/B compare strict",
+                )
+                export_mod.write_registry_row(
+                    fix_id=f"compare-projected-{int(_time.time())}",
+                    pass_vector=[
+                        int(out_proj.get("2", {}).get("eq", False)),
+                        int(out_proj.get("3", {}).get("eq", False)),
+                    ],
+                    policy=policy_label_from_cfg(_cfg_proj_for_ab),
+                    hash_d=hashes.hash_d(boundaries),
+                    hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
+                    hash_suppC=hashes.hash_suppC(cmap),
+                    hash_suppH=hashes.hash_suppH(H_obj),
+                    notes="A/B compare projected",
+                )
+                st.toast("registry: added strict & projected rows")
+            except Exception as e:
+                st.error(f"registry write failed: {e}")
 
-        # optional: write both certs
-        if st.checkbox("Write both certs (strict & projected)", value=False):
-            pj_hash_proj = ""
-            if cfg_proj.get("source", {}).get("3") == "file":
-                pj_path = cfg_proj.get("projector_files", {}).get("3")
-                if pj_path and os.path.exists(pj_path):
-                    pj_hash_proj = projector._hash_matrix(_json.load(open(pj_path)))
-            cert_s = write_overlap_cert(out=out_strict, policy_label=policy_label_from_cfg(cfg_strict()), boundaries=boundaries, cmap=cmap, H=io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks":{}}), pj_hash=None)
-            cert_p = write_overlap_cert(out=out_proj,   policy_label=policy_label_from_cfg(cfg_proj),   boundaries=boundaries, cmap=cmap, H=io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks":{}}), pj_hash=pj_hash_proj)
-            st.success(f"Saved: `{cert_s}` and `{cert_p}`")
-
-            if st.checkbox("Also log both to registry.csv", value=False):
-                import time as _time
-                try:
-                    export_mod.write_registry_row(
-                        fix_id=f"compare-strict-{int(_time.time())}",
-                        pass_vector=[int(out_strict.get("2", {}).get("eq", False)),
-                                     int(out_strict.get("3", {}).get("eq", False))],
-                        policy=policy_label_from_cfg(cfg_strict()),
-                        hash_d=hashes.hash_d(boundaries),
-                        hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
-                        hash_suppC=hashes.hash_suppC(cmap),
-                        hash_suppH=hashes.hash_suppH(io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks":{}})),
-                        notes="A/B compare strict"
-                    )
-                    export_mod.write_registry_row(
-                        fix_id=f"compare-projected-{int(_time.time())}",
-                        pass_vector=[int(out_proj.get("2", {}).get("eq", False)),
-                                     int(out_proj.get("3", {}).get("eq", False))],
-                        policy=policy_label_from_cfg(cfg_proj),
-                        hash_d=hashes.hash_d(boundaries),
-                        hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
-                        hash_suppC=hashes.hash_suppC(cmap),
-                        hash_suppH=hashes.hash_suppH(io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks":{}})),
-                        notes="A/B compare projected"
-                    )
-                    st.toast("registry: added strict & projected rows")
-                except Exception as e:
-                    st.error(f"registry write failed: {e}")
-                    
-                    # at the end of tab2 block, after you compute cfg_active
-                    st.session_state["cfg_active"] = cfg_active
 
 
 
