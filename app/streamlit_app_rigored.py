@@ -155,6 +155,15 @@ with tab2:
                 lane_mask = [1 if any(row[j] for row in d3) else 0 for j in range(len(d3[0]))]
                 st.write("k=3 lane_mask (1=lane, 0=ker):", lane_mask)
 
+import importlib, inspect, sys
+st.write("PKG_NAME =", PKG_NAME)
+
+# Load/reload and print where it's coming from
+overlap_gate = _load_pkg_module(f"{PKG_NAME}.overlap_gate", "overlap_gate.py")
+st.write("overlap_gate.__file__ =", getattr(overlap_gate, "__file__", "<none>"))
+st.write("overlap_check signature =", str(inspect.signature(overlap_gate.overlap_check)))
+
+            
             # --- Run overlap; fallback to strict if old module signature is still loaded ---
             try:
                 out = overlap_gate.overlap_check(
