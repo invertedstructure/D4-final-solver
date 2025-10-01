@@ -478,26 +478,26 @@ with tab2:
                     
                  # ---------- Download bundle (place this block here) ----------
     H_local = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})
-                    try:
-                        bundle_path = export_mod.build_download_bundle(
-                            boundaries=boundaries,
-                            cmap=cmap,
-                            H=H_local,
-                            shapes=shapes,
-                            policy_block=policy_block,
-                            cert_path=cert_path,
-                            out_zip=f"overlap_bundle__{district_id}__{policy_block['policy_tag']}__{full_hash[:12]}.zip",
+                try:
+                    bundle_path = export_mod.build_download_bundle(
+                        boundaries=boundaries,
+                        cmap=cmap,
+                        H=H_local,
+                        shapes=shapes,
+                        policy_block=policy_block,
+                        cert_path=cert_path,
+                        out_zip=f"overlap_bundle__{district_id}__{policy_block['policy_tag']}__{full_hash[:12]}.zip",
+                    )
+                    with open(bundle_path, "rb") as _f:
+                        st.download_button(
+                            "Download run bundle (.zip)",
+                            _f,
+                            file_name=os.path.basename(bundle_path),
+                            mime="application/zip",
+                            key="dl_overlap_bundle",
                         )
-                        with open(bundle_path, "rb") as _f:
-                            st.download_button(
-                                "Download run bundle (.zip)",
-                                _f,
-                                file_name=os.path.basename(bundle_path),
-                                mime="application/zip",
-                                key="dl_overlap_bundle",
-                            )
-                    except Exception as e:
-                        st.error(f"Could not build download bundle: {e}")
+                except Exception as e:
+                    st.error(f"Could not build download bundle: {e}")
 
 
 
