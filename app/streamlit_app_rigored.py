@@ -284,9 +284,26 @@ with tab2:
     f_H = st.file_uploader("Homotopy H (H_corrected.json)", type=["json"], key="H_corr")
     _stamp_filename("fname_H", f_H)              # <— add this line
     d_H = read_json_file(f_H) if f_H else None
-    H = io.parse_cmap(d_H) if d_H else None
-    if H is not None:
-        st.session_state["H_obj"] = H           # make H available to other tabs
+   # After:
+# f_H = st.file_uploader("Homotopy H (H_corrected.json)", type=["json"], key="H_corr")
+# d_H = read_json_file(f_H) if f_H else None
+
+# Build/parse H (auto-zero if not provided)
+if d_H:
+    H = io.parse_cmap(d_H)
+else:
+    # synthesize H2 = 0 with the right shape (n3 x n2)
+    d3 = boundaries.blocks.__root__.get("3")
+    # d3 has shape (n2 x n3) ⇒ cols = n3
+    n3 = len(d3[0]) if d3 and len(d3) > 0 else 0
+
+    C2 = cmap.blocks.__root__.get("2")
+    # C2 has shape (n2 x n2) ⇒ rows = n2; if missing, fall back to d3 rows
+    n2 = len(C2) if C2 else (len(d3) if d3 else 0)
+
+    H_zero = {"name": "H_zero", "blocks": {"2": [[0]*n2 for _ in range(n3)]}}
+    H = io.parse_cmap(H_zero)
+
 
 
     # --- Policy toggle UI (inside tab2!) -------------------------------------
