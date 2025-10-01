@@ -205,8 +205,31 @@ with tab2:
                 out = overlap_gate.overlap_check(boundaries, cmap, H)
 
             st.json(out)
+            
+            # ---- build pass-vector and write registry row ----
+pass_vec = [
+    int(out.get("2", {}).get("eq", False)),
+    int(out.get("3", {}).get("eq", False)),
+    # add more k if you start reporting them
+]
 
-    
+import time
+fix_id = f"overlap-{int(time.time())}"  # or your own canonical fixture id
+
+try:
+    export_mod.write_registry_row(
+        fix_id=fix_id,
+        pass_vector=pass_vec,
+        policy=policy_label,                     # from policy_label_from_cfg(cfg)
+        hash_d=hashes.hash_d(boundaries),
+        hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
+        hash_suppC=hashes.hash_suppC(cmap),
+        hash_suppH=hashes.hash_suppH(H),
+        notes=""
+    )
+    st.success("Registry updated (registry.csv).")
+except Exception as e:
+    st.error(f"Failed to write registry row: {e}")
 
 
 with tab3:
@@ -217,6 +240,8 @@ with tab3:
         if st.button("Run Triangle"):
             out = triangle_gate.triangle_check(boundaries, triangle, shapes=shapes)
             st.json(out)
+
+
 
 with tab4:
     st.subheader("Towers")
