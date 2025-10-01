@@ -473,30 +473,6 @@ with tab2:
         cert_path, full_hash = export_mod.write_cert_json(cert_payload)
         st.success(f"Cert written: `{cert_path}`")
 
-        # Build a local H object for bundling (same as the run)
-H_local = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})
-
-# Build the ZIP bundle and show download button
-try:
-    bundle_path = export_mod.build_download_bundle(
-        boundaries=boundaries,
-        cmap=cmap,
-        H=H_local,
-        shapes=shapes,
-        policy_block=policy_block,
-        cert_path=cert_path,
-        out_zip="overlap_bundle.zip",
-    )
-    with open(bundle_path, "rb") as f:
-        st.download_button(
-            "Download run bundle (.zip)",
-            f,
-            file_name=os.path.basename(bundle_path),
-            mime="application/zip",
-            key="dl_overlap_bundle",
-        )
-except Exception as e:
-    st.error(f"Could not build download bundle: {e}")
 
 
         # ---------- Promotion: freeze projector + log (optional) ----------
