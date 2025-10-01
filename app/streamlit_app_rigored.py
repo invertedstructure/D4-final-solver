@@ -1,40 +1,22 @@
 # --- robust loader with real package context (supports app/otcore or app/core) ---
-import sys, pathlib, importlib.util, types, json, os
+import sys, pathlib, importlib.util, types
 import streamlit as st
 
-APP_DIR = Path(__file__).resolve().parent
-
-OVERLAP_PATH = APP_DIR / "overlap_gate.py"
-PROJECTOR_PATH = APP_DIR / "projector.py"
-
-# Drop any cached modules with those names
-for _name in ("overlap_gate_hot", "projector_hot"):
-    if _name in sys.modules:
-        del sys.modules[_name]
-
-
-# Load fresh modules directly from file
-overlap_gate = SourceFileLoader("overlap_gate_hot", str(OVERLAP_PATH)).load_module()
-projector    = SourceFileLoader("projector_hot",    str(PROJECTOR_PATH)).load_module()
-
-# Sanity: show which files are actually loaded
-st.caption(f"overlap_gate loaded from: {getattr(overlap_gate, '__file__', '<none>')}")
-st.caption(f"projector loaded from: {getattr(projector, '__file__', '<none>')}")
-
-
+# 1) Locate package dir and set PKG_NAME
 HERE = pathlib.Path(__file__).resolve().parent
-PKG_NAME = "otcore" if (HERE / "otcore").exists() else ("core" if (HERE / "core").exists() else "app")
 OTCORE = HERE / "otcore"
-CORE = HERE / "core"
+CORE   = HERE / "core"
 PKG_DIR = OTCORE if OTCORE.exists() else CORE
 PKG_NAME = "otcore" if OTCORE.exists() else "core"
 
+# Create a lightweight package object so relative imports inside modules work
 if PKG_NAME not in sys.modules:
     pkg = types.ModuleType(PKG_NAME)
     pkg.__path__ = [str(PKG_DIR)]
     pkg.__file__ = str(PKG_DIR / "__init__.py")
     sys.modules[PKG_NAME] = pkg
 
+# 2) Minimal loader that loads modules from PKG_DIR by filename
 def _load_pkg_module(fullname: str, rel_path: str):
     path = PKG_DIR / rel_path
     if not path.exists():
@@ -45,35 +27,36 @@ def _load_pkg_module(fullname: str, rel_path: str):
     sys.modules[fullname] = mod
     spec.loader.exec_module(mod)  # type: ignore[attr-defined]
     return mod
-    
-import sys, importlib
 
-# Always drop cached copies so we load the latest file from PKG_DIR
+# 3) Force fresh imports of overlap_gate/projector from the package on disk
+import importlib
 for _mod in (f"{PKG_NAME}.overlap_gate", f"{PKG_NAME}.projector"):
     if _mod in sys.modules:
         del sys.modules[_mod]
 
-# Load modules from the package (relative imports inside them will work)
 overlap_gate = _load_pkg_module(f"{PKG_NAME}.overlap_gate", "overlap_gate.py")
 projector    = _load_pkg_module(f"{PKG_NAME}.projector",    "projector.py")
 
-# Optional: show paths in the UI so you can verify the loaded files
+# Optional: show the exact files to verify we loaded the package versions
 st.caption(f"overlap_gate loaded from: {getattr(overlap_gate, '__file__', '<none>')}")
 st.caption(f"projector loaded from: {getattr(projector, '__file__', '<none>')}")
 
-io = _load_pkg_module(f"{PKG_NAME}.io", "io.py")
-hashes = _load_pkg_module(f"{PKG_NAME}.hashes", "hashes.py")
-unit_gate = _load_pkg_module(f"{PKG_NAME}.unit_gate", "unit_gate.py")
+# 4) Load the rest of your modules from the same package
+io            = _load_pkg_module(f"{PKG_NAME}.io",            "io.py")
+hashes        = _load_pkg_module(f"{PKG_NAME}.hashes",        "hashes.py")
+unit_gate     = _load_pkg_module(f"{PKG_NAME}.unit_gate",     "unit_gate.py")
 triangle_gate = _load_pkg_module(f"{PKG_NAME}.triangle_gate", "triangle_gate.py")
-towers = _load_pkg_module(f"{PKG_NAME}.towers", "towers.py")
-export_mod = _load_pkg_module(f"{PKG_NAME}.export", "export.py")
+towers        = _load_pkg_module(f"{PKG_NAME}.towers",        "towers.py")
+export_mod    = _load_pkg_module(f"{PKG_NAME}.export",        "export.py")
 
 APP_VERSION = getattr(hashes, "APP_VERSION", "v0.1-core")
 # -----------------------------------------------------------------------------
 
+
 st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
 st.title("Odd Tetra — Phase U (v0.1 core)")
 st.caption("Schemas + deterministic hashes + timestamped run IDs + Gates + Towers")
+
 
 def read_json_file(file):
     if not file: return None
