@@ -4,6 +4,9 @@ import streamlit as st
 import json
 import json as _json
 import hashlib as _hashlib
+# cert + export helpers
+from otcore import cert_helpers as cert
+from otcore import export as export_mod
 
 # Streamlit MUST be configured before ANY other st.* call:
 st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
