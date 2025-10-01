@@ -5,6 +5,24 @@ from typing import Dict, Optional, List, Any
 
 from .linalg_gf2 import mul, zeros  # use your existing GF(2) ops
 
+import hashlib
+from typing import Any, Dict, List
+
+def projector_hash(P: List[List[int]]) -> str:
+    s = json.dumps(P, separators=(",", ":"), sort_keys=True)
+    return hashlib.sha256(s.encode()).hexdigest()
+
+def save_projector(path: str, P: List[List[int]]) -> str:
+    with open(path, "w") as f:
+        json.dump({"P": P}, f, separators=(",", ":"), sort_keys=True)
+    return projector_hash(P)
+
+def load_projector_file(path: str) -> List[List[int]]:
+    with open(path, "r") as f:
+        d = json.load(f)
+    return d.get("P") or d  # support bare matrix or {"P": ...}
+
+
 # ---------- config helpers ----------
 
 _DEFAULT_CFG = {
