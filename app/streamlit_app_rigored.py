@@ -6,6 +6,7 @@ import json as _json
 import hashlib as _hashlib
 from otcore import cert_helpers as cert
 from otcore import export as export_mod
+import os
 from otcore.linalg_gf2 import mul, add, eye
 from io import BytesIO
 import zipfile
