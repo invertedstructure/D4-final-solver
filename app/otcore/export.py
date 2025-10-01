@@ -70,12 +70,6 @@ def write_registry_row(
         w.writerow(row)
     return path
     
-    # app/otcore/export.py  (append)
-from __future__ import annotations
-import os, json, hashlib, datetime
-from typing import Any, Dict
-from .io import dump_canonical
-from . import hashes
 
 def ensure_dir(p: str):
     os.makedirs(p, exist_ok=True)
