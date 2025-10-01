@@ -471,6 +471,100 @@ with tab2:
         }
         cert_path, full_hash = export_mod.write_cert_json(cert_payload)
         st.success(f"Cert written: `{cert_path}`")
+
+        # --- Download bundle (zip) of this Overlap run --------------------------------
+try:
+    from io import BytesIO
+    import zipfile
+    import os
+
+    # Provenance manifest for this run
+    manifest = {
+        "identity": {
+            "district_id": st.session_state.get("district_id", "D3"),
+            "timestamp": hashes.timestamp_iso_lisbon(),
+            "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
+            "run_policy": policy_label,  # strict / projected(columns@k=3,auto|file)
+        },
+        "policy": {
+            "label": policy_label,
+            "config_effective": cfg_active,  # strict dict or projected dict
+        },
+        "hashes": {
+            "hash_d": hashes.hash_d(boundaries),
+            "hash_U": hashes.hash_U(shapes) if 'shapes' in locals() else "",
+            "hash_suppC": hashes.hash_suppC(cmap),
+            "hash_suppH": hashes.hash_suppH(H),
+        },
+        "results": {
+            "k2": out.get("2", {}),
+            "k3": out.get("3", {}),
+        },
+        # Optional: original upload names if you track them via session_state
+        "files": {
+            "boundaries": st.session_state.get("fname_boundaries",""),
+            "cmap":       st.session_state.get("fname_cmap",""),
+            "H":          st.session_state.get("fname_H_corr",""),
+            "U":          st.session_state.get("fname_shapes",""),
+        },
+    }
+
+    # If projected in FILE mode, include the projector file/hash in the bundle
+    pj_file = None
+    pj_hash = ""
+    if cfg_active.get("source", {}).get("3") == "file":
+        pj_file = cfg_active.get("projector_files", {}).get("3")
+        if pj_file and os.path.exists(pj_file):
+            # optional helper (you already have projector._hash_matrix)
+            with open(pj_file, "r") as _pf:
+                import json as _json
+                pj_hash = projector._hash_matrix(_json.load(_pf))
+            manifest["hashes"]["hash_P"] = pj_hash
+
+    # Build the zip in-memory
+    buf = BytesIO()
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
+        # Manifest
+        import json as _json
+        z.writestr("manifest.json", _json.dumps(manifest, indent=2))
+
+        # Inputs (canonical dumps of the objects used)
+        z.writestr("inputs/boundaries.json", _json.dumps(boundaries.dict() if hasattr(boundaries, "dict") else {}, indent=2))
+        z.writestr("inputs/cmap.json",       _json.dumps(cmap.dict()       if hasattr(cmap,       "dict") else {}, indent=2))
+        z.writestr("inputs/H.json",          _json.dumps(H.dict()          if hasattr(H,          "dict") else {}, indent=2))
+        if 'shapes' in locals():
+            z.writestr("inputs/U.json", _json.dumps(shapes, indent=2))
+
+        # Policy files in effect
+        if os.path.exists("projection_config.json"):
+            with open("projection_config.json", "r") as f:
+                z.writestr("inputs/projection_config.json", f.read())
+        if pj_file and os.path.exists(pj_file):
+            z.write(pj_file, f"inputs/{os.path.basename(pj_file)}")
+
+        # Results
+        z.writestr("results/overlap_result.json", _json.dumps(out, indent=2))
+
+        # Cert (if you just wrote one)
+        if 'cert_path' in locals() and cert_path and os.path.exists(cert_path):
+            z.write(cert_path, f"certs/{os.path.basename(cert_path)}")
+
+    buf.seek(0)
+
+    # Friendly filename
+    bundle_name = f"overlap_bundle__{st.session_state.get('district_id','D3')}__{policy_tag_for_filename(policy_label)}.zip"
+
+    st.download_button(
+        "Download overlap bundle (.zip)",
+        data=buf.getvalue(),
+        file_name=bundle_name,
+        mime="application/zip",
+        key="dl_overlap_bundle_zip",
+        help="Includes manifest, inputs, results, and cert (if written)."
+    )
+except Exception as e:
+    st.error(f"Could not build download bundle: {e}")
+
        
 
 
