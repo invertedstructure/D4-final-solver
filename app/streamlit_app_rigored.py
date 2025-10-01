@@ -568,27 +568,32 @@ cert_path, full_hash = export_mod.write_cert_json(cert_payload)
 st.success(f"Cert written: `{cert_path}`")
 
 
-# ---------- Download bundle ----------
+# ---------- Build & show download bundle ----------
+import os
+
 try:
-    bundle_path = export_mod.build_download_bundle(
+    bundle_path = export_mod.build_overlap_download_bundle(
         boundaries=boundaries,
         cmap=cmap,
-        H=H_local,
-        shapes=shapes_payload,   # <- JSON-serializable now
+        H=H_local,                               # <-- use H_local (parsed dict-backed CMap)
+        shapes=shapes_payload,                   # <-- use shapes_payload (dict), not the Pydantic model
         policy_block=policy_block,
         cert_path=cert_path,
         out_zip=f"overlap_bundle__{district_id}__{policy_block['policy_tag']}__{full_hash[:12]}.zip",
+        cfg_snapshot=cfg_active,                 # nice to include the projection_config used
     )
-    with open(bundle_path, "rb") as _f:
+    st.success(f"Bundle ready: `{os.path.basename(bundle_path)}`")
+    with open(bundle_path, "rb") as fh:
         st.download_button(
-            "Download run bundle (.zip)",
-            _f,
+            "⬇️ Download overlap bundle",
+            fh,
             file_name=os.path.basename(bundle_path),
             mime="application/zip",
             key="dl_overlap_bundle",
         )
 except Exception as e:
     st.error(f"Could not build download bundle: {e}")
+
 
 
 
