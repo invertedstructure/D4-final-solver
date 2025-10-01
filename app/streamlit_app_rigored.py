@@ -37,6 +37,22 @@ projector   = _load_pkg_module(f"{PKG_NAME}.projector", "projector.py")
 triangle_gate = _load_pkg_module(f"{PKG_NAME}.triangle_gate", "triangle_gate.py")
 towers = _load_pkg_module(f"{PKG_NAME}.towers", "towers.py")
 export_mod = _load_pkg_module(f"{PKG_NAME}.export", "export.py")
+# -- force fresh loads so Streamlit doesn't keep old submodules around
+import sys, importlib
+
+# Drop cached copies if present
+for _mod in (f"{PKG_NAME}.overlap_gate", f"{PKG_NAME}.projector"):
+    if _mod in sys.modules:
+        del sys.modules[_mod]
+
+# Load modules from the package folder
+overlap_gate = _load_pkg_module(f"{PKG_NAME}.overlap_gate", "overlap_gate.py")
+projector    = _load_pkg_module(f"{PKG_NAME}.projector",    "projector.py")
+
+# Hard reload to ensure the file on disk is the one in memory
+importlib.reload(overlap_gate)
+importlib.reload(projector)
+
 APP_VERSION = getattr(hashes, "APP_VERSION", "v0.1-core")
 # -----------------------------------------------------------------------------
 
@@ -119,7 +135,6 @@ with tab2:
     st.subheader("Overlap gate (homotopy vs identity)")
     f_H = st.file_uploader("Homotopy H (H_corrected.json)", type=["json"], key="H_corr")
     d_H = read_json_file(f_H) if f_H else None
-
     if st.button("Run Overlap"):
         if not d_H:
             st.error("Upload H_corrected.json")
@@ -127,17 +142,17 @@ with tab2:
             H = io.parse_cmap(d_H)  # reuse CMap schema for H blocks
 
             # --- Show actual working directory & files there ---
-            import os
+            import os, inspect
             st.write("cwd:", os.getcwd())
             st.write("files in cwd:", os.listdir("."))
             st.write("cfg file in CWD:", os.path.exists("projection_config.json"))
 
             # --- Load projection config ---
             cfg = projector.load_projection_config("projection_config.json")
-            st.json({"cfg": cfg})  # you should see enabled_layers/modes here if found
+            st.json({"cfg": cfg})
             cache = projector.preload_projectors_from_files(cfg)
 
-            # Policy tag
+            # Policy badge
             layers = cfg.get("enabled_layers", [])
             modes = cfg.get("modes", {})
             sources = cfg.get("source", {})
@@ -149,35 +164,34 @@ with tab2:
                 policy_str = "strict"
             st.caption(f"Policy: {policy_str}")
 
+            # --- Sanity: which overlap_gate is actually loaded?
+            st.write("overlap_gate.__file__ =", getattr(overlap_gate, "__file__", "<none>"))
+            st.write("overlap_check signature =", str(inspect.signature(overlap_gate.overlap_check)))
+
             # Lane mask peek for k=3 (to see ker columns)
             d3 = boundaries.blocks.__root__.get('3')
             if d3 is not None:
                 lane_mask = [1 if any(row[j] for row in d3) else 0 for j in range(len(d3[0]))]
                 st.write("k=3 lane_mask (1=lane, 0=ker):", lane_mask)
 
-import importlib, inspect, sys
-st.write("PKG_NAME =", PKG_NAME)
-
-# Load/reload and print where it's coming from
-overlap_gate = _load_pkg_module(f"{PKG_NAME}.overlap_gate", "overlap_gate.py")
-st.write("overlap_gate.__file__ =", getattr(overlap_gate, "__file__", "<none>"))
-st.write("overlap_check signature =", str(inspect.signature(overlap_gate.overlap_check)))
-
-            
-            # --- Run overlap; fallback to strict if old module signature is still loaded ---
+            # --- Run overlap; if projection kwargs aren't accepted, fall back and warn
             try:
                 out = overlap_gate.overlap_check(
                     boundaries, cmap, H,
                     projection_config=cfg,
                     projector_cache=cache
                 )
-            except TypeError:
-                # Old module still in memory; run strict and warn
+            except TypeError as e:
+                st.warning(
+                    "overlap_gate is running in STRICT mode (old module signature) — "
+                    "hard-restart the app after patching overlap_gate.py. "
+                    f"TypeError: {e}"
+                )
                 out = overlap_gate.overlap_check(boundaries, cmap, H)
-                st.warning("overlap_gate is running in STRICT mode (old module loaded). "
-                           "Hard-restart the app so the new projection-aware function is used.")
+
             st.json(out)
 
+    
 
 
 with tab3:
