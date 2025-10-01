@@ -319,6 +319,133 @@ with tab2:
                 st.warning("Ran in STRICT fallback (old overlap_check signature)")
 
             st.json(out)
+            
+            # ---- Build & write cert JSON -------------------------------------------------
+district_id = st.session_state.get("district_id", "D3")
+timestamp   = hashes.timestamp_iso_lisbon()
+app_version = getattr(hashes, "APP_VERSION", "v0.1-core")
+
+# Hash of run content (for run_id)
+run_content_hash = hashes.bundle_content_hash([
+    ("boundaries", boundaries.dict() if hasattr(boundaries, "dict") else boundaries),
+    ("cmap",       cmap.dict()       if hasattr(cmap,       "dict") else cmap),
+    ("H",          H.dict()          if hasattr(H,          "dict") else H),
+    ("cfg",        cfg_active),
+])
+
+# Policy snapshot
+d3 = boundaries.blocks.__root__.get("3")
+lane_mask = cert.lane_mask_from_d(d3) if d3 else []
+projector_hash = None
+if cfg_active.get("source", {}).get("3") == "file":
+    pj_file = cfg_active.get("projector_files", {}).get("3")
+    if pj_file and os.path.exists(pj_file):
+        try:
+            projector_hash = export_mod.hashes.content_hash_of(json.load(open(pj_file)))
+        except Exception:
+            projector_hash = None
+
+policy_block = {
+    "policy_tag":        policy_label,
+    "projection_config": cfg_active,
+    "lane_mask_k3":      lane_mask,
+    "projector_hash":    projector_hash,
+    "field":             "GF(2)",
+}
+
+# Inputs block
+inputs_block = {
+    "boundaries_hash": hashes.hash_d(boundaries),
+    "C_hash":          hashes.hash_suppC(cmap),
+    "H_hash":          hashes.hash_suppH(H),
+    "U_hash":          hashes.hash_U(globals().get("shapes","")),
+    "shapes":          cert.sizes_from_blocks(boundaries),
+    "filenames": {
+        "boundaries": st.session_state.get("fname_boundaries",""),
+        "cmap":       st.session_state.get("fname_cmap",""),
+        "H":          st.session_state.get("fname_H",""),
+        "U":          st.session_state.get("fname_shapes",""),
+    }
+}
+
+# Diagnostics (k=3)
+R3_strict = cert.k3_strict_residual(boundaries, cmap, H)
+R3_proj   = cert.k3_projected_residual(R3_strict, d3) if "projected(" in policy_label else R3_strict
+row_proj  = cert.bottom_row(R3_proj)
+lanes_idx, ker_idx = cert.split_lanes_ker(cert.support_indices(row_proj), lane_mask)
+
+diagnostics_block = {
+    "k3": {
+        "lane_vec_H2d3": cert.bottom_row(mul(H.blocks.__root__.get("2", []), d3)) if d3 else [],
+        "lane_vec_C3plusI3": cert.bottom_row(
+            add(cmap.blocks.__root__.get("3", []),
+                eye(len(cmap.blocks.__root__.get("3", []))) if cmap.blocks.__root__.get("3") else [])
+        ) if cmap.blocks.__root__.get("3") else [],
+        "residual_supports": {"lanes": lanes_idx, "ker": ker_idx},
+    }
+}
+
+# Checks block (you can fill grid/fence later)
+checks_block = {
+    "k2": {
+        "eq": bool(out.get("2",{}).get("eq", False)),
+        "n_k": int(out.get("2",{}).get("n_k", 0)),
+        "grid": None, "fence": None,
+        "ker_guard": ("enforced" if policy_label=="strict" else "off"),
+        "residual_tag": "none"
+    },
+    "k3": {
+        "eq": bool(out.get("3",{}).get("eq", False)),
+        "n_k": int(out.get("3",{}).get("n_k", 0)),
+        "grid": None, "fence": None,
+        "ker_guard": ("enforced" if policy_label=="strict" else "off"),
+        "residual_tag": cert.residual_tag_for(lanes_idx, ker_idx),
+    }
+}
+
+# Signatures + promotion (basic)
+sig_block = {
+    "d_signature": cert.d_signature_simple(d3),
+    "fixture_signature": {"supp(C3-I3)": "lane=" + "".join("1" if v else "0" for v in lane_mask)},
+    "echo_context": st.session_state.get("echo_partner_id"),
+}
+
+eligible = bool(out.get("3",{}).get("eq", False)) and bool(st.session_state.get("eligible_promote", False))
+promotion = {
+    "eligible_for_promotion": eligible,
+    "promotion_target": "projected_anchor" if ("projected(" in policy_label and eligible)
+                       else ("strict_anchor" if (policy_label=="strict" and eligible) else None),
+    "notes": st.session_state.get("notes",""),
+}
+
+# Assemble payload
+cert_payload = {
+    "identity": {
+        "district_id": district_id,
+        "run_id": cert.short_id_from_hash(run_content_hash),
+        "timestamp": hashes.timestamp_iso_lisbon(),
+        "app_version": app_version,
+        "field": "GF(2)"
+    },
+    "policy": policy_block,
+    "inputs": inputs_block,
+    "diagnostics": diagnostics_block,
+    "checks": checks_block,
+    "signatures": sig_block,
+    "promotion": promotion,
+    "artifact_hashes": {
+        "boundaries_hash": inputs_block["boundaries_hash"],
+        "C_hash": inputs_block["C_hash"],
+        "H_hash": inputs_block["H_hash"],
+        "U_hash": inputs_block["U_hash"],
+        "projector_hash": policy_block["projector_hash"],
+    }
+}
+
+# Write cert
+cert_path, full_hash = export_mod.write_cert_json(cert_payload)
+st.success(f"Cert written: `{cert_path}`")
+
 
             # pass vector
             pass_vec = [
