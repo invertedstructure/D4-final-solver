@@ -1,8 +1,10 @@
-
 from __future__ import annotations
 from typing import Iterable, Tuple, Any
 from .io import dump_canonical
 import hashlib, datetime, os
+import json
+from typing import Any  # (you already import Any elsewhere; harmless to repeat)
+
 
 APP_VERSION = os.getenv("ODD_TETRA_APP_VERSION", "v0.1-core")
 
@@ -22,6 +24,31 @@ def timestamp_iso_lisbon() -> str:
 def run_id(content_hash: str, timestamp_iso: str, app_version: str = APP_VERSION) -> str:
     s = f"{content_hash}|{timestamp_iso}|{app_version}"
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
+def _to_plain(obj: Any) -> Any:
+    """
+    Convert Pydantic models (v2 .model_dump / v1 .dict) or custom classes
+    to a JSON-safe plain structure (dict/list/primitive).
+    """
+    # Pydantic v2
+    if hasattr(obj, "model_dump") and callable(getattr(obj, "model_dump")):
+        try:
+            return obj.model_dump()
+        except Exception:
+            pass
+    # Pydantic v1
+    if hasattr(obj, "dict") and callable(getattr(obj, "dict")):
+        try:
+            return obj.dict()
+        except Exception:
+            pass
+    # Already plain?
+    if isinstance(obj, (dict, list, tuple, str, int, float, bool)) or obj is None:
+        return obj
+    # Last resort: try json fallback or str()
+    try:
+        return json.loads(json.dumps(obj, default=lambda o: getattr(o, "__dict__", str(o))))
+    except Exception:
+        return str(obj)
 
 # --- convenience hashes used by the UI/registry --------------------------------
 from typing import Any, Dict, List
@@ -74,12 +101,14 @@ def hash_d(boundaries: Any) -> str:
 
 def hash_U(shapes: Any) -> str:
     """
-    Canonical hash of carrier/mask shapes (whatever structure you pass in).
-    If you pass a plain dict, it will be hashed canonically.
+    Canonical hash of carrier/mask shapes.
+    Accepts Pydantic models (v1/v2), plain dict/list, or None.
     """
-    # shapes in your app are often a dict; treat them as-is
-    payload = {"U": shapes}
+    if shapes is None:
+        return ""
+    payload = {"U": _to_plain(shapes)}
     return content_hash_of(payload)
+
 
 def hash_suppC(cmap: Any) -> str:
     """
@@ -94,3 +123,7 @@ def hash_suppH(hmap: Any) -> str:
     """
     Canonical hash of the *support* of H (per degree), modulo 2.
     """
+    blocks = _get_blocks(hmap)
+    supp = _support_of_blocks(blocks)
+    payload = {"H_support": supp}
+    return content_hash_of(payload)
