@@ -262,9 +262,6 @@ with tab1:
         out = unit_gate.unit_check(boundaries, cmap, shapes, reps=d_reps, enforce_rep_transport=enforce)
         st.json(out)  
     
-    if st.button("Run Unit"):
-        out = unit_gate.unit_check(boundaries, cmap, shapes, reps=d_reps, enforce_rep_transport=enforce)
-        st.json(out)
 
 
 # --- run overlap under a given cfg (strict or projected) ----------------------
