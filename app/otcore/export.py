@@ -1,12 +1,79 @@
 # app/otcore/export.py
 from __future__ import annotations
-
 from typing import Any, Dict, Iterable, Tuple
-import os, zipfile, csv, json, hashlib, re
+import os, zipfile, csv, json, hashlib, re, shutil
 from pathlib import Path
-
 from .io import dump_canonical
 from .hashes import APP_VERSION, bundle_content_hash, timestamp_iso_lisbon
+
+def ensure_dir(p: str) -> None:
+    Path(p).mkdir(parents=True, exist_ok=True)
+
+def _jsonable(obj: Any) -> Any:
+    """Return a JSON-serializable view of obj."""
+    if isinstance(obj, dict):
+        return obj
+    if hasattr(obj, "dict"):
+        try:
+            return obj.dict()
+        except Exception:
+            pass
+    return obj  # assume already serializable
+
+def build_overlap_download_bundle(
+    *,
+    boundaries,
+    cmap,
+    H,
+    shapes,
+    policy_block: Dict[str, Any],
+    cert_path: str,
+    out_zip: str,
+    cfg_snapshot: Dict[str, Any] | None = None,
+) -> str:
+    """
+    Write a compact, reproducible bundle with everything to re-run/verify:
+      - boundaries.json, cmap.json, H.json, shapes.json
+      - policy.json (policy_block) + projection_config.json (cfg_snapshot)
+      - cert.json (copy of the written cert)
+    Return the path to the .zip.
+    """
+    # prep temp dir
+    tmp_dir = Path(".bundle_tmp")
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    tmp_dir.mkdir()
+
+    # write inputs
+    with open(tmp_dir / "boundaries.json", "wb") as f:
+        f.write(dump_canonical(boundaries.dict() if hasattr(boundaries, "dict") else boundaries))
+    with open(tmp_dir / "cmap.json", "wb") as f:
+        f.write(dump_canonical(cmap.dict() if hasattr(cmap, "dict") else cmap))
+    with open(tmp_dir / "H.json", "wb") as f:
+        f.write(dump_canonical(H.dict() if hasattr(H, "dict") else H))
+    with open(tmp_dir / "shapes.json", "w") as f:
+        json.dump(_jsonable(shapes), f, indent=2)  # <-- JSON-safe
+
+    # write policy + cfg snapshot
+    with open(tmp_dir / "policy.json", "w") as f:
+        json.dump(_jsonable(policy_block), f, indent=2)
+    if cfg_snapshot:
+        with open(tmp_dir / "projection_config.json", "w") as f:
+            json.dump(_jsonable(cfg_snapshot), f, indent=2)
+
+    # copy cert (if present)
+    if cert_path and os.path.exists(cert_path):
+        shutil.copy2(cert_path, tmp_dir / "cert.json")
+
+    # zip it
+    ensure_dir(os.path.dirname(out_zip) or ".")
+    with zipfile.ZipFile(out_zip, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        for p in tmp_dir.iterdir():
+            z.write(str(p), arcname=p.name)
+
+    # cleanup temp
+    shutil.rmtree(tmp_dir, ignore_errors=True)
+    return out_zip
 
 # --- plain-obj serializer helpers --------------------------------------------
 def _maybe_blocks(obj):
