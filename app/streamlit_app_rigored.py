@@ -213,6 +213,50 @@ with tab2:
                 if key.startswith("guard_warning_k"):
                     st.warning(f"[{key}] {val['msg']} | file={val['hash_file']} auto={val['hash_auto']}")
 
+            # ---- Promotion: freeze projector + log its hash ----
+# 1) check pass vector
+pass_vec = [
+    int(out.get("2", {}).get("eq", False)),
+    int(out.get("3", {}).get("eq", False)),
+]
+all_green = all(v == 1 for v in pass_vec)
+
+if all_green:
+    st.success("Green — eligible for promotion.")
+    if st.button("Promote & Freeze Projector"):
+        # Build the exact projector Π_k used (columns@k=3 from d3)
+        d3 = boundaries.blocks.__root__.get("3")
+        if d3 is None:
+            st.error("No d3 in boundaries; cannot freeze projector.")
+        else:
+            # Create Π3 from current d3 (correct-by-construction)
+            P_used = projector.projector_columns_from_dkp1(d3)
+            pj_path = "projector_D3.json"
+            pj_hash = projector.save_projector(pj_path, P_used)
+            st.info(f"Projector frozen → {pj_path} (hash={pj_hash[:12]}…)")
+
+            # write registry row including projector hash (in notes)
+            import time
+            fix_id = f"overlap-{int(time.time())}"
+            try:
+                export_mod.write_registry_row(
+                    fix_id=fix_id,
+                    pass_vector=pass_vec,
+                    policy=policy_label,  # e.g., projected(columns@k=3,auto)
+                    hash_d=hashes.hash_d(boundaries),
+                    hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
+                    hash_suppC=hashes.hash_suppC(cmap),
+                    hash_suppH=hashes.hash_suppH(H),
+                    notes=f"proj_hash={pj_hash}"
+                )
+                st.success("Registry updated with projector hash.")
+            except Exception as e:
+                st.error(f"Failed to write registry row: {e}")
+else:
+    st.info("Not promoting: some checks are red.")
+
+            
+            
             # ---- Build pass-vector and write registry row ----
             pass_vec = [
                 int(out.get("2", {}).get("eq", False)),
