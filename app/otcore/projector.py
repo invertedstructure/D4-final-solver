@@ -95,62 +95,78 @@ def projector_rows_from_dkp1_real(dkp1: List[List[float]]) -> List[List[float]]:
     P = Q @ Q.T                           # (n_k, n_k)
     return P.tolist()
 
+from typing import Any, Dict, List, Optional
+from .linalg_gf2 import mul
 
-# ---------- projection application ----------
 def apply_projection(
     Rk: List[List[int]],
     k: int,
-    boundaries,                      # Boundaries (we'll use d_k for the mask)
+    boundaries,                                  # Boundaries (we’ll use d_k columns)
     config: Optional[Dict[str, Any]] = None,
     projector_cache: Optional[Dict[str, List[List[int]]]] = None,
 ):
     """
-    Apply configured projection to the residual Rk at degree k.
+    Project the *residual* Rk at degree k on the column side (GF(2)).
 
-    - columns: Rk <- Rk @ Π_k, where Π_k is built from the *columns of d_k*.
-      R_k is (n_k x n_k), d_k is (n_{k-1} x n_k), so Π_k must be (n_k x n_k).
+    Policy:
+      - Only runs when k is enabled and mode[k] == "columns".
+      - The projector Π_k is built from the *columns of d_k* (shape n_k x n_k),
+        because R_k is n_k x n_k.
+      - If source[k] == "file", use cached file projector but also compute auto Π_k
+        and stash a drift warning in projector_cache if they differ.
     """
-    cfg = config or _DEFAULT_CFG
+    cfg = config or {}
+    cache = projector_cache or {}
+
     enabled = set(cfg.get("enabled_layers", []))
     if not Rk or k not in enabled:
         return Rk
 
     mode = cfg.get("modes", {}).get(str(k), "none")
     if mode != "columns":
-        # rows-mode is unused in GF(2) runs; fall back to no-op
+        # (rows-mode is for real-valued layers; no-op for GF(2) runs)
         return Rk
 
-    # build Π_k from d_k (NOT d_{k+1})
+    # Columns of d_k determine which residual columns are "lanes"
     blocks_b = boundaries.blocks.__root__
-    dk = blocks_b.get(str(k))
+    dk = blocks_b.get(str(k))  # d_k : (n_{k-1} x n_k)
     if dk is None or not dk or not dk[0]:
         return Rk
 
-    n = len(dk[0])  # n_k = number of columns of d_k = number of columns of Rk
-    lane_mask = [1 if any(row[j] & 1 for row in dk if j < len(row)) else 0 for j in range(n)]
-    P = [[1 if (i == j and lane_mask[j]) else 0 for j in range(n)] for i in range(n)]
+    # Build Π_k (auto) from d_k columns (works for any binary matrix)
+    n_k = len(dk[0])  # number of columns of d_k == columns of Rk
+    lane_mask = [1 if any(row[j] & 1 for row in dk if j < len(row)) else 0 for j in range(n_k)]
+    P_auto = [[1 if (i == j and lane_mask[j]) else 0 for j in range(n_k)] for i in range(n_k)]
 
-    # size/shape guard: Rk must be n x n and P must be n x n
-    if len(Rk) != n or (Rk and len(Rk[0]) != n) or len(P) != n or len(P[0]) != n:
+    # Decide source
+    source = cfg.get("source", {}).get(str(k), "auto")
+    if source == "file" and str(k) in cache:
+        P_file = cache[str(k)]
+        # drift guard: compare file vs auto
+        try:
+            # projector_hash provided elsewhere in this module
+            hf = projector_hash(P_file)
+            ha = projector_hash(P_auto)
+            if P_file != P_auto:
+                cache[f"guard_warning_k{k}"] = {
+                    "msg": "Projector drift: file vs auto differ",
+                    "hash_file": hf,
+                    "hash_auto": ha,
+                }
+        except Exception:
+            # ignore hashing problems, still use P_file
+            pass
+        P = P_file
+    else:
+        P = P_auto
+
+    # Size/shape guard: Rk and Π_k must be n_k x n_k
+    if len(Rk) != n_k or (Rk and len(Rk[0]) != n_k) or len(P) != n_k or len(P[0]) != n_k:
         return Rk  # explicit no-op keeps behavior predictable
 
+    # Project *residual* on the right
     return mul(Rk, P)
 
-
-    # Build/load projector Π_k using d_k (its columns index the residual's columns)
-    if source == "file" and str(k) in cache:
-        P = cache[str(k)]
-    else:
-        blocks_b = boundaries.blocks.__root__
-        dk_for_mask = blocks_b.get(str(k))     # <-- use d_k (NOT d_{k+1})
-        if dk_for_mask is None:
-            return Rk  # nothing to project against
-        if mode == "columns":
-            P = projector_columns_from_dkp1(dk_for_mask)   # returns n_k x n_k diag
-        elif mode == "rows":
-            P = projector_rows_from_dkp1_real(dk_for_mask) # left-mult (real-only)
-        else:
-            return Rk
 
     # Apply Π_k with guards
     if mode == "columns":
@@ -176,30 +192,4 @@ def apply_projection(
         return Rk
 
 
-        # Apply
-    if not Rk:
-        return Rk
-
-    if mode == "columns":
-        # Guard: Rk must be square and P must match its column count
-        if not Rk[0] or not P or not P[0]:
-            return Rk
-        n_cols = len(Rk[0])
-        if len(P) != n_cols or len(P[0]) != n_cols:
-            # sizes don't align → no-op (or swap in eye(n_cols) if you prefer)
-            return Rk
-        return mul(Rk, P)
-
-    elif mode == "rows":
-        # left multiply in float; convert back to ints if near-exact 0/1
-        try:
-            import numpy as np
-            A = np.array(P) @ np.array(Rk)
-            B = (np.abs(A) > 1e-9).astype(int).tolist()
-            return B
-        except Exception:
-            return Rk
-
-    else:
-        return Rk
 
