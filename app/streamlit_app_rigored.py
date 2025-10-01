@@ -162,6 +162,8 @@ with tab2:
 
             # --- Load projection config ---
             cfg = projector.load_projection_config("projection_config.json")
+            policy_label = policy_label_from_cfg(cfg)
+            st.caption(f"Policy: {policy_label}")
             st.json({"cfg": cfg})
             cache = projector.preload_projectors_from_files(cfg)
 
