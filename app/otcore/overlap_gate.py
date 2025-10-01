@@ -4,6 +4,13 @@ from typing import Dict
 from .schemas import Boundaries, CMap
 from .linalg_gf2 import mul, add, zeros, eye
 
+import os, json
+st.write("cfg file in CWD:", os.path.exists("projection_config.json"))
+
+from .projector import load_projection_config, projector_columns_from_dkp1
+cfg = load_projection_config("projection_config.json")
+st.json({"cfg": cfg})
+
 
 def overlap_check(boundaries: Boundaries, cmap: CMap, homotopy: CMap) -> Dict[str, dict]:
     res: Dict[str, dict] = {}
