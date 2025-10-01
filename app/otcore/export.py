@@ -68,4 +68,26 @@ def write_registry_row(
         w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         w.writerow(row)
     return path
+    
+    # app/otcore/export.py  (append)
+from __future__ import annotations
+import os, json, hashlib, datetime
+from typing import Any, Dict
+from .io import dump_canonical
+from . import hashes
+
+def ensure_dir(p: str):
+    os.makedirs(p, exist_ok=True)
+
+def write_cert_json(payload: Dict[str, Any], out_dir: str = "certs") -> str:
+    ensure_dir(out_dir)
+    # content hash of full payload
+    full_hash = hashlib.sha256(dump_canonical(payload)).hexdigest()
+    fname = f"overlap__{payload['identity']['district_id']}__{payload['policy']['policy_tag']}__{full_hash[:8]}.json"
+    fpath = os.path.join(out_dir, fname)
+    with open(fpath, "wb") as f:
+        f.write(dump_canonical(payload))
+    return fpath, full_hash
+
+
 
