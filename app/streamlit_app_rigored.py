@@ -34,6 +34,29 @@ def policy_label_from_cfg(cfg: dict) -> str:
         src  = cfg.get("source", {}).get(str(kk), "auto")
         parts.append(f"{mode}@k={kk},{src}")
     return "projected(" + "; ".join(parts) + ")"
+    def _stamp_filename(state_key: str, f):
+    """Remember the uploaded filename in session_state for certs/registry."""
+    if f is not None:
+        st.session_state[state_key] = getattr(f, "name", "")
+    else:
+        st.session_state.pop(state_key, None)
+
+def read_json_file(f):
+    if not f: 
+        return None
+    try:
+        return json.load(f)
+    except Exception as e:
+        st.error(f"Failed to parse JSON: {e}")
+        return None
+        
+        def _stamp_filename(state_key: str, f):
+    if f is not None:
+        st.session_state[state_key] = getattr(f, "name", "")
+    else:
+        st.session_state.pop(state_key, None)
+
+
 
 # --- cert writer (save one result to certs/...) -------------------------------
 from pathlib import Path
@@ -208,8 +231,37 @@ tab1, tab2, tab3, tab4, tab5 = st.tabs(["Unit", "Overlap", "Triangle", "Towers",
 
 with tab1:
     st.subheader("Unit gate")
+    # Boundaries (B)
+    f_B = st.file_uploader("Boundaries (boundaries*.json)", type=["json"], key="B_up")
+    _stamp_filename("fname_boundaries", f_B)
+    d_B = read_json_file(f_B) if f_B else None
+    if d_B:
+        boundaries = io.parse_boundaries(d_B)
+
+    # C-map (optional override here; otherwise load it where you prefer)
+    f_C = st.file_uploader("C map (optional)", type=["json"], key="C_up")
+    _stamp_filename("fname_cmap", f_C)
+    d_C = read_json_file(f_C) if f_C else None
+    if d_C:
+        cmap = io.parse_cmap(d_C)
+
+    # Shapes / carrier U (optional)
+    f_U = st.file_uploader("Shapes / carrier U (optional)", type=["json"], key="U_up")
+    _stamp_filename("fname_shapes", f_U)
+    d_U = read_json_file(f_U) if f_U else None
+    if d_U:
+        shapes = io.parse_shapes(d_U)  # or whatever parser you have
+
+    # Reps (only if you actually use them)
+    f_reps = st.file_uploader("Reps (optional)", type=["json"], key="reps_up")
+    _stamp_filename("fname_reps", f_reps)
+    d_reps = read_json_file(f_reps) if f_reps else None
+
     enforce = st.checkbox("Enforce rep transport (c_cod = C c_dom)", value=False)
-    d_reps  = read_json_file(f_reps) if f_reps else None
+    if st.button("Run Unit"):
+        out = unit_gate.unit_check(boundaries, cmap, shapes, reps=d_reps, enforce_rep_transport=enforce)
+        st.json(out)  
+    
     if st.button("Run Unit"):
         out = unit_gate.unit_check(boundaries, cmap, shapes, reps=d_reps, enforce_rep_transport=enforce)
         st.json(out)
@@ -233,7 +285,12 @@ def run_overlap_with_cfg(boundaries, cmap, H, cfg: dict):
 with tab2:
     st.subheader("Overlap gate (homotopy vs identity)")
     f_H = st.file_uploader("Homotopy H (H_corrected.json)", type=["json"], key="H_corr")
+    _stamp_filename("fname_H", f_H)              # <— add this line
     d_H = read_json_file(f_H) if f_H else None
+    H = io.parse_cmap(d_H) if d_H else None
+    if H is not None:
+        st.session_state["H_obj"] = H           # make H available to other tabs
+
 
     # --- Policy toggle UI (inside tab2!) -------------------------------------
     st.markdown("### Policy")
@@ -561,6 +618,45 @@ st.success(f"Cert written: `{cert_path}`")
                     st.toast("registry: added strict & projected rows")
                 except Exception as e:
                     st.error(f"registry write failed: {e}")
+with tab3:
+    st.subheader("Triangle gate (Echo)")
+
+    # Second homotopy H' (the first H is taken from tab2 via session_state)
+    f_H2 = st.file_uploader("Second homotopy H' (JSON)", type=["json"], key="H2_up")
+    _stamp_filename("fname_H2", f_H2)
+    d_H2 = read_json_file(f_H2) if f_H2 else None
+    H2 = io.parse_cmap(d_H2) if d_H2 else None
+
+    # Pull H from tab2 (if loaded)
+    H = st.session_state.get("H_obj")
+
+    # Reuse the same active policy you compute in tab2 (strict/projected)
+    # If you compute cfg_active in tab2's scope, rebuild it here the same way or store it in session_state
+    cfg_active = st.session_state.get("cfg_active")  # if you saved it; otherwise rebuild
+
+    if st.button("Run Triangle"):
+        if boundaries is None or cmap is None:
+            st.error("Load Boundaries and C in Unit tab first.")
+        elif H is None:
+            st.error("Upload H in Overlap tab first.")
+        elif H2 is None:
+            st.error("Upload H' here.")
+        else:
+            try:
+                outT = triangle_gate.triangle_check(
+                    boundaries, cmap, H, H2,
+                    projection_config=cfg_active,
+                    projector_cache=projector.preload_projectors_from_files(cfg_active)
+                )
+                st.json(outT)
+            except TypeError:
+                # fallback if triangle_check doesn’t yet accept projection kwargs
+                outT = triangle_gate.triangle_check(boundaries, cmap, H, H2)
+                st.warning("Triangle running in STRICT path (no projection kwargs).")
+                st.json(outT)
+
+
+
 
 
 
