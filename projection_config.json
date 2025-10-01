@@ -1,6 +1,0 @@
-{
-  "enabled_layers": [3],
-  "modes": { "3": "columns", "2": "none" },
-  "source": { "3": "auto", "2": "auto" },
-  "projector_files": { "3": "projector_D3.json", "2": "projector_D2.json" }
-}
