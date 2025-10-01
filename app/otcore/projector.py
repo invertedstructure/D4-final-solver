@@ -126,21 +126,33 @@ def apply_projection(
         else:
             return Rk
 
-    # Apply
+       # Apply
     if not Rk:
         return Rk
-      if mode == "columns":
+
+    if mode == "columns":
         # Guard: Rk must be square and P must match its column count
-        if not Rk or not Rk[0] or not P or not P[0]:
+        if not Rk[0] or not P or not P[0]:
             return Rk
-        n_rows = len(Rk)
         n_cols = len(Rk[0])
         if len(P) != n_cols or len(P[0]) != n_cols:
-            # Fallback: do nothing if sizes don't align (or build an identity of size n_cols)
-            # from .linalg_gf2 import eye
-            # return mul(Rk, eye(n_cols))
+            # sizes don't align → no-op (or swap in eye(n_cols) if you prefer)
             return Rk
         return mul(Rk, P)
+
+    elif mode == "rows":
+        # left multiply in float; convert back to ints if near-exact 0/1
+        try:
+            import numpy as np
+            A = np.array(P) @ np.array(Rk)
+            B = (np.abs(A) > 1e-9).astype(int).tolist()
+            return B
+        except Exception:
+            return Rk
+
+    else:
+        return Rk
+
           
     elif mode == "rows":
         # left multiply in float; convert back to ints if near-exact 0/1
