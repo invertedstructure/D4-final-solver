@@ -6,6 +6,8 @@ import json as _json
 import hashlib as _hashlib
 from otcore import cert_helpers as cert
 from otcore import export as export_mod
+from otcore.linalg_gf2 import mul, add, eye
+
 
 st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
 
