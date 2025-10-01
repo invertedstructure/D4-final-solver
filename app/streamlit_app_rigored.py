@@ -148,6 +148,7 @@ with tab2:
     st.subheader("Overlap gate (homotopy vs identity)")
     f_H = st.file_uploader("Homotopy H (H_corrected.json)", type=["json"], key="H_corr")
     d_H = read_json_file(f_H) if f_H else None
+
     if st.button("Run Overlap"):
         if not d_H:
             st.error("Upload H_corrected.json")
@@ -155,7 +156,7 @@ with tab2:
             H = io.parse_cmap(d_H)  # reuse CMap schema for H blocks
 
             # --- Show actual working directory & files there ---
-            import os, inspect
+            import os, inspect, time
             st.write("cwd:", os.getcwd())
             st.write("files in cwd:", os.listdir("."))
             st.write("cfg file in CWD:", os.path.exists("projection_config.json"))
@@ -167,20 +168,9 @@ with tab2:
             st.json({"cfg": cfg})
             cache = projector.preload_projectors_from_files(cfg)
 
-            # After we run overlap_check, we’ll read any guard warnings from cache.
-            # show overlap results
-st.json(out)
-
-# guard warning (if file-mode drift)
-for key, val in list(cache.items()):
-    if key.startswith("guard_warning_k"):
-        st.warning(f"[{key}] {val['msg']} | file={val['hash_file']} auto={val['hash_auto']}")
-
-
-
-            # Policy badge
-            layers = cfg.get("enabled_layers", [])
-            modes = cfg.get("modes", {})
+            # Policy badge (string)
+            layers  = cfg.get("enabled_layers", [])
+            modes   = cfg.get("modes", {})
             sources = cfg.get("source", {})
             if layers:
                 policy_str = "projected(" + ",".join(
@@ -215,42 +205,36 @@ for key, val in list(cache.items()):
                 )
                 out = overlap_gate.overlap_check(boundaries, cmap, H)
 
+            # Results
             st.json(out)
-            
-            # ---- build pass-vector and write registry row ----
-pass_vec = [
-    int(out.get("2", {}).get("eq", False)),
-    int(out.get("3", {}).get("eq", False)),
-    # add more k if you start reporting them
-]
 
-import time
-fix_id = f"overlap-{int(time.time())}"  # or your own canonical fixture id
+            # Guard warning (if file-mode drift was detected inside apply_projection)
+            for key, val in list(cache.items()):
+                if key.startswith("guard_warning_k"):
+                    st.warning(f"[{key}] {val['msg']} | file={val['hash_file']} auto={val['hash_auto']}")
 
-try:
-    export_mod.write_registry_row(
-        fix_id=fix_id,
-        pass_vector=pass_vec,
-        policy=policy_label,                     # from policy_label_from_cfg(cfg)
-        hash_d=hashes.hash_d(boundaries),
-        hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
-        hash_suppC=hashes.hash_suppC(cmap),
-        hash_suppH=hashes.hash_suppH(H),
-        notes=""
-    )
-    st.success("Registry updated (registry.csv).")
-except Exception as e:
-    st.error(f"Failed to write registry row: {e}")
+            # ---- Build pass-vector and write registry row ----
+            pass_vec = [
+                int(out.get("2", {}).get("eq", False)),
+                int(out.get("3", {}).get("eq", False)),
+            ]
 
+            fix_id = f"overlap-{int(time.time())}"
 
-with tab3:
-    st.subheader("Triangle gate")
-    if 'triangle' not in locals() or triangle is None:
-        st.info("Upload triangle schema to run.")
-    else:
-        if st.button("Run Triangle"):
-            out = triangle_gate.triangle_check(boundaries, triangle, shapes=shapes)
-            st.json(out)
+            try:
+                export_mod.write_registry_row(
+                    fix_id=fix_id,
+                    pass_vector=pass_vec,
+                    policy=policy_label,                         # strict / projected(...)
+                    hash_d=hashes.hash_d(boundaries),
+                    hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
+                    hash_suppC=hashes.hash_suppC(cmap),
+                    hash_suppH=hashes.hash_suppH(H),
+                    notes=""
+                )
+                st.success("Registry updated (registry.csv).")
+            except Exception as e:
+                st.error(f"Failed to write registry row: {e}")
 
 
 
