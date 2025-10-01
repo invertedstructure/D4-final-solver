@@ -125,7 +125,7 @@ def apply_projection(
         else:
             return Rk
 
-       # Apply
+        # Apply
     if not Rk:
         return Rk
 
@@ -152,17 +152,3 @@ def apply_projection(
     else:
         return Rk
 
-          
-    elif mode == "rows":
-        # left multiply in float; convert back to ints if near-exact 0/1
-        try:
-            import numpy as np
-            A = np.array(P) @ np.array(Rk)
-            # Optional snap to {0,1}
-            B = (np.abs(A) > 1e-9).astype(int).tolist()
-            return B
-        except Exception:
-            # fallback: no-op if numpy absent
-            return Rk
-    else:
-        return Rk
