@@ -30,6 +30,58 @@ def policy_label_from_cfg(cfg: dict) -> str:
         parts.append(f"{mode}@k={kk},{src}")
     return "projected(" + "; ".join(parts) + ")"
 
+# --- cert writer (save one result to certs/...) -------------------------------
+from pathlib import Path
+import json as _json
+
+def _short(s: str, n: int = 12) -> str:
+    return s[:n] if s else ""
+
+def policy_tag_for_filename(label: str) -> str:
+    # turn "projected(columns@k=3,auto)" into "projected_columns_k3_auto"
+    return (
+        label.replace("projected(", "projected_")
+             .replace(")", "")
+             .replace("@", "_")
+             .replace(";", "_")
+             .replace(",", "_")
+             .replace("=", "")
+             .replace(" ", "")
+    )
+
+def write_overlap_cert(*, out: dict, policy_label: str, boundaries, cmap, H, pj_hash: str | None = None, cert_dir: str = "certs") -> str:
+    Path(cert_dir).mkdir(exist_ok=True)
+    payload = {
+        "policy": policy_label,
+        "k2": out.get("2", {}),
+        "k3": out.get("3", {}),
+        "hashes": {
+            "hash_d": hashes.hash_d(boundaries),
+            "hash_U": hashes.hash_U(globals().get("shapes")) if "shapes" in globals() else "",
+            "hash_suppC": hashes.hash_suppC(cmap),
+            "hash_suppH": hashes.hash_suppH(H),
+            "hash_P": pj_hash or "",
+        },
+        "app": {
+            "version": getattr(hashes, "APP_VERSION", "v0.1-core"),
+            "run_id": hashes.run_id(
+                content_hash := hashes.bundle_content_hash([
+                    ("d", boundaries.dict() if hasattr(boundaries, "dict") else {}),
+                    ("C", cmap.dict() if hasattr(cmap, "dict") else {}),
+                    ("H", H.dict() if hasattr(H, "dict") else {}),
+                ]),
+                hashes.timestamp_iso_lisbon(),
+            ),
+            "content_hash": content_hash,
+        },
+    }
+    fname = f"overlap_pass__{policy_tag_for_filename(policy_label)}__{_short(payload['app']['run_id'])}.json"
+    fpath = str(Path(cert_dir) / fname)
+    with open(fpath, "w") as f:
+        _json.dump(payload, f, indent=2)
+    return fpath
+
+
 
 # 1) Locate package dir and set PKG_NAME
 HERE = pathlib.Path(__file__).resolve().parent
@@ -239,6 +291,19 @@ with colA:
         # B: projected (use current cfg)
         out_proj, _ = run_overlap_with_cfg(boundaries, cmap, H, cfg)
 
+        # --- optional: write both certs from A/B ---
+if st.checkbox("Write both certs (strict & projected)", value=False):
+    cert_s = write_overlap_cert(out=out_strict, policy_label=policy_label_from_cfg(cfg_strict()), boundaries=boundaries, cmap=cmap, H=H, pj_hash=None)
+    # projector hash for projected path (file-mode only)
+    pj_hash_proj = ""
+    if cfg_proj.get("source", {}).get("3") == "file":
+        pj_path = cfg_proj.get("projector_files", {}).get("3")
+        if pj_path and os.path.exists(pj_path):
+            pj_hash_proj = projector._hash_matrix(_json.load(open(pj_path)))
+    cert_p = write_overlap_cert(out=out_proj, policy_label=policy_label_from_cfg(cfg_proj), boundaries=boundaries, cmap=cmap, H=H, pj_hash=pj_hash_proj)
+    st.success(f"Saved: `{cert_s}` and `{cert_p}`")
+
+
         # Show side-by-side verdicts
         klist = sorted(set(out_strict.keys()) | set(out_proj.keys()), key=int)
         rows = []
@@ -331,6 +396,24 @@ with colB:
                 out = overlap_gate.overlap_check(boundaries, cmap, H)
 
             st.json(out)
+
+# --- optional: save a cert for this single run ---
+pj_hash = ""
+# if we’re in projected + FILE mode, include the projector hash if present in cache
+k = "3"
+if cfg.get("source", {}).get(k) == "file":
+    pj_path = cfg.get("projector_files", {}).get(k)
+    if pj_path and os.path.exists(pj_path):
+        # reuse projector hashing to avoid dupes
+        try:
+            pj_hash = projector._hash_matrix(_json.load(open(pj_path)))
+        except Exception:
+            pj_hash = ""
+
+if st.checkbox("Write cert for this run", value=False):
+    cert_path = write_overlap_cert(out=out, policy_label=policy_label, boundaries=boundaries, cmap=cmap, H=H, pj_hash=pj_hash)
+    st.success(f"Saved cert → `{cert_path}`")
+
 
 # ---- Build pass-vector & promotion ------------------------------------------
 pass_vec = [
