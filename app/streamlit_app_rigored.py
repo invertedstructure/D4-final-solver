@@ -4,16 +4,13 @@ import streamlit as st
 # --- force hot-load local modules from disk (bypass package cache) ---
 from pathlib import Path
 from importlib.machinery import SourceFileLoader
-import sys
 
 APP_DIR = Path(__file__).resolve().parent
-
 OVERLAP_PATH = APP_DIR / "overlap_gate.py"
 PROJECTOR_PATH = APP_DIR / "projector.py"
 
-# Drop any cached modules with those names
-for _name in ("overlap_gate_hot", "projector_hot",
-              f"{PKG_NAME}.overlap_gate", f"{PKG_NAME}.projector"):
+# Drop any cached modules with those names (avoid PKG_NAME before it's defined)
+for _name in ("overlap_gate_hot", "projector_hot"):
     if _name in sys.modules:
         del sys.modules[_name]
 
@@ -24,6 +21,7 @@ projector    = SourceFileLoader("projector_hot",    str(PROJECTOR_PATH)).load_mo
 # Sanity: show which files are actually loaded
 st.caption(f"overlap_gate loaded from: {getattr(overlap_gate, '__file__', '<none>')}")
 st.caption(f"projector loaded from: {getattr(projector, '__file__', '<none>')}")
+
 
 
 APP_DIR = Path(__file__).resolve().parent
