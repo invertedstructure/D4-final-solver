@@ -2,6 +2,30 @@
 # --- robust loader with real package context (supports app/otcore or app/core) ---
 import sys, pathlib, importlib.util, types, json, os
 import streamlit as st
+# --- force hot-load local modules from disk (bypass package cache) ---
+from pathlib import Path
+from importlib.machinery import SourceFileLoader
+import sys
+
+APP_DIR = Path(__file__).resolve().parent
+
+OVERLAP_PATH = APP_DIR / "overlap_gate.py"
+PROJECTOR_PATH = APP_DIR / "projector.py"
+
+# Drop any cached modules with those names
+for _name in ("overlap_gate_hot", "projector_hot",
+              f"{PKG_NAME}.overlap_gate", f"{PKG_NAME}.projector"):
+    if _name in sys.modules:
+        del sys.modules[_name]
+
+# Load fresh modules directly from file
+overlap_gate = SourceFileLoader("overlap_gate_hot", str(OVERLAP_PATH)).load_module()
+projector    = SourceFileLoader("projector_hot",    str(PROJECTOR_PATH)).load_module()
+
+# Sanity: show which files are actually loaded
+st.caption(f"overlap_gate loaded from: {getattr(overlap_gate, '__file__', '<none>')}")
+st.caption(f"projector loaded from: {getattr(projector, '__file__', '<none>')}")
+
 
 HERE = pathlib.Path(__file__).resolve().parent
 OTCORE = HERE / "otcore"
@@ -25,33 +49,12 @@ def _load_pkg_module(fullname: str, rel_path: str):
     sys.modules[fullname] = mod
     spec.loader.exec_module(mod)  # type: ignore[attr-defined]
     return mod
-projector = _load_pkg_module(f"{PKG_NAME}.projector", "projector.py")
 io = _load_pkg_module(f"{PKG_NAME}.io", "io.py")
 hashes = _load_pkg_module(f"{PKG_NAME}.hashes", "hashes.py")
 unit_gate = _load_pkg_module(f"{PKG_NAME}.unit_gate", "unit_gate.py")
-overlap_gate = _load_pkg_module(f"{PKG_NAME}.overlap_gate", "overlap_gate.py")
-import importlib
-overlap_gate = _load_pkg_module(f"{PKG_NAME}.overlap_gate", "overlap_gate.py")
-importlib.reload(overlap_gate)  # force-refresh so new signature is active
-projector   = _load_pkg_module(f"{PKG_NAME}.projector", "projector.py")
 triangle_gate = _load_pkg_module(f"{PKG_NAME}.triangle_gate", "triangle_gate.py")
 towers = _load_pkg_module(f"{PKG_NAME}.towers", "towers.py")
 export_mod = _load_pkg_module(f"{PKG_NAME}.export", "export.py")
-# -- force fresh loads so Streamlit doesn't keep old submodules around
-import sys, importlib
-
-# Drop cached copies if present
-for _mod in (f"{PKG_NAME}.overlap_gate", f"{PKG_NAME}.projector"):
-    if _mod in sys.modules:
-        del sys.modules[_mod]
-
-# Load modules from the package folder
-overlap_gate = _load_pkg_module(f"{PKG_NAME}.overlap_gate", "overlap_gate.py")
-projector    = _load_pkg_module(f"{PKG_NAME}.projector",    "projector.py")
-
-# Hard reload to ensure the file on disk is the one in memory
-importlib.reload(overlap_gate)
-importlib.reload(projector)
 
 APP_VERSION = getattr(hashes, "APP_VERSION", "v0.1-core")
 # -----------------------------------------------------------------------------
