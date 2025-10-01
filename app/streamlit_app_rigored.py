@@ -167,6 +167,17 @@ with tab2:
             st.json({"cfg": cfg})
             cache = projector.preload_projectors_from_files(cfg)
 
+            # After we run overlap_check, we’ll read any guard warnings from cache.
+            # show overlap results
+st.json(out)
+
+# guard warning (if file-mode drift)
+for key, val in list(cache.items()):
+    if key.startswith("guard_warning_k"):
+        st.warning(f"[{key}] {val['msg']} | file={val['hash_file']} auto={val['hash_auto']}")
+
+
+
             # Policy badge
             layers = cfg.get("enabled_layers", [])
             modes = cfg.get("modes", {})
