@@ -568,51 +568,52 @@ with tab2:
     }
 
       # ---- Signatures (rank/ker + lane patterns) ----
-    def _gf2_rank(M):
-    # simple Gaussian elimination mod 2
-        if not M:
-            return 0
-        A = [row[:] for row in M]
-        r = 0
-        n_rows = len(A)
-        n_cols = len(A[0]) if A[0] else 0
-        col = 0
-        while r < n_rows and col < n_cols:
-        # find pivot
-            pivot = None
-        for i in range(r, n_rows):
-            if A[i][col] & 1:
+def _gf2_rank(M):
+    """Gaussian elimination over GF(2) to compute rank."""
+    if not M or not M[0]:
+        return 0
+    A = [row[:] for row in M]
+    m, n = len(A), len(A[0])
+    r = 0
+    c = 0
+    while r < m and c < n:
+        # find pivot in column c
+        pivot = None
+        for i in range(r, m):
+            if A[i][c] & 1:
                 pivot = i
                 break
         if pivot is None:
-            col += 1
+            c += 1
             continue
-        # swap
+        # swap pivot to row r
         if pivot != r:
             A[r], A[pivot] = A[pivot], A[r]
-        # eliminate below
-        for i in range(r + 1, n_rows):
-            if A[i][col] & 1:
-                # row_i ^= row_r
-                A[i] = [(A[i][j] ^ A[r][j]) for j in range(n_cols)]
+        # eliminate this column in all other rows
+        for i in range(m):
+            if i != r and (A[i][c] & 1):
+                A[i] = [(A[i][j] ^ A[r][j]) for j in range(n)]
         r += 1
-        col += 1
+        c += 1
     return r
 
-d3 = (boundaries.blocks.__root__.get("3") or [])
+d3 = boundaries.blocks.__root__.get("3") or []
 n_cols_d3 = len(d3[0]) if (d3 and d3[0]) else 0
-rank_d3 = _gf2_rank(d3)
+rank_d3   = _gf2_rank(d3)
 ker_dim_d3 = max(0, n_cols_d3 - rank_d3)
 
-lane_pattern = "".join(str(x) for x in diagnostics_block.get("lane_mask_k3", []))
-lane_vec_C = diagnostics_block.get("lane_vec_C3plusI3", [])
+lane_mask    = diagnostics_block.get("lane_mask_k3", []) or []
+lane_pattern = "".join("1" if x else "0" for x in lane_mask) if lane_mask else ""
+lane_vec_C   = diagnostics_block.get("lane_vec_C3plusI3", []) or []
 fixture_lane = "".join(str(int(x)) for x in lane_vec_C) if lane_vec_C else ""
 
+# If an old sig_block exists, preserve echo_context; otherwise set None
 sig_block = {
-    "d_signature":      {"rank": rank_d3, "ker_dim": ker_dim_d3, "lane_pattern": lane_pattern},
+    "d_signature":       {"rank": rank_d3, "ker_dim": ker_dim_d3, "lane_pattern": lane_pattern},
     "fixture_signature": {"lane": fixture_lane},
-    "echo_context": None,
+    "echo_context": (sig_block.get("echo_context") if 'sig_block' in locals() else None),
 }
+
 
     
     # --- fixture_signature from support of (C3 + I3) restricted to lanes ----------
