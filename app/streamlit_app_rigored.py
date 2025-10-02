@@ -390,13 +390,6 @@ with tab1:
     _stamp_filename("fname_reps", f_reps)
     d_reps = read_json_file(f_reps) if f_reps else None
 
-    def _stamp_filename(state_key: str, f):
-    """Remember the uploaded filename in session_state for certs/registry."""
-    if f is not None:
-        st.session_state[state_key] = getattr(f, "name", "")
-    else:
-        st.session_state.pop(state_key, None)
-
 
     enforce = st.checkbox("Enforce rep transport (c_cod = C c_dom)", value=False)
     if st.button("Run Unit"):
@@ -426,13 +419,6 @@ with tab2:
     # --- H uploader + auto-zero ---
     f_H = st.file_uploader("Homotopy H (H_corrected.json)", type=["json"], key="H_corr")
     d_H = read_json_file(f_H) if f_H else None
-
-    def _stamp_filename(state_key: str, f):
-    """Remember the uploaded filename in session_state for certs/registry."""
-    if f is not None:
-        st.session_state[state_key] = getattr(f, "name", "")
-    else:
-        st.session_state.pop(state_key, None)
 
 
     # --- Policy toggle UI ---
@@ -1068,13 +1054,6 @@ with tab3:
     _stamp_filename("fname_H2", f_H2)
     d_H2 = read_json_file(f_H2) if f_H2 else None
     H2 = io.parse_cmap(d_H2) if d_H2 else None
-
-    def _stamp_filename(state_key: str, f):
-    """Remember the uploaded filename in session_state for certs/registry."""
-    if f is not None:
-        st.session_state[state_key] = getattr(f, "name", "")
-    else:
-        st.session_state.pop(state_key, None)
 
 
 
