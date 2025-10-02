@@ -1100,13 +1100,18 @@ if ab_ctx:
     }
     cert_payload["ab_pair_tag"] = ab_ctx.get("pair_tag", "")
 
+    # --- Uniform provenance: mirror projected hash into top-level if empty ---
+    proj_hash_from_ab = cert_payload["policy"]["projected_snapshot"].get("projector_hash", "")
+    if proj_hash_from_ab and not cert_payload["policy"].get("projector_hash"):
+        cert_payload["policy"]["projector_hash"] = proj_hash_from_ab
+
 # ---- Integrity + top-level artifact hashes ----------------------------------
 cert_payload.setdefault("artifact_hashes", {
     "boundaries_hash": inputs_block["boundaries_hash"],
     "C_hash":          inputs_block["C_hash"],
     "H_hash":          inputs_block["H_hash"],
     "U_hash":          inputs_block["U_hash"],
-    "projector_hash":  policy_block.get("projector_hash", ""),
+    "projector_hash":  cert_payload.get("policy", {}).get("projector_hash", ""),  # keep in sync
 })
 cert_payload.setdefault("integrity", {})
 cert_payload["integrity"]["content_hash"] = hashes.content_hash_of(cert_payload)
@@ -1161,6 +1166,15 @@ try:
             or cert_payload["policy"]["projected_snapshot"].get("projector_hash", "")
         )
 
+    # --- Uniform provenance for policy.json (bundle): mirror top-level too ---
+    proj_hash_bundle = (
+        _projected_ctx.get("projector_hash")
+        or cert_payload.get("policy", {}).get("projected_snapshot", {}).get("projector_hash", "")
+        or _policy_block_for_bundle.get("projector_hash", "")
+    )
+    if proj_hash_bundle and not _policy_block_for_bundle.get("projector_hash"):
+        _policy_block_for_bundle["projector_hash"] = proj_hash_bundle
+
     # Tag bundle name with __withAB when embedded
     tag = policy_label.replace(" ", "_")
     if "policy" in cert_payload and "strict_snapshot" in cert_payload["policy"]:
@@ -1186,6 +1200,7 @@ try:
         )
 except Exception as e:
     st.error(f"Could not build download bundle: {e}")
+
 
 
 
