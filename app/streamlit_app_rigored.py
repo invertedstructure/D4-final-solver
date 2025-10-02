@@ -376,11 +376,11 @@ with tab1:
     if d_U:
         shapes = io.parse_shapes(d_U)  # or whatever parser you have
         
-    def _stamp_filename(state_key: str, f):
+def _stamp_filename(state_key: str, f):
 if f is not None:
-    st.session_state[state_key] = getattr(f, "name", "")
+st.session_state[state_key] = getattr(f, "name", "")
 else:
-    st.session_state.pop(state_key, None)
+st.session_state.pop(state_key, None)
 
     
     # Reps (only if you actually use them)
