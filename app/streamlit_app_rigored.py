@@ -764,12 +764,12 @@ inputs_block["filenames"] = {
 # ---------- Tiny polish: filenames + signatures ----------
 
 # 1) Ensure filenames for Boundaries and U are filled (H already set)
-inputs_block["filenames"]["boundaries"] = (
-    inputs_block["filenames"].get("boundaries") or st.session_state.get("fname_boundaries", "")
-)
-inputs_block["filenames"]["U"] = (
-    inputs_block["filenames"].get("U") or st.session_state.get("fname_shapes", "")
-)
+    inputs_block["filenames"]["boundaries"] = (
+        inputs_block["filenames"].get("boundaries") or st.session_state.get("fname_boundaries", "")
+    )
+    inputs_block["filenames"]["U"] = (
+        inputs_block["filenames"].get("U") or st.session_state.get("fname_shapes", "")
+    )
 
 # 2) d-signature (from d3): rank, ker_dim, lane_pattern
 d3 = boundaries.blocks.__root__.get("3")
