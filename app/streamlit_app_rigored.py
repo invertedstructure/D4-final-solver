@@ -485,6 +485,12 @@ with tab2:
             st.warning("overlap_gate in STRICT signature path; projection ignored this run.")
         st.json(out)
 
+        # persist for downstream cert/bundle blocks
+        st.session_state["overlap_out"] = out
+        st.session_state["overlap_cfg"] = cfg_active         # the cfg you actually used
+        st.session_state["overlap_policy_label"] = policy_label
+        st.session_state["overlap_H"] = H_local              # parsed homotopy (JSON-safe)
+
         # --- Lane mask preview (k=3) ---
         d3 = boundaries.blocks.__root__.get("3")
         lane_mask = [1 if any(row[j] for row in d3) else 0 for j in range(len(d3[0]))] if d3 else []
