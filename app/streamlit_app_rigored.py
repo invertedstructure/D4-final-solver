@@ -981,56 +981,41 @@ def _pass_vec_from(out_dict: dict) -> list[int]:
         int(out_dict.get("3", {}).get("eq", False)),
     ]
 
-# Fill ab_compare inside the policy block (so cert has both snapshots)
+# ---- Optional A/B: embed snapshots into the cert (safe, no KeyErrors) ----
+ab_ctx         = st.session_state.get("ab_compare", {}) or {}
+strict_ctx     = ab_ctx.get("strict", {}) or {}
+projected_ctx  = ab_ctx.get("projected", {}) or {}
+
+# If you want the pair tag at top-level too:
+cert_payload["ab_pair_tag"] = ab_ctx.get("pair_tag", "")
+
+def _pass_vec_from(out_dict: dict) -> list[int]:
+    return [
+        int(out_dict.get("2", {}).get("eq", False)),
+        int(out_dict.get("3", {}).get("eq", False)),
+    ]
+
 policy_block.setdefault("ab_compare", {
     "pair": ab_ctx.get("pair_tag", ""),
     "strict_snapshot": {
         "policy_tag": strict_ctx.get("label", policy_label_from_cfg(cfg_strict())),
         "ker_guard":  strict_ctx.get("ker_guard", "enforced"),
-        "lane_mask_k3":    strict_ctx.get("lane_mask_k3",    diagnostics_block.get("lane_mask_k3", [])),
-        "lane_vec_H2d3":   strict_ctx.get("lane_vec_H2d3",   diagnostics_block.get("lane_vec_H2d3", [])),
+        "lane_mask_k3":      strict_ctx.get("lane_mask_k3",      diagnostics_block.get("lane_mask_k3", [])),
+        "lane_vec_H2d3":     strict_ctx.get("lane_vec_H2d3",     diagnostics_block.get("lane_vec_H2d3", [])),
         "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
         "pass_vec": _pass_vec_from(strict_ctx.get("out", {})),
     },
     "projected_snapshot": {
-        "policy_tag": projected_ctx.get("label", policy_label_from_cfg(cfg_projected_base())),
-        "ker_guard":  projected_ctx.get("ker_guard", "off"),
+        "policy_tag":    projected_ctx.get("label", policy_label_from_cfg(cfg_projected_base())),
+        "ker_guard":     projected_ctx.get("ker_guard", "off"),
         "projector_hash": projected_ctx.get("projector_hash", ""),
-        "lane_mask_k3":    projected_ctx.get("lane_mask_k3",    diagnostics_block.get("lane_mask_k3", [])),
-        "lane_vec_H2d3":   projected_ctx.get("lane_vec_H2d3",   diagnostics_block.get("lane_vec_H2d3", [])),
+        "lane_mask_k3":      projected_ctx.get("lane_mask_k3",      diagnostics_block.get("lane_mask_k3", [])),
+        "lane_vec_H2d3":     projected_ctx.get("lane_vec_H2d3",     diagnostics_block.get("lane_vec_H2d3", [])),
         "lane_vec_C3plusI3": projected_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
         "pass_vec": _pass_vec_from(projected_ctx.get("out", {})),
     },
 })
 
-
-    # lane mask is stored at the top-level of ab_ctx
-    lane_mask_k3 = ab_ctx.get("lane_mask_k3", [])
-
-    strict_snap = {
-        "label":      ab_ctx.get("strict", {}).get("label", "strict"),
-        "policy_tag": ab_ctx.get("strict", {}).get("label", "strict"),
-        "ker_guard":  ab_ctx.get("strict", {}).get("ker_guard", "enforced"),
-        "lane_mask_k3": lane_mask_k3,
-        "lane_vec_H2d3": ab_ctx.get("strict", {}).get("lane_vec_H2d3", []),
-        "lane_vec_C3plusI3": ab_ctx.get("strict", {}).get("lane_vec_C3plusI3", []),
-        "pass_vec": _pass_vec_from(strict_out),
-    }
-
-    projected_snap = {
-        "label":      ab_ctx.get("projected", {}).get("label", "projected(columns@k=3)"),
-        "policy_tag": ab_ctx.get("projected", {}).get("label", "projected(columns@k=3)"),
-        "ker_guard":  ab_ctx.get("projected", {}).get("ker_guard", "off"),
-        "lane_mask_k3": lane_mask_k3,  # <- FIX: read from top-level, not inside projected
-        "lane_vec_H2d3": ab_ctx.get("projected", {}).get("lane_vec_H2d3", []),
-        "lane_vec_C3plusI3": ab_ctx.get("projected", {}).get("lane_vec_C3plusI3", []),
-        "projector_hash": ab_ctx.get("projected", {}).get("projector_hash", ""),
-        "pass_vec": _pass_vec_from(proj_out),
-    }
-
-    cert_payload.setdefault("policy_snapshots", {})
-    cert_payload["policy_snapshots"]["strict"]    = strict_snap
-    cert_payload["policy_snapshots"]["projected"] = projected_snap
 
 
 
