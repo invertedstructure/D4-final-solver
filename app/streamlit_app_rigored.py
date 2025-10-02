@@ -853,34 +853,28 @@ cert_payload = {
     "policy_tag": policy_block.get("policy_tag", policy_block.get("label", "unknown")),
 }
 
-# Write cert
-cert_path, full_hash = export_mod.write_cert_json(cert_payload)
-st.success(f"Cert written: `{cert_path}`")
-
-
-# ---- 5) Write cert -----------------------------------------------------------
-cert_path, full_hash = export_mod.write_cert_json(cert_payload)
-st.success(f"Cert written: `{cert_path}`")
-
-
-# Top-level duplication of artifact hashes (handy for quick indexing)
-"artifact_hashes": {
-        "boundaries_hash": inputs_block["boundaries_hash"],
-        "C_hash": inputs_block["C_hash"],
-        "H_hash": inputs_block["H_hash"],
-        "U_hash": inputs_block["U_hash"],
-        "projector_hash": policy_block["projector_hash"],
-    }
+# ---- Finalize cert: integrity + write ----------------------------------------
+# Ensure we have a mirror of artifact hashes at the top level (optional, for indexing)
+cert_payload.setdefault("artifact_hashes", {
+    "boundaries_hash": inputs_block["boundaries_hash"],
+    "C_hash":          inputs_block["C_hash"],
+    "H_hash":          inputs_block["H_hash"],
+    "U_hash":          inputs_block["U_hash"],
+    "projector_hash":  policy_block.get("projector_hash", ""),
+})
 
 # Integrity: hash the entire payload and embed it
-cert_payload["integrity"] = {
-    "content_hash": hashes.content_hash_of(cert_payload)
-}
+cert_payload.setdefault("integrity", {})
+cert_payload["integrity"]["content_hash"] = hashes.content_hash_of(cert_payload)
 
+# Write cert (single call)
+cert_path, full_hash = export_mod.write_cert_json(cert_payload)
+st.success(f"Cert written: `{cert_path}`")
 
-# ---------- Download bundle (includes cert.json) ----------
+# ---- Download bundle (includes cert.json) ------------------------------------
 try:
-    bundle_name = f"overlap_bundle__{district_id}__{policy_label.replace(' ','_')}__{full_hash[:12]}.zip"
+    district_id = st.session_state.get("district_id", "D3")
+    bundle_name = f"overlap_bundle__{district_id}__{policy_label.replace(' ', '_')}__{full_hash[:12]}.zip"
     zip_path = export_mod.build_overlap_bundle(
         boundaries=boundaries,
         cmap=cmap,
@@ -901,55 +895,56 @@ try:
 except Exception as e:
     st.error(f"Could not build download bundle: {e}")
 
+# ---- Promotion (optional) ----------------------------------------------------
+pass_vec  = [int(out.get("2", {}).get("eq", False)),
+             int(out.get("3", {}).get("eq", False))]
+all_green = all(v == 1 for v in pass_vec)
 
-    # ---------- Promotion (optional) ----------
-    pass_vec = [int(out.get("2", {}).get("eq", False)),
-                int(out.get("3", {}).get("eq", False))]
-    all_green = all(v == 1 for v in pass_vec)
-    if all_green:
-        st.success("Green — eligible for promotion.")
-        flip_to_file = st.checkbox("After promotion, switch to FILE-backed projector",
-                                   value=True, key="flip_to_file_k3")
-        keep_auto = st.checkbox("…or keep AUTO (don’t lock now)",
-                                value=False, key="keep_auto_k3")
-        if st.button("Promote & Freeze Projector", key="promote_k3"):
-            d3_now = boundaries.blocks.__root__.get("3")
-            if not d3_now:
-                st.error("No d3; cannot freeze projector.")
+if all_green:
+    st.success("Green — eligible for promotion.")
+    flip_to_file = st.checkbox("After promotion, switch to FILE-backed projector",
+                               value=True, key="flip_to_file_k3")
+    keep_auto = st.checkbox("…or keep AUTO (don’t lock now)",
+                            value=False, key="keep_auto_k3")
+
+    if st.button("Promote & Freeze Projector", key="promote_k3"):
+        d3_now = boundaries.blocks.__root__.get("3")
+        if not d3_now:
+            st.error("No d3; cannot freeze projector.")
+        else:
+            # Freeze the exact Π3 used now
+            P_used = projector.projector_columns_from_dkp1(d3_now)
+            pj_path = cfg_file.get("projector_files", {}).get("3", "projector_D3.json")
+            pj_hash = projector.save_projector(pj_path, P_used)
+            st.info(f"Projector frozen → {pj_path} (hash={pj_hash[:12]}…)")
+
+            # Flip config or keep auto
+            if flip_to_file and not keep_auto:
+                cfg_file.setdefault("source", {})["3"] = "file"
+                cfg_file.setdefault("projector_files", {})["3"] = pj_path
             else:
-                P_used = projector.projector_columns_from_dkp1(d3_now)
-                pj_path = cfg_file.get("projector_files", {}).get("3", "projector_D3.json")
-                pj_hash = projector.save_projector(pj_path, P_used)
-                st.info(f"Projector frozen → {pj_path} (hash={pj_hash[:12]}…)")
+                cfg_file.setdefault("source", {})["3"] = "auto"
+                if "projector_files" in cfg_file and "3" in cfg_file["projector_files"]:
+                    del cfg_file["projector_files"]["3"]
+            with open("projection_config.json", "w") as _f:
+                _json.dump(cfg_file, _f, indent=2)
 
-                if flip_to_file and not keep_auto:
-                    cfg_file.setdefault("source", {})["3"] = "file"
-                    cfg_file.setdefault("projector_files", {})["3"] = pj_path
-                else:
-                    cfg_file.setdefault("source", {})["3"] = "auto"
-                    if "projector_files" in cfg_file and "3" in cfg_file["projector_files"]:
-                        del cfg_file["projector_files"]["3"]
-                with open("projection_config.json", "w") as _f:
-                    _json.dump(cfg_file, _f, indent=2)
-
-                import time as _time
-                try:
-                    export_mod.write_registry_row(
-                        fix_id=f"overlap-{int(_time.time())}",
-                        pass_vector=pass_vec,
-                        policy=policy_label,
-                        hash_d=hashes.hash_d(boundaries),
-                        hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
-                        hash_suppC=hashes.hash_suppC(cmap),
-                        hash_suppH=hashes.hash_suppH(H_local),
-                        notes=f"proj_hash={pj_hash}"
-                    )
-                    st.success("Registry updated with projector hash.")
-                except Exception as e:
-                    st.error(f"Failed to write registry row: {e}")
-
-
-       
+            import time as _time
+            try:
+                export_mod.write_registry_row(
+                    fix_id=f"overlap-{int(_time.time())}",
+                    pass_vector=pass_vec,
+                    policy=policy_label,
+                    hash_d=hashes.hash_d(boundaries),
+                    hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
+                    hash_suppC=hashes.hash_suppC(cmap),
+                    hash_suppH=hashes.hash_suppH(H_local),
+                    notes=f"proj_hash={pj_hash}"
+                )
+                st.success("Registry updated with projector hash.")
+            except Exception as e:
+                st.error(f"Failed to write registry row: {e}")
+     
        
 
     # --- A/B compare (strict vs projected) ------------------------------------
