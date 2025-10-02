@@ -972,6 +972,51 @@ if ab_ctx:
 # Single write
 cert_path, full_hash = export_mod.write_cert_json(cert_payload)
 st.success(f"Cert written: `{cert_path}`")
+# ---- Registry/Gallery de-duplication row ------------------------------------
+try:
+    # A/B context (if any)
+    ab_ctx = st.session_state.get("ab_compare")
+
+    # Build the key parts
+    district_id     = st.session_state.get("district_id", "D3")
+    boundaries_hash = inputs_block["boundaries_hash"]
+    U_hash          = inputs_block["U_hash"]
+    suppC_hash      = hashes.hash_suppC(cmap)   # support(C), you already use this
+
+    # lane address → prefer projected lane_vec_H2d3 when present, otherwise use diagnostics
+    if ab_ctx and ab_ctx.get("projected", {}).get("lane_vec_H2d3"):
+        lane_vec = ab_ctx["projected"]["lane_vec_H2d3"]
+    else:
+        lane_vec = diagnostics_block.get("lane_vec_H2d3", [])
+    lane_vec_key = "".join(str(int(x)) for x in (lane_vec or []))
+
+    # policy mode tag (strict or projected(...))
+    policy_mode = policy_label  # already computed earlier
+
+    # the UNIQUE key (tuple of simple primitives)
+    key = (district_id, boundaries_hash, U_hash, suppC_hash, lane_vec_key, policy_mode)
+
+    # minimal row payload (feel free to add more columns)
+    row = {
+        "district_id": district_id,
+        "policy_mode": policy_mode,
+        "boundaries_hash": boundaries_hash,
+        "U_hash": U_hash,
+        "suppC_hash": suppC_hash,
+        "lane_vec_H2d3": lane_vec_key,
+        "cert_path": cert_path,
+        "content_hash": cert_payload.get("integrity", {}).get("content_hash", ""),
+    }
+
+    # write once (CSV), skip duplicates
+    res = export_mod.write_gallery_row(row, key, path="gallery.csv")
+    if res == "written":
+        st.toast("gallery: added exemplar row")
+    else:
+        st.toast("gallery: duplicate skipped")
+except Exception as e:
+    st.warning(f"gallery dedupe failed: {e}")
+
 
 
 # ---- Download bundle (includes cert.json) ------------------------------------
