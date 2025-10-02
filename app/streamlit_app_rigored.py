@@ -928,6 +928,45 @@ if include_ab:
         st.caption("A/B block added to cert (strict + projected).")
     else:
         st.warning("A/B context not found — run the A/B compare first.")
+        
+        # ---- If we have an A/B context, stamp both snapshots into cert ----
+ab_ctx = st.session_state.get("ab_compare")
+
+if ab_ctx:
+    # small dual badge in UI
+    eq_s = bool(ab_ctx["strict"]["out"].get("3", {}).get("eq", False))
+    eq_p = bool(ab_ctx["projected"]["out"].get("3", {}).get("eq", False))
+    badge = f"A/B: strict={'✅' if eq_s else '❌'} · projected={'✅' if eq_p else '❌'}"
+    st.caption(badge)
+
+    # put both snapshots under cert.policy
+    cert_payload.setdefault("policy", {})
+    cert_payload["policy"]["strict_snapshot"] = {
+        "policy_tag": ab_ctx["strict"]["label"],
+        "ker_guard":  ab_ctx["strict"]["ker_guard"],
+        "pass_vec": [
+            int(ab_ctx["strict"]["out"].get("2", {}).get("eq", False)),
+            int(ab_ctx["strict"]["out"].get("3", {}).get("eq", False)),
+        ],
+        "out": ab_ctx["strict"]["out"],
+    }
+    cert_payload["policy"]["projected_snapshot"] = {
+        "policy_tag": ab_ctx["projected"]["label"],
+        "ker_guard":  ab_ctx["projected"]["ker_guard"],
+        "projector_hash": ab_ctx["projected"]["projector_hash"],
+        "lane_mask_k3": ab_ctx["projected"]["lane_mask_k3"],
+        "lane_vec_H2d3": ab_ctx["projected"]["lane_vec_H2d3"],
+        "lane_vec_C3plusI3": ab_ctx["projected"]["lane_vec_C3plusI3"],
+        "pass_vec": [
+            int(ab_ctx["projected"]["out"].get("2", {}).get("eq", False)),
+            int(ab_ctx["projected"]["out"].get("3", {}).get("eq", False)),
+        ],
+        "out": ab_ctx["projected"]["out"],
+    }
+
+    # optionally carry tag at top-level for quick discovery
+    cert_payload["ab_pair_tag"] = ab_ctx["pair_tag"]
+
 
 
 # Single write
