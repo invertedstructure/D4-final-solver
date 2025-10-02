@@ -617,18 +617,18 @@ sig_block = {
     
     # fixture_signature from support of (C3 + I3) restricted to lanes
 C3 = cmap.blocks.__root__.get("3") or []
-        if C3:
-            # Build C3 + I3 over GF(2)
-            I3 = [[1 if i == j else 0 for j in range(len(C3))] for i in range(len(C3))]
-            C3pI3 = [[(C3[i][j] ^ I3[i][j]) for j in range(len(C3[0]))] for i in range(len(C3))]
-            # Support by column: 1 if any row has 1 in that column
-            supp_cols = []
-            for j in range(len(C3pI3[0]) if C3pI3 else 0):
-                any1 = any(C3pI3[i][j] & 1 for i in range(len(C3pI3)))
-                supp_cols.append(1 if any1 else 0)
-            # keep only lane columns (but keep string length n3, ker columns show as '0')
-            fixture_lane_str = "".join("1" if (lane_mask[j] and supp_cols[j]) else "0"
-                                       for j in range(len(supp_cols))) if lane_mask else ""
+    if C3:
+        # Build C3 + I3 over GF(2)
+        I3 = [[1 if i == j else 0 for j in range(len(C3))] for i in range(len(C3))]
+        C3pI3 = [[(C3[i][j] ^ I3[i][j]) for j in range(len(C3[0]))] for i in range(len(C3))]
+        # Support by column: 1 if any row has 1 in that column
+        supp_cols = []
+        for j in range(len(C3pI3[0]) if C3pI3 else 0):
+            any1 = any(C3pI3[i][j] & 1 for i in range(len(C3pI3)))
+            supp_cols.append(1 if any1 else 0)
+        # keep only lane columns (but keep string length n3, ker columns show as '0')
+        fixture_lane_str = "".join("1" if (lane_mask[j] and supp_cols[j]) else "0"
+                                   for j in range(len(supp_cols))) if lane_mask else ""
         else:
             fixture_lane_str = ""
         
