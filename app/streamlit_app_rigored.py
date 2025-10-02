@@ -754,6 +754,57 @@ identity_block = {
     "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
     "field": "GF(2)",
 }
+
+
+# ---- 1) Attach human filenames ONCE (right after building inputs_block) ----
+inputs_block["filenames"] = {
+    "boundaries": st.session_state.get("fname_boundaries", ""),
+    "C":          st.session_state.get("fname_cmap", ""),
+    "H":          st.session_state.get("fname_h", ""),
+    "U":          st.session_state.get("fname_shapes", ""),
+
+
+
+# ---- 3) Promotion helper flags ----------------------------------------------
+is_strict = (not cfg_active.get("enabled_layers"))  # strict if no enabled layers
+k3_true   = bool(out.get("3", {}).get("eq", False))
+
+# ---- 4) Assemble the FULL cert payload (single source of truth) --------------
+cert_payload = {
+    "identity": identity_block,          # you already built this (district_id/run_id/timestamp/app_version/field)
+    "policy": policy_block,              # label + config echo + projector_hash (if file-backed)
+    "inputs": inputs_block,              # hashes + dims + filenames (now filled)
+    "diagnostics": diagnostics_block,    # lane_mask_k3 / lane_vec_* etc.
+    "checks": checks_block,              # per-k eq + n_k (+ grid/fence/ker_guard/residual_tag if you added them)
+    "signatures": sig_block,             # canonical signatures (rank/ker/lane)
+    "promotion": {
+        "eligible_for_promotion": k3_true,
+        "promotion_target": ("strict_anchor" if is_strict else "projected_anchor") if k3_true else None,
+        "notes": "",
+    },
+    "policy_tag": policy_block.get("policy_tag", policy_block.get("label", "unknown")),
+}
+
+# ---- 5) Write cert -----------------------------------------------------------
+cert_path, full_hash = export_mod.write_cert_json(cert_payload)
+st.success(f"Cert written: `{cert_path}`")
+
+
+    # Top-level duplication of artifact hashes (handy for quick indexing)
+    "artifact_hashes": {
+        "boundaries_hash": inputs_block["boundaries_hash"],
+        "C_hash": inputs_block["C_hash"],
+        "H_hash": inputs_block["H_hash"],
+        "U_hash": inputs_block["U_hash"],
+        "projector_hash": policy_block["projector_hash"],
+    },
+}
+
+# Integrity: hash the entire payload and embed it
+cert_payload["integrity"] = {
+    "content_hash": hashes.content_hash_of(cert_payload)
+}
+
 # ---------- Tiny polish: filenames + signatures ----------
 # Place this AFTER you've created `inputs_block` and `diagnostics_block`,
 # and BEFORE you build `cert_payload`.
@@ -830,55 +881,6 @@ sig_block = {
     "d_signature": d_signature,
     "fixture_signature": fixture_signature,
     "echo_context": _prev_echo,
-}
-
-# ---- 1) Attach human filenames ONCE (right after building inputs_block) ----
-inputs_block["filenames"] = {
-    "boundaries": st.session_state.get("fname_boundaries", ""),
-    "C":          st.session_state.get("fname_cmap", ""),
-    "H":          st.session_state.get("fname_h", ""),
-    "U":          st.session_state.get("fname_shapes", ""),
-
-
-
-# ---- 3) Promotion helper flags ----------------------------------------------
-is_strict = (not cfg_active.get("enabled_layers"))  # strict if no enabled layers
-k3_true   = bool(out.get("3", {}).get("eq", False))
-
-# ---- 4) Assemble the FULL cert payload (single source of truth) --------------
-cert_payload = {
-    "identity": identity_block,          # you already built this (district_id/run_id/timestamp/app_version/field)
-    "policy": policy_block,              # label + config echo + projector_hash (if file-backed)
-    "inputs": inputs_block,              # hashes + dims + filenames (now filled)
-    "diagnostics": diagnostics_block,    # lane_mask_k3 / lane_vec_* etc.
-    "checks": checks_block,              # per-k eq + n_k (+ grid/fence/ker_guard/residual_tag if you added them)
-    "signatures": sig_block,             # canonical signatures (rank/ker/lane)
-    "promotion": {
-        "eligible_for_promotion": k3_true,
-        "promotion_target": ("strict_anchor" if is_strict else "projected_anchor") if k3_true else None,
-        "notes": "",
-    },
-    "policy_tag": policy_block.get("policy_tag", policy_block.get("label", "unknown")),
-}
-
-# ---- 5) Write cert -----------------------------------------------------------
-cert_path, full_hash = export_mod.write_cert_json(cert_payload)
-st.success(f"Cert written: `{cert_path}`")
-
-
-    # Top-level duplication of artifact hashes (handy for quick indexing)
-    "artifact_hashes": {
-        "boundaries_hash": inputs_block["boundaries_hash"],
-        "C_hash": inputs_block["C_hash"],
-        "H_hash": inputs_block["H_hash"],
-        "U_hash": inputs_block["U_hash"],
-        "projector_hash": policy_block["projector_hash"],
-    },
-}
-
-# Integrity: hash the entire payload and embed it
-cert_payload["integrity"] = {
-    "content_hash": hashes.content_hash_of(cert_payload)
 }
 
 # Write cert
