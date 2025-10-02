@@ -20,6 +20,77 @@ def _jsonable(obj: Any) -> Any:
             pass
     return obj  # assume already serializable
 
+# --- bundle builder: write B/C/H/U + policy + cert into a single .zip ----------
+def build_overlap_bundle(
+    *,
+    boundaries,
+    cmap,
+    H,
+    shapes,
+    policy_block: dict,
+    cert_path: str,
+    out_zip: str = "overlap_bundle.zip",
+) -> str:
+    """
+    Create a single zip containing:
+      - boundaries.json
+      - cmap.json
+      - H.json
+      - shapes.json
+      - policy.json  (effective policy snapshot used for the run)
+      - cert.json    (the cert file you just wrote; copied verbatim)
+
+    Returns the path to the written zip.
+    """
+    import json
+    import zipfile
+    from pathlib import Path
+
+    def _plain(obj):
+        """Best-effort JSON-safe conversion for pydantic-like objects."""
+        if hasattr(obj, "dict"):
+            try:
+                return obj.dict()
+            except Exception:
+                pass
+        # Many of your dataclasses already hold plain dicts/lists; use as-is.
+        return obj if obj is not None else {}
+
+    # Prepare JSON-safe payloads
+    b_payload = _plain(boundaries)
+    c_payload = _plain(cmap)
+    h_payload = _plain(H)
+    u_payload = _plain(shapes)
+
+    # Ensure output dir exists
+    out_zip_path = Path(out_zip)
+    out_zip_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Read cert bytes (if present) so we can embed the exact cert
+    cert_bytes = b""
+    cert_name = "cert.json"
+    try:
+        cert_bytes = Path(cert_path).read_bytes()
+        # normalize name inside the zip
+        if Path(cert_path).name:
+            cert_name = Path(cert_path).name
+    except Exception:
+        # keep empty; we still build the rest
+        cert_bytes = b""
+
+    # Write the zip
+    with zipfile.ZipFile(out_zip_path, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        z.writestr("boundaries.json", json.dumps(b_payload, indent=2))
+        z.writestr("cmap.json",       json.dumps(c_payload, indent=2))
+        z.writestr("H.json",          json.dumps(h_payload, indent=2))
+        z.writestr("shapes.json",     json.dumps(u_payload, indent=2))
+        z.writestr("policy.json",     json.dumps(policy_block or {}, indent=2))
+        if cert_bytes:
+            z.writestr(cert_name, cert_bytes)
+
+    return str(out_zip_path)
+
+
 def build_overlap_download_bundle(
     *,
     boundaries,
