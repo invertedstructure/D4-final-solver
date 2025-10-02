@@ -1019,43 +1019,7 @@ try:
         )
 except Exception as e:
     st.error(f"Could not build download bundle: {e}")
-    
-    try:
-    # build dedupe key
-    district_id = st.session_state.get("district_id", "D3")
-    boundaries_hash = inputs_block["boundaries_hash"]
-    U_hash = inputs_block["U_hash"]
-    suppC_hash = hashes.hash_suppC(cmap)  # you already have this
-    # lane address from projected if present, else strict
-    lv = None
-    if ab_ctx and ab_ctx["projected"]["lane_vec_H2d3"]:
-        lv = ab_ctx["projected"]["lane_vec_H2d3"]
-    else:
-        lv = diagnostics_block.get("lane_vec_H2d3", [])
-    lane_vec_key = "".join(str(int(x)) for x in (lv or []))
-    policy_mode = policy_label  # e.g., "strict" or "projected(columns@k=3,auto)"
-
-    key = (district_id, boundaries_hash, U_hash, suppC_hash, lane_vec_key, policy_mode)
-
-    row = {
-        "district_id": district_id,
-        "policy_mode": policy_mode,
-        "boundaries_hash": boundaries_hash,
-        "U_hash": U_hash,
-        "suppC_hash": suppC_hash,
-        "lane_vec_H2d3": lane_vec_key,
-        "cert_path": cert_path,
-        "content_hash": cert_payload.get("integrity", {}).get("content_hash", ""),
-    }
-
-    res = export_mod.write_gallery_row(row, key, path="gallery.csv")
-    if res == "written":
-        st.toast("gallery: added exemplar row")
-    else:
-        st.toast("gallery: duplicate skipped")
-except Exception as e:
-    st.warning(f"gallery dedupe failed: {e}")
-
+   
 
 
 # ---- Promotion (optional) ----------------------------------------------------
