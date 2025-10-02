@@ -1045,12 +1045,6 @@ with tab3:
     d_H2 = read_json_file(f_H2) if f_H2 else None
     H2 = io.parse_cmap(d_H2) if d_H2 else None
 
-    def _stamp_filename(state_key: str, f):
-    if f is not None:
-        st.session_state[state_key] = getattr(f, "name", "")
-    else:
-        st.session_state.pop(state_key, None)
-
 
     # Pull H from tab2 (if loaded)
     H = st.session_state.get("H_obj")
