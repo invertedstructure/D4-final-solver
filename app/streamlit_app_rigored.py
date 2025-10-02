@@ -966,17 +966,43 @@ if ab_ctx:
 
     # optionally carry tag at top-level for quick discovery
     cert_payload["ab_pair_tag"] = ab_ctx["pair_tag"]
-    # --- Optional: embed A/B snapshots into the cert (if available) --------------
-ab_ctx = st.session_state.get("ab_compare")
-if ab_ctx:
-    strict_out = ab_ctx.get("strict", {}).get("out", {})
-    proj_out   = ab_ctx.get("projected", {}).get("out", {})
+    # ---- Optional A/B: embed snapshots into the cert (safe, no KeyErrors) ----
+ab_ctx = st.session_state.get("ab_compare", {}) or {}
+strict_ctx    = ab_ctx.get("strict", {}) or {}
+projected_ctx = ab_ctx.get("projected", {}) or {}
 
-    def _pass_vec_from(out_dict):
-        return [
-            int(out_dict.get("2", {}).get("eq", False)),
-            int(out_dict.get("3", {}).get("eq", False)),
-        ]
+# If you want the pair tag at top-level too:
+cert_payload["ab_pair_tag"] = ab_ctx.get("pair_tag", "")
+
+# Helper to build a pass vector from any out-dict
+def _pass_vec_from(out_dict: dict) -> list[int]:
+    return [
+        int(out_dict.get("2", {}).get("eq", False)),
+        int(out_dict.get("3", {}).get("eq", False)),
+    ]
+
+# Fill ab_compare inside the policy block (so cert has both snapshots)
+policy_block.setdefault("ab_compare", {
+    "pair": ab_ctx.get("pair_tag", ""),
+    "strict_snapshot": {
+        "policy_tag": strict_ctx.get("label", policy_label_from_cfg(cfg_strict())),
+        "ker_guard":  strict_ctx.get("ker_guard", "enforced"),
+        "lane_mask_k3":    strict_ctx.get("lane_mask_k3",    diagnostics_block.get("lane_mask_k3", [])),
+        "lane_vec_H2d3":   strict_ctx.get("lane_vec_H2d3",   diagnostics_block.get("lane_vec_H2d3", [])),
+        "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
+        "pass_vec": _pass_vec_from(strict_ctx.get("out", {})),
+    },
+    "projected_snapshot": {
+        "policy_tag": projected_ctx.get("label", policy_label_from_cfg(cfg_projected_base())),
+        "ker_guard":  projected_ctx.get("ker_guard", "off"),
+        "projector_hash": projected_ctx.get("projector_hash", ""),
+        "lane_mask_k3":    projected_ctx.get("lane_mask_k3",    diagnostics_block.get("lane_mask_k3", [])),
+        "lane_vec_H2d3":   projected_ctx.get("lane_vec_H2d3",   diagnostics_block.get("lane_vec_H2d3", [])),
+        "lane_vec_C3plusI3": projected_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
+        "pass_vec": _pass_vec_from(projected_ctx.get("out", {})),
+    },
+})
+
 
     # lane mask is stored at the top-level of ab_ctx
     lane_mask_k3 = ab_ctx.get("lane_mask_k3", [])
@@ -1203,6 +1229,77 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
 
     # Show raw A/B for quick look
     st.json({"strict": out_strict, "projected": out_proj})
+    
+    # --- Compute lane diagnostics shared by both runs ---
+d3 = boundaries.blocks.__root__.get("3") or []
+lane_mask = (
+    [1 if d3 and any(row[j] & 1 for row in d3) else 0 for j in range(len(d3[0]))]
+    if (d3 and d3[0]) else []
+)
+
+from otcore.linalg_gf2 import mul, add, eye
+
+def _bottom_row(M): 
+    return M[-1] if (M and len(M)) else []
+
+lane_idx = [j for j, m in enumerate(lane_mask) if m]
+
+H2   = (H_obj.blocks.__root__.get("2") or [])
+H2d3 = mul(H2, d3) if (H2 and d3) else []
+C3   = (cmap.blocks.__root__.get("3") or [])
+C3pI3 = add(C3, eye(len(C3))) if C3 else []
+
+def _mask(vec, idx):
+    return [vec[j] for j in idx] if (vec and idx) else []
+
+lane_vec_H2d3  = _mask(_bottom_row(H2d3), lane_idx)
+lane_vec_C3pI3 = _mask(_bottom_row(C3pI3), lane_idx)
+
+# projector hash (only if projected is file-backed)
+proj_hash = ""
+if _cfg_proj_for_ab.get("source", {}).get("3") == "file":
+    pj_path = _cfg_proj_for_ab.get("projector_files", {}).get("3")
+    if pj_path and os.path.exists(pj_path):
+        proj_hash = projector._hash_matrix(_json.load(open(pj_path)))
+
+label_strict = policy_label_from_cfg(cfg_strict())
+label_proj   = policy_label_from_cfg(_cfg_proj_for_ab)
+pair_tag     = f"{label_strict}__VS__{label_proj}"
+
+ab_ctx = {
+    "pair_tag": pair_tag,
+    "strict": {
+        "label": label_strict,
+        "cfg":   cfg_strict(),
+        "out":   out_strict,
+        "ker_guard": "enforced",
+        "lane_mask_k3": lane_mask,
+        "lane_vec_H2d3": lane_vec_H2d3,
+        "lane_vec_C3plusI3": lane_vec_C3pI3,
+        "pass_vec": [
+            int(out_strict.get("2", {}).get("eq", False)),
+            int(out_strict.get("3", {}).get("eq", False)),
+        ],
+    },
+    "projected": {
+        "label": label_proj,
+        "cfg":   _cfg_proj_for_ab,
+        "out":   out_proj,
+        "ker_guard": "off",
+        "projector_hash": proj_hash,
+        "lane_mask_k3": lane_mask,
+        "lane_vec_H2d3": lane_vec_H2d3,
+        "lane_vec_C3plusI3": lane_vec_C3pI3,
+        "pass_vec": [
+            int(out_proj.get("2", {}).get("eq", False)),
+            int(out_proj.get("3", {}).get("eq", False)),
+        ],
+    },
+}
+
+st.session_state["ab_compare"] = ab_ctx
+st.caption(f"Saved A/B context: {pair_tag}")
+
 
     # ---- Pack diagnostics for both (lane mask + lane vectors) ----
     blocks_b = boundaries.blocks.__root__
