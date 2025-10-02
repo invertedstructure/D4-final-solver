@@ -838,16 +838,30 @@ sig_block = {
 is_strict = (not cfg_active.get("enabled_layers"))
 k3_true   = bool(out.get("3", {}).get("eq", False))
 
-# ---- Filenames: ensure we attach human-readable names from session_state ----
-def _fname(key: str, fallback: str = "") -> str:
+# ---- Filenames: make them NOT depend on visiting Unit tab ----
+def _name_from_state(key: str) -> str:
     v = st.session_state.get(key)
-    return v if isinstance(v, str) and v else fallback
+    return v if isinstance(v, str) and v.strip() else ""
+
+def _name_or_default(sesskey: str, file_obj, default_name: str) -> str:
+    # 1) if user uploaded somewhere and we stamped it, prefer that
+    stamped = _name_from_state(sesskey)
+    if stamped:
+        return stamped
+    # 2) else if we have a file object here (e.g., H uploader in this tab), use its real name
+    if file_obj is not None:
+        nm = getattr(file_obj, "name", "")
+        if isinstance(nm, str) and nm.strip():
+            return nm
+    # 3) else fall back to the canonical bundle filename
+    return default_name
 
 inputs_block.setdefault("filenames", {})
-inputs_block["filenames"]["boundaries"] = _fname("fname_boundaries", inputs_block["filenames"].get("boundaries", ""))
-inputs_block["filenames"]["C"]          = _fname("fname_cmap",       inputs_block["filenames"].get("C", ""))
-inputs_block["filenames"]["H"]          = _fname("fname_h",          inputs_block["filenames"].get("H", ""))
-inputs_block["filenames"]["U"]          = _fname("fname_shapes",     inputs_block["filenames"].get("U", ""))
+inputs_block["filenames"]["boundaries"] = _name_or_default("fname_boundaries", None,  "boundaries.json")
+inputs_block["filenames"]["C"]          = _name_or_default("fname_cmap",       None,  "cmap.json")
+inputs_block["filenames"]["U"]          = _name_or_default("fname_shapes",     None,  "shapes.json")
+inputs_block["filenames"]["H"]          = _name_or_default("fname_h",          f_H,   "H.json")
+
 
 # ---- Policy tag for cert filename (must be set BEFORE building payload) ----
 policy_tag = policy_label  # e.g. "strict" or "projected(columns@k=3,auto)"
