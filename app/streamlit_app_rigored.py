@@ -570,14 +570,14 @@ with tab2:
       # ---- Signatures (rank/ker + lane patterns) ----
     def _gf2_rank(M):
     # simple Gaussian elimination mod 2
-    if not M:
+        if not M:
         return 0
-    A = [row[:] for row in M]
-    r = 0
-    n_rows = len(A)
-    n_cols = len(A[0]) if A[0] else 0
-    col = 0
-    while r < n_rows and col < n_cols:
+        A = [row[:] for row in M]
+        r = 0
+        n_rows = len(A)
+        n_cols = len(A[0]) if A[0] else 0
+        col = 0
+        while r < n_rows and col < n_cols:
         # find pivot
         pivot = None
         for i in range(r, n_rows):
