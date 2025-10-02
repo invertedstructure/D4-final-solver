@@ -1063,40 +1063,7 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
     )
 
     st.json({"strict": out_strict, "projected": out_proj})
-
-    # ---- Stash A/B context for later cert/bundle writing ----
-st.session_state["ab_out_strict"] = out_strict
-st.session_state["ab_out_proj"]   = out_proj
-
-# Freeze the exact projected cfg used (you already built _cfg_proj_for_ab above)
-st.session_state["ab_cfg_proj"]   = _cfg_proj_for_ab
-st.session_state["ab_policy_label_strict"] = policy_label_from_cfg(cfg_strict())
-st.session_state["ab_policy_label_proj"]   = policy_label_from_cfg(_cfg_proj_for_ab)
-
-# Projector hash if file-backed
-_ab_pj_hash = ""
-if _cfg_proj_for_ab.get("source", {}).get("3") == "file":
-    _pj = _cfg_proj_for_ab.get("projector_files", {}).get("3")
-    if _pj and os.path.exists(_pj):
-        _ab_pj_hash = projector._hash_matrix(_json.load(open(_pj)))
-st.session_state["ab_projector_hash"] = _ab_pj_hash
-
-# (Optional) precompute projected residual diagnostics for k=3
-try:
-    from otcore import cert_helpers as cert
-    R3_strict = cert.k3_strict_residual(boundaries, cmap, H_obj)  # H_obj you used above
-    d3 = boundaries.blocks.__root__.get("3")
-    R3_proj   = cert.k3_projected_residual(R3_strict, d3) if d3 else []
-    st.session_state["ab_R3_strict"] = R3_strict
-    st.session_state["ab_R3_proj"]   = R3_proj
-except Exception:
-    # Non-fatal; cert can still be written without these matrices
-    pass
-
-st.success("A/B context captured: will be included if you choose to write a combined cert.")
-
-
-    # --- Compute policy labels + pair tag ---------------------------------
+        # --- Compute policy labels + pair tag ---------------------------------
     label_strict = policy_label_from_cfg(cfg_strict())
     label_proj   = policy_label_from_cfg(_cfg_proj_for_ab)
     ab_pair_tag  = f"{label_strict}__VS__{label_proj}"
@@ -1173,6 +1140,9 @@ st.success("A/B context captured: will be included if you choose to write a comb
                 st.toast("registry: added strict & projected rows")
             except Exception as e:
                 st.error(f"registry write failed: {e}")
+
+
+
 
 
 
