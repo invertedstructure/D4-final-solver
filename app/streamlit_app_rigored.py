@@ -1286,10 +1286,11 @@ st.session_state["ab_compare"] = ab_ctx
 st.caption(f"Saved A/B context: {pair_tag}")
 
 
-    # ---- Pack diagnostics for both (lane mask + lane vectors) ----
+        # ---- Pack diagnostics for both (lane mask + lane vectors) ----
     blocks_b = boundaries.blocks.__root__
     blocks_c = cmap.blocks.__root__
     blocks_h = H_obj.blocks.__root__
+
     d3 = blocks_b.get("3")
     lane_mask = []
     if d3 and d3[0]:
@@ -1297,25 +1298,35 @@ st.caption(f"Saved A/B context: {pair_tag}")
             lane_mask.append(1 if any(row[j] & 1 for row in d3) else 0)
 
     from otcore.linalg_gf2 import mul, add, eye
-    def _bottom_row(M): return M[-1] if (M and len(M)) else []
+
+    def _bottom_row(M):
+        return M[-1] if (M and len(M)) else []
+
     lane_idx = [j for j, m in enumerate(lane_mask) if m]
 
     # strict lane vecs
     H2d3_s = mul(blocks_h.get("2", []), d3) if (blocks_h.get("2") and d3) else []
-    C3pI3  = add(blocks_c.get("3", []),
-                 eye(len(blocks_c.get("3", []))) if blocks_c.get("3") else [])
-    def _mask(vec): return [vec[j] for j in lane_idx] if vec and lane_idx else []
+    C3pI3  = add(
+        blocks_c.get("3", []),
+        eye(len(blocks_c.get("3", []))) if blocks_c.get("3") else []
+    )
+
+    def _mask(vec):
+        return [vec[j] for j in lane_idx] if vec and lane_idx else []
+
     lane_vec_H2d3_s = _mask(_bottom_row(H2d3_s))
     lane_vec_C3pI3  = _mask(_bottom_row(C3pI3))
 
     # projected lane vecs (same inputs; projection changes residual checks, not these vecs)
-    lane_vec_H2d3_p = lane_vec_H2d3_s  # same lanes; fine to reuse
+    lane_vec_H2d3_p = lane_vec_H2d3_s  # identical for our purposes
+
     # projector hash if file-backed
     pj_hash_proj = ""
     if _cfg_proj_for_ab.get("source", {}).get("3") == "file":
         pj_path = _cfg_proj_for_ab.get("projector_files", {}).get("3")
         if pj_path and os.path.exists(pj_path):
             pj_hash_proj = projector._hash_matrix(_json.load(open(pj_path)))
+
 
     # ---- Persist compact A/B context into session_state ----------------------
     ab_ctx = {
