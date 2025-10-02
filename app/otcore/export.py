@@ -19,10 +19,7 @@ def _jsonable(obj: Any) -> Any:
         except Exception:
             pass
     return obj  # assume already serializable
-    from __future__ import annotations
-import os, csv, json, hashlib
-from pathlib import Path
-from .io import dump_canonical
+  
 
 def ensure_dir(d: str) -> None:
     Path(d).mkdir(parents=True, exist_ok=True)
