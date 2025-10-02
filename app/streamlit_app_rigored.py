@@ -838,6 +838,18 @@ sig_block = {
 is_strict = (not cfg_active.get("enabled_layers"))
 k3_true   = bool(out.get("3", {}).get("eq", False))
 
+# ---- Filenames: ensure we attach human-readable names from session_state
+def _fname(key, fallback=""):
+    v = st.session_state.get(key)
+    return v if isinstance(v, str) and v else fallback
+
+inputs_block.setdefault("filenames", {})
+inputs_block["filenames"]["boundaries"] = _fname("fname_boundaries", inputs_block["filenames"].get("boundaries",""))
+inputs_block["filenames"]["C"]          = _fname("fname_cmap",       inputs_block["filenames"].get("C",""))
+inputs_block["filenames"]["H"]          = _fname("fname_h",          inputs_block["filenames"].get("H",""))
+inputs_block["filenames"]["U"]          = _fname("fname_shapes",     inputs_block["filenames"].get("U",""))
+
+
 # ---- FULL cert payload (single source of truth) ------------------------------
 cert_payload = {
     "identity":    identity_block,       # district_id/run_id/timestamp/app_version/field
@@ -948,7 +960,7 @@ if all_green:
      
        
 
-    # --- A/B compare (strict vs projected) ------------------------------------
+   # --- A/B compare (strict vs projected) ------------------------------------
 st.markdown("### A/B: strict vs projected")
 
 # Build a projected config fresh from file each time (so A/B mirrors disk)
@@ -978,6 +990,11 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
 
     st.json({"strict": out_strict, "projected": out_proj})
 
+    # --- Compute policy labels + pair tag ---------------------------------
+    label_strict = policy_label_from_cfg(cfg_strict())
+    label_proj   = policy_label_from_cfg(_cfg_proj_for_ab)
+    ab_pair_tag  = f"{label_strict}__VS__{label_proj}"
+
     # Optional: write both certs
     if st.checkbox("Write both certs (strict & projected)", value=False, key="ab_write_certs"):
         pj_hash_proj = ""
@@ -986,18 +1003,38 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
             if pj_path and os.path.exists(pj_path):
                 pj_hash_proj = projector._hash_matrix(_json.load(open(pj_path)))
 
-        cert_s = write_overlap_cert(
-            out=out_strict,
-            policy_label=policy_label_from_cfg(cfg_strict()),
-            boundaries=boundaries, cmap=cmap, H=H_obj, pj_hash=None
-        )
-        cert_p = write_overlap_cert(
-            out=out_proj,
-            policy_label=policy_label_from_cfg(_cfg_proj_for_ab),
-            boundaries=boundaries, cmap=cmap, H=H_obj, pj_hash=pj_hash_proj
-        )
+        # Try to pass ab_pair_tag; if helper doesn't support it yet, fall back gracefully
+        try:
+            cert_s = write_overlap_cert(
+                out=out_strict,
+                policy_label=label_strict,
+                boundaries=boundaries, cmap=cmap, H=H_obj, pj_hash=None,
+                ab_pair_tag=ab_pair_tag,
+            )
+        except TypeError:
+            cert_s = write_overlap_cert(
+                out=out_strict,
+                policy_label=label_strict,
+                boundaries=boundaries, cmap=cmap, H=H_obj, pj_hash=None,
+            )
+
+        try:
+            cert_p = write_overlap_cert(
+                out=out_proj,
+                policy_label=label_proj,
+                boundaries=boundaries, cmap=cmap, H=H_obj, pj_hash=pj_hash_proj,
+                ab_pair_tag=ab_pair_tag,
+            )
+        except TypeError:
+            cert_p = write_overlap_cert(
+                out=out_proj,
+                policy_label=label_proj,
+                boundaries=boundaries, cmap=cmap, H=H_obj, pj_hash=pj_hash_proj,
+            )
+
         st.success(f"Saved: `{cert_s}` and `{cert_p}`")
 
+        # Optional: log both to registry
         if st.checkbox("Also log both to registry.csv", value=False, key="ab_write_registry"):
             import time as _time
             try:
@@ -1007,12 +1044,12 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
                         int(out_strict.get("2", {}).get("eq", False)),
                         int(out_strict.get("3", {}).get("eq", False)),
                     ],
-                    policy=policy_label_from_cfg(cfg_strict()),
+                    policy=label_strict,
                     hash_d=hashes.hash_d(boundaries),
                     hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
                     hash_suppC=hashes.hash_suppC(cmap),
                     hash_suppH=hashes.hash_suppH(H_obj),
-                    notes="A/B compare strict",
+                    notes=f"A/B compare strict | pair={ab_pair_tag}",
                 )
                 export_mod.write_registry_row(
                     fix_id=f"compare-projected-{int(_time.time())}",
@@ -1020,12 +1057,12 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
                         int(out_proj.get("2", {}).get("eq", False)),
                         int(out_proj.get("3", {}).get("eq", False)),
                     ],
-                    policy=policy_label_from_cfg(_cfg_proj_for_ab),
+                    policy=label_proj,
                     hash_d=hashes.hash_d(boundaries),
                     hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
                     hash_suppC=hashes.hash_suppC(cmap),
                     hash_suppH=hashes.hash_suppH(H_obj),
-                    notes="A/B compare projected",
+                    notes=f"A/B compare projected | pair={ab_pair_tag}",
                 )
                 st.toast("registry: added strict & projected rows")
             except Exception as e:
