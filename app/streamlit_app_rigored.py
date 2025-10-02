@@ -785,26 +785,6 @@ cert_payload = {
     "policy_tag": policy_block.get("policy_tag", policy_block.get("label", "unknown")),
 }
 
-# ---- 5) Write cert -----------------------------------------------------------
-cert_path, full_hash = export_mod.write_cert_json(cert_payload)
-st.success(f"Cert written: `{cert_path}`")
-
-
-    # Top-level duplication of artifact hashes (handy for quick indexing)
-    "artifact_hashes": {
-        "boundaries_hash": inputs_block["boundaries_hash"],
-        "C_hash": inputs_block["C_hash"],
-        "H_hash": inputs_block["H_hash"],
-        "U_hash": inputs_block["U_hash"],
-        "projector_hash": policy_block["projector_hash"],
-    },
-}
-
-# Integrity: hash the entire payload and embed it
-cert_payload["integrity"] = {
-    "content_hash": hashes.content_hash_of(cert_payload)
-}
-
 # ---------- Tiny polish: filenames + signatures ----------
 # Place this AFTER you've created `inputs_block` and `diagnostics_block`,
 # and BEFORE you build `cert_payload`.
@@ -886,6 +866,28 @@ sig_block = {
 # Write cert
 cert_path, full_hash = export_mod.write_cert_json(cert_payload)
 st.success(f"Cert written: `{cert_path}`")
+
+
+# ---- 5) Write cert -----------------------------------------------------------
+cert_path, full_hash = export_mod.write_cert_json(cert_payload)
+st.success(f"Cert written: `{cert_path}`")
+
+
+    # Top-level duplication of artifact hashes (handy for quick indexing)
+    "artifact_hashes": {
+        "boundaries_hash": inputs_block["boundaries_hash"],
+        "C_hash": inputs_block["C_hash"],
+        "H_hash": inputs_block["H_hash"],
+        "U_hash": inputs_block["U_hash"],
+        "projector_hash": policy_block["projector_hash"],
+    },
+}
+
+# Integrity: hash the entire payload and embed it
+cert_payload["integrity"] = {
+    "content_hash": hashes.content_hash_of(cert_payload)
+}
+
 
 # ---------- Download bundle (includes cert.json) ----------
 try:
