@@ -568,13 +568,78 @@ with tab2:
         "lane_vec_C3plusI3": mask_to_lanes(bottom_row(C3pI3), lane_idx),
     }
 
-    # ---------- Checks/signatures ----------
-    checks_block = out  # {"2": {...}, "3": {...}}
-    sig_block = {
-        "d_signature": {},
-        "fixture_signature": {},
-        "echo_context": None,
-    }
+   # --- Signatures ---------------------------------------------------------------
+# d_signature from d3 (rank, ker_dim, lane_pattern)
+d3 = boundaries.blocks.__root__.get("3") or []
+lane_mask = diagnostics_block.get("lane_mask_k3", [])
+lane_pattern = "".join("1" if m else "0" for m in lane_mask) if lane_mask else ""
+
+def gf2_rank(mat):
+    # Gaussian elimination over GF(2) on a copy
+    A = [row[:] for row in mat] if mat else []
+    if not A:
+        return 0
+    n_rows, n_cols = len(A), len(A[0])
+    r = 0
+    c = 0
+    while r < n_rows and c < n_cols:
+        # find pivot row with 1 in column c
+        pivot = None
+        for i in range(r, n_rows):
+            if A[i][c] & 1:
+                pivot = i; break
+        if pivot is None:
+            c += 1
+            continue
+        # swap to row r
+        if pivot != r:
+            A[r], A[pivot] = A[pivot], A[r]
+        # eliminate below
+        for i in range(r+1, n_rows):
+            if A[i][c] & 1:
+                # row_i ^= row_r
+                A[i] = [(A[i][j] ^ A[r][j]) for j in range(n_cols)]
+        r += 1
+        c += 1
+    return r
+
+rank_d3 = gf2_rank(d3)
+n3 = len(d3[0]) if (d3 and d3[0]) else 0
+ker_dim = max(n3 - rank_d3, 0)
+
+d_signature = {
+    "rank": rank_d3,
+    "ker_dim": ker_dim,
+    "lane_pattern": lane_pattern,
+}
+
+# fixture_signature from support of (C3 + I3) restricted to lanes
+C3 = cmap.blocks.__root__.get("3") or []
+if C3:
+    # Build C3 + I3 over GF(2)
+    I3 = [[1 if i == j else 0 for j in range(len(C3))] for i in range(len(C3))]
+    C3pI3 = [[(C3[i][j] ^ I3[i][j]) for j in range(len(C3[0]))] for i in range(len(C3))]
+    # Support by column: 1 if any row has 1 in that column
+    supp_cols = []
+    for j in range(len(C3pI3[0]) if C3pI3 else 0):
+        any1 = any(C3pI3[i][j] & 1 for i in range(len(C3pI3)))
+        supp_cols.append(1 if any1 else 0)
+    # keep only lane columns (but keep string length n3, ker columns show as '0')
+    fixture_lane_str = "".join("1" if (lane_mask[j] and supp_cols[j]) else "0"
+                               for j in range(len(supp_cols))) if lane_mask else ""
+else:
+    fixture_lane_str = ""
+
+fixture_signature = {
+    "lane": fixture_lane_str
+}
+
+# finally, plug into sig_block you already build later
+sig_block = {
+    "d_signature": d_signature,
+    "fixture_signature": fixture_signature,
+    "echo_context": sig_block.get("echo_context") if 'sig_block' in locals() else None,
+}
 
     # ---------- Policy snapshot ----------
     pj_hash = ""
