@@ -616,7 +616,7 @@ sig_block = {
 
     
     # fixture_signature from support of (C3 + I3) restricted to lanes
-    C3 = cmap.blocks.__root__.get("3") or []
+C3 = cmap.blocks.__root__.get("3") or []
         if C3:
             # Build C3 + I3 over GF(2)
             I3 = [[1 if i == j else 0 for j in range(len(C3))] for i in range(len(C3))]
