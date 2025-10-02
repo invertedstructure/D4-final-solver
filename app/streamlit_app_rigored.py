@@ -1063,83 +1063,62 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
     )
 
     st.json({"strict": out_strict, "projected": out_proj})
-        # --- Compute policy labels + pair tag ---------------------------------
-    label_strict = policy_label_from_cfg(cfg_strict())
-    label_proj   = policy_label_from_cfg(_cfg_proj_for_ab)
-    ab_pair_tag  = f"{label_strict}__VS__{label_proj}"
+        # --- Compute policy labels + pair tag ---
+label_strict = policy_label_from_cfg(cfg_strict())
+label_proj   = policy_label_from_cfg(_cfg_proj_for_ab)
+ab_pair_tag  = f"{label_strict}__VS__{label_proj}"
 
-    # Optional: write both certs
-    if st.checkbox("Write both certs (strict & projected)", value=False, key="ab_write_certs"):
-        pj_hash_proj = ""
-        if _cfg_proj_for_ab.get("source", {}).get("3") == "file":
-            pj_path = _cfg_proj_for_ab.get("projector_files", {}).get("3")
-            if pj_path and os.path.exists(pj_path):
-                pj_hash_proj = projector._hash_matrix(_json.load(open(pj_path)))
+# quick lane diagnostics for projected (optional but handy)
+d3 = boundaries.blocks.__root__.get("3") or []
+lane_mask = []
+if d3 and d3[0]:
+    n = len(d3[0])
+    for j in range(n):
+        lane_mask.append(1 if any(row[j] & 1 for row in d3) else 0)
+else:
+    lane_mask = []
 
-        # Try to pass ab_pair_tag; if helper doesn't support it yet, fall back gracefully
-        try:
-            cert_s = write_overlap_cert(
-                out=out_strict,
-                policy_label=label_strict,
-                boundaries=boundaries, cmap=cmap, H=H_obj, pj_hash=None,
-                ab_pair_tag=ab_pair_tag,
-            )
-        except TypeError:
-            cert_s = write_overlap_cert(
-                out=out_strict,
-                policy_label=label_strict,
-                boundaries=boundaries, cmap=cmap, H=H_obj, pj_hash=None,
-            )
+from otcore.linalg_gf2 import mul, add, eye
 
-        try:
-            cert_p = write_overlap_cert(
-                out=out_proj,
-                policy_label=label_proj,
-                boundaries=boundaries, cmap=cmap, H=H_obj, pj_hash=pj_hash_proj,
-                ab_pair_tag=ab_pair_tag,
-            )
-        except TypeError:
-            cert_p = write_overlap_cert(
-                out=out_proj,
-                policy_label=label_proj,
-                boundaries=boundaries, cmap=cmap, H=H_obj, pj_hash=pj_hash_proj,
-            )
+H2d3 = mul(H_obj.blocks.__root__.get("2", []), d3) if (H_obj and d3) else []
+C3   = cmap.blocks.__root__.get("3", [])
+C3pI3 = add(C3, eye(len(C3))) if C3 else []
 
-        st.success(f"Saved: `{cert_s}` and `{cert_p}`")
+def _bottom_row(M): return M[-1] if (M and len(M)) else []
+lane_idx = [j for j, m in enumerate(lane_mask) if m]
+def _mask(vec, idxs): return [vec[j] for j in idxs] if (vec and idxs) else []
 
-        # Optional: log both to registry
-        if st.checkbox("Also log both to registry.csv", value=False, key="ab_write_registry"):
-            import time as _time
-            try:
-                export_mod.write_registry_row(
-                    fix_id=f"compare-strict-{int(_time.time())}",
-                    pass_vector=[
-                        int(out_strict.get("2", {}).get("eq", False)),
-                        int(out_strict.get("3", {}).get("eq", False)),
-                    ],
-                    policy=label_strict,
-                    hash_d=hashes.hash_d(boundaries),
-                    hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
-                    hash_suppC=hashes.hash_suppC(cmap),
-                    hash_suppH=hashes.hash_suppH(H_obj),
-                    notes=f"A/B compare strict | pair={ab_pair_tag}",
-                )
-                export_mod.write_registry_row(
-                    fix_id=f"compare-projected-{int(_time.time())}",
-                    pass_vector=[
-                        int(out_proj.get("2", {}).get("eq", False)),
-                        int(out_proj.get("3", {}).get("eq", False)),
-                    ],
-                    policy=label_proj,
-                    hash_d=hashes.hash_d(boundaries),
-                    hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
-                    hash_suppC=hashes.hash_suppC(cmap),
-                    hash_suppH=hashes.hash_suppH(H_obj),
-                    notes=f"A/B compare projected | pair={ab_pair_tag}",
-                )
-                st.toast("registry: added strict & projected rows")
-            except Exception as e:
-                st.error(f"registry write failed: {e}")
+lane_vec_H2d3 = _mask(_bottom_row(H2d3), lane_idx)
+lane_vec_C3pI3 = _mask(_bottom_row(C3pI3), lane_idx)
+
+# projector hash if proj is file-backed
+pj_hash_proj = ""
+if _cfg_proj_for_ab.get("source", {}).get("3") == "file":
+    pj_path = _cfg_proj_for_ab.get("projector_files", {}).get("3")
+    if pj_path and os.path.exists(pj_path):
+        pj_hash_proj = projector._hash_matrix(_json.load(open(pj_path)))
+
+# Persist the full A/B context so cert writing can find it later
+st.session_state["ab_compare"] = {
+    "pair_tag": ab_pair_tag,
+    "strict": {
+        "label": label_strict,
+        "cfg":   cfg_strict(),
+        "out":   out_strict,
+        "ker_guard": "enforced",
+    },
+    "projected": {
+        "label": label_proj,
+        "cfg":   _cfg_proj_for_ab,
+        "out":   out_proj,
+        "ker_guard": "off",
+        "lane_mask_k3": lane_mask,
+        "lane_vec_H2d3": lane_vec_H2d3,
+        "lane_vec_C3plusI3": lane_vec_C3pI3,
+        "projector_hash": pj_hash_proj,
+    },
+}
+st.success("A/B context captured for certs & bundle.")
 
 
 
