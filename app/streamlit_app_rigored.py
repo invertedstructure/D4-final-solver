@@ -838,17 +838,19 @@ sig_block = {
 is_strict = (not cfg_active.get("enabled_layers"))
 k3_true   = bool(out.get("3", {}).get("eq", False))
 
-# ---- Filenames: ensure we attach human-readable names from session_state
-def _fname(key, fallback=""):
+# ---- Filenames: ensure we attach human-readable names from session_state ----
+def _fname(key: str, fallback: str = "") -> str:
     v = st.session_state.get(key)
     return v if isinstance(v, str) and v else fallback
 
 inputs_block.setdefault("filenames", {})
-inputs_block["filenames"]["boundaries"] = _fname("fname_boundaries", inputs_block["filenames"].get("boundaries",""))
-inputs_block["filenames"]["C"]          = _fname("fname_cmap",       inputs_block["filenames"].get("C",""))
-inputs_block["filenames"]["H"]          = _fname("fname_h",          inputs_block["filenames"].get("H",""))
-inputs_block["filenames"]["U"]          = _fname("fname_shapes",     inputs_block["filenames"].get("U",""))
+inputs_block["filenames"]["boundaries"] = _fname("fname_boundaries", inputs_block["filenames"].get("boundaries", ""))
+inputs_block["filenames"]["C"]          = _fname("fname_cmap",       inputs_block["filenames"].get("C", ""))
+inputs_block["filenames"]["H"]          = _fname("fname_h",          inputs_block["filenames"].get("H", ""))
+inputs_block["filenames"]["U"]          = _fname("fname_shapes",     inputs_block["filenames"].get("U", ""))
 
+# ---- Policy tag for cert filename (must be set BEFORE building payload) ----
+policy_tag = policy_label  # e.g. "strict" or "projected(columns@k=3,auto)"
 
 # ---- FULL cert payload (single source of truth) ------------------------------
 cert_payload = {
@@ -863,11 +865,11 @@ cert_payload = {
         "promotion_target": ("strict_anchor" if is_strict else "projected_anchor") if k3_true else None,
         "notes": "",
     },
-    "policy_tag": policy_block.get("policy_tag", policy_block.get("label", "unknown")),
+    "policy_tag": policy_tag,
 }
 
-# ---- Finalize cert: integrity + write ----------------------------------------
-# Ensure we have a mirror of artifact hashes at the top level (optional, for indexing)
+# ---- Finalize cert: integrity + artifact hashes, then write ------------------
+# (Top-level mirror of artifact hashes is handy for indexing/search)
 cert_payload.setdefault("artifact_hashes", {
     "boundaries_hash": inputs_block["boundaries_hash"],
     "C_hash":          inputs_block["C_hash"],
@@ -880,9 +882,10 @@ cert_payload.setdefault("artifact_hashes", {
 cert_payload.setdefault("integrity", {})
 cert_payload["integrity"]["content_hash"] = hashes.content_hash_of(cert_payload)
 
-# Write cert (single call)
+# Single write
 cert_path, full_hash = export_mod.write_cert_json(cert_payload)
 st.success(f"Cert written: `{cert_path}`")
+
 
 # ---- Download bundle (includes cert.json) ------------------------------------
 try:
