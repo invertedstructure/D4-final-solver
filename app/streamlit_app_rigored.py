@@ -863,8 +863,8 @@ cert_path, full_hash = export_mod.write_cert_json(cert_payload)
 st.success(f"Cert written: `{cert_path}`")
 
 
-    # Top-level duplication of artifact hashes (handy for quick indexing)
-    "artifact_hashes": {
+# Top-level duplication of artifact hashes (handy for quick indexing)
+"artifact_hashes": {
         "boundaries_hash": inputs_block["boundaries_hash"],
         "C_hash": inputs_block["C_hash"],
         "H_hash": inputs_block["H_hash"],
