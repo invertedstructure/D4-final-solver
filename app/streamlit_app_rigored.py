@@ -1306,13 +1306,48 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
     lane_vec_H2d3  = _mask(_bottom_row(H2d3), lane_idx)
     lane_vec_C3pI3 = _mask(_bottom_row(C3pI3), lane_idx)
 
-    # --- 2) Projector provenance hash for the PROJECTED leg (AUTO or FILE) ---
+    # --- helper: call projector_provenance_hash across possible signatures -------
+def _provenance_hash(cfg, lane_mask, district_id):
+    try:
+        # v1: explicit lane_mask_k3 kwarg
+        return projector_provenance_hash(
+            cfg=cfg, lane_mask_k3=lane_mask, district_id=district_id
+        )
+    except TypeError:
+        pass
+    try:
+        # v2: older name "lane_mask"
+        return projector_provenance_hash(
+            cfg=cfg, lane_mask=lane_mask, district_id=district_id
+        )
+    except TypeError:
+        pass
+    try:
+        # v3: provenance via boundaries + diagnostics_block
+        return projector_provenance_hash(
+            cfg=cfg,
+            boundaries=boundaries,
+            district_id=district_id,
+            diagnostics_block={"lane_mask_k3": lane_mask},
+        )
+    except TypeError:
+        pass
+    try:
+        # v4: minimal signature
+        return projector_provenance_hash(cfg=cfg)
+    except Exception:
+        return ""
+
+
+       # --- 2) Projector provenance hash for the PROJECTED leg (AUTO or FILE) ---
     district_id = st.session_state.get("district_id", "D3")
-    proj_hash_prov = projector_provenance_hash(
+    proj_hash_prov = _provenance_hash(_cfg_proj_for_ab, lane_mask, district_id)
         cfg=_cfg_proj_for_ab,
         lane_mask_k3=lane_mask,
         district_id=district_id,
     )
+    st.caption(f"projected Π provenance hash: {proj_hash_prov[:12]}…")
+
 
     # --- Persist compact A/B context ---
     pair_tag = f"{label_strict}__VS__{label_proj}"
