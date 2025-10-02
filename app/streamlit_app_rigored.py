@@ -1358,48 +1358,48 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
     proj_hash_prov = _provenance_hash(_cfg_proj_for_ab, lane_mask, district_id)
     st.caption(f"projected Π provenance hash: {proj_hash_prov[:12]}…")
 
-    # Build an inputs signature for freshness checks
-inputs_sig = [
-    inputs_block.get("boundaries_hash", ""),
-    inputs_block.get("C_hash", ""),
-    inputs_block.get("H_hash", ""),
-    inputs_block.get("U_hash", ""),
-    inputs_block.get("shapes_hash", ""),  # if you don’t have, leave ""
-]
-
-# --- Persist compact A/B context ---
-pair_tag = f"{label_strict}__VS__{label_proj}"
-st.session_state["ab_compare"] = {
-    "pair_tag": pair_tag,
-    "inputs_sig": inputs_sig,          # <-- NEW: stamp inputs used for this A/B
-    "lane_mask_k3": lane_mask,
-    "strict": {
-        "label": label_strict,
-        "cfg":   cfg_strict(),
-        "out":   out_strict,
-        "ker_guard": "enforced",
-        "lane_vec_H2d3": lane_vec_H2d3,
-        "lane_vec_C3plusI3": lane_vec_C3pI3,
-        "projector_hash": "",
-        "pass_vec": [
-            int(out_strict.get("2", {}).get("eq", False)),
-            int(out_strict.get("3", {}).get("eq", False)),
-        ],
-    },
-    "projected": {
-        "label": label_proj,
-        "cfg":   _cfg_proj_for_ab,
-        "out":   out_proj,
-        "ker_guard": "off",
-        "projector_hash": proj_hash_prov,
-        "lane_vec_H2d3": lane_vec_H2d3,
-        "lane_vec_C3plusI3": lane_vec_C3pI3,
-        "pass_vec": [
-            int(out_proj.get("2", {}).get("eq", False)),
-            int(out_proj.get("3", {}).get("eq", False)),
-        ],
-    },
-}
+        # Build an inputs signature for freshness checks
+    inputs_sig = [
+        inputs_block.get("boundaries_hash", ""),
+        inputs_block.get("C_hash", ""),
+        inputs_block.get("H_hash", ""),
+        inputs_block.get("U_hash", ""),
+        inputs_block.get("shapes_hash", ""),  # if you don’t have, leave ""
+    ]
+    
+    # --- Persist compact A/B context ---
+    pair_tag = f"{label_strict}__VS__{label_proj}"
+    st.session_state["ab_compare"] = {
+        "pair_tag": pair_tag,
+        "inputs_sig": inputs_sig,          # <-- NEW: stamp inputs used for this A/B
+        "lane_mask_k3": lane_mask,
+        "strict": {
+            "label": label_strict,
+            "cfg":   cfg_strict(),
+            "out":   out_strict,
+            "ker_guard": "enforced",
+            "lane_vec_H2d3": lane_vec_H2d3,
+            "lane_vec_C3plusI3": lane_vec_C3pI3,
+            "projector_hash": "",
+            "pass_vec": [
+                int(out_strict.get("2", {}).get("eq", False)),
+                int(out_strict.get("3", {}).get("eq", False)),
+            ],
+        },
+        "projected": {
+            "label": label_proj,
+            "cfg":   _cfg_proj_for_ab,
+            "out":   out_proj,
+            "ker_guard": "off",
+            "projector_hash": proj_hash_prov,
+            "lane_vec_H2d3": lane_vec_H2d3,
+            "lane_vec_C3plusI3": lane_vec_C3pI3,
+            "pass_vec": [
+                int(out_proj.get("2", {}).get("eq", False)),
+                int(out_proj.get("3", {}).get("eq", False)),
+            ],
+        },
+    }
 
 
     # --- Status badge ---
