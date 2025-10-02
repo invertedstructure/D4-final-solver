@@ -679,6 +679,85 @@ identity_block = {
     "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
     "field": "GF(2)",
 }
+# ---------- Tiny polish: filenames + signatures ----------
+
+# 1) Ensure filenames for Boundaries and U are filled (H already set)
+inputs_block["filenames"]["boundaries"] = (
+    inputs_block["filenames"].get("boundaries") or st.session_state.get("fname_boundaries", "")
+)
+inputs_block["filenames"]["U"] = (
+    inputs_block["filenames"].get("U") or st.session_state.get("fname_shapes", "")
+)
+
+# 2) d-signature (from d3): rank, ker_dim, lane_pattern
+d3 = boundaries.blocks.__root__.get("3")
+
+def _gf2_rank(M):
+    if not M or not M[0]:
+        return 0
+    # Gaussian elimination over GF(2)
+    A = [row[:] for row in M]
+    m, n = len(A), len(A[0])
+    r, c = 0, 0
+    while r < m and c < n:
+        pivot = None
+        for i in range(r, m):
+            if A[i][c] & 1:
+                pivot = i
+                break
+        if pivot is None:
+            c += 1
+            continue
+        # swap pivot row up
+        if pivot != r:
+            A[r], A[pivot] = A[pivot], A[r]
+        # eliminate same-col bits in all other rows
+        for i in range(m):
+            if i != r and (A[i][c] & 1):
+                A[i] = [(a ^ b) & 1 for a, b in zip(A[i], A[r])]
+        r += 1
+        c += 1
+    return r
+
+lane_mask = diagnostics_block.get("lane_mask_k3", []) or []
+lane_pattern = "".join(str(int(x)) for x in lane_mask) if lane_mask else ""
+
+rank_d3 = _gf2_rank(d3) if d3 else 0
+ncols_d3 = len(d3[0]) if (d3 and d3[0]) else 0
+ker_dim_d3 = max(ncols_d3 - rank_d3, 0)
+
+d_signature = {
+    "rank": rank_d3,
+    "ker_dim": ker_dim_d3,
+    "lane_pattern": lane_pattern,
+}
+
+# 3) fixture_signature: support(C3 + I3) restricted to LANE columns
+from otcore.linalg_gf2 import add, eye
+
+C3 = cmap.blocks.__root__.get("3")
+C3pI3 = add(C3, eye(len(C3))) if C3 else []
+lane_idxs = [j for j, m in enumerate(lane_mask) if m == 1]
+
+def _col_support_pattern(M, cols):
+    if not M or not cols:
+        return ""
+    bits = []
+    for j in cols:
+        any_nz = any((row[j] & 1) for row in M)
+        bits.append("1" if any_nz else "0")
+    return "".join(bits)
+
+fixture_signature = {
+    "lane": _col_support_pattern(C3pI3, lane_idxs)
+}
+
+# 4) Plug signatures into your sig_block (replace your previous placeholder)
+sig_block = {
+    "d_signature": d_signature,
+    "fixture_signature": fixture_signature,
+    "echo_context": None,
+}
 
 # ---------- Full cert payload ----------
 cert_payload = {
