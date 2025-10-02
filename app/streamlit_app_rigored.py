@@ -482,22 +482,24 @@ if st.button("Run Overlap", key="run_overlap"):
         st.error(f"Overlap run failed: {e}")
         st.stop()
 
+        
+                # ---------- Gather last run from session_state (required for cert/bundle) ----------
+        _ss = st.session_state
+        overlap_out          = _ss.get("overlap_out")
+        overlap_cfg          = _ss.get("overlap_cfg")
+        overlap_policy_label = _ss.get("overlap_policy_label")
+        H_local              = _ss.get("overlap_H")
+        
+        if overlap_out is None or overlap_cfg is None or H_local is None:
+            st.info("Run Overlap first to populate cert & download bundle.")
+            st.stop()
+        
+        # convenience handles used below (replace previous uses of `out`, `cfg_active`, `policy_label`, and `H`)
+        out          = overlap_out
+        cfg_active   = overlap_cfg
+        policy_label = overlap_policy_label
+        # H_local is already set above
 
-        # --- Lane mask preview (k=3) ---
-        d3 = boundaries.blocks.__root__.get("3")
-        lane_mask = [1 if any(row[j] for row in d3) else 0 for j in range(len(d3[0]))] if d3 else []
-        st.write("k=3 lane_mask (1=lane, 0=ker):", lane_mask)
-        
-                # ===== Restore last overlap run (required by cert/bundle) =====
-        out = st.session_state.get("overlap_out")
-        if out is None:
-            st.info("Run Overlap first (no cached result to write).")
-            st.stop()  # prevents the rest of the cert code from executing
-        
-        # use the exact cfg/policy/H used in the run
-        cfg_active   = st.session_state.get("overlap_cfg", cfg_strict())
-        policy_label = st.session_state.get("overlap_policy_label", policy_label_from_cfg(cfg_active))
-        H_local      = st.session_state.get("overlap_H", io.parse_cmap({"blocks": {}}))
         
         # shapes must be JSON-safe
         shapes_payload = shapes.dict() if hasattr(shapes, "dict") else (shapes or {})
