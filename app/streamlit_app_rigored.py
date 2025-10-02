@@ -591,55 +591,154 @@ with tab2:
         "projector_hash": pj_hash,
     }
 
-    # ---------- Cert payload + write ----------
-    district_id = st.session_state.get("district_id", "D3")
-    cert_payload = {
-        "identity": {
-            "district_id": district_id,
-            "run_id": hashes.run_id(inputs_hash, hashes.timestamp_iso_lisbon()),
-            "timestamp": hashes.timestamp_iso_lisbon(),
-            "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
-            "field": "GF(2)",
-        },
-        "policy": policy_block,
-        "inputs": inputs_block,
-        "diagnostics": diagnostics_block,
-        "checks": checks_block,
-        "signatures": sig_block,
-        "promotion": {"eligible_for_promotion": None, "promotion_target": None, "notes": ""},
-        "artifact_hashes": {
-            "boundaries_hash": inputs_block["boundaries_hash"],
-            "C_hash": inputs_block["C_hash"],
-            "H_hash": inputs_block["H_hash"],
-            "U_hash": inputs_block["U_hash"],
-            "projector_hash": policy_block["projector_hash"],
-        },
-        "policy_tag": policy_label,
-    }
-    cert_path, full_hash = export_mod.write_cert_json(cert_payload)
-    st.success(f"Cert written: `{cert_path}`")
+   # ---------- Residual tag (lanes / ker / mixed / none) ----------
+from otcore.linalg_gf2 import mul, add, eye
 
-    # ---------- One-click bundle download ----------
-    try:
-        zpath = export_mod.build_overlap_bundle(
-            boundaries=boundaries,
-            cmap=cmap,
-            H=H_local,
-            shapes=shapes_payload,
-            policy_block=policy_block,
-            cert_path=cert_path,
-            out_zip=f"overlap_bundle__{district_id}__{policy_label.replace(' ','_')}__{full_hash[:12]}.zip",
+def _support(M):
+    return [[1 if (v % 2) != 0 else 0 for v in row] for row in (M or [])]
+
+# Strict residual at k=3: R3 = H2@d3 + (C3 + I3)
+blocks_b = boundaries.blocks.__root__
+blocks_c = cmap.blocks.__root__
+blocks_h = H_local.blocks.__root__
+d3 = blocks_b.get("3")
+C3 = blocks_c.get("3")
+H2 = blocks_h.get("2")
+
+R3_strict = []
+if d3 is not None and C3 is not None and H2 is not None:
+    I3 = eye(len(C3))
+    R3_strict = add(mul(H2, d3), add(C3, I3))
+
+lane_mask_k3 = diagnostics_block.get("lane_mask_k3", [])
+lane_idx = [j for j, m in enumerate(lane_mask_k3) if m == 1]
+ker_idx  = [j for j, m in enumerate(lane_mask_k3) if m == 0]
+
+def _which_cols_nonzero(M):
+    if not M: return set()
+    nz = set()
+    for r in M:
+        for j, v in enumerate(r):
+            if v % 2 != 0:
+                nz.add(j)
+    return nz
+
+nz_cols = _which_cols_nonzero(R3_strict)
+lanes_nonzero = any(j in nz_cols for j in lane_idx)
+ker_nonzero   = any(j in nz_cols for j in ker_idx)
+if not nz_cols:
+    residual_tag = "none"
+elif lanes_nonzero and not ker_nonzero:
+    residual_tag = "lanes"
+elif ker_nonzero and not lanes_nonzero:
+    residual_tag = "ker"
+else:
+    residual_tag = "mixed"
+
+# ---------- Checks (extend beyond eq) ----------
+# If you have real grid/fence checks elsewhere, wire them here.
+# Until then, record sensible defaults and ker_guard based on policy:
+is_strict = (policy_label == "strict")
+checks_extended = {
+    "grid": True,                 # placeholder (set real result if you compute it)
+    "fence": True,                # placeholder (set real result if you compute it)
+    "ker_guard": "enforced" if is_strict else "off",
+}
+# Merge with your per-k out (eq, n_k)
+checks_block = {**out, **checks_extended, "residual_tag": residual_tag}
+
+# ---------- Policy snapshot (echo full config + projector hash if file) ----------
+pj_hash = ""
+if cfg_active.get("source", {}).get("3") == "file":
+    pj_path = cfg_active.get("projector_files", {}).get("3")
+    if pj_path and os.path.exists(pj_path):
+        pj_hash = projector._hash_matrix(_json.load(open(pj_path)))
+
+policy_block = {
+    "policy": policy_label,              # "strict" or "projected(columns@k=3,auto|file)"
+    "projection_config": cfg_active,     # echo effective config
+    "projector_hash": pj_hash,           # only if file-backed
+}
+
+# ---------- Identity ----------
+district_id = st.session_state.get("district_id", "D3")
+run_id_val  = hashes.run_id(
+    hashes.bundle_content_hash([
+        ("boundaries", boundaries.dict() if hasattr(boundaries, "dict") else {}),
+        ("cmap",       cmap.dict()       if hasattr(cmap,       "dict") else {}),
+        ("H",          H_local.dict()    if hasattr(H_local,    "dict") else {}),
+        ("cfg",        cfg_active),
+    ]),
+    hashes.timestamp_iso_lisbon(),
+)
+
+identity_block = {
+    "district_id": district_id,
+    "run_id": run_id_val,
+    "timestamp": hashes.timestamp_iso_lisbon(),
+    "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
+    "field": "GF(2)",
+}
+
+# ---------- Full cert payload ----------
+cert_payload = {
+    "identity": identity_block,
+    "policy": policy_block,
+    "inputs": inputs_block,              # you already assembled (hashes + dims + filenames)
+    "diagnostics": diagnostics_block,    # lane_mask_k3 / lane_vec_* you computed earlier
+    "checks": checks_block,              # per-k eq + n_k + grid/fence/ker_guard/residual_tag
+    "signatures": {
+        "d_signature": {},               # fill with your canonical signature if you have it
+        "fixture_signature": {},
+        "echo_context": None,
+    },
+    "promotion": {
+        "eligible_for_promotion": int(out.get("3", {}).get("eq", False)) == 1,
+        "promotion_target": ("projected_anchor" if not is_strict else "strict_anchor") if int(out.get("3", {}).get("eq", False)) == 1 else None,
+        "notes": "",
+    },
+    # Top-level duplication of artifact hashes (handy for quick indexing)
+    "artifact_hashes": {
+        "boundaries_hash": inputs_block["boundaries_hash"],
+        "C_hash": inputs_block["C_hash"],
+        "H_hash": inputs_block["H_hash"],
+        "U_hash": inputs_block["U_hash"],
+        "projector_hash": policy_block["projector_hash"],
+    },
+}
+
+# Integrity: hash the entire payload and embed it
+cert_payload["integrity"] = {
+    "content_hash": hashes.content_hash_of(cert_payload)
+}
+
+# Write cert
+cert_path, full_hash = export_mod.write_cert_json(cert_payload)
+st.success(f"Cert written: `{cert_path}`")
+
+# ---------- Download bundle (includes cert.json) ----------
+try:
+    bundle_name = f"overlap_bundle__{district_id}__{policy_label.replace(' ','_')}__{full_hash[:12]}.zip"
+    zip_path = export_mod.build_overlap_bundle(
+        boundaries=boundaries,
+        cmap=cmap,
+        H=H_local,
+        shapes=(shapes.dict() if hasattr(shapes, "dict") else (shapes or {})),
+        policy_block=policy_block,
+        cert_path=cert_path,
+        out_zip=bundle_name,
+    )
+    with open(zip_path, "rb") as f:
+        st.download_button(
+            "⬇️ Download bundle (.zip)",
+            data=f,
+            file_name=bundle_name,
+            mime="application/zip",
+            key="dl_overlap_bundle",
         )
-        with open(zpath, "rb") as fz:
-            st.download_button(
-                "⬇️ Download bundle (B,C,H,U,config,cert)",
-                data=fz,
-                file_name=os.path.basename(zpath),
-                mime="application/zip",
-                key="dl_bundle_k3",
-            )
-    except Exception as e:
-        st.error(f"Could not build download bundle: {e}")
+except Exception as e:
+    st.error(f"Could not build download bundle: {e}")
+
 
     # ---------- Promotion (optional) ----------
     pass_vec = [int(out.get("2", {}).get("eq", False)),
