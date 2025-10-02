@@ -17,6 +17,55 @@ st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
 # --- Policy helpers -----------------------------------------------------------
 # ---- cert helpers: diagnostics and checks (GF(2)-safe) ----
 
+def _lane_mask_from_d3(boundaries) -> list[int]:
+    """Derive lane_mask_k3 from d3: column j is lane if any bit in that column is 1."""
+    try:
+        d3 = boundaries.blocks.__root__.get("3")
+    except Exception:
+        d3 = None
+    if not d3 or not d3[0]:
+        return []
+    mask = []
+    for j in range(len(d3[0])):
+        mask.append(1 if any((row[j] & 1) for row in d3) else 0)
+    return mask
+
+def projector_provenance_hash(cfg: dict, *, boundaries, district_id: str, diagnostics_block: dict | None = None) -> str:
+    """
+    Stable hash for projector provenance.
+    - If file-backed: hash the file content (if you want, keep your existing path).
+    - For AUTO: hash a normalized descriptor that captures the effective selection.
+    """
+    # Try file-backed first
+    try:
+        src = (cfg or {}).get("source", {}).get("3")
+        pj_path = (cfg or {}).get("projector_files", {}).get("3")
+        if src == "file" and pj_path:
+            with open(pj_path) as f:
+                P = _json.load(f)
+            # normalize matrix content to stable string before hashing
+            s = _json.dumps(P, sort_keys=True, separators=(",", ":"))
+            return _hashlib.sha256(s.encode("utf-8")).hexdigest()
+    except Exception:
+        pass
+
+    # AUTO (or anything else): build a normalized descriptor
+    mode = (cfg or {}).get("modes", {}).get("3", "columns")
+    selection = (cfg or {}).get("source", {}).get("3", "auto")
+    enabled = (cfg or {}).get("enabled_layers", [])
+    lane_mask = (diagnostics_block or {}).get("lane_mask_k3") or _lane_mask_from_d3(boundaries)
+
+    descriptor = {
+        "mode": mode,              # "columns"
+        "k": 3,
+        "selection": selection,    # "auto"
+        "enabled_layers": enabled, # [3] or []
+        "lane_mask_k3": lane_mask, # e.g., [1,1,0]
+        "district_id": district_id or "unknown",
+    }
+    s = _json.dumps(descriptor, sort_keys=True, separators=(",", ":"))
+    return _hashlib.sha256(s.encode("utf-8")).hexdigest()
+
 def projector_hash_for_cfg(cfg: dict) -> str:
     """Return hash of projector_D3.json if k=3 is file-backed, else ''."""
     try:
@@ -1174,22 +1223,24 @@ _cache_for_ab = projector.preload_projectors_from_files(_cfg_proj_for_ab)
 H_obj = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})
 
 if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
-    # A) strict
+    # --- A) strict
     out_strict   = overlap_gate.overlap_check(boundaries, cmap, H_obj)
     label_strict = policy_label_from_cfg(cfg_strict())
 
-    # B) projected (columns@k=3, auto|file per config)
-    out_proj   = overlap_gate.overlap_check(
+    # --- B) projected (columns@k=3, auto|file per config)
+    out_proj = overlap_gate.overlap_check(
         boundaries, cmap, H_obj,
         projection_config=_cfg_proj_for_ab,
         projector_cache=_cache_for_ab,
     )
     label_proj = policy_label_from_cfg(_cfg_proj_for_ab)
 
-    # lane diagnostics shared by both
+    # --- Lane diagnostics (shared by both) ---
     d3 = boundaries.blocks.__root__.get("3") or []
-    lane_mask = [1 if d3 and any(row[j] & 1 for row in d3) else 0
-                 for j in range(len(d3[0]))] if (d3 and d3[0]) else []
+    lane_mask = (
+        [1 if d3 and any(row[j] & 1 for row in d3) else 0 for j in range(len(d3[0]))]
+        if (d3 and d3[0]) else []
+    )
 
     from otcore.linalg_gf2 import mul, add, eye
     def _bottom_row(M): return M[-1] if (M and len(M)) else []
@@ -1204,16 +1255,17 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
     lane_vec_H2d3  = _mask(_bottom_row(H2d3), lane_idx)
     lane_vec_C3pI3 = _mask(_bottom_row(C3pI3), lane_idx)
 
-    # projector hash if file-backed
-    proj_hash = ""
-    if _cfg_proj_for_ab.get("source", {}).get("3") == "file":
-        pj_path = _cfg_proj_for_ab.get("projector_files", {}).get("3")
-        if pj_path and os.path.exists(pj_path):
-            proj_hash = projector._hash_matrix(_json.load(open(pj_path)))
+    # --- Projector provenance hash (works for AUTO or FILE) ---
+    district_id = st.session_state.get("district_id", "D3")
+    proj_hash_proj = projector_provenance_hash(
+        _cfg_proj_for_ab,
+        boundaries=boundaries,
+        district_id=district_id,
+        diagnostics_block={"lane_mask_k3": lane_mask},
+    )
 
+    # --- Persist compact A/B context ---
     pair_tag = f"{label_strict}__VS__{label_proj}"
-
-    # Persist compact A/B context
     st.session_state["ab_compare"] = {
         "pair_tag": pair_tag,
         "lane_mask_k3": lane_mask,
@@ -1235,7 +1287,7 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
             "cfg":   _cfg_proj_for_ab,
             "out":   out_proj,
             "ker_guard": "off",
-            "projector_hash": proj_hash,
+            "projector_hash": proj_hash_proj,  # <-- filled for AUTO/FILE
             "lane_vec_H2d3": lane_vec_H2d3,
             "lane_vec_C3plusI3": lane_vec_C3pI3,
             "pass_vec": [
@@ -1245,10 +1297,11 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
         },
     }
 
-    # status badge
+    # --- Status badge ---
     s_ok = bool(out_strict.get("3", {}).get("eq", False))
     p_ok = bool(out_proj.get("3", {}).get("eq", False))
     st.success(f"A/B: strict={'GREEN' if s_ok else 'RED'} · projected={'GREEN' if p_ok else 'RED'}")
+
 
 
 
