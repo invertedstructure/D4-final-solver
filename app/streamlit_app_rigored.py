@@ -863,10 +863,27 @@ inputs_block["filenames"]["U"]          = _name_or_default("fname_shapes",     N
 inputs_block["filenames"]["H"]          = _name_or_default("fname_h",          f_H,   "H.json")
 
 
-# ---- Policy tag for cert filename (must be set BEFORE building payload) ----
+# ──────────────────────────────────────────────────────────────────────────────
+# 1) policy tag for cert filename (must be set BEFORE building payload)
+# ──────────────────────────────────────────────────────────────────────────────
 policy_tag = policy_label  # e.g. "strict" or "projected(columns@k=3,auto)"
 
-# ---- FULL cert payload (single source of truth) ------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# 2) filenames: ensure we attach human-readable names from session_state
+# ──────────────────────────────────────────────────────────────────────────────
+def _fname(key: str, fallback: str = "") -> str:
+    v = st.session_state.get(key)
+    return v if isinstance(v, str) and v else fallback
+
+inputs_block.setdefault("filenames", {})
+inputs_block["filenames"]["boundaries"] = _fname("fname_boundaries", inputs_block["filenames"].get("boundaries", ""))
+inputs_block["filenames"]["C"]          = _fname("fname_cmap",       inputs_block["filenames"].get("C", ""))
+inputs_block["filenames"]["H"]          = _fname("fname_h",          inputs_block["filenames"].get("H", ""))
+inputs_block["filenames"]["U"]          = _fname("fname_shapes",     inputs_block["filenames"].get("U", ""))
+
+# ──────────────────────────────────────────────────────────────────────────────
+# 3) assemble the full cert payload (single source of truth)
+# ──────────────────────────────────────────────────────────────────────────────
 cert_payload = {
     "identity":    identity_block,       # district_id/run_id/timestamp/app_version/field
     "policy":      policy_block,         # label + config echo + projector_hash (if file-backed)
@@ -882,8 +899,7 @@ cert_payload = {
     "policy_tag": policy_tag,
 }
 
-# ---- Finalize cert: integrity + artifact hashes, then write ------------------
-# (Top-level mirror of artifact hashes is handy for indexing/search)
+# top-level mirror of artifact hashes (handy for indexing/search)
 cert_payload.setdefault("artifact_hashes", {
     "boundaries_hash": inputs_block["boundaries_hash"],
     "C_hash":          inputs_block["C_hash"],
@@ -892,162 +908,84 @@ cert_payload.setdefault("artifact_hashes", {
     "projector_hash":  policy_block.get("projector_hash", ""),
 })
 
-# Integrity: hash the entire payload and embed it
+# integrity: hash the entire payload and embed it
 cert_payload.setdefault("integrity", {})
 cert_payload["integrity"]["content_hash"] = hashes.content_hash_of(cert_payload)
 
-# ---- If A/B results exist and user wants them, embed into the cert ----
-include_ab = st.checkbox("Include A/B comparison in this cert", value=False, key="include_ab_in_cert")
-
-if include_ab:
-    ab_out_s = st.session_state.get("ab_out_strict")
-    ab_out_p = st.session_state.get("ab_out_proj")
-    ab_cfg_p = st.session_state.get("ab_cfg_proj")
-    ab_lbl_s = st.session_state.get("ab_policy_label_strict")
-    ab_lbl_p = st.session_state.get("ab_policy_label_proj")
-    ab_pj_h  = st.session_state.get("ab_projector_hash", "")
-    ab_Rs    = st.session_state.get("ab_R3_strict")
-    ab_Rp    = st.session_state.get("ab_R3_proj")
-
-    if ab_out_s and ab_out_p and ab_cfg_p:
-        cert_payload["ab_compare"] = {
-            "strict": {
-                "policy": ab_lbl_s,
-                "checks": ab_out_s,
-                "k3_residual_preview": ab_Rs[-1] if (ab_Rs and len(ab_Rs)) else None  # bottom row preview
-            },
-            "projected": {
-                "policy": ab_lbl_p,
-                "checks": ab_out_p,
-                "projector_hash": ab_pj_h,
-                "k3_residual_projected_preview": ab_Rp[-1] if (ab_Rp and len(ab_Rp)) else None
-            }
-        }
-        # also mirror projection config for projected leg
-        cert_payload.setdefault("policy", {}).setdefault("ab_projection_config", ab_cfg_p)
-        st.caption("A/B block added to cert (strict + projected).")
-    else:
-        st.warning("A/B context not found — run the A/B compare first.")
-        
-        # ---- If we have an A/B context, stamp both snapshots into cert ----
+# ──────────────────────────────────────────────────────────────────────────────
+# 4) optional A/B embed (safe, no KeyErrors; reads mask from top-level ab_ctx)
+# ──────────────────────────────────────────────────────────────────────────────
 ab_ctx = st.session_state.get("ab_compare")
-
 if ab_ctx:
-    # small dual badge in UI
-    eq_s = bool(ab_ctx["strict"]["out"].get("3", {}).get("eq", False))
-    eq_p = bool(ab_ctx["projected"]["out"].get("3", {}).get("eq", False))
-    badge = f"A/B: strict={'✅' if eq_s else '❌'} · projected={'✅' if eq_p else '❌'}"
-    st.caption(badge)
+    def _pass_vec_from(out_dict: dict) -> list[int]:
+        return [
+            int(out_dict.get("2", {}).get("eq", False)),
+            int(out_dict.get("3", {}).get("eq", False)),
+        ]
 
-    # put both snapshots under cert.policy
+    strict_ctx    = ab_ctx.get("strict", {}) or {}
+    projected_ctx = ab_ctx.get("projected", {}) or {}
+    lane_mask_k3  = ab_ctx.get("lane_mask_k3", [])  # stored once at top-level
+
+    strict_label = strict_ctx.get("label", policy_label_from_cfg(cfg_strict()))
+    proj_label   = projected_ctx.get("label", policy_label_from_cfg(cfg_projected_base()))
+
+    strict_snap = {
+        "policy_tag":        strict_label,
+        "ker_guard":         strict_ctx.get("ker_guard", "enforced"),
+        "lane_mask_k3":      lane_mask_k3,
+        "lane_vec_H2d3":     strict_ctx.get("lane_vec_H2d3", []),
+        "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3", []),
+        "pass_vec":          _pass_vec_from(strict_ctx.get("out", {})),
+    }
+
+    projected_snap = {
+        "policy_tag":        proj_label,
+        "ker_guard":         projected_ctx.get("ker_guard", "off"),
+        "projector_hash":    projected_ctx.get("projector_hash", ""),
+        "lane_mask_k3":      lane_mask_k3,
+        "lane_vec_H2d3":     projected_ctx.get("lane_vec_H2d3", []),
+        "lane_vec_C3plusI3": projected_ctx.get("lane_vec_C3plusI3", []),
+        "pass_vec":          _pass_vec_from(projected_ctx.get("out", {})),
+    }
+
+    # attach under policy
     cert_payload.setdefault("policy", {})
-    cert_payload["policy"]["strict_snapshot"] = {
-        "policy_tag": ab_ctx["strict"]["label"],
-        "ker_guard":  ab_ctx["strict"]["ker_guard"],
-        "pass_vec": [
-            int(ab_ctx["strict"]["out"].get("2", {}).get("eq", False)),
-            int(ab_ctx["strict"]["out"].get("3", {}).get("eq", False)),
-        ],
-        "out": ab_ctx["strict"]["out"],
-    }
-    cert_payload["policy"]["projected_snapshot"] = {
-        "policy_tag": ab_ctx["projected"]["label"],
-        "ker_guard":  ab_ctx["projected"]["ker_guard"],
-        "projector_hash": ab_ctx["projected"]["projector_hash"],
-        "lane_mask_k3": ab_ctx["projected"]["lane_mask_k3"],
-        "lane_vec_H2d3": ab_ctx["projected"]["lane_vec_H2d3"],
-        "lane_vec_C3plusI3": ab_ctx["projected"]["lane_vec_C3plusI3"],
-        "pass_vec": [
-            int(ab_ctx["projected"]["out"].get("2", {}).get("eq", False)),
-            int(ab_ctx["projected"]["out"].get("3", {}).get("eq", False)),
-        ],
-        "out": ab_ctx["projected"]["out"],
-    }
+    cert_payload["policy"]["strict_snapshot"]    = strict_snap
+    cert_payload["policy"]["projected_snapshot"] = projected_snap
+    # also carry a convenient tag at top-level
+    cert_payload["ab_pair_tag"] = ab_ctx.get("pair_tag", "")
 
-    # optionally carry tag at top-level for quick discovery
-    cert_payload["ab_pair_tag"] = ab_ctx["pair_tag"]
-    # ---- Optional A/B: embed snapshots into the cert (safe, no KeyErrors) ----
-ab_ctx = st.session_state.get("ab_compare", {}) or {}
-strict_ctx    = ab_ctx.get("strict", {}) or {}
-projected_ctx = ab_ctx.get("projected", {}) or {}
-
-# If you want the pair tag at top-level too:
-cert_payload["ab_pair_tag"] = ab_ctx.get("pair_tag", "")
-
-# Helper to build a pass vector from any out-dict
-def _pass_vec_from(out_dict: dict) -> list[int]:
-    return [
-        int(out_dict.get("2", {}).get("eq", False)),
-        int(out_dict.get("3", {}).get("eq", False)),
-    ]
-
-# ---- Optional A/B: embed snapshots into the cert (safe, no KeyErrors) ----
-ab_ctx         = st.session_state.get("ab_compare", {}) or {}
-strict_ctx     = ab_ctx.get("strict", {}) or {}
-projected_ctx  = ab_ctx.get("projected", {}) or {}
-
-# If you want the pair tag at top-level too:
-cert_payload["ab_pair_tag"] = ab_ctx.get("pair_tag", "")
-
-def _pass_vec_from(out_dict: dict) -> list[int]:
-    return [
-        int(out_dict.get("2", {}).get("eq", False)),
-        int(out_dict.get("3", {}).get("eq", False)),
-    ]
-
-policy_block.setdefault("ab_compare", {
-    "pair": ab_ctx.get("pair_tag", ""),
-    "strict_snapshot": {
-        "policy_tag": strict_ctx.get("label", policy_label_from_cfg(cfg_strict())),
-        "ker_guard":  strict_ctx.get("ker_guard", "enforced"),
-        "lane_mask_k3":      strict_ctx.get("lane_mask_k3",      diagnostics_block.get("lane_mask_k3", [])),
-        "lane_vec_H2d3":     strict_ctx.get("lane_vec_H2d3",     diagnostics_block.get("lane_vec_H2d3", [])),
-        "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
-        "pass_vec": _pass_vec_from(strict_ctx.get("out", {})),
-    },
-    "projected_snapshot": {
-        "policy_tag":    projected_ctx.get("label", policy_label_from_cfg(cfg_projected_base())),
-        "ker_guard":     projected_ctx.get("ker_guard", "off"),
-        "projector_hash": projected_ctx.get("projector_hash", ""),
-        "lane_mask_k3":      projected_ctx.get("lane_mask_k3",      diagnostics_block.get("lane_mask_k3", [])),
-        "lane_vec_H2d3":     projected_ctx.get("lane_vec_H2d3",     diagnostics_block.get("lane_vec_H2d3", [])),
-        "lane_vec_C3plusI3": projected_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
-        "pass_vec": _pass_vec_from(projected_ctx.get("out", {})),
-    },
-})
-
-
-
-
-
-# Single write
+# ──────────────────────────────────────────────────────────────────────────────
+# 5) single write
+# ──────────────────────────────────────────────────────────────────────────────
 cert_path, full_hash = export_mod.write_cert_json(cert_payload)
 st.success(f"Cert written: `{cert_path}`")
-# ---- Registry/Gallery de-duplication row ------------------------------------
-try:
-    # A/B context (if any)
-    ab_ctx = st.session_state.get("ab_compare")
 
-    # Build the key parts
+# ──────────────────────────────────────────────────────────────────────────────
+# 6) registry/gallery de-duplication row (in-memory/CSV)
+# ──────────────────────────────────────────────────────────────────────────────
+try:
+    # build the key parts
     district_id     = st.session_state.get("district_id", "D3")
     boundaries_hash = inputs_block["boundaries_hash"]
     U_hash          = inputs_block["U_hash"]
-    suppC_hash      = hashes.hash_suppC(cmap)   # support(C), you already use this
+    suppC_hash      = hashes.hash_suppC(cmap)  # support(C)
 
-    # lane address → prefer projected lane_vec_H2d3 when present, otherwise use diagnostics
+    # lane address → prefer projected lane_vec_H2d3 when present
     if ab_ctx and ab_ctx.get("projected", {}).get("lane_vec_H2d3"):
         lane_vec = ab_ctx["projected"]["lane_vec_H2d3"]
     else:
         lane_vec = diagnostics_block.get("lane_vec_H2d3", [])
     lane_vec_key = "".join(str(int(x)) for x in (lane_vec or []))
 
-    # policy mode tag (strict or projected(...))
-    policy_mode = policy_label  # already computed earlier
+    # policy mode tag
+    policy_mode = policy_label
 
-    # the UNIQUE key (tuple of simple primitives)
+    # UNIQUE key
     key = (district_id, boundaries_hash, U_hash, suppC_hash, lane_vec_key, policy_mode)
 
-    # minimal row payload (feel free to add more columns)
+    # minimal row
     row = {
         "district_id": district_id,
         "policy_mode": policy_mode,
@@ -1059,52 +997,40 @@ try:
         "content_hash": cert_payload.get("integrity", {}).get("content_hash", ""),
     }
 
-    # write once (CSV), skip duplicates
     res = export_mod.write_gallery_row(row, key, path="gallery.csv")
-    if res == "written":
-        st.toast("gallery: added exemplar row")
-    else:
-        st.toast("gallery: duplicate skipped")
+    st.toast("gallery: added exemplar row" if res == "written" else "gallery: duplicate skipped")
 except Exception as e:
     st.warning(f"gallery dedupe failed: {e}")
 
-
-
-# ---- Download bundle (includes cert.json) ------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# 7) download bundle (includes cert.json)
+# ──────────────────────────────────────────────────────────────────────────────
 try:
-    district_id = st.session_state.get("district_id", "D3")
-
-    # If you toggled A/B earlier and we embedded it in cert_payload, reflect it in policy.json too
-    policy_block_for_bundle = dict(policy_block)  # shallow copy
-    _ab_present = bool(cert_payload.get("ab_compare")) if isinstance(cert_payload, dict) else False
-    if _ab_present:
-        # mirror the two labels
-        policy_block_for_bundle["ab_policies"] = {
-            "strict":    cert_payload["ab_compare"]["strict"]["policy"],
-            "projected": cert_payload["ab_compare"]["projected"]["policy"],
+    _policy_block_for_bundle = dict(policy_block)  # shallow copy
+    # if we embedded A/B, echo the pair to policy.json in the zip
+    if "policy" in cert_payload and "strict_snapshot" in cert_payload["policy"]:
+        _policy_block_for_bundle["ab_policies"] = {
+            "strict":    cert_payload["policy"]["strict_snapshot"]["policy_tag"],
+            "projected": cert_payload["policy"]["projected_snapshot"]["policy_tag"],
         }
-        # echo projected cfg + projector hash (if present)
-        policy_block_for_bundle["ab_projection_config"] = cert_payload.get("policy", {}).get("ab_projection_config", {})
-        policy_block_for_bundle["ab_projector_hash"]    = cert_payload["ab_compare"]["projected"].get("projector_hash", "")
+        _policy_block_for_bundle["ab_projector_hash"] = cert_payload["policy"]["projected_snapshot"].get("projector_hash", "")
 
-    # Bundle filename (tag with __withAB when present)
-    _tag = policy_label.replace(" ", "_")
-    if _ab_present:
-        _tag = f"{_tag}__withAB"
-    bundle_name = f"overlap_bundle__{district_id}__{_tag}__{full_hash[:12]}.zip"
+    district_id = st.session_state.get("district_id", "D3")
+    tag = policy_label.replace(" ", "_")
+    if "policy" in cert_payload and "strict_snapshot" in cert_payload["policy"]:
+        tag = f"{tag}__withAB"
+    bundle_name = f"overlap_bundle__{district_id}__{tag}__{full_hash[:12]}.zip"
 
-    # Build the .zip (includes cert.json + policy.json + B/C/H/U)
     zip_path = export_mod.build_overlap_bundle(
         boundaries=boundaries,
         cmap=cmap,
         H=H_local,
         shapes=(shapes.dict() if hasattr(shapes, "dict") else (shapes or {})),
-        policy_block=policy_block_for_bundle,
+        policy_block=_policy_block_for_bundle,
         cert_path=cert_path,
         out_zip=bundle_name,
     )
 
-    # Download button
     with open(zip_path, "rb") as f:
         st.download_button(
             "⬇️ Download bundle (.zip)",
@@ -1115,10 +1041,10 @@ try:
         )
 except Exception as e:
     st.error(f"Could not build download bundle: {e}")
-   
 
-
-# ---- Promotion (optional) ----------------------------------------------------
+# ──────────────────────────────────────────────────────────────────────────────
+# 8) promotion (optional)
+# ──────────────────────────────────────────────────────────────────────────────
 pass_vec  = [int(out.get("2", {}).get("eq", False)),
              int(out.get("3", {}).get("eq", False))]
 all_green = all(v == 1 for v in pass_vec)
@@ -1135,13 +1061,13 @@ if all_green:
         if not d3_now:
             st.error("No d3; cannot freeze projector.")
         else:
-            # Freeze the exact Π3 used now
+            # freeze exact Π3 used now
             P_used = projector.projector_columns_from_dkp1(d3_now)
             pj_path = cfg_file.get("projector_files", {}).get("3", "projector_D3.json")
             pj_hash = projector.save_projector(pj_path, P_used)
             st.info(f"Projector frozen → {pj_path} (hash={pj_hash[:12]}…)")
 
-            # Flip config or keep auto
+            # flip config or keep auto
             if flip_to_file and not keep_auto:
                 cfg_file.setdefault("source", {})["3"] = "file"
                 cfg_file.setdefault("projector_files", {})["3"] = pj_path
@@ -1167,6 +1093,7 @@ if all_green:
                 st.success("Registry updated with projector hash.")
             except Exception as e:
                 st.error(f"Failed to write registry row: {e}")
+
      
        
 
