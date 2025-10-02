@@ -756,47 +756,18 @@ identity_block = {
 }
 
 
-# ---- 1) Attach human filenames ONCE (right after building inputs_block) ----
-inputs_block["filenames"] = {
-    "boundaries": st.session_state.get("fname_boundaries", ""),
-    "C":          st.session_state.get("fname_cmap", ""),
-    "H":          st.session_state.get("fname_h", ""),
-    "U":          st.session_state.get("fname_shapes", ""),
-
-
-
-# ---- 3) Promotion helper flags ----------------------------------------------
-is_strict = (not cfg_active.get("enabled_layers"))  # strict if no enabled layers
-k3_true   = bool(out.get("3", {}).get("eq", False))
-
-# ---- 4) Assemble the FULL cert payload (single source of truth) --------------
-cert_payload = {
-    "identity": identity_block,          # you already built this (district_id/run_id/timestamp/app_version/field)
-    "policy": policy_block,              # label + config echo + projector_hash (if file-backed)
-    "inputs": inputs_block,              # hashes + dims + filenames (now filled)
-    "diagnostics": diagnostics_block,    # lane_mask_k3 / lane_vec_* etc.
-    "checks": checks_block,              # per-k eq + n_k (+ grid/fence/ker_guard/residual_tag if you added them)
-    "signatures": sig_block,             # canonical signatures (rank/ker/lane)
-    "promotion": {
-        "eligible_for_promotion": k3_true,
-        "promotion_target": ("strict_anchor" if is_strict else "projected_anchor") if k3_true else None,
-        "notes": "",
-    },
-    "policy_tag": policy_block.get("policy_tag", policy_block.get("label", "unknown")),
-}
-
 # ---------- Tiny polish: filenames + signatures ----------
-# Place this AFTER you've created `inputs_block` and `diagnostics_block`,
-# and BEFORE you build `cert_payload`.
+# Do this AFTER you've created `inputs_block` and `diagnostics_block`,
+# and BEFORE you assemble `cert_payload`.
 
-# 1) Ensure filenames dict exists and fill Boundaries / U (H/C are already handled)
+# 1) Attach/ensure human filenames ONCE
 inputs_block.setdefault("filenames", {})
-inputs_block["filenames"]["boundaries"] = (
-    inputs_block["filenames"].get("boundaries") or st.session_state.get("fname_boundaries", "")
-)
-inputs_block["filenames"]["U"] = (
-    inputs_block["filenames"].get("U") or st.session_state.get("fname_shapes", "")
-)
+inputs_block["filenames"].update({
+    "boundaries": st.session_state.get("fname_boundaries", inputs_block["filenames"].get("boundaries", "")),
+    "C":          st.session_state.get("fname_cmap",       inputs_block["filenames"].get("C", "")),
+    "H":          st.session_state.get("fname_h",          inputs_block["filenames"].get("H", "")),
+    "U":          st.session_state.get("fname_shapes",     inputs_block["filenames"].get("U", "")),
+})
 
 # 2) d-signature (from d3): rank, ker_dim, lane_pattern
 d3 = boundaries.blocks.__root__.get("3") or []
@@ -826,20 +797,19 @@ def _gf2_rank(M):
         c += 1
     return r
 
-lane_mask = diagnostics_block.get("lane_mask_k3", []) or []
+lane_mask    = (diagnostics_block.get("lane_mask_k3") or [])
 lane_pattern = "".join("1" if x else "0" for x in lane_mask) if lane_mask else ""
-
-rank_d3   = _gf2_rank(d3) if d3 else 0
-ncols_d3  = len(d3[0]) if (d3 and d3[0]) else 0
-ker_dim_d3 = max(ncols_d3 - rank_d3, 0)
+rank_d3      = _gf2_rank(d3) if d3 else 0
+ncols_d3     = len(d3[0]) if (d3 and d3[0]) else 0
+ker_dim_d3   = max(ncols_d3 - rank_d3, 0)
 
 d_signature = {
-    "rank": rank_d3,
-    "ker_dim": ker_dim_d3,
+    "rank":        rank_d3,
+    "ker_dim":     ker_dim_d3,
     "lane_pattern": lane_pattern,
 }
 
-# 3) fixture_signature: support(C3 + I3) restricted to LANE columns
+# 3) fixture_signature: support(C3 + I3) on LANE columns only
 from otcore.linalg_gf2 import add, eye
 
 C3     = cmap.blocks.__root__.get("3") or []
@@ -855,12 +825,32 @@ fixture_signature = {
     "lane": _col_support_pattern(C3pI3, lane_idxs)
 }
 
-# 4) Plug signatures into your sig_block (preserve existing echo_context if any)
+# 4) Final signatures block (preserve previous echo_context if any)
 _prev_echo = sig_block.get("echo_context") if "sig_block" in locals() else None
 sig_block = {
     "d_signature": d_signature,
     "fixture_signature": fixture_signature,
     "echo_context": _prev_echo,
+}
+
+# ---- Promotion helper flags (build AFTER we have `out`) ----------------------
+is_strict = (not cfg_active.get("enabled_layers"))
+k3_true   = bool(out.get("3", {}).get("eq", False))
+
+# ---- FULL cert payload (single source of truth) ------------------------------
+cert_payload = {
+    "identity":    identity_block,       # district_id/run_id/timestamp/app_version/field
+    "policy":      policy_block,         # label + config echo + projector_hash (if file-backed)
+    "inputs":      inputs_block,         # hashes + dims + filenames (now filled)
+    "diagnostics": diagnostics_block,    # lane_mask_k3 / lane_vec_* etc.
+    "checks":      checks_block,         # per-k eq + n_k (+ grid/fence/ker_guard/residual_tag if present)
+    "signatures":  sig_block,            # canonical signatures (rank/ker/lane)
+    "promotion": {
+        "eligible_for_promotion": k3_true,
+        "promotion_target": ("strict_anchor" if is_strict else "projected_anchor") if k3_true else None,
+        "notes": "",
+    },
+    "policy_tag": policy_block.get("policy_tag", policy_block.get("label", "unknown")),
 }
 
 # Write cert
