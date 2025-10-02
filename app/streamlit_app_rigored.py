@@ -615,33 +615,41 @@ sig_block = {
 }
 
     
-    # fixture_signature from support of (C3 + I3) restricted to lanes
+    # --- fixture_signature from support of (C3 + I3) restricted to lanes ----------
 C3 = cmap.blocks.__root__.get("3") or []
-    if C3:
-        # Build C3 + I3 over GF(2)
-        I3 = [[1 if i == j else 0 for j in range(len(C3))] for i in range(len(C3))]
-        C3pI3 = [[(C3[i][j] ^ I3[i][j]) for j in range(len(C3[0]))] for i in range(len(C3))]
-        # Support by column: 1 if any row has 1 in that column
-        supp_cols = []
-        for j in range(len(C3pI3[0]) if C3pI3 else 0):
-            any1 = any(C3pI3[i][j] & 1 for i in range(len(C3pI3)))
-            supp_cols.append(1 if any1 else 0)
-        # keep only lane columns (but keep string length n3, ker columns show as '0')
-        fixture_lane_str = "".join("1" if (lane_mask[j] and supp_cols[j]) else "0"
-                                   for j in range(len(supp_cols))) if lane_mask else ""
-        else:
-            fixture_lane_str = ""
-        
-        fixture_signature = {
-            "lane": fixture_lane_str
-        }
-        
-        # finally, plug into sig_block you already build later
-        sig_block = {
-            "d_signature": d_signature,
-            "fixture_signature": fixture_signature,
-            "echo_context": sig_block.get("echo_context") if 'sig_block' in locals() else None,
-        }
+if C3:
+    n3 = len(C3)
+    I3 = [[1 if i == j else 0 for j in range(n3)] for i in range(n3)]
+    # GF(2): C3 + I3 is XOR on entries
+    C3pI3 = [[(C3[i][j] ^ I3[i][j]) for j in range(len(C3[0]))] for i in range(n3)]
+    # column support: 1 if any row has 1 in that column
+    supp_cols = [
+        1 if any(C3pI3[i][j] & 1 for i in range(n3)) else 0
+        for j in range(len(C3pI3[0]) if C3pI3 else 0)
+    ]
+    fixture_lane_str = ""
+    if lane_mask:
+        fixture_lane_str = "".join(
+            "1" if (lane_mask[j] and supp_cols[j]) else "0"
+            for j in range(len(supp_cols))
+        )
+else:
+    fixture_lane_str = ""
+
+# ensure d_signature exists (if you computed it earlier, this keeps it)
+if "d_signature" not in locals():
+    d_signature = {}
+
+fixture_signature = {"lane": fixture_lane_str}
+
+# merge into sig_block, preserving any existing echo_context if present
+_prev_echo = sig_block.get("echo_context") if "sig_block" in locals() else None
+sig_block = {
+    "d_signature": d_signature,
+    "fixture_signature": fixture_signature,
+    "echo_context": _prev_echo,
+}
+
 
     # ---------- Policy snapshot ----------
     pj_hash = ""
