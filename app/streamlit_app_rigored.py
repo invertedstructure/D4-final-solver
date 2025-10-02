@@ -415,11 +415,7 @@ with tab2:
     st.markdown("### Policy")
     policy_choice = st.radio("Choose policy", ["strict", "projected(columns@k=3)"],
                              horizontal=True, key="policy_choice_k3")
-    def _stamp_filename(state_key: str, f):
-    if f is not None:
-        st.session_state[state_key] = getattr(f, "name", "")
-    else:
-        st.session_state.pop(state_key, None)
+
 
 
     # Build active cfg (respect file/auto from projection_config.json)
