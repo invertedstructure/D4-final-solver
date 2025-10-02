@@ -15,6 +15,118 @@ import zipfile
 st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
 
 # --- Policy helpers -----------------------------------------------------------
+# ---- cert helpers: diagnostics and checks (GF(2)-safe) ----
+def _mat(M):  # ensure list[list[int]]
+    return M if isinstance(M, list) else []
+
+def _bottom_row(M):
+    M = _mat(M)
+    if not M: return []
+    return M[-1] if M[-1] else []
+
+def _lane_mask_from_d3(boundaries):
+    try:
+        d3 = boundaries.blocks.__root__.get("3")
+    except Exception:
+        d3 = None
+    if not d3 or not d3[0]:
+        return []
+    ncols = len(d3[0])
+    return [1 if any(r[j] & 1 for r in d3) else 0 for j in range(ncols)]
+
+def _restrict_to_lanes(vec, lane_mask):
+    if not vec or not lane_mask: return []
+    n = min(len(vec), len(lane_mask))
+    return [vec[j] for j in range(n) if lane_mask[j] == 1]
+
+def _gf2_add(A, B):  # elementwise XOR for equal shapes
+    if not A or not B: return A or B or []
+    r = len(A); c = len(A[0])
+    if len(B) != r or len(B[0]) != c:
+        return A  # shape mismatch → leave A
+    return [[(A[i][j] ^ B[i][j]) for j in range(c)] for i in range(r)]
+
+def _eye(n):
+    return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
+
+def _mul_gf2(A, B):
+    # very small, safe GF(2) multiply with guards
+    if not A or not A[0] or not B or not B[0]:
+        return []
+    r, k  = len(A), len(A[0])
+    k2, c = len(B), len(B[0])
+    if k != k2:
+        return []
+    out = [[0]*c for _ in range(r)]
+    for i in range(r):
+        for j in range(c):
+            s = 0
+            for t in range(k):
+                s ^= (A[i][t] & B[t][j])
+            out[i][j] = s
+    return out
+
+def _support(M):
+    M = _mat(M)
+    return [[1 if (v & 1) else 0 for v in row] for row in M] if M else []
+
+def _subset_support(small, big):
+    # is supp(small) ⊆ supp(big) ? both are 0/1 matrices
+    if not small: return True
+    if not big:   return False
+    if len(small) > len(big) or len(small[0]) > len(big[0]):
+        return False
+    r = len(small); c = len(small[0])
+    for i in range(r):
+        for j in range(c):
+            if small[i][j] and not big[i][j]:
+                return False
+    return True
+
+def _grid_flags(boundaries, cmap):
+    # Grid @ k=3: d3 C3 == C2 d3 (if all present). If missing, treat as True.
+    try:
+        d3 = boundaries.blocks.__root__.get("3")
+        C3 = cmap.blocks.__root__.get("3")
+        C2 = cmap.blocks.__root__.get("2")
+    except Exception:
+        d3 = C3 = C2 = None
+    if not d3 or not C3 or not C2:
+        return True
+    left  = _mul_gf2(d3, C3)
+    right = _mul_gf2(C2, d3)
+    return (left == right)
+
+def _fence_flags(cmap, H, shapes):
+    # Try to read a carrier mask U_k (same shape as blocks). If not available → True.
+    def _get_U(k):
+        # Support common patterns; fall back to None.
+        try:
+            if hasattr(shapes, "blocks"):
+                return shapes.blocks.__root__.get(k)
+            if isinstance(shapes, dict):
+                # shapes may be { "blocks": {...} } or directly {k: mask}
+                if "blocks" in shapes and isinstance(shapes["blocks"], dict):
+                    return shapes["blocks"].get(k)
+                return shapes.get(k)
+        except Exception:
+            return None
+        return None
+
+    try:
+        C3 = cmap.blocks.__root__.get("3"); C2 = cmap.blocks.__root__.get("2")
+        H2 = H.blocks.__root__.get("2") if H else None
+    except Exception:
+        C3 = C2 = H2 = None
+
+    U3 = _get_U("3")
+    U2 = _get_U("2")
+
+    okC3 = True if C3 is None or U3 is None else _subset_support(_support(C3), _support(U3))
+    okC2 = True if C2 is None or U2 is None else _subset_support(_support(C2), _support(U2))
+    okH2 = True if H2 is None or U3 is None else _subset_support(_support(H2), _support(U3))
+    return (okC3 and okC2 and okH2)
+
 def _safe_dict(x):
     try:
         return x.dict()
@@ -263,7 +375,14 @@ with tab1:
     d_U = read_json_file(f_U) if f_U else None
     if d_U:
         shapes = io.parse_shapes(d_U)  # or whatever parser you have
+        
+        def _stamp_filename(state_key: str, f):
+    if f is not None:
+        st.session_state[state_key] = getattr(f, "name", "")
+    else:
+        st.session_state.pop(state_key, None)
 
+    
     # Reps (only if you actually use them)
     f_reps = st.file_uploader("Reps (optional)", type=["json"], key="reps_up")
     _stamp_filename("fname_reps", f_reps)
@@ -302,6 +421,12 @@ with tab2:
     st.markdown("### Policy")
     policy_choice = st.radio("Choose policy", ["strict", "projected(columns@k=3)"],
                              horizontal=True, key="policy_choice_k3")
+    def _stamp_filename(state_key: str, f):
+    if f is not None:
+        st.session_state[state_key] = getattr(f, "name", "")
+    else:
+        st.session_state.pop(state_key, None)
+
 
     # Build active cfg (respect file/auto from projection_config.json)
     cfg_file = projector.load_projection_config("projection_config.json")
@@ -365,31 +490,60 @@ with tab2:
         lane_mask = [1 if any(row[j] for row in d3) else 0 for j in range(len(d3[0]))] if d3 else []
         st.write("k=3 lane_mask (1=lane, 0=ker):", lane_mask)
 
-        # ---------- Diagnostics ----------
-        # safe pulls
-        C3 = cmap.blocks.__root__.get("3", [])
-        I3 = eye(len(C3)) if C3 else []
-        H2 = H.blocks.__root__.get("2", [])
-        d3 = boundaries.blocks.__root__.get("3", [])
-        # H2@d3 (guard sizes)
-        H2d3 = []
-        if H2 and d3 and len(H2[0]) == len(d3):
-            H2d3 = mul(H2, d3)
-        C3pI = add(C3, I3) if C3 and I3 else []
-        # bottom rows
-        row_H2d3 = cert.bottom_row(H2d3)
-        row_C3pI = cert.bottom_row(C3pI)
-        # restricted-to-lanes view
-        lanes_idx, ker_idx = cert.split_lanes_ker(cert.support_indices(row_C3pI), lane_mask)
+            # ---------- Diagnostics (lane mask + lane vectors) ----------
+        lane_mask_k3 = _lane_mask_from_d3(boundaries)
+        
+        # Build H2@d3 bottom row and (C3+I3) bottom row
+        try:
+            d3 = boundaries.blocks.__root__.get("3")
+            C3 = cmap.blocks.__root__.get("3")
+            H2 = (io.parse_cmap(d_H).blocks.__root__.get("2") if d_H else None)
+        except Exception:
+            d3 = C3 = H2 = None
+        
+        H2d3_bottom = []
+        C3pI3_bottom = []
+        if d3 and C3:
+            if H2:
+                Hd = _mul_gf2(H2, d3)
+                H2d3_bottom = _bottom_row(Hd)
+            I3 = _eye(len(C3)) if C3 and len(C3) else []
+            C3pI3 = _gf2_add(C3, I3)
+            C3pI3_bottom = _bottom_row(C3pI3)
+        
+        lane_vec_H2d3  = _restrict_to_lanes(H2d3_bottom, lane_mask_k3)
+        lane_vec_C3pI3 = _restrict_to_lanes(C3pI3_bottom, lane_mask_k3)
+        
         diagnostics_block = {
-            "k3": {
-                "lane_vec_H2d3": row_H2d3,
-                "lane_vec_C3plusI3": row_C3pI,
-                "residual_supports": {
-                    "lanes": lanes_idx, "ker": ker_idx
-                }
-            }
+            "lane_mask_k3": lane_mask_k3,
+            "lane_vec_H2d3": lane_vec_H2d3,
+            "lane_vec_C3pI3": lane_vec_C3pI3,
         }
+        
+        # ---------- Checks (grid / fence / ker_guard) ----------
+        grid_ok  = _grid_flags(boundaries, cmap)
+        # H_local: safe homotopy object for fence (use empty if none uploaded)
+        H_local_for_fence = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})
+        fence_ok = _fence_flags(cmap, H_local_for_fence, shapes)
+        
+        ker_guard = "enforced" if policy_label == "strict" else "off"
+        
+        # Keep your per-k eq results (computed earlier into `out`)
+        checks_block = {
+            "grid": bool(grid_ok),
+            "fence": bool(fence_ok),
+            "ker_guard": ker_guard,
+            "k": out,  # preserves {"2":{"eq":...,"n_k":...},"3":{...}}
+        }
+        
+        # ---------- Filenames (human trace) ----------
+        inputs_block["filenames"] = {
+            "boundaries": st.session_state.get("fname_boundaries", ""),
+            "C":          st.session_state.get("fname_cmap", ""),
+            "H":          st.session_state.get("fname_h", ""),
+            "U":          st.session_state.get("fname_shapes", ""),
+        }
+
 
         # ---------- Inputs / hashes ----------
         inputs_hash = hashes.bundle_content_hash([
@@ -900,6 +1054,13 @@ with tab3:
     _stamp_filename("fname_H2", f_H2)
     d_H2 = read_json_file(f_H2) if f_H2 else None
     H2 = io.parse_cmap(d_H2) if d_H2 else None
+
+    def _stamp_filename(state_key: str, f):
+    if f is not None:
+        st.session_state[state_key] = getattr(f, "name", "")
+    else:
+        st.session_state.pop(state_key, None)
+
 
     # Pull H from tab2 (if loaded)
     H = st.session_state.get("H_obj")
