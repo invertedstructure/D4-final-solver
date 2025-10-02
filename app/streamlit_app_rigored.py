@@ -461,29 +461,26 @@ with tab2:
             st.success(f"projection_config.json updated → source.3 = {mode_choice}")
 
     # ---------- RUN OVERLAP ----------
-    if st.button("Run Overlap", key="run_overlap_k3"):
-        # Parse or synthesize H (auto-zero) with correct shape
-        if d_H:
-            H = io.parse_cmap(d_H)
-        else:
-            d3 = boundaries.blocks.__root__.get("3")
-            n3 = len(d3[0]) if d3 and len(d3) > 0 else 0
-            C2 = cmap.blocks.__root__.get("2")
-            n2 = len(C2) if C2 else (len(d3) if d3 else 0)
-            H = io.parse_cmap({"name":"H_zero","blocks":{"2": [[0]*n2 for _ in range(n3)]}})
-            st.caption("No H uploaded → using H2 ≡ 0 (auto-zero).")
+         if st.button("Run Overlap", key="run_overlap"):
+            try:
+                out = overlap_gate.overlap_check(
+                    boundaries,
+                    cmap,
+                    H_local,                      # ✅ use the one we just built
+                    projection_config=cfg_active, # your active policy (strict/projected)
+                    projector_cache=cache,
+                )
+                st.json(out)
+        
+                # ✅ persist the last run so cert/bundle can read it later
+                st.session_state["overlap_out"] = out
+                st.session_state["overlap_cfg"] = cfg_active
+                st.session_state["overlap_policy_label"] = policy_label
+                st.session_state["overlap_H"] = H_local
+            except Exception as e:
+                st.error(f"Overlap run failed: {e}")
+                st.stop()
 
-        # Run the gate
-        try:
-            out = overlap_gate.overlap_check(
-                boundaries, cmap, H,
-                projection_config=cfg_active,
-                projector_cache=cache
-            )
-        except TypeError:
-            out = overlap_gate.overlap_check(boundaries, cmap, H)
-            st.warning("overlap_gate in STRICT signature path; projection ignored this run.")
-        st.json(out)
 
         # persist for downstream cert/bundle blocks
         st.session_state["overlap_out"] = out
@@ -613,6 +610,22 @@ promotion = {
                         "strict_anchor" if all_green else None),
     "notes": "",
 }
+
+# ===== Restore last overlap run (required by cert/bundle) =====
+out_cached = st.session_state.get("overlap_out")
+if out_cached is None:
+    st.info("Run Overlap first (no cached result to write).")
+    st.stop()
+
+# use the exact cfg/policy/H used in the run
+out          = out_cached
+cfg_active   = st.session_state.get("overlap_cfg", cfg_strict())
+policy_label = st.session_state.get("overlap_policy_label", policy_label_from_cfg(cfg_active))
+H_local      = st.session_state.get("overlap_H", io.parse_cmap({"blocks": {}}))
+
+# shapes must be JSON-safe when serialized
+shapes_payload = shapes.dict() if hasattr(shapes, "dict") else (shapes or {})
+
 
 # 9) Cert payload + write (unchanged)
 cert_payload = {
