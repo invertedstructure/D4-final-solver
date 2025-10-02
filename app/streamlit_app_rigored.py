@@ -462,24 +462,24 @@ with tab2:
 
     # ---------- RUN OVERLAP ----------
      if st.button("Run Overlap", key="run_overlap"):
-try:
-    out = overlap_gate.overlap_check(
-        boundaries,
-        cmap,
-        H_local,                      # ✅ use the one we just built
-        projection_config=cfg_active, # your active policy (strict/projected)
-        projector_cache=cache,
-    )
-    st.json(out)
-
-    # ✅ persist the last run so cert/bundle can read it later
-    st.session_state["overlap_out"] = out
-    st.session_state["overlap_cfg"] = cfg_active
-    st.session_state["overlap_policy_label"] = policy_label
-    st.session_state["overlap_H"] = H_local
-except Exception as e:
-    st.error(f"Overlap run failed: {e}")
-    st.stop()
+        try:
+              out = overlap_gate.overlap_check(
+                boundaries,
+                cmap,
+                H_local,                      # ✅ use the one we just built
+                projection_config=cfg_active, # your active policy (strict/projected)
+                projector_cache=cache,
+            )
+            st.json(out)
+            
+            # ✅ persist the last run so cert/bundle can read it later
+            st.session_state["overlap_out"] = out
+            st.session_state["overlap_cfg"] = cfg_active
+            st.session_state["overlap_policy_label"] = policy_label
+            st.session_state["overlap_H"] = H_local
+        except Exception as e:
+            st.error(f"Overlap run failed: {e}")
+            st.stop()
 
 
 
