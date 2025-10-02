@@ -317,6 +317,11 @@ with st.sidebar:
     f_reps = st.file_uploader("Reps (reps_for_Cmap_chain_pairing_ok.json)", type=["json"], key="reps")
     f_triangle = st.file_uploader("Triangle schema (triangle_J_schema.json)", type=["json"], key="tri")
     seed = st.text_input("Seed", "super-seed-A")
+    
+
+_stamp_filename("fname_shapes", f_shapes)
+_stamp_filename("fname_boundaries", f_bound)
+_stamp_filename("fname_cmap", f_cmap)
 
 d_shapes = read_json_file(f_shapes)
 d_bound = read_json_file(f_bound)
@@ -539,12 +544,6 @@ with tab2:
         "U_hash":          hashes.hash_U(shapes_payload),
         "shapes":          shapes_block,
     }
-    inputs_block["filenames"] = {
-        "boundaries": st.session_state.get("fname_boundaries", ""),
-        "C":          st.session_state.get("fname_cmap", ""),
-        "H":          st.session_state.get("fname_h", ""),
-        "U":          st.session_state.get("fname_shapes", ""),
-    }
 
     # ---------- Diagnostics (lane mask + lane vectors) ----------
     d3 = blocks_b.get("3")
@@ -568,50 +567,53 @@ with tab2:
         "lane_vec_C3plusI3": mask_to_lanes(bottom_row(C3pI3), lane_idx),
     }
 
-       # --- Signatures ---------------------------------------------------------------
-    # d_signature from d3 (rank, ker_dim, lane_pattern)
-    d3 = boundaries.blocks.__root__.get("3") or []
-    lane_mask = diagnostics_block.get("lane_mask_k3", [])
-    lane_pattern = "".join("1" if m else "0" for m in lane_mask) if lane_mask else ""
-    
-    def gf2_rank(mat):
-        # Gaussian elimination over GF(2) on a copy
-        A = [row[:] for row in mat] if mat else []
-        if not A:
-            return 0
-        n_rows, n_cols = len(A), len(A[0])
-        r = 0
-        c = 0
-        while r < n_rows and c < n_cols:
-            # find pivot row with 1 in column c
-            pivot = None
-            for i in range(r, n_rows):
-                if A[i][c] & 1:
-                    pivot = i; break
-            if pivot is None:
-                c += 1
-                continue
-            # swap to row r
-            if pivot != r:
-                A[r], A[pivot] = A[pivot], A[r]
-            # eliminate below
-            for i in range(r+1, n_rows):
-                if A[i][c] & 1:
-                    # row_i ^= row_r
-                    A[i] = [(A[i][j] ^ A[r][j]) for j in range(n_cols)]
-            r += 1
-            c += 1
-        return r
-    
-    rank_d3 = gf2_rank(d3)
-    n3 = len(d3[0]) if (d3 and d3[0]) else 0
-    ker_dim = max(n3 - rank_d3, 0)
-    
-    d_signature = {
-        "rank": rank_d3,
-        "ker_dim": ker_dim,
-        "lane_pattern": lane_pattern,
-    }
+      # ---- Signatures (rank/ker + lane patterns) ----
+    def _gf2_rank(M):
+    # simple Gaussian elimination mod 2
+    if not M:
+        return 0
+    A = [row[:] for row in M]
+    r = 0
+    n_rows = len(A)
+    n_cols = len(A[0]) if A[0] else 0
+    col = 0
+    while r < n_rows and col < n_cols:
+        # find pivot
+        pivot = None
+        for i in range(r, n_rows):
+            if A[i][col] & 1:
+                pivot = i
+                break
+        if pivot is None:
+            col += 1
+            continue
+        # swap
+        if pivot != r:
+            A[r], A[pivot] = A[pivot], A[r]
+        # eliminate below
+        for i in range(r + 1, n_rows):
+            if A[i][col] & 1:
+                # row_i ^= row_r
+                A[i] = [(A[i][j] ^ A[r][j]) for j in range(n_cols)]
+        r += 1
+        col += 1
+    return r
+
+d3 = (boundaries.blocks.__root__.get("3") or [])
+n_cols_d3 = len(d3[0]) if (d3 and d3[0]) else 0
+rank_d3 = _gf2_rank(d3)
+ker_dim_d3 = max(0, n_cols_d3 - rank_d3)
+
+lane_pattern = "".join(str(x) for x in diagnostics_block.get("lane_mask_k3", []))
+lane_vec_C = diagnostics_block.get("lane_vec_C3plusI3", [])
+fixture_lane = "".join(str(int(x)) for x in lane_vec_C) if lane_vec_C else ""
+
+sig_block = {
+    "d_signature":      {"rank": rank_d3, "ker_dim": ker_dim_d3, "lane_pattern": lane_pattern},
+    "fixture_signature": {"lane": fixture_lane},
+    "echo_context": None,
+}
+
     
     # fixture_signature from support of (C3 + I3) restricted to lanes
     C3 = cmap.blocks.__root__.get("3") or []
@@ -744,6 +746,13 @@ identity_block = {
     "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
     "field": "GF(2)",
 }
+
+# ---- 1) Attach human filenames ONCE (right after building inputs_block) ----
+inputs_block["filenames"] = {
+    "boundaries": st.session_state.get("fname_boundaries", ""),
+    "C":          st.session_state.get("fname_cmap", ""),
+    "H":          st.session_state.get("fname_h", ""),
+    "U":          st.session_state.get("fname_shapes", ""),
 # ---------- Tiny polish: filenames + signatures ----------
 
 # 1) Ensure filenames for Boundaries and U are filled (H already set)
@@ -824,23 +833,32 @@ sig_block = {
     "echo_context": None,
 }
 
-# ---------- Full cert payload ----------
+
+# ---- 3) Promotion helper flags ----------------------------------------------
+is_strict = (not cfg_active.get("enabled_layers"))  # strict if no enabled layers
+k3_true   = bool(out.get("3", {}).get("eq", False))
+
+# ---- 4) Assemble the FULL cert payload (single source of truth) --------------
 cert_payload = {
-    "identity": identity_block,
-    "policy": policy_block,
-    "inputs": inputs_block,              # you already assembled (hashes + dims + filenames)
-    "diagnostics": diagnostics_block,    # lane_mask_k3 / lane_vec_* you computed earlier
-    "checks": checks_block,              # per-k eq + n_k + grid/fence/ker_guard/residual_tag
-    "signatures": {
-        "d_signature": {},               # fill with your canonical signature if you have it
-        "fixture_signature": {},
-        "echo_context": None,
-    },
+    "identity": identity_block,          # you already built this (district_id/run_id/timestamp/app_version/field)
+    "policy": policy_block,              # label + config echo + projector_hash (if file-backed)
+    "inputs": inputs_block,              # hashes + dims + filenames (now filled)
+    "diagnostics": diagnostics_block,    # lane_mask_k3 / lane_vec_* etc.
+    "checks": checks_block,              # per-k eq + n_k (+ grid/fence/ker_guard/residual_tag if you added them)
+    "signatures": sig_block,             # canonical signatures (rank/ker/lane)
     "promotion": {
-        "eligible_for_promotion": int(out.get("3", {}).get("eq", False)) == 1,
-        "promotion_target": ("projected_anchor" if not is_strict else "strict_anchor") if int(out.get("3", {}).get("eq", False)) == 1 else None,
+        "eligible_for_promotion": k3_true,
+        "promotion_target": ("strict_anchor" if is_strict else "projected_anchor") if k3_true else None,
         "notes": "",
     },
+    "policy_tag": policy_block.get("policy_tag", policy_block.get("label", "unknown")),
+}
+
+# ---- 5) Write cert -----------------------------------------------------------
+cert_path, full_hash = export_mod.write_cert_json(cert_payload)
+st.success(f"Cert written: `{cert_path}`")
+
+
     # Top-level duplication of artifact hashes (handy for quick indexing)
     "artifact_hashes": {
         "boundaries_hash": inputs_block["boundaries_hash"],
