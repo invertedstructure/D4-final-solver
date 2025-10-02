@@ -652,8 +652,8 @@ sig_block = {
 
 
     # ---------- Policy snapshot ----------
-    pj_hash = ""
-    if cfg_active.get("source", {}).get("3") == "file":
+pj_hash = ""
+if cfg_active.get("source", {}).get("3") == "file":
         pj_path = cfg_active.get("projector_files", {}).get("3")
         if pj_path and os.path.exists(pj_path):
             pj_hash = projector._hash_matrix(_json.load(open(pj_path)))
