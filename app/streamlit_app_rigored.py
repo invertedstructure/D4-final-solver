@@ -571,7 +571,7 @@ with tab2:
     def _gf2_rank(M):
     # simple Gaussian elimination mod 2
         if not M:
-        return 0
+            return 0
         A = [row[:] for row in M]
         r = 0
         n_rows = len(A)
