@@ -754,13 +754,6 @@ identity_block = {
     "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
     "field": "GF(2)",
 }
-
-# ---- 1) Attach human filenames ONCE (right after building inputs_block) ----
-inputs_block["filenames"] = {
-    "boundaries": st.session_state.get("fname_boundaries", ""),
-    "C":          st.session_state.get("fname_cmap", ""),
-    "H":          st.session_state.get("fname_h", ""),
-    "U":          st.session_state.get("fname_shapes", ""),
 # ---------- Tiny polish: filenames + signatures ----------
 # Place this AFTER you've created `inputs_block` and `diagnostics_block`,
 # and BEFORE you build `cert_payload`.
@@ -838,6 +831,13 @@ sig_block = {
     "fixture_signature": fixture_signature,
     "echo_context": _prev_echo,
 }
+
+# ---- 1) Attach human filenames ONCE (right after building inputs_block) ----
+inputs_block["filenames"] = {
+    "boundaries": st.session_state.get("fname_boundaries", ""),
+    "C":          st.session_state.get("fname_cmap", ""),
+    "H":          st.session_state.get("fname_h", ""),
+    "U":          st.session_state.get("fname_shapes", ""),
 
 
 
