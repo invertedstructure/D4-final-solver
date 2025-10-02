@@ -30,6 +30,39 @@ def projector_hash_for_cfg(cfg: dict) -> str:
         return projector._hash_matrix(P)
     except Exception:
         return ""
+        
+import os
+
+def projector_hashes_from_context(cfg: dict, boundaries, cache=None):
+    """
+    Returns a tuple: (file_hash, runtime_hash)
+
+    file_hash: hash of projector_D3.json if a file path exists (even if source=='auto').
+    runtime_hash: hash of the live projector derived from d3 (columns@k=3), for AUTO runs.
+    """
+    file_hash = ""
+    runtime_hash = ""
+
+    # Try file-backed first (even if source==auto, but a path exists)
+    try:
+        pj_path = (cfg or {}).get("projector_files", {}).get("3")
+        if pj_path and os.path.exists(pj_path):
+            with open(pj_path) as f:
+                P = _json.load(f)
+            file_hash = projector._hash_matrix(P)
+    except Exception:
+        pass
+
+    # Always try to compute a runtime projector hash from d3 (for AUTO provenance)
+    try:
+        d3 = boundaries.blocks.__root__.get("3")
+        if d3:
+            P_rt = projector.projector_columns_from_dkp1(d3)  # columns @ k=3
+            runtime_hash = projector._hash_matrix(P_rt)
+    except Exception:
+        pass
+
+    return file_hash, runtime_hash
 
 
 def gallery_key_from(*, cert_payload: dict, cmap, diagnostics_block: dict, policy_label: str):
