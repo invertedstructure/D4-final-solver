@@ -416,19 +416,22 @@ def run_overlap_with_cfg(boundaries, cmap, H, cfg: dict):
 with tab2:
     st.subheader("Overlap gate (homotopy vs identity)")
 
-    # --- H uploader + auto-zero ---
+    # --- H uploader (+ remember filename for certs/bundles) ---
     f_H = st.file_uploader("Homotopy H (H_corrected.json)", type=["json"], key="H_corr")
+    _stamp_filename("fname_h", f_H)
     d_H = read_json_file(f_H) if f_H else None
-
+    H_local = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})  # JSON-safe CMap
 
     # --- Policy toggle UI ---
     st.markdown("### Policy")
-    policy_choice = st.radio("Choose policy", ["strict", "projected(columns@k=3)"],
-                             horizontal=True, key="policy_choice_k3")
+    policy_choice = st.radio(
+        "Choose policy",
+        ["strict", "projected(columns@k=3)"],
+        horizontal=True,
+        key="policy_choice_k3",
+    )
 
-
-
-    # Build active cfg (respect file/auto from projection_config.json)
+    # --- Build active cfg (respect file/auto from projection_config.json) ---
     cfg_file = projector.load_projection_config("projection_config.json")
     cfg_proj = cfg_projected_base()
     if cfg_file.get("source", {}).get("3") in ("file", "auto"):
@@ -441,13 +444,21 @@ with tab2:
 
     cache = projector.preload_projectors_from_files(cfg_active)
 
-    # Projector source expander (guarded by cfg_active)
+    # --- Projector source (k=3) quick switcher ---
     with st.expander("Projector source (k=3)"):
         cur_src  = cfg_file.get("source", {}).get("3", "auto")
         cur_file = cfg_file.get("projector_files", {}).get("3", "projector_D3.json")
-        st.write(f"Current: source.3 = **{cur_src}**", f"(file: `{cur_file}`)" if cur_src == "file" else "")
-        mode_choice = st.radio("Choose source for k=3", options=["auto","file"],
-                               index=0 if cur_src == "auto" else 1, horizontal=True, key="proj_src_choice_k3")
+        st.write(
+            f"Current: source.3 = **{cur_src}**",
+            f"(file: `{cur_file}`)" if cur_src == "file" else ""
+        )
+        mode_choice = st.radio(
+            "Choose source for k=3",
+            options=["auto","file"],
+            index=0 if cur_src == "auto" else 1,
+            horizontal=True,
+            key="proj_src_choice_k3",
+        )
         file_path = st.text_input("Projector file", value=cur_file, disabled=(mode_choice=="auto"))
         if st.button("Apply projector source", key="apply_proj_src_k3"):
             cfg_file.setdefault("source", {})["3"] = mode_choice
@@ -460,7 +471,7 @@ with tab2:
                 _json.dump(cfg_file, _f, indent=2)
             st.success(f"projection_config.json updated → source.3 = {mode_choice}")
 
-  # ---------- RUN OVERLAP ----------
+    # ---------- RUN OVERLAP ----------
     if st.button("Run Overlap", key="run_overlap"):
         try:
             out = overlap_gate.overlap_check(
@@ -471,7 +482,7 @@ with tab2:
                 projector_cache=cache,
             )
             st.json(out)
-    
+
             # persist for downstream cert/bundle blocks
             st.session_state["overlap_out"] = out
             st.session_state["overlap_cfg"] = cfg_active
@@ -482,375 +493,174 @@ with tab2:
             st.error(f"Overlap run failed: {e}")
             st.stop()
 
-        
-                # ---------- Gather last run from session_state (required for cert/bundle) ----------
-        _ss = st.session_state
-        overlap_out          = _ss.get("overlap_out")
-        overlap_cfg          = _ss.get("overlap_cfg")
-        overlap_policy_label = _ss.get("overlap_policy_label")
-        H_local              = _ss.get("overlap_H")
-        
-        if overlap_out is None or overlap_cfg is None or H_local is None:
-            st.info("Run Overlap first to populate cert & download bundle.")
-            st.stop()
-        
-        # convenience handles used below (replace previous uses of `out`, `cfg_active`, `policy_label`, and `H`)
-        out          = overlap_out
-        cfg_active   = overlap_cfg
-        policy_label = overlap_policy_label
-        # H_local is already set above
+    # ===== Restore last overlap run (required by cert/bundle) =====
+    _ss = st.session_state
+    overlap_out          = _ss.get("overlap_out")
+    overlap_cfg          = _ss.get("overlap_cfg")
+    overlap_policy_label = _ss.get("overlap_policy_label")
+    overlap_H            = _ss.get("overlap_H")
 
-        
-        # shapes must be JSON-safe
-        shapes_payload = shapes.dict() if hasattr(shapes, "dict") else (shapes or {})
+    if overlap_out is None or overlap_cfg is None or overlap_H is None:
+        st.info("Run Overlap first to populate cert & download bundle.")
+        st.stop()
 
+    # use the exact data from the run
+    out          = overlap_out
+    cfg_active   = overlap_cfg
+    policy_label = overlap_policy_label
+    H_local      = overlap_H
 
-         # --- After you've loaded cfg_active / policy_label and parsed H ---
-_stamp_filename("fname_h", f_H)  # remember the H filename
+    # shapes must be JSON-safe
+    shapes_payload = shapes.dict() if hasattr(shapes, "dict") else (shapes or {})
 
-# 1) Build a JSON-safe H and shapes right here
-H_local = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})
-shapes_payload = shapes.dict() if hasattr(shapes, "dict") else (shapes or {})
+    # ---------- Inputs block (hashes + shapes + filenames) ----------
+    inputs_hash = hashes.bundle_content_hash([
+        ("boundaries", boundaries.dict() if hasattr(boundaries, "dict") else {}),
+        ("cmap",       cmap.dict()       if hasattr(cmap,       "dict") else {}),
+        ("H",          H_local.dict()    if hasattr(H_local,    "dict") else {}),
+        ("cfg",        cfg_active),
+    ])
 
-# 2) Policy snapshot block (used in cert + bundle)
-pj_hash = ""
-if cfg_active.get("source", {}).get("3") == "file":
-    pj_path = cfg_active.get("projector_files", {}).get("3")
-    if pj_path and os.path.exists(pj_path):
-        pj_hash = projector._hash_matrix(_json.load(open(pj_path)))
+    def _dims(M):
+        return [len(M), len(M[0])] if (M and len(M) and M[0]) else [0, 0]
 
-policy_block = {
-    "label": policy_label,
-    "policy_tag": policy_label,     # exporter expects this key
-    "enabled_layers": cfg_active.get("enabled_layers", []),
-    "modes": cfg_active.get("modes", {}),
-    "source": cfg_active.get("source", {}),
-    "projector_hash": pj_hash,
-}
+    blocks_b = boundaries.blocks.__root__
+    blocks_c = cmap.blocks.__root__
+    blocks_h = H_local.blocks.__root__
+    shapes_block = {
+        "n3": _dims(blocks_c.get("3"))[0],
+        "n2": _dims(blocks_c.get("2"))[0],
+    }
 
-# 3) Inputs block (define it BEFORE adding filenames)
-inputs_hash = hashes.bundle_content_hash([
-    ("boundaries", boundaries.dict() if hasattr(boundaries, "dict") else {}),
-    ("cmap",       cmap.dict()       if hasattr(cmap,       "dict") else {}),
-    ("H",          H_local.dict()    if hasattr(H_local,    "dict") else {}),
-    ("cfg",        cfg_active),
-])
-
-def _dims(M):
-    return [len(M), len(M[0])] if (M and len(M) and M[0]) else [0, 0]
-
-blocks_b = boundaries.blocks.__root__
-blocks_c = cmap.blocks.__root__
-blocks_h = H_local.blocks.__root__
-shapes_block = {
-    "n3": _dims(blocks_c.get("3"))[0],
-    "n2": _dims(blocks_c.get("2"))[0],
-}
-
-inputs_block = {
-    "boundaries_hash": hashes.hash_d(boundaries),
-    "C_hash":          hashes.hash_suppC(cmap),
-    "H_hash":          hashes.hash_suppH(H_local),
-    "U_hash":          hashes.hash_U(shapes_payload),
-    "shapes":          shapes_block,
-}
-
-# 4) NOW attach human filenames (this was causing the NameError)
-inputs_block["filenames"] = {
-    "boundaries": st.session_state.get("fname_boundaries", ""),
-    "C":          st.session_state.get("fname_cmap", ""),
-    "H":          st.session_state.get("fname_h", ""),       # requires _stamp_filename on f_H
-    "U":          st.session_state.get("fname_shapes", ""),
-}
-
-# 5) Diagnostics (add lane mask & lane vectors if you like)
-d3 = blocks_b.get("3")
-lane_mask = [1 if d3 and any(row[j] & 1 for row in d3) else 0
-             for j in range(len(d3[0]))] if (d3 and len(d3) and d3[0]) else []
-
-def bottom_row(M):
-    return M[-1] if (M and len(M)) else []
-
-from otcore.linalg_gf2 import mul, add, eye
-lane_idx = [j for j, m in enumerate(lane_mask) if m == 1]
-
-H2d3 = mul(blocks_h.get("2", []), d3) if (blocks_h.get("2") and d3) else []
-C3pI3 = add(blocks_c.get("3", []),
-            eye(len(blocks_c.get("3", []))) if blocks_c.get("3") else [])
-
-def mask_to_lanes(vec, mask_idx):
-    return [vec[j] for j in mask_idx] if vec and mask_idx else []
-
-diagnostics_block = {
-    "lane_mask_k3": lane_mask,
-    "lane_vec_H2d3": mask_to_lanes(bottom_row(H2d3), lane_idx),
-    "lane_vec_C3plusI3": mask_to_lanes(bottom_row(C3pI3), lane_idx),
-}
-
-# 6) Checks (use the `out` you already computed earlier in this tab)
-checks_block = out  # e.g. {"2": {"eq": ...}, "3": {"eq": ...}}
-
-# 7) Signatures (example placeholders; keep your real ones if you have them)
-sig_block = {
-    "d_signature": {},
-    "fixture_signature": {},
-    "echo_context": None,
-}
-
-# 8) Promotion flags (example)
-pass_vec = [int(out.get("2", {}).get("eq", False)),
-            int(out.get("3", {}).get("eq", False))]
-all_green = all(v == 1 for v in pass_vec)
-promotion = {
-    "eligible_for_promotion": all_green,
-    "promotion_target": "projected_anchor" if all_green and policy_label.startswith("projected") else (
-                        "strict_anchor" if all_green else None),
-    "notes": "",
-}
-
-# ===== Restore last overlap run (required by cert/bundle) =====
-out_cached = st.session_state.get("overlap_out")
-if out_cached is None:
-    st.info("Run Overlap first (no cached result to write).")
-    st.stop()
-
-# use the exact cfg/policy/H used in the run
-out          = out_cached
-cfg_active   = st.session_state.get("overlap_cfg", cfg_strict())
-policy_label = st.session_state.get("overlap_policy_label", policy_label_from_cfg(cfg_active))
-H_local      = st.session_state.get("overlap_H", io.parse_cmap({"blocks": {}}))
-
-# shapes must be JSON-safe when serialized
-shapes_payload = shapes.dict() if hasattr(shapes, "dict") else (shapes or {})
-
-
-# 9) Cert payload + write (unchanged)
-cert_payload = {
-    "identity": {
-        "district_id": "D3",
-        "run_id": hashes.run_id(inputs_hash, hashes.timestamp_iso_lisbon()),
-        "timestamp": hashes.timestamp_iso_lisbon(),
-        "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
-        "field": "GF(2)",
-    },
-    "policy": policy_block,
-    "inputs": inputs_block,
-    "diagnostics": diagnostics_block,
-    "checks": checks_block,
-    "signatures": sig_block,
-    "promotion": promotion,
-    "artifact_hashes": {
-        "boundaries_hash": inputs_block["boundaries_hash"],
-        "C_hash":          inputs_block["C_hash"],
-        "H_hash":          inputs_block["H_hash"],
-        "U_hash":          inputs_block["U_hash"],
-        "projector_hash":  policy_block["projector_hash"],
-    },
-    "policy_tag": policy_label,
-}
-cert_path, full_hash = export_mod.write_cert_json(cert_payload)
-st.success(f"Cert written: `{cert_path}`")
- 
-                
-# ---------- Cert payload + write (JSON-safe, standalone) ----------
-district_id = st.session_state.get("district_id", "D3")
-
-# Make H and shapes JSON-safe
-H_local = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})
-shapes_payload = shapes.dict() if hasattr(shapes, "dict") else (shapes or {})
-
-# Effective policy (strict/projected) and projector hash (if file-backed)
-cfg_eff = cfg_active
-pj_hash = ""
-if cfg_eff.get("source", {}).get("3") == "file":
-    pj_path = cfg_eff.get("projector_files", {}).get("3")
-    if pj_path and os.path.exists(pj_path):
-        pj_hash = projector._hash_matrix(_json.load(open(pj_path)))
-
-policy_block = {
-    "label":          policy_label,          # e.g. "projected(columns@k=3,auto)" or "strict"
-    "policy_tag":     policy_label,          # exporter uses this for filename
-    "enabled_layers": cfg_eff.get("enabled_layers", []),
-    "modes":          cfg_eff.get("modes", {}),
-    "source":         cfg_eff.get("source", {}),
-    "projector_hash": pj_hash,               # empty if not file-backed
-}
-
-# Hash of inputs bundle for run_id
-inputs_hash = hashes.bundle_content_hash([
-    ("boundaries", boundaries.dict() if hasattr(boundaries, "dict") else {}),
-    ("cmap",       cmap.dict()       if hasattr(cmap,       "dict") else {}),
-    ("H",          H_local.dict()    if hasattr(H_local,    "dict") else {}),
-    ("shapes",     shapes_payload),
-    ("cfg",        cfg_eff),
-])
-
-# Inputs block (hashes + friendly filenames if you tracked them in session_state)
-inputs_block = {
-    "boundaries_hash": hashes.hash_d(boundaries),
-    "C_hash":          hashes.hash_suppC(cmap),
-    "H_hash":          hashes.hash_suppH(H_local),
-    "U_hash":          hashes.hash_U(shapes_payload),
-    "shapes":          shapes_payload,
-    "filenames": {
+    inputs_block = {
+        "boundaries_hash": hashes.hash_d(boundaries),
+        "C_hash":          hashes.hash_suppC(cmap),
+        "H_hash":          hashes.hash_suppH(H_local),
+        "U_hash":          hashes.hash_U(shapes_payload),
+        "shapes":          shapes_block,
+    }
+    inputs_block["filenames"] = {
         "boundaries": st.session_state.get("fname_boundaries", ""),
-        "cmap":       st.session_state.get("fname_cmap", ""),
-        "H":          st.session_state.get("fname_H", ""),
+        "C":          st.session_state.get("fname_cmap", ""),
+        "H":          st.session_state.get("fname_h", ""),
         "U":          st.session_state.get("fname_shapes", ""),
-    },
-}
+    }
 
-# Checks from your solver output
-try:
-    checks_block = out  # set earlier when you ran overlap_check
-except NameError:
-    # If we're outside the button scope, recompute once so the cert still works
-    _cache = projector.preload_projectors_from_files(cfg_active)
-    checks_block = overlap_gate.overlap_check(
-        boundaries, cmap, H_local,
-        projection_config=cfg_active if cfg_active.get("enabled_layers") else None,
-        projector_cache=_cache,
-    )
+    # ---------- Diagnostics (lane mask + lane vectors) ----------
+    d3 = blocks_b.get("3")
+    lane_mask = [1 if d3 and any(row[j] & 1 for row in d3) else 0
+                 for j in range(len(d3[0]))] if (d3 and len(d3) and d3[0]) else []
 
+    def bottom_row(M):
+        return M[-1] if (M and len(M)) else []
 
-# Graceful defaults if you didn't build these earlier
-diagnostics_block = locals().get("diagnostics_block", {})
-sig_block = locals().get("sig_block", {"d_signature": {}, "fixture_signature": "", "echo_context": ""})
-promotion = locals().get("promotion", {"eligible_for_promotion": False, "promotion_target": None, "notes": ""})
+    lane_idx = [j for j, m in enumerate(lane_mask) if m == 1]
+    H2d3  = mul(blocks_h.get("2", []), d3) if (blocks_h.get("2") and d3) else []
+    C3pI3 = add(blocks_c.get("3", []),
+                eye(len(blocks_c.get("3", []))) if blocks_c.get("3") else [])
 
-# Final cert payload
-cert_payload = {
-    "identity": {
-        "district_id": district_id,
-        "run_id":      hashes.run_id(inputs_hash, hashes.timestamp_iso_lisbon()),
-        "timestamp":   hashes.timestamp_iso_lisbon(),
-        "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
-        "field":       "GF(2)",
-    },
-    "policy":          policy_block,
-    "inputs":          inputs_block,
-    "diagnostics":     diagnostics_block,
-    "checks":          checks_block,
-    "signatures":      sig_block,
-    "promotion":       promotion,
-    "artifact_hashes": {
-        "boundaries_hash": inputs_block["boundaries_hash"],
-        "C_hash":          inputs_block["C_hash"],
-        "H_hash":          inputs_block["H_hash"],
-        "U_hash":          inputs_block["U_hash"],
-        "projector_hash":  policy_block["projector_hash"],
-    },
-}
+    def mask_to_lanes(vec, mask_idx):
+        return [vec[j] for j in mask_idx] if vec and mask_idx else []
 
-cert_path, full_hash = export_mod.write_cert_json(cert_payload)
-if st.checkbox("Show download bundle", value=False, key="show_bundle"):
+    diagnostics_block = {
+        "lane_mask_k3":    lane_mask,
+        "lane_vec_H2d3":   mask_to_lanes(bottom_row(H2d3),  lane_idx),
+        "lane_vec_C3plusI3": mask_to_lanes(bottom_row(C3pI3), lane_idx),
+    }
+
+    # ---------- Checks/signatures ----------
+    checks_block = out  # {"2": {...}, "3": {...}}
+    sig_block = {
+        "d_signature": {},
+        "fixture_signature": {},
+        "echo_context": None,
+    }
+
+    # ---------- Policy snapshot ----------
+    pj_hash = ""
+    if cfg_active.get("source", {}).get("3") == "file":
+        pj_path = cfg_active.get("projector_files", {}).get("3")
+        if pj_path and os.path.exists(pj_path):
+            pj_hash = projector._hash_matrix(_json.load(open(pj_path)))
+    policy_block = {
+        "label": policy_label,
+        "policy_tag": policy_label,     # exporter expects this key
+        "enabled_layers": cfg_active.get("enabled_layers", []),
+        "modes": cfg_active.get("modes", {}),
+        "source": cfg_active.get("source", {}),
+        "projector_hash": pj_hash,
+    }
+
+    # ---------- Cert payload + write ----------
+    district_id = st.session_state.get("district_id", "D3")
+    cert_payload = {
+        "identity": {
+            "district_id": district_id,
+            "run_id": hashes.run_id(inputs_hash, hashes.timestamp_iso_lisbon()),
+            "timestamp": hashes.timestamp_iso_lisbon(),
+            "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
+            "field": "GF(2)",
+        },
+        "policy": policy_block,
+        "inputs": inputs_block,
+        "diagnostics": diagnostics_block,
+        "checks": checks_block,
+        "signatures": sig_block,
+        "promotion": {"eligible_for_promotion": None, "promotion_target": None, "notes": ""},
+        "artifact_hashes": {
+            "boundaries_hash": inputs_block["boundaries_hash"],
+            "C_hash": inputs_block["C_hash"],
+            "H_hash": inputs_block["H_hash"],
+            "U_hash": inputs_block["U_hash"],
+            "projector_hash": policy_block["projector_hash"],
+        },
+        "policy_tag": policy_label,
+    }
+    cert_path, full_hash = export_mod.write_cert_json(cert_payload)
+    st.success(f"Cert written: `{cert_path}`")
+
+    # ---------- One-click bundle download ----------
     try:
-        # only proceed if the variables exist
-        if 'boundaries' in locals() and 'cmap' in locals():
-            H_local = io.parse_cmap(d_H) if 'd_H' in locals() and d_H else io.parse_cmap({"blocks": {}})
-
-            boundaries_payload = _safe_dict(boundaries)
-            cmap_payload       = _safe_dict(cmap)
-            H_payload          = _safe_dict(H_local)
-            shapes_payload     = _safe_dict(shapes) if 'shapes' in locals() else {}
-
-            # minimal policy stub if one wasn’t built above
-            _pj_hash = ""
-            if 'cfg_active' in locals() and cfg_active.get("source", {}).get("3") == "file":
-                pj_path = cfg_active.get("projector_files", {}).get("3")
-                if pj_path and os.path.exists(pj_path):
-                    _pj_hash = projector._hash_matrix(_json.load(open(pj_path)))
-
-            _policy_block = {
-                "label":        policy_label if 'policy_label' in locals() else "strict",
-                "policy_tag":   policy_label if 'policy_label' in locals() else "strict",
-                "enabled_layers": (cfg_active.get("enabled_layers", []) if 'cfg_active' in locals() else []),
-                "modes":          (cfg_active.get("modes", {}) if 'cfg_active' in locals() else {}),
-                "source":         (cfg_active.get("source", {}) if 'cfg_active' in locals() else {}),
-                "projector_hash": _pj_hash,
-            }
-
-            district_id = st.session_state.get("district_id", "D3")
-            out_zip_name = f"overlap_bundle__{district_id}__{_policy_block['policy_tag'].replace(' ','_')}__{(full_hash or '')[:12]}.zip"
-
-            bundle_zip = export_mod.build_overlap_bundle(
-                boundaries=boundaries_payload,
-                cmap=cmap_payload,
-                H=H_payload,
-                shapes=shapes_payload,
-                policy_block=_policy_block,
-                cert_path=cert_path,
-                out_zip=out_zip_name,
-            )
-
-            with open(bundle_zip, "rb") as f:
-                st.download_button(
-                    label="⬇️ Download overlap bundle",
-                    data=f.read(),
-                    file_name=os.path.basename(bundle_zip),
-                    mime="application/zip",
-                    key="dl_overlap_bundle",
-                )
-        else:
-            st.info("Bundle skipped (inputs not in scope).")
-    except Exception as e:
-        st.caption(f"Bundle muted: {e}")
-
-
-# ---------- Build & show download bundle ----------
-import os
-
-try:
-    bundle_path = export_mod.build_overlap_download_bundle(
-        boundaries=boundaries,
-        cmap=cmap,
-        H=H_local,                               # <-- use H_local (parsed dict-backed CMap)
-        shapes=shapes_payload,                   # <-- use shapes_payload (dict), not the Pydantic model
-        policy_block=policy_block,
-        cert_path=cert_path,
-        out_zip=f"overlap_bundle__{district_id}__{policy_block['policy_tag']}__{full_hash[:12]}.zip",
-        cfg_snapshot=cfg_active,                 # nice to include the projection_config used
-    )
-    st.success(f"Bundle ready: `{os.path.basename(bundle_path)}`")
-    with open(bundle_path, "rb") as fh:
-        st.download_button(
-            "⬇️ Download overlap bundle",
-            fh,
-            file_name=os.path.basename(bundle_path),
-            mime="application/zip",
-            key="dl_overlap_bundle",
+        zpath = export_mod.build_overlap_bundle(
+            boundaries=boundaries,
+            cmap=cmap,
+            H=H_local,
+            shapes=shapes_payload,
+            policy_block=policy_block,
+            cert_path=cert_path,
+            out_zip=f"overlap_bundle__{district_id}__{policy_label.replace(' ','_')}__{full_hash[:12]}.zip",
         )
-except Exception as e:
-    st.error(f"Could not build download bundle: {e}")
+        with open(zpath, "rb") as fz:
+            st.download_button(
+                "⬇️ Download bundle (B,C,H,U,config,cert)",
+                data=fz,
+                file_name=os.path.basename(zpath),
+                mime="application/zip",
+                key="dl_bundle_k3",
+            )
+    except Exception as e:
+        st.error(f"Could not build download bundle: {e}")
 
-
-
-
-
-    # ---------- Promotion: freeze projector + log (optional) ----------
+    # ---------- Promotion (optional) ----------
+    pass_vec = [int(out.get("2", {}).get("eq", False)),
+                int(out.get("3", {}).get("eq", False))]
+    all_green = all(v == 1 for v in pass_vec)
     if all_green:
         st.success("Green — eligible for promotion.")
-        flip_to_file = st.checkbox(
-            "After promotion, switch to FILE-backed projector",
-            value=True, key="flip_to_file_k3"
-        )
-        keep_auto = st.checkbox(
-            "…or keep AUTO (don’t lock now)",
-            value=False, key="keep_auto_k3"
-        )
-
+        flip_to_file = st.checkbox("After promotion, switch to FILE-backed projector",
+                                   value=True, key="flip_to_file_k3")
+        keep_auto = st.checkbox("…or keep AUTO (don’t lock now)",
+                                value=False, key="keep_auto_k3")
         if st.button("Promote & Freeze Projector", key="promote_k3"):
             d3_now = boundaries.blocks.__root__.get("3")
             if not d3_now:
                 st.error("No d3; cannot freeze projector.")
             else:
-                # Freeze the exact Π3 used right now
                 P_used = projector.projector_columns_from_dkp1(d3_now)
                 pj_path = cfg_file.get("projector_files", {}).get("3", "projector_D3.json")
                 pj_hash = projector.save_projector(pj_path, P_used)
                 st.info(f"Projector frozen → {pj_path} (hash={pj_hash[:12]}…)")
 
-                # Flip config or keep auto
                 if flip_to_file and not keep_auto:
                     cfg_file.setdefault("source", {})["3"] = "file"
                     cfg_file.setdefault("projector_files", {})["3"] = pj_path
@@ -861,7 +671,6 @@ except Exception as e:
                 with open("projection_config.json", "w") as _f:
                     _json.dump(cfg_file, _f, indent=2)
 
-                # Registry row
                 import time as _time
                 try:
                     export_mod.write_registry_row(
@@ -871,108 +680,13 @@ except Exception as e:
                         hash_d=hashes.hash_d(boundaries),
                         hash_U=hashes.hash_U(shapes) if 'shapes' in locals() else "",
                         hash_suppC=hashes.hash_suppC(cmap),
-                        hash_suppH=hashes.hash_suppH(H),
-                        notes=f"proj_hash={pj_hash}",
+                        hash_suppH=hashes.hash_suppH(H_local),
+                        notes=f"proj_hash={pj_hash}"
                     )
                     st.success("Registry updated with projector hash.")
                 except Exception as e:
                     st.error(f"Failed to write registry row: {e}")
-    else:
-        st.info("Not promoting: some checks are red.")
 
-
-        # --- Download bundle (zip) of this Overlap run --------------------------------
-try:
-    from io import BytesIO
-    import zipfile
-    import os
-
-    # Provenance manifest for this run
-    manifest = {
-        "identity": {
-            "district_id": st.session_state.get("district_id", "D3"),
-            "timestamp": hashes.timestamp_iso_lisbon(),
-            "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
-            "run_policy": policy_label,  # strict / projected(columns@k=3,auto|file)
-        },
-        "policy": {
-            "label": policy_label,
-            "config_effective": cfg_active,  # strict dict or projected dict
-        },
-        "hashes": {
-            "hash_d": hashes.hash_d(boundaries),
-            "hash_U": hashes.hash_U(shapes) if 'shapes' in locals() else "",
-            "hash_suppC": hashes.hash_suppC(cmap),
-            "hash_suppH": hashes.hash_suppH(H),
-        },
-        "results": {
-            "k2": out.get("2", {}),
-            "k3": out.get("3", {}),
-        },
-        # Optional: original upload names if you track them via session_state
-        "files": {
-            "boundaries": st.session_state.get("fname_boundaries",""),
-            "cmap":       st.session_state.get("fname_cmap",""),
-            "H":          st.session_state.get("fname_H_corr",""),
-            "U":          st.session_state.get("fname_shapes",""),
-        },
-    }
-
-    # If projected in FILE mode, include the projector file/hash in the bundle
-    pj_file = None
-    pj_hash = ""
-    if cfg_active.get("source", {}).get("3") == "file":
-        pj_file = cfg_active.get("projector_files", {}).get("3")
-        if pj_file and os.path.exists(pj_file):
-            # optional helper (you already have projector._hash_matrix)
-            with open(pj_file, "r") as _pf:
-                import json as _json
-                pj_hash = projector._hash_matrix(_json.load(_pf))
-            manifest["hashes"]["hash_P"] = pj_hash
-
-    # Build the zip in-memory
-    buf = BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
-        # Manifest
-        import json as _json
-        z.writestr("manifest.json", _json.dumps(manifest, indent=2))
-
-        # Inputs (canonical dumps of the objects used)
-        z.writestr("inputs/boundaries.json", _json.dumps(boundaries.dict() if hasattr(boundaries, "dict") else {}, indent=2))
-        z.writestr("inputs/cmap.json",       _json.dumps(cmap.dict()       if hasattr(cmap,       "dict") else {}, indent=2))
-        z.writestr("inputs/H.json",          _json.dumps(H.dict()          if hasattr(H,          "dict") else {}, indent=2))
-        if 'shapes' in locals():
-            z.writestr("inputs/U.json", _json.dumps(shapes, indent=2))
-
-        # Policy files in effect
-        if os.path.exists("projection_config.json"):
-            with open("projection_config.json", "r") as f:
-                z.writestr("inputs/projection_config.json", f.read())
-        if pj_file and os.path.exists(pj_file):
-            z.write(pj_file, f"inputs/{os.path.basename(pj_file)}")
-
-        # Results
-        z.writestr("results/overlap_result.json", _json.dumps(out, indent=2))
-
-        # Cert (if you just wrote one)
-        if 'cert_path' in locals() and cert_path and os.path.exists(cert_path):
-            z.write(cert_path, f"certs/{os.path.basename(cert_path)}")
-
-    buf.seek(0)
-
-    # Friendly filename
-    bundle_name = f"overlap_bundle__{st.session_state.get('district_id','D3')}__{policy_tag_for_filename(policy_label)}.zip"
-
-    st.download_button(
-        "Download overlap bundle (.zip)",
-        data=buf.getvalue(),
-        file_name=bundle_name,
-        mime="application/zip",
-        key="dl_overlap_bundle_zip",
-        help="Includes manifest, inputs, results, and cert (if written)."
-    )
-except Exception as e:
-    st.error(f"Could not build download bundle: {e}")
 
        
        
