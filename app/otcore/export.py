@@ -19,6 +19,45 @@ def _jsonable(obj: Any) -> Any:
         except Exception:
             pass
     return obj  # assume already serializable
+    from __future__ import annotations
+import os, csv, json, hashlib
+from pathlib import Path
+from .io import dump_canonical
+
+def ensure_dir(d: str) -> None:
+    Path(d).mkdir(parents=True, exist_ok=True)
+
+def write_gallery_row(row: dict, key_tuple: tuple, path: str = "gallery.csv") -> str:
+    """
+    Append a row to gallery.csv only if the key_tuple is unseen.
+    key_tuple should be a tuple of primitives (e.g., strings).
+    Returns 'written' or 'ignored'.
+    """
+    ensure_dir(os.path.dirname(path) or ".")
+    seen = set()
+    if os.path.exists(path):
+        with open(path, newline="") as f:
+            r = csv.DictReader(f)
+            for rr in r:
+                seen.add(rr.get("__key__", ""))
+
+    key_str = json.dumps(key_tuple, separators=(",", ":"))
+    if key_str in seen:
+        return "ignored"
+
+    # flatten + include key
+    flat = dict(row)
+    flat["__key__"] = key_str
+
+    write_header = (not os.path.exists(path))
+    with open(path, "a", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=sorted(flat.keys()))
+        if write_header:
+            w.writeheader()
+        w.writerow(flat)
+    return "written"
+
+
 
 # --- bundle builder: write B/C/H/U + policy + cert into a single .zip ----------
 def build_overlap_bundle(
