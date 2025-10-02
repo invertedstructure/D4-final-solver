@@ -1049,9 +1049,23 @@ cert_payload = {
 }
 
 # ---- Optional: embed A/B snapshots into the cert (safe, no KeyErrors) -------
-ab_ctx         = st.session_state.get("ab_compare", {}) or {}
-strict_ctx     = ab_ctx.get("strict", {}) or {}
-projected_ctx  = ab_ctx.get("projected", {}) or {}
+ab_ctx = st.session_state.get("ab_compare", {}) or {}
+
+# Build current inputs signature to validate freshness of the A/B snapshot
+_current_sig = [
+    inputs_block.get("boundaries_hash", ""),
+    inputs_block.get("C_hash", ""),
+    inputs_block.get("H_hash", ""),
+    inputs_block.get("U_hash", ""),
+    inputs_block.get("shapes_hash", ""),
+]
+
+# If the stored A/B snapshot was produced with different inputs, ignore it
+if ab_ctx.get("inputs_sig") != _current_sig:
+    ab_ctx = {}
+
+strict_ctx    = ab_ctx.get("strict", {}) if ab_ctx else {}
+projected_ctx = ab_ctx.get("projected", {}) if ab_ctx else {}
 
 if ab_ctx:
     # Helper to build pass-vector from an out-dict
@@ -1065,45 +1079,58 @@ if ab_ctx:
     proj_hash_ab = projected_ctx.get("projector_hash", "")
     if not proj_hash_ab:
         try:
+            # Prefer the A/B snapshot's own lane mask if present
             proj_hash_ab = projector_provenance_hash(
                 cfg=(projected_ctx.get("cfg", {}) or {}),
-                lane_mask_k3=diagnostics_block.get("lane_mask_k3", []),
-                district_id=district_id,
+                lane_mask_k3=projected_ctx.get("lane_mask_k3", []),
+                district_id=st.session_state.get("district_id", "D3"),
             )
-        except Exception:
-            # Legacy fallback path
+        except TypeError:
             try:
-                file_hash_ab, rt_hash_ab = projector_hashes_from_context(projected_ctx.get("cfg", {}) or {}, boundaries, cache)
-                proj_hash_ab = file_hash_ab or rt_hash_ab or ""
+                proj_hash_ab = projector_provenance_hash(
+                    cfg=(projected_ctx.get("cfg", {}) or {}),
+                    lane_mask=projected_ctx.get("lane_mask_k3", []),
+                    district_id=st.session_state.get("district_id", "D3"),
+                )
             except Exception:
-                proj_hash_ab = ""
+                try:
+                    file_hash_ab, rt_hash_ab = projector_hashes_from_context(
+                        projected_ctx.get("cfg", {}) or {}, boundaries, cache
+                    )
+                    proj_hash_ab = file_hash_ab or rt_hash_ab or ""
+                except Exception:
+                    proj_hash_ab = ""
 
     cert_payload.setdefault("policy", {})
+    # Use ONLY the lanes/pass/out stored in the snapshot contexts (no diag fallbacks)
     cert_payload["policy"]["strict_snapshot"] = {
         "policy_tag": strict_ctx.get("label", policy_label_from_cfg(cfg_strict())),
         "ker_guard":  strict_ctx.get("ker_guard", "enforced"),
-        "lane_mask_k3":      strict_ctx.get("lane_mask_k3",      diagnostics_block.get("lane_mask_k3", [])),
-        "lane_vec_H2d3":     strict_ctx.get("lane_vec_H2d3",     diagnostics_block.get("lane_vec_H2d3", [])),
-        "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
+        "lane_mask_k3":      strict_ctx.get("lane_mask_k3", []),
+        "lane_vec_H2d3":     strict_ctx.get("lane_vec_H2d3", []),
+        "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3", []),
         "pass_vec": _pass_vec_from(strict_ctx.get("out", {})),
         "out":      strict_ctx.get("out", {}),
     }
     cert_payload["policy"]["projected_snapshot"] = {
         "policy_tag":     projected_ctx.get("label", policy_label_from_cfg(cfg_projected_base())),
         "ker_guard":      projected_ctx.get("ker_guard", "off"),
-        "projector_hash": proj_hash_ab,  # <-- same provenance hash as A/B projected leg
-        "lane_mask_k3":      projected_ctx.get("lane_mask_k3",      diagnostics_block.get("lane_mask_k3", [])),
-        "lane_vec_H2d3":     projected_ctx.get("lane_vec_H2d3",     diagnostics_block.get("lane_vec_H2d3", [])),
-        "lane_vec_C3plusI3": projected_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
+        "projector_hash": proj_hash_ab,
+        "lane_mask_k3":      projected_ctx.get("lane_mask_k3", []),
+        "lane_vec_H2d3":     projected_ctx.get("lane_vec_H2d3", []),
+        "lane_vec_C3plusI3": projected_ctx.get("lane_vec_C3plusI3", []),
         "pass_vec": _pass_vec_from(projected_ctx.get("out", {})),
         "out":      projected_ctx.get("out", {}),
     }
     cert_payload["ab_pair_tag"] = ab_ctx.get("pair_tag", "")
 
-    # --- Uniform provenance: mirror projected hash into top-level if empty ---
+    # Uniform provenance: mirror projected hash into top-level if empty (strict active)
     proj_hash_from_ab = cert_payload["policy"]["projected_snapshot"].get("projector_hash", "")
     if proj_hash_from_ab and not cert_payload["policy"].get("projector_hash"):
         cert_payload["policy"]["projector_hash"] = proj_hash_from_ab
+        # Keep artifact hashes in sync as well
+        cert_payload.setdefault("artifact_hashes", {})
+        cert_payload["artifact_hashes"]["projector_hash"] = proj_hash_from_ab
 
 # ---- Integrity + top-level artifact hashes ----------------------------------
 cert_payload.setdefault("artifact_hashes", {
