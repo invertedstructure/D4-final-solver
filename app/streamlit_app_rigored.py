@@ -490,150 +490,136 @@ with tab2:
         lane_mask = [1 if any(row[j] for row in d3) else 0 for j in range(len(d3[0]))] if d3 else []
         st.write("k=3 lane_mask (1=lane, 0=ker):", lane_mask)
 
-            # ---------- Diagnostics (lane mask + lane vectors) ----------
-        lane_mask_k3 = _lane_mask_from_d3(boundaries)
-        
-        # Build H2@d3 bottom row and (C3+I3) bottom row
-        try:
-            d3 = boundaries.blocks.__root__.get("3")
-            C3 = cmap.blocks.__root__.get("3")
-            H2 = (io.parse_cmap(d_H).blocks.__root__.get("2") if d_H else None)
-        except Exception:
-            d3 = C3 = H2 = None
-        
-        H2d3_bottom = []
-        C3pI3_bottom = []
-        if d3 and C3:
-            if H2:
-                Hd = _mul_gf2(H2, d3)
-                H2d3_bottom = _bottom_row(Hd)
-            I3 = _eye(len(C3)) if C3 and len(C3) else []
-            C3pI3 = _gf2_add(C3, I3)
-            C3pI3_bottom = _bottom_row(C3pI3)
-        
-        lane_vec_H2d3  = _restrict_to_lanes(H2d3_bottom, lane_mask_k3)
-        lane_vec_C3pI3 = _restrict_to_lanes(C3pI3_bottom, lane_mask_k3)
-        
-        diagnostics_block = {
-            "lane_mask_k3": lane_mask_k3,
-            "lane_vec_H2d3": lane_vec_H2d3,
-            "lane_vec_C3pI3": lane_vec_C3pI3,
-        }
-        
-        # ---------- Checks (grid / fence / ker_guard) ----------
-        grid_ok  = _grid_flags(boundaries, cmap)
-        # H_local: safe homotopy object for fence (use empty if none uploaded)
-        H_local_for_fence = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})
-        fence_ok = _fence_flags(cmap, H_local_for_fence, shapes)
-        
-        ker_guard = "enforced" if policy_label == "strict" else "off"
-        
-        # Keep your per-k eq results (computed earlier into `out`)
-        checks_block = {
-            "grid": bool(grid_ok),
-            "fence": bool(fence_ok),
-            "ker_guard": ker_guard,
-            "k": out,  # preserves {"2":{"eq":...,"n_k":...},"3":{...}}
-        }
-        
-        # ---------- Filenames (human trace) ----------
-        inputs_block["filenames"] = {
-            "boundaries": st.session_state.get("fname_boundaries", ""),
-            "C":          st.session_state.get("fname_cmap", ""),
-            "H":          st.session_state.get("fname_h", ""),
-            "U":          st.session_state.get("fname_shapes", ""),
-        }
+         # --- After you've loaded cfg_active / policy_label and parsed H ---
+_stamp_filename("fname_h", f_H)  # remember the H filename
 
+# 1) Build a JSON-safe H and shapes right here
+H_local = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})
+shapes_payload = shapes.dict() if hasattr(shapes, "dict") else (shapes or {})
 
-        # ---------- Inputs / hashes ----------
-        inputs_hash = hashes.bundle_content_hash([
-            ("boundaries", boundaries.dict() if hasattr(boundaries,"dict") else {}),
-            ("cmap",       cmap.dict()       if hasattr(cmap,      "dict") else {}),
-            ("H",          H.dict()          if hasattr(H,         "dict") else {}),
-            ("cfg",        cfg_active),
-        ])
-        inputs_block = {
-            "boundaries_hash": hashes.hash_d(boundaries),
-            "C_hash": hashes.hash_suppC(cmap),   # or content hash if you prefer full C
-            "H_hash": hashes.hash_suppH(H),
-            "U_hash": hashes.hash_U(shapes) if 'shapes' in locals() else "",
-            "shapes": {"n3": len(C3), "n2": len(cmap.blocks.__root__.get("2", []))},
-            "filenames": {
-                "boundaries": st.session_state.get("f_boundaries_name",""),
-                "cmap":       st.session_state.get("f_cmap_name",""),
-                "H":          getattr(f_H,"name","") or "H_zero",
-                "U":          st.session_state.get("f_shapes_name",""),
-            },
-        }
+# 2) Policy snapshot block (used in cert + bundle)
+pj_hash = ""
+if cfg_active.get("source", {}).get("3") == "file":
+    pj_path = cfg_active.get("projector_files", {}).get("3")
+    if pj_path and os.path.exists(pj_path):
+        pj_hash = projector._hash_matrix(_json.load(open(pj_path)))
 
-        # ---------- Policy snapshot ----------
-        policy_block = {
-            "policy": policy_label,
-            "projection_config": cfg_active,
-            "lane_mask_k3": lane_mask,
-            "projector_hash": (
-                projector._hash_matrix(_json.load(open(cfg_active.get("projector_files",{}).get("3"))))
-                if cfg_active.get("source",{}).get("3") == "file" else ""
-            ),
-        }
+policy_block = {
+    "label": policy_label,
+    "policy_tag": policy_label,     # exporter expects this key
+    "enabled_layers": cfg_active.get("enabled_layers", []),
+    "modes": cfg_active.get("modes", {}),
+    "source": cfg_active.get("source", {}),
+    "projector_hash": pj_hash,
+}
 
-        # ---------- Checks ----------
-        checks_block = {
-            "k2": {"eq": bool(out.get("2",{}).get("eq")), "n_k": out.get("2",{}).get("n_k",0),
-                   "grid": True, "fence": True, "ker_guard": "off" if policy_choice!="strict" else "enforced",
-                   "residual_tag": "none"},
-            "k3": {"eq": bool(out.get("3",{}).get("eq")), "n_k": out.get("3",{}).get("n_k",0),
-                   "grid": True, "fence": True, "ker_guard": "off" if policy_choice!="strict" else "enforced",
-                   "residual_tag": "none"},
-        }
+# 3) Inputs block (define it BEFORE adding filenames)
+inputs_hash = hashes.bundle_content_hash([
+    ("boundaries", boundaries.dict() if hasattr(boundaries, "dict") else {}),
+    ("cmap",       cmap.dict()       if hasattr(cmap,       "dict") else {}),
+    ("H",          H_local.dict()    if hasattr(H_local,    "dict") else {}),
+    ("cfg",        cfg_active),
+])
 
-        # ---------- Signatures (toy example) ----------
-        sig_block = {
-            "d_signature": {
-                "k+1": len(C3[0]) if (C3 and len(C3)>0) else 0,
-                "rank": None, "ker_dim": lane_mask.count(0),
-                "lane_pattern": "".join(str(x) for x in lane_mask) if lane_mask else ""
-            },
-            "fixture_signature": {"supp_C_minus_I_lane": row_C3pI},
-            "echo_context": None,
-        }
+def _dims(M):
+    return [len(M), len(M[0])] if (M and len(M) and M[0]) else [0, 0]
 
-        # ---------- Promotion flags ----------
-        pass_vec = [int(out.get("2",{}).get("eq", False)), int(out.get("3",{}).get("eq", False))]
-        all_green = all(v==1 for v in pass_vec)
-        promotion = {
-            "eligible_for_promotion": bool(all_green),
-            "promotion_target": "projected_anchor" if (all_green and policy_choice!="strict") else
-                                ("strict_anchor" if all_green else None),
-            "notes": "",
-        }
+blocks_b = boundaries.blocks.__root__
+blocks_c = cmap.blocks.__root__
+blocks_h = H_local.blocks.__root__
+shapes_block = {
+    "n3": _dims(blocks_c.get("3"))[0],
+    "n2": _dims(blocks_c.get("2"))[0],
+}
 
-                # ---------- Cert payload + write ----------
-        cert_payload = {
-            "identity": {
-                "district_id": "D3",  # or your actual district id
-                "run_id": hashes.run_id(inputs_hash, hashes.timestamp_iso_lisbon()),
-                "timestamp": hashes.timestamp_iso_lisbon(),
-                "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
-                "field": "GF(2)",
-            },
-            "policy": policy_block,
-            "inputs": inputs_block,
-            "diagnostics": diagnostics_block,
-            "checks": checks_block,
-            "signatures": sig_block,
-            "promotion": promotion,
-            "artifact_hashes": {
-                "boundaries_hash": inputs_block["boundaries_hash"],
-                "C_hash": inputs_block["C_hash"],
-                "H_hash": inputs_block["H_hash"],
-                "U_hash": inputs_block["U_hash"],
-                "projector_hash": policy_block["projector_hash"],
-            },
-            "policy_tag": policy_label,  # needed by write_cert_json
-        }
-        cert_path, full_hash = export_mod.write_cert_json(cert_payload)
-        st.success(f"Cert written: `{cert_path}`")
+inputs_block = {
+    "boundaries_hash": hashes.hash_d(boundaries),
+    "C_hash":          hashes.hash_suppC(cmap),
+    "H_hash":          hashes.hash_suppH(H_local),
+    "U_hash":          hashes.hash_U(shapes_payload),
+    "shapes":          shapes_block,
+}
+
+# 4) NOW attach human filenames (this was causing the NameError)
+inputs_block["filenames"] = {
+    "boundaries": st.session_state.get("fname_boundaries", ""),
+    "C":          st.session_state.get("fname_cmap", ""),
+    "H":          st.session_state.get("fname_h", ""),       # requires _stamp_filename on f_H
+    "U":          st.session_state.get("fname_shapes", ""),
+}
+
+# 5) Diagnostics (add lane mask & lane vectors if you like)
+d3 = blocks_b.get("3")
+lane_mask = [1 if d3 and any(row[j] & 1 for row in d3) else 0
+             for j in range(len(d3[0]))] if (d3 and len(d3) and d3[0]) else []
+
+def bottom_row(M):
+    return M[-1] if (M and len(M)) else []
+
+from otcore.linalg_gf2 import mul, add, eye
+lane_idx = [j for j, m in enumerate(lane_mask) if m == 1]
+
+H2d3 = mul(blocks_h.get("2", []), d3) if (blocks_h.get("2") and d3) else []
+C3pI3 = add(blocks_c.get("3", []),
+            eye(len(blocks_c.get("3", []))) if blocks_c.get("3") else [])
+
+def mask_to_lanes(vec, mask_idx):
+    return [vec[j] for j in mask_idx] if vec and mask_idx else []
+
+diagnostics_block = {
+    "lane_mask_k3": lane_mask,
+    "lane_vec_H2d3": mask_to_lanes(bottom_row(H2d3), lane_idx),
+    "lane_vec_C3plusI3": mask_to_lanes(bottom_row(C3pI3), lane_idx),
+}
+
+# 6) Checks (use the `out` you already computed earlier in this tab)
+checks_block = out  # e.g. {"2": {"eq": ...}, "3": {"eq": ...}}
+
+# 7) Signatures (example placeholders; keep your real ones if you have them)
+sig_block = {
+    "d_signature": {},
+    "fixture_signature": {},
+    "echo_context": None,
+}
+
+# 8) Promotion flags (example)
+pass_vec = [int(out.get("2", {}).get("eq", False)),
+            int(out.get("3", {}).get("eq", False))]
+all_green = all(v == 1 for v in pass_vec)
+promotion = {
+    "eligible_for_promotion": all_green,
+    "promotion_target": "projected_anchor" if all_green and policy_label.startswith("projected") else (
+                        "strict_anchor" if all_green else None),
+    "notes": "",
+}
+
+# 9) Cert payload + write (unchanged)
+cert_payload = {
+    "identity": {
+        "district_id": "D3",
+        "run_id": hashes.run_id(inputs_hash, hashes.timestamp_iso_lisbon()),
+        "timestamp": hashes.timestamp_iso_lisbon(),
+        "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
+        "field": "GF(2)",
+    },
+    "policy": policy_block,
+    "inputs": inputs_block,
+    "diagnostics": diagnostics_block,
+    "checks": checks_block,
+    "signatures": sig_block,
+    "promotion": promotion,
+    "artifact_hashes": {
+        "boundaries_hash": inputs_block["boundaries_hash"],
+        "C_hash":          inputs_block["C_hash"],
+        "H_hash":          inputs_block["H_hash"],
+        "U_hash":          inputs_block["U_hash"],
+        "projector_hash":  policy_block["projector_hash"],
+    },
+    "policy_tag": policy_label,
+}
+cert_path, full_hash = export_mod.write_cert_json(cert_payload)
+st.success(f"Cert written: `{cert_path}`")
+ 
                 
 # ---------- Cert payload + write (JSON-safe, standalone) ----------
 district_id = st.session_state.get("district_id", "D3")
