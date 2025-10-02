@@ -579,7 +579,7 @@ with tab2:
         col = 0
         while r < n_rows and col < n_cols:
         # find pivot
-        pivot = None
+            pivot = None
         for i in range(r, n_rows):
             if A[i][col] & 1:
                 pivot = i
