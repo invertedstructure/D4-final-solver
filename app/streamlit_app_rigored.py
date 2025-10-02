@@ -1170,25 +1170,22 @@ if all_green:
      
        
 
-  # --- A/B compare (strict vs projected) ------------------------------------
+# --- A/B compare (strict vs projected) ------------------------------------
 st.markdown("### A/B: strict vs projected")
 
-# Outside the button: show snapshot only if it exists (no warning if absent)
-ab_ctx = st.session_state.get("ab_compare")
-if ab_ctx:
-    s_ok = bool(ab_ctx.get("strict", {}).get("out", {}).get("3", {}).get("eq", False))
-    p_ok = bool(ab_ctx.get("projected", {}).get("out", {}).get("3", {}).get("eq", False))
+# Show current A/B snapshot if it exists (no warnings if absent)
+_ab_ctx_existing = st.session_state.get("ab_compare")
+if _ab_ctx_existing:
+    s_ok = bool(_ab_ctx_existing.get("strict", {}).get("out", {}).get("3", {}).get("eq", False))
+    p_ok = bool(_ab_ctx_existing.get("projected", {}).get("out", {}).get("3", {}).get("eq", False))
     s_badge = "✅" if s_ok else "❌"
     p_badge = "✅" if p_ok else "❌"
     st.caption(f"A/B: strict={s_badge} · projected={p_badge}")
-    st.caption(f"pair: {ab_ctx.get('pair_tag','')}")
-    # optional peek
-    # st.json({"strict": ab_ctx["strict"]["out"], "projected": ab_ctx["projected"]["out"]})
+    st.caption(f"pair: {_ab_ctx_existing.get('pair_tag','')}")
 else:
     st.caption("A/B: (no snapshot yet)")
 
-
-# Build projected cfg from disk choices
+# Build projected cfg from disk choices (so A/B mirrors what's on disk)
 _cfg_file_for_ab = projector.load_projection_config("projection_config.json")
 _cfg_proj_for_ab = cfg_projected_base()
 if _cfg_file_for_ab.get("source", {}).get("3") in ("file", "auto"):
@@ -1197,31 +1194,36 @@ if "projector_files" in _cfg_file_for_ab and "3" in _cfg_file_for_ab["projector_
     _cfg_proj_for_ab["projector_files"]["3"] = _cfg_file_for_ab["projector_files"]["3"]
 
 _cache_for_ab = projector.preload_projectors_from_files(_cfg_proj_for_ab)
+
+# Parse H once for both runs
 H_obj = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})
 
 if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
-    # ---- A) strict
-    out_strict = overlap_gate.overlap_check(boundaries, cmap, H_obj)
+    # ---- A) strict ----------------------------------------------------------
+    out_strict   = overlap_gate.overlap_check(boundaries, cmap, H_obj)
     label_strict = policy_label_from_cfg(cfg_strict())
 
-    # ---- B) projected (columns@k=3, auto|file per config)
+    # ---- B) projected (columns@k=3, auto|file per config) -------------------
     out_proj = overlap_gate.overlap_check(
         boundaries, cmap, H_obj,
         projection_config=_cfg_proj_for_ab,
         projector_cache=_cache_for_ab,
     )
     label_proj = policy_label_from_cfg(_cfg_proj_for_ab)
-    
-        # ---- Pack diagnostics for both (lane mask + lane vectors) ----
+
+    # Show raw results for quick look
+    st.json({"strict": out_strict, "projected": out_proj})
+
+    # ---- Lane diagnostics shared by both (mask + lane vectors) --------------
     blocks_b = boundaries.blocks.__root__
     blocks_c = cmap.blocks.__root__
     blocks_h = H_obj.blocks.__root__
 
-    d3 = blocks_b.get("3")
-    lane_mask = []
+    d3 = blocks_b.get("3") or []
     if d3 and d3[0]:
-        for j in range(len(d3[0])):
-            lane_mask.append(1 if any(row[j] & 1 for row in d3) else 0)
+        lane_mask = [1 if any(row[j] & 1 for row in d3) else 0 for j in range(len(d3[0]))]
+    else:
+        lane_mask = []
 
     from otcore.linalg_gf2 import mul, add, eye
 
@@ -1230,128 +1232,55 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
 
     lane_idx = [j for j, m in enumerate(lane_mask) if m]
 
-    # strict lane vecs
-    H2d3_s = mul(blocks_h.get("2", []), d3) if (blocks_h.get("2") and d3) else []
-    C3pI3  = add(
-        blocks_c.get("3", []),
-        eye(len(blocks_c.get("3", []))) if blocks_c.get("3") else []
-    )
+    H2   = (blocks_h.get("2") or [])
+    H2d3 = mul(H2, d3) if (H2 and d3) else []
+    C3   = (blocks_c.get("3") or [])
+    C3pI3 = add(C3, eye(len(C3))) if C3 else []
 
-    def _mask(vec):
-        return [vec[j] for j in lane_idx] if vec and lane_idx else []
+    def _mask(vec, idx):
+        return [vec[j] for j in idx] if (vec and idx) else []
 
-    lane_vec_H2d3_s = _mask(_bottom_row(H2d3_s))
-    lane_vec_C3pI3  = _mask(_bottom_row(C3pI3))
+    lane_vec_H2d3  = _mask(_bottom_row(H2d3), lane_idx)
+    lane_vec_C3pI3 = _mask(_bottom_row(C3pI3), lane_idx)
 
-    # projected lane vecs (same inputs; projection changes residual checks, not these vecs)
-    lane_vec_H2d3_p = lane_vec_H2d3_s  # identical for our purposes
-
-    # projector hash if file-backed
-    pj_hash_proj = ""
+    # projector hash (only if projected is file-backed)
+    proj_hash = ""
     if _cfg_proj_for_ab.get("source", {}).get("3") == "file":
         pj_path = _cfg_proj_for_ab.get("projector_files", {}).get("3")
         if pj_path and os.path.exists(pj_path):
-            pj_hash_proj = projector._hash_matrix(_json.load(open(pj_path)))
+            proj_hash = projector._hash_matrix(_json.load(open(pj_path)))
 
-
-    # Show raw A/B for quick look
-    st.json({"strict": out_strict, "projected": out_proj})
-    
-    # --- Compute lane diagnostics shared by both runs ---
-d3 = boundaries.blocks.__root__.get("3") or []
-lane_mask = (
-    [1 if d3 and any(row[j] & 1 for row in d3) else 0 for j in range(len(d3[0]))]
-    if (d3 and d3[0]) else []
-)
-
-from otcore.linalg_gf2 import mul, add, eye
-
-def _bottom_row(M): 
-    return M[-1] if (M and len(M)) else []
-
-lane_idx = [j for j, m in enumerate(lane_mask) if m]
-
-H2   = (H_obj.blocks.__root__.get("2") or [])
-H2d3 = mul(H2, d3) if (H2 and d3) else []
-C3   = (cmap.blocks.__root__.get("3") or [])
-C3pI3 = add(C3, eye(len(C3))) if C3 else []
-
-def _mask(vec, idx):
-    return [vec[j] for j in idx] if (vec and idx) else []
-
-lane_vec_H2d3  = _mask(_bottom_row(H2d3), lane_idx)
-lane_vec_C3pI3 = _mask(_bottom_row(C3pI3), lane_idx)
-
-# projector hash (only if projected is file-backed)
-proj_hash = ""
-if _cfg_proj_for_ab.get("source", {}).get("3") == "file":
-    pj_path = _cfg_proj_for_ab.get("projector_files", {}).get("3")
-    if pj_path and os.path.exists(pj_path):
-        proj_hash = projector._hash_matrix(_json.load(open(pj_path)))
-
-label_strict = policy_label_from_cfg(cfg_strict())
-label_proj   = policy_label_from_cfg(_cfg_proj_for_ab)
-pair_tag     = f"{label_strict}__VS__{label_proj}"
-
-ab_ctx = {
-    "pair_tag": pair_tag,
-    "strict": {
-        "label": label_strict,
-        "cfg":   cfg_strict(),
-        "out":   out_strict,
-        "ker_guard": "enforced",
-        "lane_mask_k3": lane_mask,
-        "lane_vec_H2d3": lane_vec_H2d3,
-        "lane_vec_C3plusI3": lane_vec_C3pI3,
-        "pass_vec": [
-            int(out_strict.get("2", {}).get("eq", False)),
-            int(out_strict.get("3", {}).get("eq", False)),
-        ],
-    },
-    "projected": {
-        "label": label_proj,
-        "cfg":   _cfg_proj_for_ab,
-        "out":   out_proj,
-        "ker_guard": "off",
-        "projector_hash": proj_hash,
-        "lane_mask_k3": lane_mask,
-        "lane_vec_H2d3": lane_vec_H2d3,
-        "lane_vec_C3plusI3": lane_vec_C3pI3,
-        "pass_vec": [
-            int(out_proj.get("2", {}).get("eq", False)),
-            int(out_proj.get("3", {}).get("eq", False)),
-        ],
-    },
-}
-
-st.session_state["ab_compare"] = ab_ctx
-st.caption(f"Saved A/B context: {pair_tag}")
-
-
-
-    
-
+    # Labels + pair tag
+    pair_tag = f"{label_strict}__VS__{label_proj}"
 
     # ---- Persist compact A/B context into session_state ----------------------
     ab_ctx = {
-        "pair_tag": f"{label_strict}__VS__{label_proj}",
+        "pair_tag": pair_tag,
         "lane_mask_k3": lane_mask,
         "strict": {
             "label": label_strict,
-            "cfg": cfg_strict(),
-            "out": out_strict,
+            "cfg":   cfg_strict(),
+            "out":   out_strict,
             "ker_guard": "enforced",
-            "lane_vec_H2d3": lane_vec_H2d3_s,
+            "lane_vec_H2d3": lane_vec_H2d3,
             "lane_vec_C3plusI3": lane_vec_C3pI3,
+            "pass_vec": [
+                int(out_strict.get("2", {}).get("eq", False)),
+                int(out_strict.get("3", {}).get("eq", False)),
+            ],
         },
         "projected": {
             "label": label_proj,
-            "cfg": _cfg_proj_for_ab,
-            "out": out_proj,
+            "cfg":   _cfg_proj_for_ab,
+            "out":   out_proj,
             "ker_guard": "off",
-            "lane_vec_H2d3": lane_vec_H2d3_p,
+            "projector_hash": proj_hash,
+            "lane_vec_H2d3": lane_vec_H2d3,     # same inputs → same lane vec
             "lane_vec_C3plusI3": lane_vec_C3pI3,
-            "projector_hash": pj_hash_proj,
+            "pass_vec": [
+                int(out_proj.get("2", {}).get("eq", False)),
+                int(out_proj.get("3", {}).get("eq", False)),
+            ],
         },
     }
     st.session_state["ab_compare"] = ab_ctx
@@ -1363,15 +1292,7 @@ st.caption(f"Saved A/B context: {pair_tag}")
     p_badge = "GREEN" if p_ok else "RED"
     st.success(f"A/B: strict={s_badge} · projected={p_badge}")
 
-# Outside the button: show current A/B snapshot if present (no warnings if absent)
-ab_ctx = st.session_state.get("ab_compare")
-if ab_ctx:
-    st.caption(f"A/B pair: {ab_ctx.get('pair_tag','')}")
-    st.json({
-        "strict":    {"k3": ab_ctx["strict"]["out"].get("3", {}).get("eq", None)},
-        "projected": {"k3": ab_ctx["projected"]["out"].get("3", {}).get("eq", None)},
-        "lane_mask_k3": ab_ctx.get("lane_mask_k3", []),
-    })
+
 
 
 
