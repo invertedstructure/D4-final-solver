@@ -17,6 +17,25 @@ st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
 # --- Policy helpers -----------------------------------------------------------
 # ---- cert helpers: diagnostics and checks (GF(2)-safe) ----
 
+def projector_provenance_hash(*, cfg: dict, lane_mask_k3: list[int], district_id: str = "D3") -> str:
+    """
+    Build a minimal, normalized spec for the k=3 projector and hash it.
+    Works for AUTO or FILE; does NOT read matrices, so it's reproducible.
+    """
+    src  = (cfg or {}).get("source", {}).get("3", "auto")
+    mode = (cfg or {}).get("modes",  {}).get("3", "columns")
+    enabled = (cfg or {}).get("enabled_layers", [])
+    spec = {
+        "mode":           mode,
+        "k":              3,
+        "selection":      ("file" if src == "file" else "auto"),
+        "lane_mask_k3":   list(map(int, lane_mask_k3 or [])),
+        "district_id":    district_id,
+        "enabled_layers": enabled,
+    }
+    norm = _json.dumps(spec, sort_keys=True, separators=(",", ":")).encode()
+    return _hashlib.sha256(norm).hexdigest()
+
 def _lane_mask_from_d3(boundaries) -> list[int]:
     """Derive lane_mask_k3 from d3: column j is lane if any bit in that column is 1."""
     try:
@@ -977,16 +996,29 @@ inputs_block["filenames"]["H"]          = _name_or_default("fname_h",          f
 
 
 # ---- Policy block (with projector provenance) --------------------------------
-# Prefer file-backed projector hash; otherwise fall back to runtime (AUTO) hash
-try:
-    file_hash_active, rt_hash_active = projector_hashes_from_context(cfg_active, boundaries, cache)
-    proj_hash_active = file_hash_active or rt_hash_active
-except Exception:
-    # Fallback if helper name differs in your codebase
+# Compute provenance hash for ACTIVE policy (projected only)
+district_id = st.session_state.get("district_id", "D3")
+lane_mask_for_active = (diagnostics_block.get("lane_mask_k3", []) if isinstance(diagnostics_block, dict) else [])
+
+proj_hash_active = ""
+if cfg_active.get("enabled_layers"):  # Only stamp when projected is active
     try:
-        proj_hash_active = projector_hash_for_cfg(cfg_active)
+        # Preferred: provenance hash using cfg + lane mask + district id
+        proj_hash_active = projector_provenance_hash(
+            cfg=cfg_active,
+            lane_mask_k3=lane_mask_for_active,
+            district_id=district_id,
+        )
     except Exception:
-        proj_hash_active = ""
+        # Fallbacks for older helpers in your codebase
+        try:
+            file_hash_active, rt_hash_active = projector_hashes_from_context(cfg_active, boundaries, cache)
+            proj_hash_active = file_hash_active or rt_hash_active or ""
+        except Exception:
+            try:
+                proj_hash_active = projector_hash_for_cfg(cfg_active)  # last resort
+            except Exception:
+                proj_hash_active = ""
 
 policy_block = {
     "label":          policy_label,                 # e.g. "strict" or "projected(columns@k=3,auto)"
@@ -994,7 +1026,7 @@ policy_block = {
     "enabled_layers": cfg_active.get("enabled_layers", []),
     "modes":          cfg_active.get("modes", {}),
     "source":         cfg_active.get("source", {}),
-    "projector_hash": proj_hash_active,             # file or runtime Π hash
+    "projector_hash": proj_hash_active,             # provenance Π hash (or empty for strict)
 }
 
 # ---- FULL cert payload (single source of truth) ------------------------------
@@ -1029,12 +1061,22 @@ if ab_ctx:
             int(out_dict.get("3", {}).get("eq", False)),
         ]
 
-    # projector hash for the projected leg of A/B (prefer file; else runtime)
-    try:
-        file_hash_ab, rt_hash_ab = projector_hashes_from_context(projected_ctx.get("cfg", {}) or {}, boundaries, cache)
-        proj_hash_ab = file_hash_ab or rt_hash_ab
-    except Exception:
-        proj_hash_ab = ""
+    # Prefer A/B context's projected hash; if missing, recompute with provenance
+    proj_hash_ab = projected_ctx.get("projector_hash", "")
+    if not proj_hash_ab:
+        try:
+            proj_hash_ab = projector_provenance_hash(
+                cfg=(projected_ctx.get("cfg", {}) or {}),
+                lane_mask_k3=diagnostics_block.get("lane_mask_k3", []),
+                district_id=district_id,
+            )
+        except Exception:
+            # Legacy fallback path
+            try:
+                file_hash_ab, rt_hash_ab = projector_hashes_from_context(projected_ctx.get("cfg", {}) or {}, boundaries, cache)
+                proj_hash_ab = file_hash_ab or rt_hash_ab or ""
+            except Exception:
+                proj_hash_ab = ""
 
     cert_payload.setdefault("policy", {})
     cert_payload["policy"]["strict_snapshot"] = {
@@ -1047,9 +1089,9 @@ if ab_ctx:
         "out":      strict_ctx.get("out", {}),
     }
     cert_payload["policy"]["projected_snapshot"] = {
-        "policy_tag":    projected_ctx.get("label", policy_label_from_cfg(cfg_projected_base())),
-        "ker_guard":     projected_ctx.get("ker_guard", "off"),
-        "projector_hash": proj_hash_ab,
+        "policy_tag":     projected_ctx.get("label", policy_label_from_cfg(cfg_projected_base())),
+        "ker_guard":      projected_ctx.get("ker_guard", "off"),
+        "projector_hash": proj_hash_ab,  # <-- same provenance hash as A/B projected leg
         "lane_mask_k3":      projected_ctx.get("lane_mask_k3",      diagnostics_block.get("lane_mask_k3", [])),
         "lane_vec_H2d3":     projected_ctx.get("lane_vec_H2d3",     diagnostics_block.get("lane_vec_H2d3", [])),
         "lane_vec_C3plusI3": projected_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
@@ -1072,6 +1114,7 @@ cert_payload["integrity"]["content_hash"] = hashes.content_hash_of(cert_payload)
 # ---- Single write ------------------------------------------------------------
 cert_path, full_hash = export_mod.write_cert_json(cert_payload)
 st.success(f"Cert written: `{cert_path}`")
+
 
 # ---- Gallery de-duplication row (one exemplar per key) -----------------------
 try:
@@ -1102,13 +1145,20 @@ try:
 
     # Mirror A/B info (if present) into policy.json that goes in the zip
     _policy_block_for_bundle = dict(policy_block)  # shallow copy
+
+    # NEW: read A/B context for the most authoritative projected hash
+    _ab_ctx = st.session_state.get("ab_compare", {}) or {}
+    _projected_ctx = _ab_ctx.get("projected", {}) or {}
+
     if "policy" in cert_payload and "projected_snapshot" in cert_payload["policy"]:
         _policy_block_for_bundle["ab_policies"] = {
             "strict":    cert_payload["policy"]["strict_snapshot"]["policy_tag"],
             "projected": cert_payload["policy"]["projected_snapshot"]["policy_tag"],
         }
+        # Prefer the hash from A/B context; fall back to the snapshot
         _policy_block_for_bundle["ab_projector_hash"] = (
-            cert_payload["policy"]["projected_snapshot"].get("projector_hash", "")
+            _projected_ctx.get("projector_hash")
+            or cert_payload["policy"]["projected_snapshot"].get("projector_hash", "")
         )
 
     # Tag bundle name with __withAB when embedded
@@ -1136,6 +1186,7 @@ try:
         )
 except Exception as e:
     st.error(f"Could not build download bundle: {e}")
+
 
 
 
@@ -1255,13 +1306,12 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
     lane_vec_H2d3  = _mask(_bottom_row(H2d3), lane_idx)
     lane_vec_C3pI3 = _mask(_bottom_row(C3pI3), lane_idx)
 
-    # --- Projector provenance hash (works for AUTO or FILE) ---
+    # --- 2) Projector provenance hash for the PROJECTED leg (AUTO or FILE) ---
     district_id = st.session_state.get("district_id", "D3")
-    proj_hash_proj = projector_provenance_hash(
-        _cfg_proj_for_ab,
-        boundaries=boundaries,
+    proj_hash_prov = projector_provenance_hash(
+        cfg=_cfg_proj_for_ab,
+        lane_mask_k3=lane_mask,
         district_id=district_id,
-        diagnostics_block={"lane_mask_k3": lane_mask},
     )
 
     # --- Persist compact A/B context ---
@@ -1287,7 +1337,7 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
             "cfg":   _cfg_proj_for_ab,
             "out":   out_proj,
             "ker_guard": "off",
-            "projector_hash": proj_hash_proj,  # <-- filled for AUTO/FILE
+            "projector_hash": proj_hash_prov,  # <-- provenance hash here
             "lane_vec_H2d3": lane_vec_H2d3,
             "lane_vec_C3plusI3": lane_vec_C3pI3,
             "pass_vec": [
@@ -1301,6 +1351,7 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
     s_ok = bool(out_strict.get("3", {}).get("eq", False))
     p_ok = bool(out_proj.get("3", {}).get("eq", False))
     st.success(f"A/B: strict={'GREEN' if s_ok else 'RED'} · projected={'GREEN' if p_ok else 'RED'}")
+
 
 
 
