@@ -1224,44 +1224,48 @@ p_ok = bool(out_proj  .get("3", {}).get("eq", False))
 st.success(f"A/B: strict={'GREEN' if s_ok else 'RED'} · projected={'GREEN' if p_ok else 'RED'}")
 
 
-    # ---- Persist compact A/B context into session_state ----------------------
-    ab_ctx = {
-        "pair_tag": pair_tag,
-        "lane_mask_k3": lane_mask,
-        "strict": {
-            "label": label_strict,
-            "cfg":   cfg_strict(),
-            "out":   out_strict,
-            "ker_guard": "enforced",
-            "lane_vec_H2d3": lane_vec_H2d3,
-            "lane_vec_C3plusI3": lane_vec_C3pI3,
-            "pass_vec": [
-                int(out_strict.get("2", {}).get("eq", False)),
-                int(out_strict.get("3", {}).get("eq", False)),
-            ],
-        },
-        "projected": {
-            "label": label_proj,
-            "cfg":   _cfg_proj_for_ab,
-            "out":   out_proj,
-            "ker_guard": "off",
-            "projector_hash": proj_hash,
-            "lane_vec_H2d3": lane_vec_H2d3,     # same inputs → same lane vec
-            "lane_vec_C3plusI3": lane_vec_C3pI3,
-            "pass_vec": [
-                int(out_proj.get("2", {}).get("eq", False)),
-                int(out_proj.get("3", {}).get("eq", False)),
-            ],
-        },
-    }
-    st.session_state["ab_compare"] = ab_ctx
+   # ... you already computed: out_strict, out_proj, label_strict, label_proj,
+# lane_mask, lane_vec_H2d3, lane_vec_C3pI3, proj_hash, pair_tag, _cfg_proj_for_ab
 
-    # ---- Dual badge right away ----------------------------------------------
-    s_ok = bool(out_strict.get("3", {}).get("eq", False))
-    p_ok = bool(out_proj.get("3", {}).get("eq", False))
-    s_badge = "GREEN" if s_ok else "RED"
-    p_badge = "GREEN" if p_ok else "RED"
-    st.success(f"A/B: strict={s_badge} · projected={p_badge}")
+# ---- Persist compact A/B context into session_state ----------------------
+ab_ctx = {
+    "pair_tag": pair_tag,
+    "lane_mask_k3": lane_mask,
+    "strict": {
+        "label": label_strict,
+        "cfg":   cfg_strict(),
+        "out":   out_strict,
+        "ker_guard": "enforced",
+        "lane_vec_H2d3": lane_vec_H2d3,
+        "lane_vec_C3plusI3": lane_vec_C3pI3,
+        "pass_vec": [
+            int(out_strict.get("2", {}).get("eq", False)),
+            int(out_strict.get("3", {}).get("eq", False)),
+        ],
+    },
+    "projected": {
+        "label": label_proj,
+        "cfg":   _cfg_proj_for_ab,
+        "out":   out_proj,
+        "ker_guard": "off",
+        "projector_hash": proj_hash,
+        "lane_vec_H2d3": lane_vec_H2d3,        # same inputs → same lane vec
+        "lane_vec_C3plusI3": lane_vec_C3pI3,
+        "pass_vec": [
+            int(out_proj.get("2", {}).get("eq", False)),
+            int(out_proj.get("3", {}).get("eq", False)),
+        ],
+    },
+}
+st.session_state["ab_compare"] = ab_ctx
+
+# ---- Dual badge right away ----------------------------------------------
+s_ok = bool(out_strict.get("3", {}).get("eq", False))
+p_ok = bool(out_proj.get("3", {}).get("eq", False))
+s_badge = "GREEN" if s_ok else "RED"
+p_badge = "GREEN" if p_ok else "RED"
+st.success(f"A/B: strict={s_badge} · projected={p_badge}")
+
 
 
 
