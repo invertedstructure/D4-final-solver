@@ -896,6 +896,40 @@ cert_payload.setdefault("artifact_hashes", {
 cert_payload.setdefault("integrity", {})
 cert_payload["integrity"]["content_hash"] = hashes.content_hash_of(cert_payload)
 
+# ---- If A/B results exist and user wants them, embed into the cert ----
+include_ab = st.checkbox("Include A/B comparison in this cert", value=False, key="include_ab_in_cert")
+
+if include_ab:
+    ab_out_s = st.session_state.get("ab_out_strict")
+    ab_out_p = st.session_state.get("ab_out_proj")
+    ab_cfg_p = st.session_state.get("ab_cfg_proj")
+    ab_lbl_s = st.session_state.get("ab_policy_label_strict")
+    ab_lbl_p = st.session_state.get("ab_policy_label_proj")
+    ab_pj_h  = st.session_state.get("ab_projector_hash", "")
+    ab_Rs    = st.session_state.get("ab_R3_strict")
+    ab_Rp    = st.session_state.get("ab_R3_proj")
+
+    if ab_out_s and ab_out_p and ab_cfg_p:
+        cert_payload["ab_compare"] = {
+            "strict": {
+                "policy": ab_lbl_s,
+                "checks": ab_out_s,
+                "k3_residual_preview": ab_Rs[-1] if (ab_Rs and len(ab_Rs)) else None  # bottom row preview
+            },
+            "projected": {
+                "policy": ab_lbl_p,
+                "checks": ab_out_p,
+                "projector_hash": ab_pj_h,
+                "k3_residual_projected_preview": ab_Rp[-1] if (ab_Rp and len(ab_Rp)) else None
+            }
+        }
+        # also mirror projection config for projected leg
+        cert_payload.setdefault("policy", {}).setdefault("ab_projection_config", ab_cfg_p)
+        st.caption("A/B block added to cert (strict + projected).")
+    else:
+        st.warning("A/B context not found — run the A/B compare first.")
+
+
 # Single write
 cert_path, full_hash = export_mod.write_cert_json(cert_payload)
 st.success(f"Cert written: `{cert_path}`")
@@ -904,16 +938,38 @@ st.success(f"Cert written: `{cert_path}`")
 # ---- Download bundle (includes cert.json) ------------------------------------
 try:
     district_id = st.session_state.get("district_id", "D3")
-    bundle_name = f"overlap_bundle__{district_id}__{policy_label.replace(' ', '_')}__{full_hash[:12]}.zip"
+
+    # If you toggled A/B earlier and we embedded it in cert_payload, reflect it in policy.json too
+    policy_block_for_bundle = dict(policy_block)  # shallow copy
+    _ab_present = bool(cert_payload.get("ab_compare")) if isinstance(cert_payload, dict) else False
+    if _ab_present:
+        # mirror the two labels
+        policy_block_for_bundle["ab_policies"] = {
+            "strict":    cert_payload["ab_compare"]["strict"]["policy"],
+            "projected": cert_payload["ab_compare"]["projected"]["policy"],
+        }
+        # echo projected cfg + projector hash (if present)
+        policy_block_for_bundle["ab_projection_config"] = cert_payload.get("policy", {}).get("ab_projection_config", {})
+        policy_block_for_bundle["ab_projector_hash"]    = cert_payload["ab_compare"]["projected"].get("projector_hash", "")
+
+    # Bundle filename (tag with __withAB when present)
+    _tag = policy_label.replace(" ", "_")
+    if _ab_present:
+        _tag = f"{_tag}__withAB"
+    bundle_name = f"overlap_bundle__{district_id}__{_tag}__{full_hash[:12]}.zip"
+
+    # Build the .zip (includes cert.json + policy.json + B/C/H/U)
     zip_path = export_mod.build_overlap_bundle(
         boundaries=boundaries,
         cmap=cmap,
         H=H_local,
         shapes=(shapes.dict() if hasattr(shapes, "dict") else (shapes or {})),
-        policy_block=policy_block,
+        policy_block=policy_block_for_bundle,
         cert_path=cert_path,
         out_zip=bundle_name,
     )
+
+    # Download button
     with open(zip_path, "rb") as f:
         st.download_button(
             "⬇️ Download bundle (.zip)",
@@ -924,6 +980,7 @@ try:
         )
 except Exception as e:
     st.error(f"Could not build download bundle: {e}")
+
 
 # ---- Promotion (optional) ----------------------------------------------------
 pass_vec  = [int(out.get("2", {}).get("eq", False)),
@@ -1006,6 +1063,38 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
     )
 
     st.json({"strict": out_strict, "projected": out_proj})
+
+    # ---- Stash A/B context for later cert/bundle writing ----
+st.session_state["ab_out_strict"] = out_strict
+st.session_state["ab_out_proj"]   = out_proj
+
+# Freeze the exact projected cfg used (you already built _cfg_proj_for_ab above)
+st.session_state["ab_cfg_proj"]   = _cfg_proj_for_ab
+st.session_state["ab_policy_label_strict"] = policy_label_from_cfg(cfg_strict())
+st.session_state["ab_policy_label_proj"]   = policy_label_from_cfg(_cfg_proj_for_ab)
+
+# Projector hash if file-backed
+_ab_pj_hash = ""
+if _cfg_proj_for_ab.get("source", {}).get("3") == "file":
+    _pj = _cfg_proj_for_ab.get("projector_files", {}).get("3")
+    if _pj and os.path.exists(_pj):
+        _ab_pj_hash = projector._hash_matrix(_json.load(open(_pj)))
+st.session_state["ab_projector_hash"] = _ab_pj_hash
+
+# (Optional) precompute projected residual diagnostics for k=3
+try:
+    from otcore import cert_helpers as cert
+    R3_strict = cert.k3_strict_residual(boundaries, cmap, H_obj)  # H_obj you used above
+    d3 = boundaries.blocks.__root__.get("3")
+    R3_proj   = cert.k3_projected_residual(R3_strict, d3) if d3 else []
+    st.session_state["ab_R3_strict"] = R3_strict
+    st.session_state["ab_R3_proj"]   = R3_proj
+except Exception:
+    # Non-fatal; cert can still be written without these matrices
+    pass
+
+st.success("A/B context captured: will be included if you choose to write a combined cert.")
+
 
     # --- Compute policy labels + pair tag ---------------------------------
     label_strict = policy_label_from_cfg(cfg_strict())
