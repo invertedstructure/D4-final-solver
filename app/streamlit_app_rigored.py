@@ -927,19 +927,26 @@ inputs_block["filenames"]["U"]          = _name_or_default("fname_shapes",     N
 inputs_block["filenames"]["H"]          = _name_or_default("fname_h",          f_H,   "H.json")
 
 
-# ---- Policy block (with projector hash when file-backed) ---------------------
-proj_hash_active = projector_hash_for_cfg(cfg_active)
+# ---- Policy block (with projector provenance) --------------------------------
+# Prefer file-backed projector hash; otherwise fall back to runtime (AUTO) hash
+try:
+    file_hash_active, rt_hash_active = projector_hashes_from_context(cfg_active, boundaries, cache)
+    proj_hash_active = file_hash_active or rt_hash_active
+except Exception:
+    # Fallback if helper name differs in your codebase
+    try:
+        proj_hash_active = projector_hash_for_cfg(cfg_active)
+    except Exception:
+        proj_hash_active = ""
+
 policy_block = {
     "label":          policy_label,                 # e.g. "strict" or "projected(columns@k=3,auto)"
     "policy_tag":     policy_label,                 # used in filenames
     "enabled_layers": cfg_active.get("enabled_layers", []),
     "modes":          cfg_active.get("modes", {}),
     "source":         cfg_active.get("source", {}),
-    "projector_hash": proj_hash_active,             # "" unless k=3 is file-backed
+    "projector_hash": proj_hash_active,             # file or runtime Π hash
 }
-
-# ---- Policy tag for cert filename -------------------------------------------
-policy_tag = policy_label  # keep as-is for exporter & bundle names
 
 # ---- FULL cert payload (single source of truth) ------------------------------
 is_strict = (not cfg_active.get("enabled_layers"))
@@ -950,20 +957,21 @@ cert_payload = {
     "policy":      policy_block,
     "inputs":      inputs_block,       # includes hashes + dims + filenames
     "diagnostics": diagnostics_block,  # lane_mask_k3 / lane_vec_*
-    "checks":      checks_block,       # per-k eq/n_k (+ grid/fence/ker_guard/residual_tag if you add them)
+    "checks":      checks_block,       # per-k eq/n_k (+ grid/fence/ker_guard/residual_tag if present)
     "signatures":  sig_block,          # rank/ker/lane signatures
     "promotion": {
         "eligible_for_promotion": k3_true,
         "promotion_target": ("strict_anchor" if is_strict else "projected_anchor") if k3_true else None,
         "notes": "",
     },
-    "policy_tag": policy_tag,
+    "policy_tag": policy_label,        # keep for exporter & bundle names
 }
 
 # ---- Optional: embed A/B snapshots into the cert (safe, no KeyErrors) -------
 ab_ctx         = st.session_state.get("ab_compare", {}) or {}
 strict_ctx     = ab_ctx.get("strict", {}) or {}
 projected_ctx  = ab_ctx.get("projected", {}) or {}
+
 if ab_ctx:
     # Helper to build pass-vector from an out-dict
     def _pass_vec_from(out_dict: dict) -> list[int]:
@@ -972,8 +980,12 @@ if ab_ctx:
             int(out_dict.get("3", {}).get("eq", False)),
         ]
 
-    # projector hash for the projected leg of A/B (from its cfg)
-    proj_hash_ab = projector_hash_for_cfg(projected_ctx.get("cfg", {}))
+    # projector hash for the projected leg of A/B (prefer file; else runtime)
+    try:
+        file_hash_ab, rt_hash_ab = projector_hashes_from_context(projected_ctx.get("cfg", {}) or {}, boundaries, cache)
+        proj_hash_ab = file_hash_ab or rt_hash_ab
+    except Exception:
+        proj_hash_ab = ""
 
     cert_payload.setdefault("policy", {})
     cert_payload["policy"]["strict_snapshot"] = {
@@ -995,7 +1007,6 @@ if ab_ctx:
         "pass_vec": _pass_vec_from(projected_ctx.get("out", {})),
         "out":      projected_ctx.get("out", {}),
     }
-    # Optional tag for quick discovery
     cert_payload["ab_pair_tag"] = ab_ctx.get("pair_tag", "")
 
 # ---- Integrity + top-level artifact hashes ----------------------------------
