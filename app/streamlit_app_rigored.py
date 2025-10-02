@@ -966,6 +966,46 @@ if ab_ctx:
 
     # optionally carry tag at top-level for quick discovery
     cert_payload["ab_pair_tag"] = ab_ctx["pair_tag"]
+    # --- Optional: embed A/B snapshots into the cert (if available) --------------
+ab_ctx = st.session_state.get("ab_compare")
+if ab_ctx:
+    strict_out = ab_ctx.get("strict", {}).get("out", {})
+    proj_out   = ab_ctx.get("projected", {}).get("out", {})
+
+    def _pass_vec_from(out_dict):
+        return [
+            int(out_dict.get("2", {}).get("eq", False)),
+            int(out_dict.get("3", {}).get("eq", False)),
+        ]
+
+    # lane mask is stored at the top-level of ab_ctx
+    lane_mask_k3 = ab_ctx.get("lane_mask_k3", [])
+
+    strict_snap = {
+        "label":      ab_ctx.get("strict", {}).get("label", "strict"),
+        "policy_tag": ab_ctx.get("strict", {}).get("label", "strict"),
+        "ker_guard":  ab_ctx.get("strict", {}).get("ker_guard", "enforced"),
+        "lane_mask_k3": lane_mask_k3,
+        "lane_vec_H2d3": ab_ctx.get("strict", {}).get("lane_vec_H2d3", []),
+        "lane_vec_C3plusI3": ab_ctx.get("strict", {}).get("lane_vec_C3plusI3", []),
+        "pass_vec": _pass_vec_from(strict_out),
+    }
+
+    projected_snap = {
+        "label":      ab_ctx.get("projected", {}).get("label", "projected(columns@k=3)"),
+        "policy_tag": ab_ctx.get("projected", {}).get("label", "projected(columns@k=3)"),
+        "ker_guard":  ab_ctx.get("projected", {}).get("ker_guard", "off"),
+        "lane_mask_k3": lane_mask_k3,  # <- FIX: read from top-level, not inside projected
+        "lane_vec_H2d3": ab_ctx.get("projected", {}).get("lane_vec_H2d3", []),
+        "lane_vec_C3plusI3": ab_ctx.get("projected", {}).get("lane_vec_C3plusI3", []),
+        "projector_hash": ab_ctx.get("projected", {}).get("projector_hash", ""),
+        "pass_vec": _pass_vec_from(proj_out),
+    }
+
+    cert_payload.setdefault("policy_snapshots", {})
+    cert_payload["policy_snapshots"]["strict"]    = strict_snap
+    cert_payload["policy_snapshots"]["projected"] = projected_snap
+
 
 
 
@@ -1121,6 +1161,21 @@ if all_green:
 
   # --- A/B compare (strict vs projected) ------------------------------------
 st.markdown("### A/B: strict vs projected")
+
+# Outside the button: show snapshot only if it exists (no warning if absent)
+ab_ctx = st.session_state.get("ab_compare")
+if ab_ctx:
+    s_ok = bool(ab_ctx.get("strict", {}).get("out", {}).get("3", {}).get("eq", False))
+    p_ok = bool(ab_ctx.get("projected", {}).get("out", {}).get("3", {}).get("eq", False))
+    s_badge = "✅" if s_ok else "❌"
+    p_badge = "✅" if p_ok else "❌"
+    st.caption(f"A/B: strict={s_badge} · projected={p_badge}")
+    st.caption(f"pair: {ab_ctx.get('pair_tag','')}")
+    # optional peek
+    # st.json({"strict": ab_ctx["strict"]["out"], "projected": ab_ctx["projected"]["out"]})
+else:
+    st.caption("A/B: (no snapshot yet)")
+
 
 # Build projected cfg from disk choices
 _cfg_file_for_ab = projector.load_projection_config("projection_config.json")
