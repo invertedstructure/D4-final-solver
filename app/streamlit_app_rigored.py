@@ -1283,7 +1283,10 @@ if _cfg_file_for_ab.get("source", {}).get("3") in ("file", "auto"):
 if "projector_files" in _cfg_file_for_ab and "3" in _cfg_file_for_ab["projector_files"]:
     _cfg_proj_for_ab["projector_files"]["3"] = _cfg_file_for_ab["projector_files"]["3"]
 
-_cache_for_ab = projector.preload_projectors_from_files(_cfg_proj_for_ab)
+# Salt the cache with a config/file hash so new files rebuild projectors
+cfg_fingerprint = hashes.content_hash_of(_cfg_proj_for_ab)
+_cache_for_ab = projector.preload_projectors_from_files(_cfg_proj_for_ab, cache_key=cfg_fingerprint)
+
 
 # Parse H once for both runs
 H_obj = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})
