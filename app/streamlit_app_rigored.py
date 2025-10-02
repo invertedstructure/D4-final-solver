@@ -870,8 +870,7 @@ st.success(f"Cert written: `{cert_path}`")
         "H_hash": inputs_block["H_hash"],
         "U_hash": inputs_block["U_hash"],
         "projector_hash": policy_block["projector_hash"],
-    },
-}
+    }
 
 # Integrity: hash the entire payload and embed it
 cert_payload["integrity"] = {
