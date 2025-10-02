@@ -460,34 +460,28 @@ with tab2:
                 _json.dump(cfg_file, _f, indent=2)
             st.success(f"projection_config.json updated → source.3 = {mode_choice}")
 
-    # ---------- RUN OVERLAP ----------
-     if st.button("Run Overlap", key="run_overlap"):
-        try:
-              out = overlap_gate.overlap_check(
-                boundaries,
-                cmap,
-                H_local,                      # ✅ use the one we just built
-                projection_config=cfg_active, # your active policy (strict/projected)
-                projector_cache=cache,
-            )
-            st.json(out)
-            
-            # ✅ persist the last run so cert/bundle can read it later
-            st.session_state["overlap_out"] = out
-            st.session_state["overlap_cfg"] = cfg_active
-            st.session_state["overlap_policy_label"] = policy_label
-            st.session_state["overlap_H"] = H_local
-        except Exception as e:
-            st.error(f"Overlap run failed: {e}")
-            st.stop()
-
-
+  # ---------- RUN OVERLAP ----------
+if st.button("Run Overlap", key="run_overlap"):
+    try:
+        out = overlap_gate.overlap_check(
+            boundaries,
+            cmap,
+            H_local,                      # use the one we built above
+            projection_config=cfg_active, # strict/projected as chosen
+            projector_cache=cache,
+        )
+        st.json(out)
 
         # persist for downstream cert/bundle blocks
         st.session_state["overlap_out"] = out
-        st.session_state["overlap_cfg"] = cfg_active         # the cfg you actually used
+        st.session_state["overlap_cfg"] = cfg_active
         st.session_state["overlap_policy_label"] = policy_label
-        st.session_state["overlap_H"] = H_local              # parsed homotopy (JSON-safe)
+        st.session_state["overlap_H"] = H_local
+
+    except Exception as e:
+        st.error(f"Overlap run failed: {e}")
+        st.stop()
+
 
         # --- Lane mask preview (k=3) ---
         d3 = boundaries.blocks.__root__.get("3")
