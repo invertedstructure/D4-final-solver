@@ -495,6 +495,21 @@ with tab2:
         d3 = boundaries.blocks.__root__.get("3")
         lane_mask = [1 if any(row[j] for row in d3) else 0 for j in range(len(d3[0]))] if d3 else []
         st.write("k=3 lane_mask (1=lane, 0=ker):", lane_mask)
+        
+                # ===== Restore last overlap run (required by cert/bundle) =====
+        out = st.session_state.get("overlap_out")
+        if out is None:
+            st.info("Run Overlap first (no cached result to write).")
+            st.stop()  # prevents the rest of the cert code from executing
+        
+        # use the exact cfg/policy/H used in the run
+        cfg_active   = st.session_state.get("overlap_cfg", cfg_strict())
+        policy_label = st.session_state.get("overlap_policy_label", policy_label_from_cfg(cfg_active))
+        H_local      = st.session_state.get("overlap_H", io.parse_cmap({"blocks": {}}))
+        
+        # shapes must be JSON-safe
+        shapes_payload = shapes.dict() if hasattr(shapes, "dict") else (shapes or {})
+
 
          # --- After you've loaded cfg_active / policy_label and parsed H ---
 _stamp_filename("fname_h", f_H)  # remember the H filename
