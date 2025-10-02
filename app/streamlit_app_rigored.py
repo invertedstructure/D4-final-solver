@@ -762,17 +762,20 @@ inputs_block["filenames"] = {
     "H":          st.session_state.get("fname_h", ""),
     "U":          st.session_state.get("fname_shapes", ""),
 # ---------- Tiny polish: filenames + signatures ----------
+# Place this AFTER you've created `inputs_block` and `diagnostics_block`,
+# and BEFORE you build `cert_payload`.
 
-# 1) Ensure filenames for Boundaries and U are filled (H already set)
-    inputs_block["filenames"]["boundaries"] = (
-        inputs_block["filenames"].get("boundaries") or st.session_state.get("fname_boundaries", "")
-    )
-    inputs_block["filenames"]["U"] = (
-        inputs_block["filenames"].get("U") or st.session_state.get("fname_shapes", "")
-    )
+# 1) Ensure filenames dict exists and fill Boundaries / U (H/C are already handled)
+inputs_block.setdefault("filenames", {})
+inputs_block["filenames"]["boundaries"] = (
+    inputs_block["filenames"].get("boundaries") or st.session_state.get("fname_boundaries", "")
+)
+inputs_block["filenames"]["U"] = (
+    inputs_block["filenames"].get("U") or st.session_state.get("fname_shapes", "")
+)
 
 # 2) d-signature (from d3): rank, ker_dim, lane_pattern
-d3 = boundaries.blocks.__root__.get("3")
+d3 = boundaries.blocks.__root__.get("3") or []
 
 def _gf2_rank(M):
     if not M or not M[0]:
@@ -790,10 +793,8 @@ def _gf2_rank(M):
         if pivot is None:
             c += 1
             continue
-        # swap pivot row up
         if pivot != r:
             A[r], A[pivot] = A[pivot], A[r]
-        # eliminate same-col bits in all other rows
         for i in range(m):
             if i != r and (A[i][c] & 1):
                 A[i] = [(a ^ b) & 1 for a, b in zip(A[i], A[r])]
@@ -802,10 +803,10 @@ def _gf2_rank(M):
     return r
 
 lane_mask = diagnostics_block.get("lane_mask_k3", []) or []
-lane_pattern = "".join(str(int(x)) for x in lane_mask) if lane_mask else ""
+lane_pattern = "".join("1" if x else "0" for x in lane_mask) if lane_mask else ""
 
-rank_d3 = _gf2_rank(d3) if d3 else 0
-ncols_d3 = len(d3[0]) if (d3 and d3[0]) else 0
+rank_d3   = _gf2_rank(d3) if d3 else 0
+ncols_d3  = len(d3[0]) if (d3 and d3[0]) else 0
 ker_dim_d3 = max(ncols_d3 - rank_d3, 0)
 
 d_signature = {
@@ -817,29 +818,27 @@ d_signature = {
 # 3) fixture_signature: support(C3 + I3) restricted to LANE columns
 from otcore.linalg_gf2 import add, eye
 
-C3 = cmap.blocks.__root__.get("3")
-C3pI3 = add(C3, eye(len(C3))) if C3 else []
-lane_idxs = [j for j, m in enumerate(lane_mask) if m == 1]
+C3     = cmap.blocks.__root__.get("3") or []
+C3pI3  = add(C3, eye(len(C3))) if C3 else []
+lane_idxs = [j for j, m in enumerate(lane_mask) if m]
 
 def _col_support_pattern(M, cols):
     if not M or not cols:
         return ""
-    bits = []
-    for j in cols:
-        any_nz = any((row[j] & 1) for row in M)
-        bits.append("1" if any_nz else "0")
-    return "".join(bits)
+    return "".join("1" if any((row[j] & 1) for row in M) else "0" for j in cols)
 
 fixture_signature = {
     "lane": _col_support_pattern(C3pI3, lane_idxs)
 }
 
-# 4) Plug signatures into your sig_block (replace your previous placeholder)
+# 4) Plug signatures into your sig_block (preserve existing echo_context if any)
+_prev_echo = sig_block.get("echo_context") if "sig_block" in locals() else None
 sig_block = {
     "d_signature": d_signature,
     "fixture_signature": fixture_signature,
-    "echo_context": None,
+    "echo_context": _prev_echo,
 }
+
 
 
 # ---- 3) Promotion helper flags ----------------------------------------------
