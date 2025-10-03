@@ -1122,7 +1122,7 @@ def _gf2_idempotent(P):
         "lane_vec_C3plusI3": mask_to_lanes(bottom_row(C3pI3), lane_idx),
     }
 
-      # ---- Signatures (rank/ker + lane patterns) ----
+  # ---- Signatures (rank/ker + lane patterns) ---------------------------------
 def _gf2_rank(M):
     """Gaussian elimination over GF(2) to compute rank."""
     if not M or not M[0]:
@@ -1141,7 +1141,6 @@ def _gf2_rank(M):
         if pivot is None:
             c += 1
             continue
-        # swap pivot to row r
         if pivot != r:
             A[r], A[pivot] = A[pivot], A[r]
         # eliminate this column in all other rows
@@ -1152,23 +1151,76 @@ def _gf2_rank(M):
         c += 1
     return r
 
+def _lane_mask_from_d3(d3_mat):
+    if not d3_mat or not d3_mat[0]:
+        return []
+    cols = len(d3_mat[0])
+    return [1 if any(row[j] & 1 for row in d3_mat) else 0 for j in range(cols)]
+
+def _identity(n):
+    return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
+
+def _xor_mat(A, B):
+    if not A: 
+        return [row[:] for row in B]
+    if not B:
+        return [row[:] for row in A]
+    m, n = len(A), len(A[0])
+    return [[(A[i][j] ^ B[i][j]) for j in range(n)] for i in range(m)]
+
+def _bottom_row(M):
+    return M[-1] if (M and len(M)) else []
+
+def _mask_vec(vec, idx):
+    return [vec[j] for j in idx] if (vec and idx) else []
+
+# Pull current d3 block
 d3 = boundaries.blocks.__root__.get("3") or []
 n_cols_d3 = len(d3[0]) if (d3 and d3[0]) else 0
 rank_d3   = _gf2_rank(d3)
 ker_dim_d3 = max(0, n_cols_d3 - rank_d3)
 
-lane_mask    = diagnostics_block.get("lane_mask_k3", []) or []
-lane_pattern = "".join("1" if x else "0" for x in lane_mask) if lane_mask else ""
-lane_vec_C   = diagnostics_block.get("lane_vec_C3plusI3", []) or []
+# Use diagnostics if available; otherwise compute locally
+try:
+    _diag = diagnostics_block if isinstance(diagnostics_block, dict) else {}
+except NameError:
+    _diag = {}
+
+# --- lane mask (prefer diagnostics; else from d3) ----------------------------
+lane_mask = _diag.get("lane_mask_k3")
+if lane_mask is None or lane_mask == []:
+    lane_mask = _lane_mask_from_d3(d3)
+lane_pattern = "".join("1" if int(x) else "0" for x in lane_mask) if lane_mask else ""
+lane_idx = [j for j, m in enumerate(lane_mask) if m]
+
+# --- lane_vec_C3plusI3 (prefer diagnostics; else compute from C3 + I3) -------
+lane_vec_C = _diag.get("lane_vec_C3plusI3", [])
+if not lane_vec_C:
+    try:
+        # Try using otcore helpers if present
+        from otcore.linalg_gf2 import add, eye
+        C3 = (cmap.blocks.__root__.get("3") or [])
+        C3pI3 = add(C3, eye(len(C3))) if C3 else []
+        lane_vec_C = _mask_vec(_bottom_row(C3pI3), lane_idx)
+    except Exception:
+        # Pure-python fallback (XOR with identity)
+        C3 = (cmap.blocks.__root__.get("3") or [])
+        nC = len(C3)
+        C3pI3 = _xor_mat(C3, _identity(nC)) if C3 else []
+        lane_vec_C = _mask_vec(_bottom_row(C3pI3), lane_idx)
+
 fixture_lane = "".join(str(int(x)) for x in lane_vec_C) if lane_vec_C else ""
 
-# If an old sig_block exists, preserve echo_context; otherwise set None
+# Preserve prior echo_context if it existed
+_prev_echo = None
+if 'sig_block' in locals() and isinstance(sig_block, dict):
+    _prev_echo = sig_block.get("echo_context")
+
 sig_block = {
     "d_signature":       {"rank": rank_d3, "ker_dim": ker_dim_d3, "lane_pattern": lane_pattern},
     "fixture_signature": {"lane": fixture_lane},
-    "echo_context": (sig_block.get("echo_context") if 'sig_block' in locals() else None),
+    "echo_context": _prev_echo,
 }
-
 
     
     # --- fixture_signature from support of (C3 + I3) restricted to lanes ----------
