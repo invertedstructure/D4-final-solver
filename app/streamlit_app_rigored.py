@@ -1228,58 +1228,86 @@ cache = st.session_state.get("_projector_cache") or projector.preload_projectors
 st.session_state["_projector_cache"] = cache
 
 
-       # ---------- RUN OVERLAP ----------
+     # ---------- RUN OVERLAP ----------
 if st.button("Run Overlap", key="run_overlap"):
-    try:
-        # 1) choose projector & validate (strict / projected(auto) / projected(file))
-        try:
-            P_active, proj_meta = projector_choose_active(cfg_active, boundaries)
-        except ValueError as e:
-            # file mode with invalid projector → show exact reason and abort this run
-            st.error(str(e))
-            st.session_state["proj_meta"] = {
-                "mode": "projected(file)",
-                "projector_filename": cfg_active.get("projector_files", {}).get("3", ""),
-                "projector_hash": "",
-                "projector_consistent_with_d": False,
-                "errors": [str(e)],
-            }
-            st.stop()
+    # 1) decide active projector & validate (no silent fallback in file mode)
+    mode, proj_meta, err = choose_active_projector(cfg_active, boundaries)
+    if mode == "projected(file)" and err:
+        # Fail fast with a precise reason; DO NOT run overlap on auto here
+        st.error(err)
+        st.session_state["proj_meta"] = {
+            "projector_filename": cfg_active.get("projector_files", {}).get("3", ""),
+            "projector_hash": "",
+            "projector_consistent_with_d": False,
+            "errors": [err],
+        }
+        st.stop()
 
-        # 2) cache discipline (keyed by policy + input hashes + projector hash in file mode)
-        #    NOTE: assumes inputs_block already has hashes populated earlier in the tab.
+    # 2) cache discipline: rebuild when policy/boundaries/C/H/U or projector file/hash changes
+    import os, json as _json
+    _di = st.session_state.get("_district_info", {}) or {}
+    _bound_hash = _di.get("boundaries_hash", inputs_block.get("boundaries_hash", ""))
+
+    src3 = cfg_active.get("source", {}).get("3", "auto")
+    pj_file = cfg_active.get("projector_files", {}).get("3", "") if src3 == "file" else ""
+    pj_hash_key = ""
+    if pj_file and os.path.exists(pj_file):
         try:
-            pmeta_for_key = proj_meta if proj_meta.get("mode","").startswith("projected(file)") else {}
-            ckey = _cache_key_for_run(policy_label, inputs_block, pmeta_for_key)
-            maybe_bust_projector_cache(ckey)
+            with open(pj_file, "r") as _pf:
+                _rawP = _json.load(_pf)
+            _P3 = _extract_P3_matrix(_rawP) or _rawP
+            pj_hash_key = _hash_json_matrix(_P3)
         except Exception:
-            # If helpers not in scope, just proceed without busting.
-            pass
+            pj_hash_key = "ERR"
 
-        # 3) (re)load projector cache after any bust
-        cache = projector.preload_projectors_from_files(cfg_active)
-        st.session_state["_projector_cache"] = cache  # keep around for cert validation
+    cache_key = "|OM|".join([
+        f"policy={('strict' if not cfg_active.get('enabled_layers') else ('projected(file)' if src3=='file' else 'projected(auto)'))}",
+        f"B={_bound_hash}",
+        f"C={inputs_block.get('C_hash','')}",
+        f"H={inputs_block.get('H_hash','')}",
+        f"U={inputs_block.get('U_hash','')}",
+        f"Pfile={pj_file}",
+        f"Phash={pj_hash_key}",
+    ])
 
-        # 4) run overlap with the finalized cfg/cache
+    if st.session_state.get("_projector_cache_key") != cache_key:
+        st.session_state.pop("_projector_cache", None)
+        st.session_state["_projector_cache_key"] = cache_key
+
+    # 3) (re)load projector cache after any bust
+    cache = st.session_state.get("_projector_cache") or projector.preload_projectors_from_files(cfg_active)
+    st.session_state["_projector_cache"] = cache  # keep around for cert validation & A/B
+
+    # 4) run overlap with the finalized cfg/cache
+    try:
         out = overlap_gate.overlap_check(
             boundaries,
             cmap,
-            H_local,                      # use the H parsed above
-            projection_config=cfg_active, # strict/projected as chosen
+            H_local,                      # parsed H from this tab
+            projection_config=cfg_active, # strict/projected as chosen (auto/file respected)
             projector_cache=cache,
         )
         st.json(out)
-
-        # 5) persist run artifacts for cert/bundle
-        st.session_state["overlap_out"] = out
-        st.session_state["overlap_cfg"] = cfg_active
-        st.session_state["overlap_policy_label"] = policy_label
-        st.session_state["overlap_H"] = H_local
-        st.session_state["proj_meta"] = proj_meta
-
     except Exception as e:
         st.error(f"Overlap run failed: {e}")
         st.stop()
+
+    # 5) persist run artifacts for cert/bundle
+    st.session_state["overlap_out"] = out
+    st.session_state["overlap_cfg"] = cfg_active
+    st.session_state["overlap_policy_label"] = policy_label
+    st.session_state["overlap_H"] = H_local
+    st.session_state["proj_meta"] = proj_meta
+
+    # 6) friendly badge when FILE mode succeeded
+    if mode == "projected(file)":
+        ok = bool(proj_meta.get("projector_consistent_with_d"))
+        pj_name = proj_meta.get("projector_filename", "")
+        pj_hash = (proj_meta.get("projector_hash", "") or "")[:12]
+        if ok:
+            st.success(f"projected(file) OK · {pj_name} · {pj_hash} ✔️")
+        else:
+            st.warning(f"projected(file) ran but projector_consistent_with_d=false · {pj_name}")
 
 
        # ---- projector(file) metadata & validation (single source of truth) ----------
