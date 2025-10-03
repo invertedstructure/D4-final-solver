@@ -850,7 +850,6 @@ if st.session_state.get("_projector_cache_key") != _cache_key:
 cache = st.session_state.get("_projector_cache") or projector.preload_projectors_from_files(_cfg_for_cache)
 st.session_state["_projector_cache"] = cache  # keep around for cert validation
 
-
             # ---------- RUN OVERLAP ----------
     def _gf2_idempotent(P):
         try:
