@@ -1493,148 +1493,142 @@ identity_block = {
 
 
 # ---------- Tiny polish: filenames + signatures ----------
-# Do this AFTER you've created `inputs_block` and `diagnostics_block`,
-# and BEFORE you assemble `cert_payload`.
+# REQUIRE: inputs_block, diagnostics_block, cfg_active, policy_label, out,
+#          boundaries, cmap, (optional) f_H already exist in this scope.
 
-# 1) Attach/ensure human filenames ONCE
+# -- helper: safe name lookups --
+def _name_from_state(key: str) -> str:
+    v = st.session_state.get(key)
+    return v if isinstance(v, str) and v.strip() else ""
+
+def _name_or_default(sesskey: str, file_obj, default_name: str) -> str:
+    stamped = _name_from_state(sesskey)
+    if stamped:
+        return stamped
+    if file_obj is not None:
+        nm = getattr(file_obj, "name", "")
+        if isinstance(nm, str) and nm.strip():
+            return nm
+    return default_name
+
+# 1) Attach/ensure human filenames ONCE (top-level inputs.filenames)
 inputs_block.setdefault("filenames", {})
-inputs_block["filenames"].update({
-    "boundaries": st.session_state.get("fname_boundaries", inputs_block["filenames"].get("boundaries", "")),
-    "C":          st.session_state.get("fname_cmap",       inputs_block["filenames"].get("C", "")),
-    "H":          st.session_state.get("fname_h",          inputs_block["filenames"].get("H", "")),
-    "U":          st.session_state.get("fname_shapes",     inputs_block["filenames"].get("U", "")),
-})
+inputs_block["filenames"]["boundaries"] = _name_or_default("fname_boundaries", None, "boundaries.json")
+inputs_block["filenames"]["C"]          = _name_or_default("fname_cmap",       None, "cmap.json")
+inputs_block["filenames"]["U"]          = _name_or_default("fname_shapes",     None, "shapes.json")
+inputs_block["filenames"]["H"]          = _name_or_default("fname_h",          f_H if 'f_H' in locals() else None, "H.json")
 
-# 2) d-signature (from d3): rank, ker_dim, lane_pattern
-d3 = boundaries.blocks.__root__.get("3") or []
-
+# 2) d-signature (from current d3): rank, ker_dim, lane_pattern
 def _gf2_rank(M):
     if not M or not M[0]:
         return 0
-    # Gaussian elimination over GF(2)
     A = [row[:] for row in M]
     m, n = len(A), len(A[0])
-    r, c = 0, 0
+    r = c = 0
     while r < m and c < n:
         pivot = None
         for i in range(r, m):
             if A[i][c] & 1:
-                pivot = i
-                break
+                pivot = i; break
         if pivot is None:
-            c += 1
-            continue
+            c += 1; continue
         if pivot != r:
             A[r], A[pivot] = A[pivot], A[r]
         for i in range(m):
             if i != r and (A[i][c] & 1):
-                A[i] = [(a ^ b) & 1 for a, b in zip(A[i], A[r])]
-        r += 1
-        c += 1
+                A[i] = [(A[i][j] ^ A[r][j]) & 1 for j in range(n)]
+        r += 1; c += 1
     return r
 
-lane_mask    = (diagnostics_block.get("lane_mask_k3") or [])
-lane_pattern = "".join("1" if x else "0" for x in lane_mask) if lane_mask else ""
-rank_d3      = _gf2_rank(d3) if d3 else 0
-ncols_d3     = len(d3[0]) if (d3 and d3[0]) else 0
-ker_dim_d3   = max(ncols_d3 - rank_d3, 0)
+def _lane_mask_from_d3(d3_mat):
+    if not d3_mat or not d3_mat[0]:
+        return []
+    cols = len(d3_mat[0])
+    return [1 if any(row[j] & 1 for row in d3_mat) else 0 for j in range(cols)]
 
-d_signature = {
-    "rank":        rank_d3,
-    "ker_dim":     ker_dim_d3,
-    "lane_pattern": lane_pattern,
-}
+d3 = boundaries.blocks.__root__.get("3") or []
+rank_d3    = _gf2_rank(d3) if d3 else 0
+ncols_d3   = len(d3[0]) if (d3 and d3[0]) else 0
+ker_dim_d3 = max(ncols_d3 - rank_d3, 0)
 
-# 3) fixture_signature: support(C3 + I3) on LANE columns only
+lane_mask_top = (diagnostics_block.get("lane_mask_k3") if isinstance(diagnostics_block, dict) else None)
+if lane_mask_top is None:
+    lane_mask_top = _lane_mask_from_d3(d3)
+lane_pattern = "".join("1" if x else "0" for x in lane_mask_top) if lane_mask_top else ""
+
 from otcore.linalg_gf2 import add, eye
-
-C3     = cmap.blocks.__root__.get("3") or []
-C3pI3  = add(C3, eye(len(C3))) if C3 else []
-lane_idxs = [j for j, m in enumerate(lane_mask) if m]
+C3    = cmap.blocks.__root__.get("3") or []
+C3pI3 = add(C3, eye(len(C3))) if C3 else []
+lane_idxs = [j for j, m in enumerate(lane_mask_top) if m]
 
 def _col_support_pattern(M, cols):
-    if not M or not cols:
-        return ""
+    if not M or not cols: return ""
     return "".join("1" if any((row[j] & 1) for row in M) else "0" for j in cols)
 
-fixture_signature = {
-    "lane": _col_support_pattern(C3pI3, lane_idxs)
-}
+d_signature = {"rank": rank_d3, "ker_dim": ker_dim_d3, "lane_pattern": lane_pattern}
+fixture_signature = {"lane": _col_support_pattern(C3pI3, lane_idxs)}
 
-# 4) Final signatures block (preserve previous echo_context if any)
-_prev_echo = sig_block.get("echo_context") if "sig_block" in locals() else None
+_prev_echo = (sig_block.get("echo_context") if 'sig_block' in locals() and isinstance(sig_block, dict) else None)
 sig_block = {
     "d_signature": d_signature,
     "fixture_signature": fixture_signature,
     "echo_context": _prev_echo,
 }
 
-# ---- Promotion helper flags (build AFTER we have `out`) ----------------------
-is_strict = (not cfg_active.get("enabled_layers"))
-k3_true   = bool(out.get("3", {}).get("eq", False))
-
-# ---- Filenames: make them NOT depend on visiting Unit tab ----
-def _name_from_state(key: str) -> str:
-    v = st.session_state.get(key)
-    return v if isinstance(v, str) and v.strip() else ""
-
-def _name_or_default(sesskey: str, file_obj, default_name: str) -> str:
-    # 1) if user uploaded somewhere and we stamped it, prefer that
-    stamped = _name_from_state(sesskey)
-    if stamped:
-        return stamped
-    # 2) else if we have a file object here (e.g., H uploader in this tab), use its real name
-    if file_obj is not None:
-        nm = getattr(file_obj, "name", "")
-        if isinstance(nm, str) and nm.strip():
-            return nm
-    # 3) else fall back to the canonical bundle filename
-    return default_name
-
-inputs_block.setdefault("filenames", {})
-inputs_block["filenames"]["boundaries"] = _name_or_default("fname_boundaries", None,  "boundaries.json")
-inputs_block["filenames"]["C"]          = _name_or_default("fname_cmap",       None,  "cmap.json")
-inputs_block["filenames"]["U"]          = _name_or_default("fname_shapes",     None,  "shapes.json")
-inputs_block["filenames"]["H"]          = _name_or_default("fname_h",          f_H,   "H.json")
-
-
 # ---- Policy block (with projector provenance) --------------------------------
-# Compute provenance hash for ACTIVE policy (projected only)
-district_id = st.session_state.get("district_id", "D3")
-lane_mask_for_active = (diagnostics_block.get("lane_mask_k3", []) if isinstance(diagnostics_block, dict) else [])
+# provenance shims (handle various helper signatures in your codebase)
+def _prov_for_active(cfg, lane_mask, district_id):
+    try:
+        return projector_provenance_hash(cfg=cfg, lane_mask_k3=lane_mask, district_id=district_id)
+    except TypeError:
+        pass
+    try:
+        return projector_provenance_hash(cfg=cfg, lane_mask=lane_mask, district_id=district_id)
+    except TypeError:
+        pass
+    try:
+        return projector_provenance_hash(
+            cfg=cfg, boundaries=boundaries, district_id=district_id,
+            diagnostics_block={"lane_mask_k3": lane_mask},
+        )
+    except TypeError:
+        pass
+    try:
+        return projector_provenance_hash(cfg=cfg)
+    except Exception:
+        return ""
+
+# authoritative district (prefer session binding)
+_di = st.session_state.get("_district_info", {}) or {}
+district_id_auth = _di.get("district_id") or st.session_state.get("district_id", "UNKNOWN")
+lane_mask_for_active = lane_mask_top
 
 proj_hash_active = ""
-if cfg_active.get("enabled_layers"):  # Only stamp when projected is active
+if cfg_active.get("enabled_layers"):  # only when projected is active
     try:
-        # Preferred: provenance hash using cfg + lane mask + district id
-        proj_hash_active = projector_provenance_hash(
-            cfg=cfg_active,
-            lane_mask_k3=lane_mask_for_active,
-            district_id=district_id,
-        )
+        proj_hash_active = _prov_for_active(cfg_active, lane_mask_for_active, district_id_auth)
     except Exception:
-        # Fallbacks for older helpers in your codebase
         try:
-            file_hash_active, rt_hash_active = projector_hashes_from_context(cfg_active, boundaries, cache)
+            file_hash_active, rt_hash_active = projector_hashes_from_context(cfg_active, boundaries, st.session_state.get("_projector_cache"))
             proj_hash_active = file_hash_active or rt_hash_active or ""
         except Exception:
             try:
-                proj_hash_active = projector_hash_for_cfg(cfg_active)  # last resort
+                proj_hash_active = projector_hash_for_cfg(cfg_active)
             except Exception:
                 proj_hash_active = ""
 
 policy_block = {
-    "label":          policy_label,                 # e.g. "strict" or "projected(columns@k=3,auto)"
-    "policy_tag":     policy_label,                 # used in filenames
+    "label":          policy_label,                 # e.g. "strict" or "projected(columns@k=3,auto|file)"
+    "policy_tag":     policy_label,
     "enabled_layers": cfg_active.get("enabled_layers", []),
     "modes":          cfg_active.get("modes", {}),
     "source":         cfg_active.get("source", {}),
-    "projector_hash": proj_hash_active,             # provenance Π hash (or empty for strict)
+    "projector_hash": proj_hash_active,             # provenance hash (empty for strict)
 }
 
 # ---- FULL cert payload (single source of truth) ------------------------------
 is_strict = (not cfg_active.get("enabled_layers"))
-k3_true   = bool(out.get("3", {}).get("eq", False))
+k3_true   = bool((out or {}).get("3", {}).get("eq", False))
 
 cert_payload = {
     "identity":    identity_block,
@@ -1648,119 +1642,12 @@ cert_payload = {
         "promotion_target": ("strict_anchor" if is_strict else "projected_anchor") if k3_true else None,
         "notes": "",
     },
-    "policy_tag": policy_label,        # keep for exporter & bundle names
+    "policy_tag": policy_label,        # used by exporter & bundle names
 }
 
 # ---- Optional: embed A/B snapshots into the cert (fresh-only) ---------------
 ab_ctx = st.session_state.get("ab_compare", {}) or {}
 
-# Current signature to validate freshness
-_current_sig = [
-    inputs_block.get("boundaries_hash", ""),
-    inputs_block.get("C_hash", ""),
-    inputs_block.get("H_hash", ""),
-    inputs_block.get("U_hash", ""),
-    inputs_block.get("shapes_hash", ""),
-]
-
-# Refuse stale A/B
-if ab_ctx.get("inputs_sig") != _current_sig:
-    ab_ctx = {}
-
-strict_ctx    = ab_ctx.get("strict", {}) if ab_ctx else {}
-projected_ctx = ab_ctx.get("projected", {}) if ab_ctx else {}
-
-if ab_ctx:
-    def _pass_vec_from(out_dict: dict) -> list[int]:
-        return [
-            int(out_dict.get("2", {}).get("eq", False)),
-            int(out_dict.get("3", {}).get("eq", False)),
-        ]
-
-    # Prefer projected A/B hash; recompute only if missing
-    proj_hash_ab = projected_ctx.get("projector_hash", "")
-    if not proj_hash_ab:
-        try:
-            proj_hash_ab = projector_provenance_hash(
-                cfg=(projected_ctx.get("cfg", {}) or {}),
-                lane_mask_k3=projected_ctx.get("lane_mask_k3", []),
-                district_id=fresh_district_info["district_id"],
-            )
-        except TypeError:
-            try:
-                proj_hash_ab = projector_provenance_hash(
-                    cfg=(projected_ctx.get("cfg", {}) or {}),
-                    lane_mask=projected_ctx.get("lane_mask_k3", []),
-                    district_id=fresh_district_info["district_id"],
-                )
-            except Exception:
-                try:
-                    file_hash_ab, rt_hash_ab = projector_hashes_from_context(
-                        projected_ctx.get("cfg", {}) or {}, boundaries, cache
-                    )
-                    proj_hash_ab = file_hash_ab or rt_hash_ab or ""
-                except Exception:
-                    proj_hash_ab = ""
-
-    cert_payload.setdefault("policy", {})
-
-# === District + A/B embed + integrity + write + gallery + bundle =============
-
-# ---------- A) District info prelude (authoritative, no UI drift) ------------
-_di = st.session_state.get("_district_info", {}) or {}
-
-def _lane_mask_from_d3(d3_mat):
-    if not d3_mat or not d3_mat[0]:
-        return []
-    cols = len(d3_mat[0])
-    return [1 if any(row[j] & 1 for row in d3_mat) else 0 for j in range(cols)]
-
-try:
-    _d3 = (boundaries.blocks.__root__.get("3") or [])
-except Exception:
-    _d3 = []
-_d3_rows = len(_d3)
-_d3_cols = (len(_d3[0]) if _d3 and _d3[0] else 0)
-_lane_mask_now = _di.get("lane_mask_k3_now")
-if _lane_mask_now is None:
-    _lane_mask_now = _lane_mask_from_d3(_d3)
-
-# authoritative boundaries hash (session → inputs → cert)
-_boundaries_hash = (
-    _di.get("boundaries_hash")
-    or inputs_block.get("boundaries_hash", "")
-    or cert_payload.get("boundaries_hash", "")
-)
-if _boundaries_hash:
-    inputs_block["boundaries_hash"] = _boundaries_hash  # keep inputs in sync
-
-# resolve district id (session → cert → DISTRICT_MAP (if defined) → UI → UNKNOWN)
-try:
-    _district_from_map = (DISTRICT_MAP.get(_boundaries_hash) if "DISTRICT_MAP" in globals() else None)
-except Exception:
-    _district_from_map = None
-
-_district_id = (
-    _di.get("district_id")
-    or cert_payload.get("district_id")
-    or _district_from_map
-    or st.session_state.get("district_id")
-    or "UNKNOWN"
-)
-
-fresh_district_info = {
-    "district_id":        _district_id,
-    "boundaries_hash":    _boundaries_hash,
-    "district_signature": _di.get("district_signature", ""),
-    "lane_mask_k3_now":   _lane_mask_now,
-    "d3_rows":            _di.get("d3_rows", _d3_rows),
-    "d3_cols":            _di.get("d3_cols", _d3_cols),
-}
-
-# ---------- B) Embed A/B snapshots (safe, no stale drift) --------------------
-# make sure ab_ctx is available
-ab_ctx = st.session_state.get("ab_compare", {}) or {}
-# freshness check: inputs_sig must match current inputs; else drop A/B
 _current_sig = [
     inputs_block.get("boundaries_hash", ""),
     inputs_block.get("C_hash", ""),
@@ -1774,14 +1661,30 @@ if ab_ctx.get("inputs_sig") != _current_sig:
 strict_ctx    = ab_ctx.get("strict", {}) if ab_ctx else {}
 projected_ctx = ab_ctx.get("projected", {}) if ab_ctx else {}
 
-# pass-vector helper (local scope)
 def _pass_vec_from(out_dict: dict) -> list[int]:
     return [
         int(out_dict.get("2", {}).get("eq", False)),
         int(out_dict.get("3", {}).get("eq", False)),
     ]
 
-# provenance hash shim
+# ---------- A) District info prelude (authoritative, no UI drift) ------------
+def _safe_lane_mask_now():
+    try:
+        _d3 = (boundaries.blocks.__root__.get("3") or [])
+        return _lane_mask_from_d3(_d3)
+    except Exception:
+        return []
+
+fresh_district_info = {
+    "district_id":        district_id_auth,
+    "boundaries_hash":    _di.get("boundaries_hash") or inputs_block.get("boundaries_hash", ""),
+    "district_signature": _di.get("district_signature", ""),
+    "lane_mask_k3_now":   _di.get("lane_mask_k3_now", _safe_lane_mask_now()),
+    "d3_rows":            _di.get("d3_rows", len(d3)),
+    "d3_cols":            _di.get("d3_cols", (len(d3[0]) if (d3 and d3[0]) else 0)),
+}
+
+# ---------- B) Embed A/B snapshots (if fresh) --------------------------------
 def _prov_hash(cfg, lane_mask, district_id):
     try:
         return projector_provenance_hash(cfg=cfg, lane_mask_k3=lane_mask, district_id=district_id)
@@ -1804,7 +1707,6 @@ def _prov_hash(cfg, lane_mask, district_id):
         return ""
 
 if ab_ctx:
-    # 1) projector hash for projected leg (prefer A/B; else provenance)
     proj_hash_ab = projected_ctx.get("projector_hash", "")
     if not proj_hash_ab:
         proj_hash_ab = _prov_hash(
@@ -1813,9 +1715,8 @@ if ab_ctx:
             fresh_district_info["district_id"],
         )
 
-    # 2) inputs.boundaries for each snapshot (authoritative from fresh_district_info)
     strict_inputs_boundaries = {
-        "filename":        inputs_block.get("boundaries_filename", ""),
+        "filename":        inputs_block.get("boundaries_filename", inputs_block["filenames"].get("boundaries","")),
         "hash":            fresh_district_info["boundaries_hash"],
         "district_id":     fresh_district_info["district_id"],
         "district_sig":    fresh_district_info["district_signature"],
@@ -1824,7 +1725,7 @@ if ab_ctx:
         "d3_cols":         fresh_district_info["d3_cols"],
     }
     projected_inputs_boundaries = {
-        "filename":        inputs_block.get("boundaries_filename", ""),
+        "filename":        inputs_block.get("boundaries_filename", inputs_block["filenames"].get("boundaries","")),
         "hash":            fresh_district_info["boundaries_hash"],
         "district_id":     fresh_district_info["district_id"],
         "district_sig":    fresh_district_info["district_signature"],
@@ -1833,26 +1734,20 @@ if ab_ctx:
         "d3_cols":         fresh_district_info["d3_cols"],
     }
 
-    # 3) projector FILE metadata (prefer Run Overlap's proj_meta; fallback to A/B)
     _proj_meta = st.session_state.get("proj_meta", {}) or {}
-    proj_filename = (
-        _proj_meta.get("projector_filename")
-        or projected_ctx.get("projector_filename", "")
-    )
-    proj_file_hash = (
-        _proj_meta.get("projector_hash")
-        or projected_ctx.get("projector_file_hash", "")
-    )
+    proj_filename  = _proj_meta.get("projector_filename", "")
+    proj_file_hash = _proj_meta.get("projector_hash", "")
     proj_consistent = _proj_meta.get("projector_consistent_with_d", None)
 
-    # 4) assemble snapshots
     cert_payload.setdefault("policy", {})
     cert_payload["policy"]["strict_snapshot"] = {
         "policy_tag": strict_ctx.get("label", policy_label_from_cfg(cfg_strict())),
         "ker_guard":  strict_ctx.get("ker_guard", "enforced"),
         "inputs": {
             "boundaries": strict_inputs_boundaries,
-            "U_filename": inputs_block.get("U_filename", ""),
+            "U_filename": inputs_block["filenames"].get("U", "shapes.json"),
+            "C_filename": inputs_block["filenames"].get("C", "cmap.json"),
+            "H_filename": inputs_block["filenames"].get("H", "H.json"),
         },
         "lane_mask_k3":      strict_ctx.get("lane_mask_k3", []),
         "lane_vec_H2d3":     strict_ctx.get("lane_vec_H2d3", []),
@@ -1860,15 +1755,15 @@ if ab_ctx:
         "pass_vec": _pass_vec_from(strict_ctx.get("out", {})),
         "out":      strict_ctx.get("out", {}),
     }
-
     cert_payload["policy"]["projected_snapshot"] = {
         "policy_tag":     projected_ctx.get("label", policy_label_from_cfg(cfg_projected_base())),
         "ker_guard":      projected_ctx.get("ker_guard", "off"),
         "projector_hash": proj_hash_ab,
         "inputs": {
             "boundaries": projected_inputs_boundaries,
-            "U_filename": inputs_block.get("U_filename", ""),
-            # projector(file) metadata (meaningful only in file mode)
+            "U_filename": inputs_block["filenames"].get("U", "shapes.json"),
+            "C_filename": inputs_block["filenames"].get("C", "cmap.json"),
+            "H_filename": inputs_block["filenames"].get("H", "H.json"),
             "projector_filename": proj_filename,
             "projector_file_hash": proj_file_hash,
             "projector_consistent_with_d": proj_consistent,
@@ -1879,26 +1774,24 @@ if ab_ctx:
         "pass_vec": _pass_vec_from(projected_ctx.get("out", {})),
         "out":      projected_ctx.get("out", {}),
     }
-
     cert_payload["ab_pair_tag"] = ab_ctx.get("pair_tag", "")
 
-    # 5) mirror projected hash to top-level if active run is strict
+    # mirror projected hash to top-level if active run is strict
     proj_hash_from_ab = cert_payload["policy"]["projected_snapshot"].get("projector_hash", "")
     if proj_hash_from_ab and not cert_payload["policy"].get("projector_hash"):
         cert_payload["policy"]["projector_hash"] = proj_hash_from_ab
         cert_payload.setdefault("artifact_hashes", {})
         cert_payload["artifact_hashes"]["projector_hash"] = proj_hash_from_ab
 
-
-# ---------- C) Integrity + top-level artifact hashes + write ------------------
+# ---------- C) Integrity + top-level artifact hashes (no write here) ----------
 district_id_for_cert = (
     cert_payload.get("district_id")
-    or fresh_district_info["district_id"]
+    or district_id_auth
     or "UNKNOWN"
 )
 boundaries_hash_for_cert = (
     cert_payload.get("boundaries_hash")
-    or fresh_district_info["boundaries_hash"]
+    or _di.get("boundaries_hash")
     or inputs_block.get("boundaries_hash", "")
 )
 
@@ -1913,28 +1806,14 @@ cert_payload.setdefault("artifact_hashes", {
 })
 cert_payload["artifact_hashes"]["projector_hash"] = cert_payload.get("policy", {}).get("projector_hash", "")
 
-# --- Authoritative district -> force into cert before write -------------------
-_di = st.session_state.get("_district_info", {}) or {}
-if _di:
-    cert_payload["district_id"]     = _di.get("district_id", cert_payload.get("district_id", "UNKNOWN"))
-    cert_payload["boundaries_hash"] = _di.get("boundaries_hash", cert_payload.get("boundaries_hash", ""))
-
-    # keep inputs in sync to avoid parsed/bytes double-hash divergence
-    inputs_block["boundaries_hash"] = cert_payload["boundaries_hash"]
-    cert_payload["inputs"] = inputs_block
-
-
-# filenames into inputs + sync inputs.boundaries_hash to authoritative one
-if "boundaries_filename" not in inputs_block:
-    inputs_block["boundaries_filename"] = inputs_block.get("boundaries_name", "boundaries.json")
-if "U_filename" not in inputs_block:
-    inputs_block["U_filename"] = inputs_block.get("U_name", "U.json")
+# keep inputs.boundaries_hash synced to authoritative one (avoid bytes/parsed divergence)
 if cert_payload.get("boundaries_hash"):
     inputs_block["boundaries_hash"] = cert_payload["boundaries_hash"]
 cert_payload["inputs"] = inputs_block
 
 cert_payload.setdefault("integrity", {})
 cert_payload["integrity"]["content_hash"] = hashes.content_hash_of(cert_payload)
+
 # ========================== CERT ENRICHMENTS BLOCK ===========================
 
 # ---- helpers ----------------------------------------------------------------
