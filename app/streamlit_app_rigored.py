@@ -1310,10 +1310,8 @@ if _cfg_file_for_ab.get("source", {}).get("3") in ("file", "auto"):
 if "projector_files" in _cfg_file_for_ab and "3" in _cfg_file_for_ab["projector_files"]:
     _cfg_proj_for_ab["projector_files"]["3"] = _cfg_file_for_ab["projector_files"]["3"]
 
-# Salt the cache with a config/file hash so new files rebuild projectors
-cfg_fingerprint = hashes.content_hash_of(_cfg_proj_for_ab)
-_cache_for_ab = projector.preload_projectors_from_files(_cfg_proj_for_ab, cache_key=cfg_fingerprint)
-
+# Use whatever caching your helper already implements (no cache_key kwarg)
+_cache_for_ab = projector.preload_projectors_from_files(_cfg_proj_for_ab)
 
 # Parse H once for both runs
 H_obj = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})
@@ -1354,21 +1352,18 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
     # --- helper: call projector_provenance_hash across possible signatures ---
     def _provenance_hash(cfg, lane_mask, district_id):
         try:
-            # v1: explicit lane_mask_k3 kwarg
             return projector_provenance_hash(
                 cfg=cfg, lane_mask_k3=lane_mask, district_id=district_id
             )
         except TypeError:
             pass
         try:
-            # v2: older name "lane_mask"
             return projector_provenance_hash(
                 cfg=cfg, lane_mask=lane_mask, district_id=district_id
             )
         except TypeError:
             pass
         try:
-            # v3: provenance via boundaries + diagnostics_block
             return projector_provenance_hash(
                 cfg=cfg,
                 boundaries=boundaries,
@@ -1378,7 +1373,6 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
         except TypeError:
             pass
         try:
-            # v4: minimal signature
             return projector_provenance_hash(cfg=cfg)
         except Exception:
             return ""
@@ -1388,20 +1382,20 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
     proj_hash_prov = _provenance_hash(_cfg_proj_for_ab, lane_mask, district_id)
     st.caption(f"projected Π provenance hash: {proj_hash_prov[:12]}…")
 
-        # Build an inputs signature for freshness checks
+    # Build an inputs signature for freshness checks
     inputs_sig = [
         inputs_block.get("boundaries_hash", ""),
         inputs_block.get("C_hash", ""),
         inputs_block.get("H_hash", ""),
         inputs_block.get("U_hash", ""),
-        inputs_block.get("shapes_hash", ""),  # if you don’t have, leave ""
+        inputs_block.get("shapes_hash", ""),  # ok if ""
     ]
-    
+
     # --- Persist compact A/B context ---
     pair_tag = f"{label_strict}__VS__{label_proj}"
     st.session_state["ab_compare"] = {
         "pair_tag": pair_tag,
-        "inputs_sig": inputs_sig,          # <-- NEW: stamp inputs used for this A/B
+        "inputs_sig": inputs_sig,           # freshness guard
         "lane_mask_k3": lane_mask,
         "strict": {
             "label": label_strict,
@@ -1410,7 +1404,7 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
             "ker_guard": "enforced",
             "lane_vec_H2d3": lane_vec_H2d3,
             "lane_vec_C3plusI3": lane_vec_C3pI3,
-            "projector_hash": "",
+            "projector_hash": "",           # none in strict
             "pass_vec": [
                 int(out_strict.get("2", {}).get("eq", False)),
                 int(out_strict.get("3", {}).get("eq", False)),
@@ -1421,7 +1415,7 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
             "cfg":   _cfg_proj_for_ab,
             "out":   out_proj,
             "ker_guard": "off",
-            "projector_hash": proj_hash_prov,
+            "projector_hash": proj_hash_prov,  # provenance hash
             "lane_vec_H2d3": lane_vec_H2d3,
             "lane_vec_C3plusI3": lane_vec_C3pI3,
             "pass_vec": [
@@ -1431,11 +1425,11 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
         },
     }
 
-
     # --- Status badge ---
     s_ok = bool(out_strict.get("3", {}).get("eq", False))
     p_ok = bool(out_proj.get("3", {}).get("eq", False))
     st.success(f"A/B: strict={'GREEN' if s_ok else 'RED'} · projected={'GREEN' if p_ok else 'RED'}")
+
 
 
 
