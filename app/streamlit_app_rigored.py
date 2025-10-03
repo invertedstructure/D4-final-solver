@@ -699,23 +699,47 @@ with tab2:
     )
 
 
-    # --- Build active cfg (respect file/auto from projection_config.json) ---
+        # --- Build active cfg (respect file/auto from projection_config.json) ---
+    import os, json as _json
+    from pathlib import Path
+
+    # load persisted projection config
     cfg_file = projector.load_projection_config("projection_config.json")
     cfg_proj = cfg_projected_base()
+
+    # inherit source / file path from projection_config.json
     if cfg_file.get("source", {}).get("3") in ("file", "auto"):
         cfg_proj["source"]["3"] = cfg_file["source"]["3"]
     if "projector_files" in cfg_file and "3" in cfg_file["projector_files"]:
-        cfg_proj["projector_files"]["3"] = cfg_file["projector_files"]["3"]
+        cfg_proj.setdefault("projector_files", {})["3"] = cfg_file["projector_files"]["3"]
+
+    # choose strict vs projected
     cfg_active = cfg_strict() if policy_choice == "strict" else cfg_proj
-    policy_label = policy_label_from_cfg(cfg_active)
-    st.caption(f"Policy: **{policy_label}**")
 
-    cache = projector.preload_projectors_from_files(cfg_active)
+    # -------- Optional: upload a projector file to use in projected(file) -----
+    st.markdown("#### Projector (k=3)")
+    proj_upload = st.file_uploader(
+        "Projector JSON for k=3 (optional; used when source.3 = file)",
+        type=["json"], key="proj3_up"
+    )
+    proj_saved_path = None
+    if proj_upload is not None:
+        proj_dir = Path("projectors")
+        proj_dir.mkdir(exist_ok=True, parents=True)
+        proj_saved_path = proj_dir / proj_upload.name
+        with open(proj_saved_path, "wb") as _pf:
+            _pf.write(proj_upload.getvalue())
+        st.caption(f"saved projector: {proj_saved_path}")
 
-    # --- Projector source (k=3) quick switcher ---
+        # if user uploaded, switch active cfg to file mode and point to this file
+        if policy_choice != "strict":
+            cfg_active.setdefault("source", {})["3"] = "file"
+            cfg_active.setdefault("projector_files", {})["3"] = str(proj_saved_path)
+
+    # --- Projector source switcher UI (writes projection_config.json) ----------
     with st.expander("Projector source (k=3)"):
         cur_src  = cfg_file.get("source", {}).get("3", "auto")
-        cur_file = cfg_file.get("projector_files", {}).get("3", "projector_D3.json")
+        cur_file = cfg_file.get("projector_files", {}).get("3", "projectors/projector_D3.json")
         st.write(
             f"Current: source.3 = **{cur_src}**",
             f"(file: `{cur_file}`)" if cur_src == "file" else ""
@@ -723,7 +747,7 @@ with tab2:
         mode_choice = st.radio(
             "Choose source for k=3",
             options=["auto","file"],
-            index=0 if cur_src == "auto" else 1,
+            index=(0 if cur_src == "auto" else 1),
             horizontal=True,
             key="proj_src_choice_k3",
         )
@@ -739,7 +763,64 @@ with tab2:
                 _json.dump(cfg_file, _f, indent=2)
             st.success(f"projection_config.json updated → source.3 = {mode_choice}")
 
+            # also reflect in current active config if we are in projected mode
+            if policy_choice != "strict":
+                cfg_active.setdefault("source", {})["3"] = mode_choice
+                if mode_choice == "file":
+                    cfg_active.setdefault("projector_files", {})["3"] = file_path
+                else:
+                    if "projector_files" in cfg_active and "3" in cfg_active["projector_files"]:
+                        del cfg_active["projector_files"]["3"]
+
+    # --- Active policy badge ---------------------------------------------------
+    src3 = cfg_active.get("source", {}).get("3", "")
+    if policy_choice == "strict":
+        _policy_mode_badge = "strict"
+    elif src3 == "file":
+        _policy_mode_badge = "projected(file)"
+    else:
+        _policy_mode_badge = "projected(auto)"
+    policy_label = policy_label_from_cfg(cfg_active)
+    st.caption(f"Policy: **{policy_label}** · mode: {_policy_mode_badge}")
+
+    # --- Preload projectors AFTER cfg_active is finalized ---------------------
+    cache = projector.preload_projectors_from_files(cfg_active)
+    st.session_state["_projector_cache"] = cache  # keep around for cert validation
+
     # ---------- RUN OVERLAP ----------
+    def _gf2_idempotent(P):
+        try:
+            n = len(P); m = len(P[0]) if n else 0
+            if n != m:  # must be square
+                return False
+            PP = [[0]*n for _ in range(n)]
+            for i in range(n):
+                for k in range(n):
+                    if P[i][k] & 1:
+                        rowk = P[k]
+                        for j in range(n):
+                            PP[i][j] ^= (rowk[j] & 1)
+            for i in range(n):
+                for j in range(n):
+                    if (PP[i][j] & 1) != (P[i][j] & 1):
+                        return False
+            return True
+        except Exception:
+            return False
+
+    def _diag_vec(P):
+        try:
+            n = min(len(P), len(P[0]))
+            return [int(P[i][i] & 1) for i in range(n)]
+        except Exception:
+            return []
+
+    def _lane_mask_from_d3(d3_mat):
+        if not d3_mat or not d3_mat[0]:
+            return []
+        cols = len(d3_mat[0])
+        return [1 if any(row[j] & 1 for row in d3_mat) else 0 for j in range(cols)]
+
     if st.button("Run Overlap", key="run_overlap"):
         try:
             out = overlap_gate.overlap_check(
@@ -751,11 +832,54 @@ with tab2:
             )
             st.json(out)
 
+            # ---- projector(file) metadata & validation for cert --------------
+            proj_meta = {"projector_filename": "", "projector_hash": "", "projector_consistent_with_d": None}
+            if policy_choice != "strict" and cfg_active.get("source", {}).get("3") == "file":
+                pj_path = cfg_active.get("projector_files", {}).get("3")
+                if pj_path and os.path.exists(pj_path):
+                    try:
+                        with open(pj_path, "r") as _pf:
+                            P3 = _json.load(_pf)
+                    except Exception as e:
+                        P3 = None
+                        st.warning(f"Could not read projector file '{pj_path}': {e}")
+
+                    # hash projector deterministically
+                    try:
+                        proj_hash = hashes.content_hash_of({"P3": P3}) if P3 is not None else ""
+                    except Exception:
+                        try:
+                            proj_hash = hashes.sha256_hex(_json.dumps(P3, sort_keys=True).encode())
+                        except Exception:
+                            proj_hash = ""
+
+                    # validations
+                    d3 = (boundaries.blocks.__root__.get("3") or [])
+                    n3r = len(d3)
+                    n3c = len(d3[0]) if d3 else 0
+                    shape_ok = isinstance(P3, list) and P3 and isinstance(P3[0], list) and (len(P3) == len(P3[0]) == n3c == n3r)
+                    idem_ok  = _gf2_idempotent(P3) if shape_ok else False
+                    diagP    = _diag_vec(P3) if shape_ok else []
+                    auto_mask = _lane_mask_from_d3(d3)
+                    diag_ok  = (diagP == auto_mask[:len(diagP)]) if diagP else True
+                    consistent = bool(shape_ok and idem_ok and diag_ok)
+
+                    if not shape_ok: st.warning(f"Projector shape mismatch: expected {n3r}x{n3c}.")
+                    if shape_ok and not idem_ok: st.warning("Projector is not idempotent (P·P != P over GF(2)).")
+                    if shape_ok and not diag_ok: st.warning("Projector diagonal does not match d3 auto mask.")
+
+                    proj_meta = {
+                        "projector_filename": pj_path,
+                        "projector_hash": proj_hash,
+                        "projector_consistent_with_d": consistent,
+                    }
+
             # persist for downstream cert/bundle blocks
             st.session_state["overlap_out"] = out
             st.session_state["overlap_cfg"] = cfg_active
             st.session_state["overlap_policy_label"] = policy_label
             st.session_state["overlap_H"] = H_local
+            st.session_state["proj_meta"] = proj_meta
 
         except Exception as e:
             st.error(f"Overlap run failed: {e}")
@@ -767,6 +891,7 @@ with tab2:
     overlap_cfg          = _ss.get("overlap_cfg")
     overlap_policy_label = _ss.get("overlap_policy_label")
     overlap_H            = _ss.get("overlap_H")
+    proj_meta            = _ss.get("proj_meta", {"projector_filename": "", "projector_hash": "", "projector_consistent_with_d": None})
 
     if overlap_out is None or overlap_cfg is None or overlap_H is None:
         st.info("Run Overlap first to populate cert & download bundle.")
@@ -778,8 +903,14 @@ with tab2:
     policy_label = overlap_policy_label
     H_local      = overlap_H
 
+    # small badge echo (keeps UI consistent after reload)
+    src3 = cfg_active.get("source", {}).get("3", "")
+    _badge = "strict" if not cfg_active.get("enabled_layers") else ("projected(file)" if src3 == "file" else "projected(auto)")
+    st.caption(f"Active policy: **{policy_label}** · mode: {_badge}")
+
     # shapes must be JSON-safe
     shapes_payload = shapes.dict() if hasattr(shapes, "dict") else (shapes or {})
+
 
     # ---------- Inputs block (hashes + shapes + filenames) ----------
     inputs_hash = hashes.bundle_content_hash([
