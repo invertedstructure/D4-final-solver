@@ -1305,41 +1305,94 @@ if pj_filename:
     policy_block["projector_filename"] = pj_filename
 
 
-   # ---------- Residual tag (lanes / ker / mixed / none) ----------
-from otcore.linalg_gf2 import mul, add, eye
+  # ---------- Residual tag (lanes / ker / mixed / none) ----------
+# Try otcore routines; fall back to pure-python if unavailable
+try:
+    from otcore.linalg_gf2 import mul, add, eye
+    _have_otcore = True
+except Exception:
+    _have_otcore = False
 
-def _support(M):
-    return [[1 if (v % 2) != 0 else 0 for v in row] for row in (M or [])]
+    def eye(n):
+        return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
 
-# Strict residual at k=3: R3 = H2@d3 + (C3 + I3)
-blocks_b = boundaries.blocks.__root__
-blocks_c = cmap.blocks.__root__
-blocks_h = H_local.blocks.__root__
-d3 = blocks_b.get("3")
-C3 = blocks_c.get("3")
-H2 = blocks_h.get("2")
+    def add(A, B):
+        if not A:
+            return [row[:] for row in (B or [])]
+        if not B:
+            return [row[:] for row in (A or [])]
+        m, n = len(A), len(A[0])
+        return [[(A[i][j] ^ B[i][j]) for j in range(n)] for i in range(m)]
 
-R3_strict = []
-if d3 is not None and C3 is not None and H2 is not None:
-    I3 = eye(len(C3))
-    R3_strict = add(mul(H2, d3), add(C3, I3))
+    def mul(A, B):
+        # GF(2) matmul (A m×k)·(B k×n)
+        if not A or not B:
+            return []
+        m, kA = len(A), len(A[0])
+        kB, n = len(B), len(B[0])
+        if kA != kB:
+            return []  # shape mismatch → empty to avoid exceptions
+        C = [[0]*n for _ in range(m)]
+        for i in range(m):
+            for k in range(kA):
+                if A[i][k] & 1:
+                    rowk = B[k]
+                    for j in range(n):
+                        C[i][j] ^= (rowk[j] & 1)
+        return C
 
-lane_mask_k3 = diagnostics_block.get("lane_mask_k3", [])
-lane_idx = [j for j, m in enumerate(lane_mask_k3) if m == 1]
-ker_idx  = [j for j, m in enumerate(lane_mask_k3) if m == 0]
+def _lane_mask_from_d3(d3_mat):
+    if not d3_mat or not d3_mat[0]:
+        return []
+    cols = len(d3_mat[0])
+    return [1 if any(row[j] & 1 for row in d3_mat) else 0 for j in range(cols)]
 
 def _which_cols_nonzero(M):
-    if not M: return set()
+    if not M: 
+        return set()
     nz = set()
     for r in M:
         for j, v in enumerate(r):
-            if v % 2 != 0:
+            if (v & 1) != 0:
                 nz.add(j)
     return nz
 
+# Pull current blocks (safe)
+blocks_b = boundaries.blocks.__root__ if hasattr(boundaries, "blocks") else {}
+blocks_c = cmap.blocks.__root__       if hasattr(cmap, "blocks")       else {}
+blocks_h = H_local.blocks.__root__    if hasattr(H_local, "blocks")    else {}
+
+d3 = blocks_b.get("3") or []
+C3 = blocks_c.get("3") or []
+H2 = blocks_h.get("2") or []
+
+# Strict residual at k=3: R3 = H2@d3 + (C3 + I3)
+R3_strict = []
+if d3 and C3 and H2:
+    try:
+        I3 = eye(len(C3))
+        R3_strict = add(mul(H2, d3), add(C3, I3))
+    except Exception:
+        R3_strict = []
+
+# Lane mask: prefer diagnostics_block if available; else compute from d3
+try:
+    _diag = diagnostics_block if isinstance(diagnostics_block, dict) else {}
+except NameError:
+    _diag = {}
+
+lane_mask_k3 = _diag.get("lane_mask_k3")
+if lane_mask_k3 is None or lane_mask_k3 == []:
+    lane_mask_k3 = _lane_mask_from_d3(d3)
+
+lane_idx = [j for j, m in enumerate(lane_mask_k3) if int(m) == 1]
+ker_idx  = [j for j, m in enumerate(lane_mask_k3) if int(m) == 0]
+
+# Classify residual columns
 nz_cols = _which_cols_nonzero(R3_strict)
 lanes_nonzero = any(j in nz_cols for j in lane_idx)
 ker_nonzero   = any(j in nz_cols for j in ker_idx)
+
 if not nz_cols:
     residual_tag = "none"
 elif lanes_nonzero and not ker_nonzero:
@@ -1348,6 +1401,7 @@ elif ker_nonzero and not lanes_nonzero:
     residual_tag = "ker"
 else:
     residual_tag = "mixed"
+
 
 # ---------- Checks (extend beyond eq) ----------
 # If you have real grid/fence checks elsewhere, wire them here.
