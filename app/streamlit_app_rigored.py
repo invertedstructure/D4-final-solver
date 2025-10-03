@@ -1178,20 +1178,7 @@ with tab2:
             st.stop()
 
 
-     # ---------- RUN OVERLAP ----------
-if st.button("Run Overlap", key="run_overlap"):
-    # 1) decide active projector & validate (no silent fallback in file mode)
-    mode, proj_meta, err = choose_active_projector(cfg_active, boundaries)
-    if mode == "projected(file)" and err:
-        # Fail fast with a precise reason; DO NOT run overlap on auto here
-        st.error(err)
-        st.session_state["proj_meta"] = {
-            "projector_filename": cfg_active.get("projector_files", {}).get("3", ""),
-            "projector_hash": "",
-            "projector_consistent_with_d": False,
-            "errors": [err],
-        }
-        st.stop()
+  
 
     # 2) cache discipline: rebuild when policy/boundaries/C/H/U or projector file/hash changes
     import os, json as _json
