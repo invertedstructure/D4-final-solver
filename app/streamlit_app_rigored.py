@@ -2482,37 +2482,82 @@ if _cfg_file_for_ab.get("source", {}).get("3") in ("file", "auto"):
 if "projector_files" in _cfg_file_for_ab and "3" in _cfg_file_for_ab["projector_files"]:
     _cfg_proj_for_ab["projector_files"]["3"] = _cfg_file_for_ab["projector_files"]["3"]
 
-# --- Projector cache-bust key (boundaries/source/file changes) -------------
-_di = st.session_state.get("_district_info", {}) or {}
-_bound_hash = _di.get("boundaries_hash", "")
+# ---------- projector cache discipline (A/B has its own cache namespace) ----
+try:
+    # prefer authoritative boundaries hash from session
+    _di = st.session_state.get("_district_info", {}) or {}
+    _bound_hash = _di.get("boundaries_hash", inputs_block.get("boundaries_hash", ""))
 
-# Choose the cfg we’re about to load cache for
-_cfg_for_cache = cfg_active if 'cfg_active' in locals() else _cfg_proj_for_ab
-_src3  = _cfg_for_cache.get("source", {}).get("3", "")
-_file3 = _cfg_for_cache.get("projector_files", {}).get("3", "") if _src3 == "file" else ""
+    _src3  = _cfg_proj_for_ab.get("source", {}).get("3", "")
+    _file3 = _cfg_proj_for_ab.get("projector_files", {}).get("3", "") if _src3 == "file" else ""
+    _ab_cache_key = f"{_bound_hash}|AB|src3={_src3}|file3={_file3}"
 
-_cache_key = f"{_bound_hash}|src3={_src3}|file3={_file3}"
+    if st.session_state.get("_projector_cache_key_ab") != _ab_cache_key:
+        st.session_state.pop("_projector_cache_ab", None)
+        st.session_state["_projector_cache_key_ab"] = _ab_cache_key
 
-# Use different session keys for overlap vs A/B to avoid collisions
-_cache_key_name = "_projector_cache_key" if 'cfg_active' in locals() else "_projector_cache_key_ab"
-_cache_blob_name = "_projector_cache" if 'cfg_active' in locals() else "_projector_cache_ab"
-
-if st.session_state.get(_cache_key_name) != _cache_key:
-    st.session_state.pop(_cache_blob_name, None)
-    st.session_state[_cache_key_name] = _cache_key
-
-# finally preload (will rebuild if we just busted it)
-_cache_blob = st.session_state.get(_cache_blob_name) or projector.preload_projectors_from_files(_cfg_for_cache)
-st.session_state[_cache_blob_name] = _cache_blob
-
-
-# Use whatever caching your helper already implements (no cache_key kwarg)
-_cache_for_ab = projector.preload_projectors_from_files(_cfg_proj_for_ab)
+    _cache_for_ab = st.session_state.get("_projector_cache_ab") or projector.preload_projectors_from_files(_cfg_proj_for_ab)
+    st.session_state["_projector_cache_ab"] = _cache_for_ab
+except Exception:
+    # fallback: just preload with current projected cfg
+    _cache_for_ab = projector.preload_projectors_from_files(_cfg_proj_for_ab)
 
 # Parse H once for both runs
 H_obj = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})
 
+# Small helpers
+from otcore.linalg_gf2 import mul, add, eye
+
+def _bottom_row(M):
+    return M[-1] if (M and len(M)) else []
+
+def _lane_mask_from_d3(d3_mat):
+    if not d3_mat or not d3_mat[0]:
+        return []
+    cols = len(d3_mat[0])
+    return [1 if any(row[j] & 1 for row in d3_mat) else 0 for j in range(cols)]
+
+def _mask(vec, idx):
+    return [vec[j] for j in idx] if (vec and idx) else []
+
+def _compute_lane_vectors(H2_block, d3_block, C3_block, lane_indices):
+    H2d3   = mul(H2_block, d3_block) if (H2_block and d3_block) else []
+    C3pI3  = add(C3_block, eye(len(C3_block))) if C3_block else []
+    v_H2d3 = _mask(_bottom_row(H2d3), lane_indices)
+    v_C3I  = _mask(_bottom_row(C3pI3), lane_indices)
+    return v_H2d3, v_C3I
+
+# provenance hash shim
+def _provenance_hash(cfg, lane_mask_k3, district_id):
+    try:
+        return projector_provenance_hash(cfg=cfg, lane_mask_k3=lane_mask_k3, district_id=district_id)
+    except TypeError:
+        pass
+    try:
+        return projector_provenance_hash(cfg=cfg, lane_mask=lane_mask_k3, district_id=district_id)
+    except TypeError:
+        pass
+    try:
+        return projector_provenance_hash(
+            cfg=cfg, boundaries=boundaries, district_id=district_id,
+            diagnostics_block={"lane_mask_k3": lane_mask_k3},
+        )
+    except TypeError:
+        pass
+    try:
+        return projector_provenance_hash(cfg=cfg)
+    except Exception:
+        return ""
+
 if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
+    # --- Validate projected(file), fail fast if invalid (don’t silently use AUTO)
+    proj_meta_ab = {}
+    try:
+        P_active_ab, proj_meta_ab = projector_choose_active(_cfg_proj_for_ab, boundaries)
+    except ValueError as e:
+        st.error(f"A/B projected(file) invalid: {e}")
+        st.stop()
+
     # --- A) strict
     out_strict   = overlap_gate.overlap_check(boundaries, cmap, H_obj)
     label_strict = policy_label_from_cfg(cfg_strict())
@@ -2525,70 +2570,24 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
     )
     label_proj = policy_label_from_cfg(_cfg_proj_for_ab)
 
-        # --- Lane diagnostics (compute fresh from current buffers) ----------------
-    from otcore.linalg_gf2 import mul, add, eye
-
-    def _bottom_row(M): 
-        return M[-1] if (M and len(M)) else []
-
-    def _lane_mask_from_d3(d3_mat):
-        if not d3_mat or not d3_mat[0]:
-            return []
-        cols = len(d3_mat[0])
-        return [1 if any(row[j] & 1 for row in d3_mat) else 0 for j in range(cols)]
-
-    def _mask(vec, idx):
-        return [vec[j] for j in idx] if (vec and idx) else []
-
-    # Shared raw blocks
+    # --- Lane diagnostics (compute fresh from current buffers) ----------------
     d3  = boundaries.blocks.__root__.get("3") or []
     H2  = (H_obj.blocks.__root__.get("2") or [])
     C3  = (cmap.blocks.__root__.get("3") or [])
 
-    # Build lane mask from D3 only (policy-agnostic)
     lane_mask = _lane_mask_from_d3(d3)
     lane_idx  = [j for j, m in enumerate(lane_mask) if m]
 
-    # Helper to compute lanes from H@d3 and (C3+I3), *fresh each time*
-    def compute_lane_vectors(H2_block, d3_block, C3_block, lane_indices):
-        H2d3   = mul(H2_block, d3_block) if (H2_block and d3_block) else []
-        C3pI3  = add(C3_block, eye(len(C3_block))) if C3_block else []
-        v_H2d3 = _mask(_bottom_row(H2d3), lane_indices)
-        v_C3I  = _mask(_bottom_row(C3pI3), lane_indices)
-        return v_H2d3, v_C3I
+    strict_lane_vec_H2d3, strict_lane_vec_C3pI3 = _compute_lane_vectors(H2, d3, C3, lane_idx)
+    proj_lane_vec_H2d3,   proj_lane_vec_C3pI3   = _compute_lane_vectors(H2, d3, C3, lane_idx)
 
-    # Fresh lanes for strict snapshot (from current buffers)
-    strict_lane_vec_H2d3, strict_lane_vec_C3pI3 = compute_lane_vectors(H2, d3, C3, lane_idx)
-    # Fresh lanes for projected snapshot (same H,d3,C3; recomputed to avoid cross-use)
-    proj_lane_vec_H2d3,   proj_lane_vec_C3pI3   = compute_lane_vectors(H2, d3, C3, lane_idx)
-
-    # --- Projector provenance hash for the PROJECTED leg (AUTO or FILE) -------
-    def _provenance_hash(cfg, lane_mask_k3, district_id):
-        try:
-            return projector_provenance_hash(cfg=cfg, lane_mask_k3=lane_mask_k3, district_id=district_id)
-        except TypeError:
-            pass
-        try:
-            return projector_provenance_hash(cfg=cfg, lane_mask=lane_mask_k3, district_id=district_id)
-        except TypeError:
-            pass
-        try:
-            return projector_provenance_hash(
-                cfg=cfg, boundaries=boundaries, district_id=district_id,
-                diagnostics_block={"lane_mask_k3": lane_mask_k3},
-            )
-        except TypeError:
-            pass
-        try:
-            return projector_provenance_hash(cfg=cfg)
-        except Exception:
-            return ""
-
-    district_id   = st.session_state.get("district_id", "D3")
+    # --- Projector provenance hash for PROJECTED leg --------------------------
+    district_id = (st.session_state.get("_district_info", {}) or {}).get("district_id") \
+                  or st.session_state.get("district_id", "UNKNOWN")
     proj_hash_prov = _provenance_hash(_cfg_proj_for_ab, lane_mask, district_id)
     st.caption(f"projected Π provenance hash: {proj_hash_prov[:12]}…")
 
-    # Build an inputs signature for freshness checks
+    # --- Inputs signature for freshness guard ---------------------------------
     inputs_sig = [
         inputs_block.get("boundaries_hash", ""),
         inputs_block.get("C_hash", ""),
@@ -2597,7 +2596,7 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
         inputs_block.get("shapes_hash", ""),
     ]
 
-    # --- Persist compact A/B context (each snapshot uses its OWN fresh lanes) --
+    # --- Persist compact A/B context -----------------------------------------
     pair_tag = f"{label_strict}__VS__{label_proj}"
     st.session_state["ab_compare"] = {
         "pair_tag": pair_tag,
@@ -2608,8 +2607,8 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
             "cfg":   cfg_strict(),
             "out":   out_strict,
             "ker_guard": "enforced",
-            "lane_vec_H2d3":     strict_lane_vec_H2d3,   # <- fresh from H@d3
-            "lane_vec_C3plusI3": strict_lane_vec_C3pI3,  # <- fresh from C3+I3
+            "lane_vec_H2d3":     strict_lane_vec_H2d3,
+            "lane_vec_C3plusI3": strict_lane_vec_C3pI3,
             "projector_hash": "",  # none in strict
             "pass_vec": [
                 int(out_strict.get("2", {}).get("eq", False)),
@@ -2622,20 +2621,24 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
             "out":   out_proj,
             "ker_guard": "off",
             "projector_hash": proj_hash_prov,
-            "lane_vec_H2d3":     proj_lane_vec_H2d3,     # <- fresh from H@d3
-            "lane_vec_C3plusI3": proj_lane_vec_C3pI3,    # <- fresh from C3+I3
+            "lane_vec_H2d3":     proj_lane_vec_H2d3,
+            "lane_vec_C3plusI3": proj_lane_vec_C3pI3,
             "pass_vec": [
                 int(out_proj.get("2", {}).get("eq", False)),
                 int(out_proj.get("3", {}).get("eq", False)),
             ],
+            # file-mode extras if present
+            "projector_filename": proj_meta_ab.get("projector_filename", ""),
+            "projector_file_hash": proj_meta_ab.get("projector_hash", ""),
+            "projector_consistent_with_d": proj_meta_ab.get("projector_consistent_with_d", None),
         },
     }
 
-
-    # --- Status badge ---
+    # --- Status badge ---------------------------------------------------------
     s_ok = bool(out_strict.get("3", {}).get("eq", False))
     p_ok = bool(out_proj.get("3", {}).get("eq", False))
     st.success(f"A/B: strict={'GREEN' if s_ok else 'RED'} · projected={'GREEN' if p_ok else 'RED'}")
+
 
 
 
