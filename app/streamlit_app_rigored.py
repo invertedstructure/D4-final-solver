@@ -1192,50 +1192,50 @@ sig_block = {
 }
 
 
-      # ---------- Policy snapshot (robust file hashing + schema normalize) ------
-    import os, json as _json, hashlib
+  # ---------- Policy snapshot (robust file hashing + schema normalize) ------
+import os, json as _json, hashlib
 
-    def _extract_P3_matrix(obj):
-        # Accept either raw 2-D list or {"blocks": {"3": <2-D list>}}
-        if isinstance(obj, list) and obj and isinstance(obj[0], list):
-            return obj
-        if isinstance(obj, dict):
-            b = obj.get("blocks", {})
-            mat = b.get("3")
-            if isinstance(mat, list) and mat and isinstance(mat[0], list):
-                return mat
-        return None
+def _extract_P3_matrix(obj):
+    # Accept either raw 2-D list or {"blocks": {"3": <2-D list>}}
+    if isinstance(obj, list) and obj and isinstance(obj[0], list):
+        return obj
+    if isinstance(obj, dict):
+        b = obj.get("blocks", {})
+        mat = b.get("3")
+        if isinstance(mat, list) and mat and isinstance(mat[0], list):
+            return mat
+    return None
 
-    pj_hash = ""
-    pj_filename = ""
-    if cfg_active.get("source", {}).get("3") == "file":
-        pj_path = cfg_active.get("projector_files", {}).get("3")
-        if pj_path and os.path.exists(pj_path):
+pj_hash = ""
+pj_filename = ""
+if cfg_active.get("source", {}).get("3") == "file":
+    pj_path = cfg_active.get("projector_files", {}).get("3")
+    if pj_path and os.path.exists(pj_path):
+        try:
+            with open(pj_path, "r") as _pf:
+                _raw = _json.load(_pf)
+            _P3 = _extract_P3_matrix(_raw)  # <-- normalize schema
+            # Stable deterministic hash of projector contents
             try:
-                with open(pj_path, "r") as _pf:
-                    _raw = _json.load(_pf)
-                _P3 = _extract_P3_matrix(_raw)  # <-- normalize schema
-                # Stable deterministic hash of projector contents
-                try:
-                    pj_hash = hashes.content_hash_of({"P3": _P3})
-                except Exception:
-                    pj_hash = hashlib.sha256(
-                        _json.dumps(_P3, sort_keys=True, separators=(",", ":")).encode()
-                    ).hexdigest()
-                pj_filename = pj_path
-            except Exception as _e:
-                st.warning(f"Could not read projector file for hashing: {pj_path} ({_e})")
+                pj_hash = hashes.content_hash_of({"P3": _P3})
+            except Exception:
+                pj_hash = hashlib.sha256(
+                    _json.dumps(_P3, sort_keys=True, separators=(",", ":")).encode()
+                ).hexdigest()
+            pj_filename = pj_path
+        except Exception as _e:
+            st.warning(f"Could not read projector file for hashing: {pj_path} ({_e})")
 
-    policy_block = {
-        "label":          policy_label,          # e.g. "projected(columns@k=3,file)"
-        "policy_tag":     policy_label,
-        "enabled_layers": cfg_active.get("enabled_layers", []),
-        "modes":          cfg_active.get("modes", {}),
-        "source":         cfg_active.get("source", {}),
-        "projector_hash": pj_hash,
-    }
-    if pj_filename:
-        policy_block["projector_filename"] = pj_filename
+policy_block = {
+    "label":          policy_label,          # e.g. "projected(columns@k=3,file)"
+    "policy_tag":     policy_label,
+    "enabled_layers": cfg_active.get("enabled_layers", []),
+    "modes":          cfg_active.get("modes", {}),
+    "source":         cfg_active.get("source", {}),
+    "projector_hash": pj_hash,
+}
+if pj_filename:
+    policy_block["projector_filename"] = pj_filename
 
 
    # ---------- Residual tag (lanes / ker / mixed / none) ----------
