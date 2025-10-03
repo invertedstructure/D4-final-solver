@@ -1294,6 +1294,13 @@ if not proj_hash_ab:
         projected_ctx.get("lane_mask_k3", []),
         fresh_district_info["district_id"],
     )
+# Ensure pass-vector helper exists in this scope
+if "_pass_vec_from" not in locals():
+    def _pass_vec_from(out_dict: dict) -> list[int]:
+        return [
+            int(out_dict.get("2", {}).get("eq", False)),
+            int(out_dict.get("3", {}).get("eq", False)),
+        ]
 
 # ---- Inputs sub-blocks for snapshots (so A/B blocks can’t drift) ------------
 strict_inputs_boundaries = {
