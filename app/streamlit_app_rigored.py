@@ -1271,54 +1271,54 @@ shapes_payload = shapes.dict() if hasattr(shapes, "dict") else (shapes or {})
 
 
 
-    # ---------- Inputs block (hashes + shapes + filenames) ----------
-    inputs_hash = hashes.bundle_content_hash([
-        ("boundaries", boundaries.dict() if hasattr(boundaries, "dict") else {}),
-        ("cmap",       cmap.dict()       if hasattr(cmap,       "dict") else {}),
-        ("H",          H_local.dict()    if hasattr(H_local,    "dict") else {}),
-        ("cfg",        cfg_active),
-    ])
+# ---------- Inputs block (hashes + shapes + filenames) ----------
+inputs_hash = hashes.bundle_content_hash([
+    ("boundaries", boundaries.dict() if hasattr(boundaries, "dict") else {}),
+    ("cmap",       cmap.dict()       if hasattr(cmap,       "dict") else {}),
+    ("H",          H_local.dict()    if hasattr(H_local,    "dict") else {}),
+    ("cfg",        cfg_active),
+])
 
-    def _dims(M):
-        return [len(M), len(M[0])] if (M and len(M) and M[0]) else [0, 0]
+def _dims(M):
+    return [len(M), len(M[0])] if (M and len(M) and M[0]) else [0, 0]
 
-    blocks_b = boundaries.blocks.__root__
-    blocks_c = cmap.blocks.__root__
-    blocks_h = H_local.blocks.__root__
-    shapes_block = {
-        "n3": _dims(blocks_c.get("3"))[0],
-        "n2": _dims(blocks_c.get("2"))[0],
-    }
+blocks_b = boundaries.blocks.__root__
+blocks_c = cmap.blocks.__root__
+blocks_h = H_local.blocks.__root__
+shapes_block = {
+    "n3": _dims(blocks_c.get("3"))[0],
+    "n2": _dims(blocks_c.get("2"))[0],
+}
 
-    inputs_block = {
-        "boundaries_hash": hashes.hash_d(boundaries),
-        "C_hash":          hashes.hash_suppC(cmap),
-        "H_hash":          hashes.hash_suppH(H_local),
-        "U_hash":          hashes.hash_U(shapes_payload),
-        "shapes":          shapes_block,
-    }
+inputs_block = {
+    "boundaries_hash": hashes.hash_d(boundaries),
+    "C_hash":          hashes.hash_suppC(cmap),
+    "H_hash":          hashes.hash_suppH(H_local),
+    "U_hash":          hashes.hash_U(shapes_payload),
+    "shapes":          shapes_block,
+}
 
-    # ---------- Diagnostics (lane mask + lane vectors) ----------
-    d3 = blocks_b.get("3")
-    lane_mask = [1 if d3 and any(row[j] & 1 for row in d3) else 0
-                 for j in range(len(d3[0]))] if (d3 and len(d3) and d3[0]) else []
+# ---------- Diagnostics (lane mask + lane vectors) ----------
+d3 = blocks_b.get("3")
+lane_mask = [1 if d3 and any(row[j] & 1 for row in d3) else 0
+             for j in range(len(d3[0]))] if (d3 and len(d3) and d3[0]) else []
 
-    def bottom_row(M):
-        return M[-1] if (M and len(M)) else []
+def bottom_row(M):
+    return M[-1] if (M and len(M)) else []
 
-    lane_idx = [j for j, m in enumerate(lane_mask) if m == 1]
-    H2d3  = mul(blocks_h.get("2", []), d3) if (blocks_h.get("2") and d3) else []
-    C3pI3 = add(blocks_c.get("3", []),
-                eye(len(blocks_c.get("3", []))) if blocks_c.get("3") else [])
+lane_idx = [j for j, m in enumerate(lane_mask) if m == 1]
+H2d3  = mul(blocks_h.get("2", []), d3) if (blocks_h.get("2") and d3) else []
+C3pI3 = add(blocks_c.get("3", []),
+            eye(len(blocks_c.get("3", []))) if blocks_c.get("3") else [])
 
-    def mask_to_lanes(vec, mask_idx):
-        return [vec[j] for j in mask_idx] if vec and mask_idx else []
+def mask_to_lanes(vec, mask_idx):
+    return [vec[j] for j in mask_idx] if vec and mask_idx else []
 
-    diagnostics_block = {
-        "lane_mask_k3":    lane_mask,
-        "lane_vec_H2d3":   mask_to_lanes(bottom_row(H2d3),  lane_idx),
-        "lane_vec_C3plusI3": mask_to_lanes(bottom_row(C3pI3), lane_idx),
-    }
+diagnostics_block = {
+    "lane_mask_k3":    lane_mask,
+    "lane_vec_H2d3":   mask_to_lanes(bottom_row(H2d3),  lane_idx),
+    "lane_vec_C3plusI3": mask_to_lanes(bottom_row(C3pI3), lane_idx),
+}
 
   # ---- Signatures (rank/ker + lane patterns) ---------------------------------
 def _gf2_rank(M):
