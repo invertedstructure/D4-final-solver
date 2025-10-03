@@ -1518,6 +1518,41 @@ inputs_block["filenames"]["C"]          = _name_or_default("fname_cmap",       N
 inputs_block["filenames"]["U"]          = _name_or_default("fname_shapes",     None, "shapes.json")
 inputs_block["filenames"]["H"]          = _name_or_default("fname_h",          f_H if 'f_H' in locals() else None, "H.json")
 
+# ---------- Ensure diagnostics + d-signature are available (robust) ----------
+
+# 0) Always get current blocks
+_blocks_B = boundaries.blocks.__root__
+_blocks_C = cmap.blocks.__root__
+d3 = _blocks_B.get("3") or []
+C3 = _blocks_C.get("3") or []
+
+# helper: lane mask from d3 (policy-agnostic)
+def _lane_mask_from_d3(_d3):
+    if not _d3 or not _d3[0]:
+        return []
+    cols = len(_d3[0])
+    return [1 if any(row[j] & 1 for row in _d3) else 0 for j in range(cols)]
+
+# 1) Bootstrap diagnostics_block if missing
+if 'diagnostics_block' not in locals() or not isinstance(diagnostics_block, dict):
+    from otcore.linalg_gf2 import mul, add, eye
+    H2 = (H_local.blocks.__root__.get("2") or []) if 'H_local' in locals() else []
+    lane_mask_k3 = _lane_mask_from_d3(d3)
+    # compute lane vectors (bottom rows masked to lane columns)
+    def _bottom_row(M): return M[-1] if (M and len(M)) else []
+    def _mask(vec, idx): return [vec[j] for j in idx] if (vec and idx) else []
+    idx = [j for j, m in enumerate(lane_mask_k3) if m]
+
+    H2d3  = (mul(H2, d3) if (H2 and d3) else [])
+    from otcore.linalg_gf2 import add, eye  # reimport safe if not above
+    C3pI3 = add(C3, eye(len(C3))) if C3 else []
+
+    diagnostics_block = {
+        "lane_mask_k3":      lane_mask_k3,
+        "lane_vec_H2d3":     _mask(_bottom_row(H2d3),  idx),
+        "lane_vec_C3plusI3": _mask(_bottom_row(C3pI3), idx),
+    }
+
 # 2) d-signature (from current d3): rank, ker_dim, lane_pattern
 def _gf2_rank(M):
     if not M or not M[0]:
@@ -1529,9 +1564,11 @@ def _gf2_rank(M):
         pivot = None
         for i in range(r, m):
             if A[i][c] & 1:
-                pivot = i; break
+                pivot = i
+                break
         if pivot is None:
-            c += 1; continue
+            c += 1
+            continue
         if pivot != r:
             A[r], A[pivot] = A[pivot], A[r]
         for i in range(m):
@@ -1540,24 +1577,17 @@ def _gf2_rank(M):
         r += 1; c += 1
     return r
 
-def _lane_mask_from_d3(d3_mat):
-    if not d3_mat or not d3_mat[0]:
-        return []
-    cols = len(d3_mat[0])
-    return [1 if any(row[j] & 1 for row in d3_mat) else 0 for j in range(cols)]
-
-d3 = boundaries.blocks.__root__.get("3") or []
 rank_d3    = _gf2_rank(d3) if d3 else 0
 ncols_d3   = len(d3[0]) if (d3 and d3[0]) else 0
 ker_dim_d3 = max(ncols_d3 - rank_d3, 0)
 
-lane_mask_top = (diagnostics_block.get("lane_mask_k3") if isinstance(diagnostics_block, dict) else None)
-if lane_mask_top is None:
+lane_mask_top = diagnostics_block.get("lane_mask_k3", [])
+if not lane_mask_top:  # fallback if diagnostics had no mask
     lane_mask_top = _lane_mask_from_d3(d3)
 lane_pattern = "".join("1" if x else "0" for x in lane_mask_top) if lane_mask_top else ""
 
+# 3) fixture_signature: support(C3 + I3) on LANE columns only
 from otcore.linalg_gf2 import add, eye
-C3    = cmap.blocks.__root__.get("3") or []
 C3pI3 = add(C3, eye(len(C3))) if C3 else []
 lane_idxs = [j for j, m in enumerate(lane_mask_top) if m]
 
@@ -1568,7 +1598,8 @@ def _col_support_pattern(M, cols):
 d_signature = {"rank": rank_d3, "ker_dim": ker_dim_d3, "lane_pattern": lane_pattern}
 fixture_signature = {"lane": _col_support_pattern(C3pI3, lane_idxs)}
 
-_prev_echo = (sig_block.get("echo_context") if 'sig_block' in locals() and isinstance(sig_block, dict) else None)
+_prev_echo = (sig_block.get("echo_context")
+              if 'sig_block' in locals() and isinstance(sig_block, dict) else None)
 sig_block = {
     "d_signature": d_signature,
     "fixture_signature": fixture_signature,
