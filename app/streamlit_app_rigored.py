@@ -1329,46 +1329,57 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
     )
     label_proj = policy_label_from_cfg(_cfg_proj_for_ab)
 
-    # --- Lane diagnostics (shared by both) ---
-    d3 = boundaries.blocks.__root__.get("3") or []
-    lane_mask = (
-        [1 if d3 and any(row[j] & 1 for row in d3) else 0 for j in range(len(d3[0]))]
-        if (d3 and d3[0]) else []
-    )
-
+        # --- Lane diagnostics (compute fresh from current buffers) ----------------
     from otcore.linalg_gf2 import mul, add, eye
-    def _bottom_row(M): return M[-1] if (M and len(M)) else []
-    lane_idx = [j for j, m in enumerate(lane_mask) if m]
 
-    H2    = (H_obj.blocks.__root__.get("2") or [])
-    H2d3  = mul(H2, d3) if (H2 and d3) else []
-    C3    = (cmap.blocks.__root__.get("3") or [])
-    C3pI3 = add(C3, eye(len(C3))) if C3 else []
+    def _bottom_row(M): 
+        return M[-1] if (M and len(M)) else []
 
-    def _mask(vec, idx): return [vec[j] for j in idx] if (vec and idx) else []
-    lane_vec_H2d3  = _mask(_bottom_row(H2d3), lane_idx)
-    lane_vec_C3pI3 = _mask(_bottom_row(C3pI3), lane_idx)
+    def _lane_mask_from_d3(d3_mat):
+        if not d3_mat or not d3_mat[0]:
+            return []
+        cols = len(d3_mat[0])
+        return [1 if any(row[j] & 1 for row in d3_mat) else 0 for j in range(cols)]
 
-    # --- helper: call projector_provenance_hash across possible signatures ---
-    def _provenance_hash(cfg, lane_mask, district_id):
+    def _mask(vec, idx):
+        return [vec[j] for j in idx] if (vec and idx) else []
+
+    # Shared raw blocks
+    d3  = boundaries.blocks.__root__.get("3") or []
+    H2  = (H_obj.blocks.__root__.get("2") or [])
+    C3  = (cmap.blocks.__root__.get("3") or [])
+
+    # Build lane mask from D3 only (policy-agnostic)
+    lane_mask = _lane_mask_from_d3(d3)
+    lane_idx  = [j for j, m in enumerate(lane_mask) if m]
+
+    # Helper to compute lanes from H@d3 and (C3+I3), *fresh each time*
+    def compute_lane_vectors(H2_block, d3_block, C3_block, lane_indices):
+        H2d3   = mul(H2_block, d3_block) if (H2_block and d3_block) else []
+        C3pI3  = add(C3_block, eye(len(C3_block))) if C3_block else []
+        v_H2d3 = _mask(_bottom_row(H2d3), lane_indices)
+        v_C3I  = _mask(_bottom_row(C3pI3), lane_indices)
+        return v_H2d3, v_C3I
+
+    # Fresh lanes for strict snapshot (from current buffers)
+    strict_lane_vec_H2d3, strict_lane_vec_C3pI3 = compute_lane_vectors(H2, d3, C3, lane_idx)
+    # Fresh lanes for projected snapshot (same H,d3,C3; recomputed to avoid cross-use)
+    proj_lane_vec_H2d3,   proj_lane_vec_C3pI3   = compute_lane_vectors(H2, d3, C3, lane_idx)
+
+    # --- Projector provenance hash for the PROJECTED leg (AUTO or FILE) -------
+    def _provenance_hash(cfg, lane_mask_k3, district_id):
         try:
-            return projector_provenance_hash(
-                cfg=cfg, lane_mask_k3=lane_mask, district_id=district_id
-            )
+            return projector_provenance_hash(cfg=cfg, lane_mask_k3=lane_mask_k3, district_id=district_id)
+        except TypeError:
+            pass
+        try:
+            return projector_provenance_hash(cfg=cfg, lane_mask=lane_mask_k3, district_id=district_id)
         except TypeError:
             pass
         try:
             return projector_provenance_hash(
-                cfg=cfg, lane_mask=lane_mask, district_id=district_id
-            )
-        except TypeError:
-            pass
-        try:
-            return projector_provenance_hash(
-                cfg=cfg,
-                boundaries=boundaries,
-                district_id=district_id,
-                diagnostics_block={"lane_mask_k3": lane_mask},
+                cfg=cfg, boundaries=boundaries, district_id=district_id,
+                diagnostics_block={"lane_mask_k3": lane_mask_k3},
             )
         except TypeError:
             pass
@@ -1377,8 +1388,7 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
         except Exception:
             return ""
 
-    # --- 2) Projector provenance hash for the PROJECTED leg (AUTO or FILE) ---
-    district_id = st.session_state.get("district_id", "D3")
+    district_id   = st.session_state.get("district_id", "D3")
     proj_hash_prov = _provenance_hash(_cfg_proj_for_ab, lane_mask, district_id)
     st.caption(f"projected Π provenance hash: {proj_hash_prov[:12]}…")
 
@@ -1388,23 +1398,23 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
         inputs_block.get("C_hash", ""),
         inputs_block.get("H_hash", ""),
         inputs_block.get("U_hash", ""),
-        inputs_block.get("shapes_hash", ""),  # ok if ""
+        inputs_block.get("shapes_hash", ""),
     ]
 
-    # --- Persist compact A/B context ---
+    # --- Persist compact A/B context (each snapshot uses its OWN fresh lanes) --
     pair_tag = f"{label_strict}__VS__{label_proj}"
     st.session_state["ab_compare"] = {
         "pair_tag": pair_tag,
-        "inputs_sig": inputs_sig,           # freshness guard
-        "lane_mask_k3": lane_mask,
+        "inputs_sig": inputs_sig,          # freshness guard
+        "lane_mask_k3": lane_mask,         # shared mask
         "strict": {
             "label": label_strict,
             "cfg":   cfg_strict(),
             "out":   out_strict,
             "ker_guard": "enforced",
-            "lane_vec_H2d3": lane_vec_H2d3,
-            "lane_vec_C3plusI3": lane_vec_C3pI3,
-            "projector_hash": "",           # none in strict
+            "lane_vec_H2d3":     strict_lane_vec_H2d3,   # <- fresh from H@d3
+            "lane_vec_C3plusI3": strict_lane_vec_C3pI3,  # <- fresh from C3+I3
+            "projector_hash": "",  # none in strict
             "pass_vec": [
                 int(out_strict.get("2", {}).get("eq", False)),
                 int(out_strict.get("3", {}).get("eq", False)),
@@ -1415,15 +1425,16 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
             "cfg":   _cfg_proj_for_ab,
             "out":   out_proj,
             "ker_guard": "off",
-            "projector_hash": proj_hash_prov,  # provenance hash
-            "lane_vec_H2d3": lane_vec_H2d3,
-            "lane_vec_C3plusI3": lane_vec_C3pI3,
+            "projector_hash": proj_hash_prov,
+            "lane_vec_H2d3":     proj_lane_vec_H2d3,     # <- fresh from H@d3
+            "lane_vec_C3plusI3": proj_lane_vec_C3pI3,    # <- fresh from C3+I3
             "pass_vec": [
                 int(out_proj.get("2", {}).get("eq", False)),
                 int(out_proj.get("3", {}).get("eq", False)),
             ],
         },
     }
+
 
     # --- Status badge ---
     s_ok = bool(out_strict.get("3", {}).get("eq", False))
