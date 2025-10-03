@@ -986,60 +986,76 @@ if st.session_state.get("_projector_cache_key") != _cache_key:
 cache = st.session_state.get("_projector_cache") or projector.preload_projectors_from_files(_cfg_for_cache)
 st.session_state["_projector_cache"] = cache  # keep around for cert validation
 
-        # ---------- RUN OVERLAP ----------
-def _gf2_idempotent(P):
+def _cache_key_for_run(policy_label, inputs_block, proj_meta):
+    # inputs_block must already contain hashes (boundaries/C/H/U)
+    return "|".join([
+        f"policy={policy_label}",
+        f"b={inputs_block.get('boundaries_hash','')}",
+        f"C={inputs_block.get('C_hash','')}",
+        f"H={inputs_block.get('H_hash','')}",
+        f"U={inputs_block.get('U_hash','')}",
+        f"Pfile={proj_meta.get('projector_hash','') if proj_meta else ''}",
+    ])
+
+def maybe_bust_projector_cache(current_key, session_key="_projector_cache_key", blob_key="_projector_cache"):
+    if st.session_state.get(session_key) != current_key:
+        st.session_state.pop(blob_key, None)
+        st.session_state[session_key] = current_key
+
+
+       # ---------- RUN OVERLAP ----------
+if st.button("Run Overlap", key="run_overlap"):
     try:
-        n = len(P); m = len(P[0]) if n else 0
-        if n != m:  # must be square
-            return False
-        PP = [[0]*n for _ in range(n)]
-        for i in range(n):
-            for k in range(n):
-                if P[i][k] & 1:
-                    rowk = P[k]
-                    for j in range(n):
-                        PP[i][j] ^= (rowk[j] & 1)
-        for i in range(n):
-            for j in range(n):
-                if (PP[i][j] & 1) != (P[i][j] & 1):
-                    return False
-        return True
-    except Exception:
-        return False
-
-    def _diag_vec(P):
+        # 1) choose projector & validate (strict / projected(auto) / projected(file))
         try:
-            n = min(len(P), len(P[0]))
-            return [int(P[i][i] & 1) for i in range(n)]
+            P_active, proj_meta = projector_choose_active(cfg_active, boundaries)
+        except ValueError as e:
+            # file mode with invalid projector → show exact reason and abort this run
+            st.error(str(e))
+            st.session_state["proj_meta"] = {
+                "mode": "projected(file)",
+                "projector_filename": cfg_active.get("projector_files", {}).get("3", ""),
+                "projector_hash": "",
+                "projector_consistent_with_d": False,
+                "errors": [str(e)],
+            }
+            st.stop()
+
+        # 2) cache discipline (keyed by policy + input hashes + projector hash in file mode)
+        #    NOTE: assumes inputs_block already has hashes populated earlier in the tab.
+        try:
+            pmeta_for_key = proj_meta if proj_meta.get("mode","").startswith("projected(file)") else {}
+            ckey = _cache_key_for_run(policy_label, inputs_block, pmeta_for_key)
+            maybe_bust_projector_cache(ckey)
         except Exception:
-            return []
+            # If helpers not in scope, just proceed without busting.
+            pass
 
-    def _lane_mask_from_d3(d3_mat):
-        if not d3_mat or not d3_mat[0]:
-            return []
-        cols = len(d3_mat[0])
-        return [1 if any(row[j] & 1 for row in d3_mat) else 0 for j in range(cols)]
+        # 3) (re)load projector cache after any bust
+        cache = projector.preload_projectors_from_files(cfg_active)
+        st.session_state["_projector_cache"] = cache  # keep around for cert validation
 
-    def _extract_P3_matrix(obj):
-        if isinstance(obj, list) and obj and isinstance(obj[0], list):
-            return obj
-        if isinstance(obj, dict):
-            b = obj.get("blocks", {})
-            mat = b.get("3")
-            if isinstance(mat, list) and mat and isinstance(mat[0], list):
-                return mat
-        return None
+        # 4) run overlap with the finalized cfg/cache
+        out = overlap_gate.overlap_check(
+            boundaries,
+            cmap,
+            H_local,                      # use the H parsed above
+            projection_config=cfg_active, # strict/projected as chosen
+            projector_cache=cache,
+        )
+        st.json(out)
 
-    if st.button("Run Overlap", key="run_overlap"):
-        try:
-            out = overlap_gate.overlap_check(
-                boundaries,
-                cmap,
-                H_local,                      # use the one we built above
-                projection_config=cfg_active, # strict/projected as chosen
-                projector_cache=cache,
-            )
-            st.json(out)
+        # 5) persist run artifacts for cert/bundle
+        st.session_state["overlap_out"] = out
+        st.session_state["overlap_cfg"] = cfg_active
+        st.session_state["overlap_policy_label"] = policy_label
+        st.session_state["overlap_H"] = H_local
+        st.session_state["proj_meta"] = proj_meta
+
+    except Exception as e:
+        st.error(f"Overlap run failed: {e}")
+        st.stop()
+
 
             # ---- projector(file) metadata & validation for cert --------------
             proj_meta = {"projector_filename": "", "projector_hash": "", "projector_consistent_with_d": None}
