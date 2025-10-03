@@ -819,13 +819,13 @@ with tab1:
 with tab2:
     st.subheader("Overlap gate (homotopy vs identity)")
 
-    # H uploader (+ remember filename for certs/bundles)
+    # -- H uploader (+ remember filename for certs/bundles) --
     f_H = st.file_uploader("Homotopy H (H_corrected.json)", type=["json"], key="H_corr")
     _stamp_filename("fname_h", f_H)
     d_H = read_json_file(f_H) if f_H else None
     H_local = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})  # JSON-safe CMap
 
-    # Policy toggle UI
+    # -- Policy toggle UI --
     st.markdown("### Policy")
     policy_choice = st.radio(
         "Choose policy",
@@ -834,12 +834,10 @@ with tab2:
         key="policy_choice_k3",
     )
 
-
-        # --- Build active cfg (respect file/auto from projection_config.json) ---
-    import os, json as _json
+    # ===== Build active cfg (respect file/auto from projection_config.json) ===
+    import os, json as _json, hashlib
     from pathlib import Path
 
-    # load persisted projection config
     cfg_file = projector.load_projection_config("projection_config.json")
     cfg_proj = cfg_projected_base()
 
@@ -852,13 +850,12 @@ with tab2:
     # choose strict vs projected
     cfg_active = cfg_strict() if policy_choice == "strict" else cfg_proj
 
-    # -------- Optional: upload a projector file to use in projected(file) -----
+    # ===== Optional: upload a projector file (used when source.3 = "file") ====
     st.markdown("#### Projector (k=3)")
     proj_upload = st.file_uploader(
         "Projector JSON for k=3 (optional; used when source.3 = file)",
         type=["json"], key="proj3_up"
     )
-    proj_saved_path = None
     if proj_upload is not None:
         proj_dir = Path("projectors")
         proj_dir.mkdir(exist_ok=True, parents=True)
@@ -867,12 +864,12 @@ with tab2:
             _pf.write(proj_upload.getvalue())
         st.caption(f"saved projector: {proj_saved_path}")
 
-        # if user uploaded, switch active cfg to file mode and point to this file
+        # if user uploaded while in projected mode, switch to file & point to this file
         if policy_choice != "strict":
             cfg_active.setdefault("source", {})["3"] = "file"
             cfg_active.setdefault("projector_files", {})["3"] = str(proj_saved_path)
 
-    # --- Projector source switcher UI (writes projection_config.json) ----------
+    # ===== Projector source switcher (writes projection_config.json) ==========
     with st.expander("Projector source (k=3)"):
         cur_src  = cfg_file.get("source", {}).get("3", "auto")
         cur_file = cfg_file.get("projector_files", {}).get("3", "projectors/projector_D3.json")
@@ -882,12 +879,12 @@ with tab2:
         )
         mode_choice = st.radio(
             "Choose source for k=3",
-            options=["auto","file"],
+            options=["auto", "file"],
             index=(0 if cur_src == "auto" else 1),
             horizontal=True,
             key="proj_src_choice_k3",
         )
-        file_path = st.text_input("Projector file", value=cur_file, disabled=(mode_choice=="auto"))
+        file_path = st.text_input("Projector file", value=cur_file, disabled=(mode_choice == "auto"))
         if st.button("Apply projector source", key="apply_proj_src_k3"):
             cfg_file.setdefault("source", {})["3"] = mode_choice
             if mode_choice == "file":
@@ -908,324 +905,277 @@ with tab2:
                     if "projector_files" in cfg_active and "3" in cfg_active["projector_files"]:
                         del cfg_active["projector_files"]["3"]
 
-     # --- Freeze current AUTO projector → file ------------------------------------
-import os, json as _json, hashlib
+    # ===== Freeze AUTO projector → file (writes a correct diagonal Π3) ========
+    with st.expander("Freeze AUTO projector → file"):
+        def _lane_mask_from_d3(_d3):
+            if not _d3 or not _d3[0]:
+                return []
+            cols = len(_d3[0])
+            return [1 if any(row[j] & 1 for row in _d3) else 0 for j in range(cols)]
 
-with st.expander("Freeze AUTO projector → file"):
-    def _lane_mask_from_d3(_d3):
-        if not _d3 or not _d3[0]:
-            return []
-        cols = len(_d3[0])
-        return [1 if any(row[j] & 1 for row in _d3) else 0 for j in range(cols)]
+        default_name = "projectors/projector_auto_k3.json"
+        freeze_path = st.text_input("Output file", value=default_name, key="freeze_proj_out")
 
-    default_name = "projectors/projector_auto_k3.json"
-    freeze_path = st.text_input("Output file", value=default_name, key="freeze_proj_out")
+        st.caption("Build a diagonal Π₃ from the current d₃ mask and switch source.3 → file.")
+        if st.button("Freeze now", key="freeze_proj_btn"):
+            try:
+                # 1) derive mask from the currently loaded boundaries
+                d3 = (boundaries.blocks.__root__.get("3") or [])
+                n3 = len(d3[0]) if (d3 and d3[0]) else 0
+                if n3 == 0:
+                    st.error("Freeze aborted: d3 appears empty (n3=0). Load boundaries first.")
+                    st.stop()
+                auto_mask = _lane_mask_from_d3(d3)
 
-    st.caption("Build a diagonal Π₃ from the current d₃ mask and switch source.3 → file.")
-    if st.button("Freeze now", key="freeze_proj_btn"):
+                # 2) build a diagonal projector with that mask
+                P = [[1 if (i == j and auto_mask[i] == 1) else 0 for j in range(n3)] for i in range(n3)]
+                payload = {"name": "Π3 from current d3 (AUTO freeze)", "blocks": {"3": P}}
+
+                os.makedirs(os.path.dirname(freeze_path), exist_ok=True)
+                with open(freeze_path, "w") as fp:
+                    _json.dump(payload, fp, indent=2)
+
+                # 3) persist: switch projection_config to file mode
+                _cfg_disk = projector.load_projection_config("projection_config.json")
+                _cfg_disk.setdefault("source", {})["3"] = "file"
+                _cfg_disk.setdefault("projector_files", {})["3"] = freeze_path
+                with open("projection_config.json", "w") as _f:
+                    _json.dump(_cfg_disk, _f, indent=2)
+
+                # 4) in-memory flip as well
+                cfg_active.setdefault("source", {})["3"] = "file"
+                cfg_active.setdefault("projector_files", {})["3"] = freeze_path
+
+                # 5) cache-bust (overlap + A/B caches) using projector file path
+                _di = st.session_state.get("_district_info", {}) or {}
+                _bound_hash = _di.get("boundaries_hash", "")
+                st.session_state.pop("_projector_cache", None)
+                st.session_state["_projector_cache_key"] = f"{_bound_hash}|src3=file|file3={freeze_path}"
+                st.session_state.pop("_projector_cache_ab", None)
+                st.session_state["_projector_cache_key_ab"] = f"{_bound_hash}|AB|src3=file|file3={freeze_path}"
+
+                st.success(f"Projector frozen → {freeze_path}")
+                st.caption("Now click “Run Overlap” or A/B; the file-backed Π will be used.")
+            except Exception as e:
+                st.error(f"Freeze failed: {e}")
+
+    # ===== Active policy badge =================================================
+    src3 = cfg_active.get("source", {}).get("3", "")
+    _policy_mode_badge = "strict" if policy_choice == "strict" else ("projected(file)" if src3 == "file" else "projected(auto)")
+    policy_label = policy_label_from_cfg(cfg_active)
+    st.caption(f"Policy: **{policy_label}** · mode: {_policy_mode_badge}")
+
+    # ===== Cache discipline for projector preload =============================
+    _di = st.session_state.get("_district_info", {}) or {}
+    _bound_hash = _di.get("boundaries_hash", inputs_block.get("boundaries_hash", ""))
+
+    _cfg_for_cache = cfg_active
+    _src3  = _cfg_for_cache.get("source", {}).get("3", "")
+    _file3 = _cfg_for_cache.get("projector_files", {}).get("3", "") if _src3 == "file" else ""
+
+    _cache_key = f"{_bound_hash}|src3={_src3}|file3={_file3}"
+    if st.session_state.get("_projector_cache_key") != _cache_key:
+        st.session_state.pop("_projector_cache", None)
+        st.session_state["_projector_cache_key"] = _cache_key
+
+    cache = st.session_state.get("_projector_cache") or projector.preload_projectors_from_files(_cfg_for_cache)
+    st.session_state["_projector_cache"] = cache  # keep around for cert validation
+
+    def _cache_key_for_run(policy_label, inputs_block, proj_meta):
+        # inputs_block must already contain hashes (boundaries/C/H/U)
+        return "|".join([
+            f"policy={policy_label}",
+            f"b={inputs_block.get('boundaries_hash','')}",
+            f"C={inputs_block.get('C_hash','')}",
+            f"H={inputs_block.get('H_hash','')}",
+            f"U={inputs_block.get('U_hash','')}",
+            f"Pfile={proj_meta.get('projector_hash','') if proj_meta else ''}",
+        ])
+
+    def maybe_bust_projector_cache(current_key, session_key="_projector_cache_key", blob_key="_projector_cache"):
+        if st.session_state.get(session_key) != current_key:
+            st.session_state.pop(blob_key, None)
+            st.session_state[session_key] = current_key
+
+    # ===== Projector helpers (validation + selection, single source of truth) ==
+    def _diag_vec(P):
         try:
-            # 1) derive n3 and mask from the currently loaded boundaries
-            d3 = (boundaries.blocks.__root__.get("3") or [])
-            n3 = len(d3[0]) if (d3 and d3[0]) else 0
-            if n3 == 0:
-                st.error("Freeze aborted: d3 appears empty (n3=0). Load boundaries first.")
+            n = min(len(P), len(P[0]))
+            return [int(P[i][i] & 1) for i in range(n)]
+        except Exception:
+            return []
+
+    def _gf2_idempotent(P):
+        try:
+            n = len(P); m = len(P[0]) if n else 0
+            if n != m:
+                return False
+            PP = [[0]*n for _ in range(n)]
+            for i in range(n):
+                for k in range(n):
+                    if P[i][k] & 1:
+                        rowk = P[k]
+                        for j in range(n):
+                            PP[i][j] ^= (rowk[j] & 1)
+            for i in range(n):
+                for j in range(n):
+                    if (PP[i][j] & 1) != (P[i][j] & 1):
+                        return False
+            return True
+        except Exception:
+            return False
+
+    def _extract_P3_matrix(obj):
+        if isinstance(obj, dict):
+            b = obj.get("blocks", {})
+            M = b.get("3")
+            if isinstance(M, list) and M and isinstance(M[0], list):
+                return M
+            return None
+        if isinstance(obj, list) and obj and isinstance(obj[0], list):
+            return obj
+        return None
+
+    def _hash_json_matrix(P):
+        try:
+            return hashes.content_hash_of({"P3": P})
+        except Exception:
+            blob = _json.dumps(P, sort_keys=True, separators=(",", ":")).encode()
+            return hashlib.sha256(blob).hexdigest()
+
+    def projector_choose_active(cfg_active, boundaries):
+        """
+        Returns (P_active, proj_meta) OR raises ValueError with a precise error message
+        when source=file fails validation. Never silently falls back to AUTO if file was requested.
+        """
+        # derive n3 and lane mask from current d3
+        d3 = (boundaries.blocks.__root__.get("3") or [])
+        n3 = len(d3[0]) if (d3 and d3[0]) else 0
+        lane_mask = [1 if any(row[j] & 1 for row in d3) else 0 for j in range(n3)]
+
+        # AUTO projector (always available)
+        P_auto = [[1 if (i == j and lane_mask[i] == 1) else 0 for j in range(n3)] for i in range(n3)]
+
+        src3 = (cfg_active.get("source", {}) or {}).get("3", "auto")
+        if src3 != "file":
+            return P_auto, {
+                "mode": "projected(auto)" if cfg_active.get("enabled_layers") else "strict",
+                "projector_filename": "",
+                "projector_hash": _hash_json_matrix(P_auto),
+                "projector_consistent_with_d": True,
+                "diag": lane_mask,
+                "lane_mask": lane_mask,
+                "n3": n3,
+            }
+
+        # FILE mode
+        pj_path = (cfg_active.get("projector_files", {}) or {}).get("3")
+        if not pj_path:
+            raise ValueError("Projector(k=3) file mode selected but no projector file path set.")
+        if not os.path.exists(pj_path):
+            raise ValueError(f"Projector(k=3) file not found: '{pj_path}'")
+
+        try:
+            with open(pj_path, "r") as pf:
+                raw = _json.load(pf)
+            P3 = _extract_P3_matrix(raw)
+        except Exception as e:
+            raise ValueError(f"Projector(k=3) unreadable JSON: {e}")
+
+        if P3 is None:
+            raise ValueError('Projector(k=3) missing "blocks"."3" matrix.')
+
+        # shape: square n3×n3
+        rows = len(P3); cols = (len(P3[0]) if rows else 0)
+        if not all(isinstance(r, list) and len(r) == cols for r in P3):
+            raise ValueError("Projector(k=3) has ragged rows (inconsistent row lengths).")
+        if rows != n3 or cols != n3:
+            raise ValueError(f"Projector(k=3) shape mismatch: expected {n3}x{n3}, got {rows}x{cols}.")
+
+        # idempotence (GF(2))
+        if not _gf2_idempotent(P3):
+            raise ValueError("Projector(k=3) not idempotent over GF(2): P·P != P.")
+
+        # diagonal only
+        offdiag_bad = any((P3[i][j] & 1) for i in range(rows) for j in range(cols) if i != j)
+        if offdiag_bad:
+            raise ValueError("Projector(k=3) must be diagonal; off-diagonal entries found.")
+
+        # lane diag consistency
+        diagP = _diag_vec(P3)
+        if diagP != lane_mask:
+            raise ValueError(f"Projector(k=3) diagonal {diagP} inconsistent with lane_mask(d3) {lane_mask}.")
+
+        # success
+        return P3, {
+            "mode": "projected(file)",
+            "projector_filename": pj_path,
+            "projector_hash": _hash_json_matrix(P3),
+            "projector_consistent_with_d": True,
+            "diag": diagP,
+            "lane_mask": lane_mask,
+            "n3": n3,
+        }
+
+    # ===== RUN OVERLAP (uses the selector above) ==============================
+    if st.button("Run Overlap", key="run_overlap"):
+        try:
+            # 1) choose projector & validate
+            try:
+                P_active, proj_meta = projector_choose_active(cfg_active, boundaries)
+            except ValueError as e:
+                # FILE mode failed → exact reason + abort
+                st.error(str(e))
+                st.session_state["proj_meta"] = {
+                    "mode": "projected(file)",
+                    "projector_filename": (cfg_active.get("projector_files", {}) or {}).get("3", ""),
+                    "projector_hash": "",
+                    "projector_consistent_with_d": False,
+                    "errors": [str(e)],
+                }
                 st.stop()
 
-            auto_mask = _lane_mask_from_d3(d3)
+            # 1b) tiny debug echo
+            mode = proj_meta.get("mode","strict")
+            pjfn = proj_meta.get("projector_filename","")
+            pjhs = proj_meta.get("projector_hash","")
+            n3   = proj_meta.get("n3")
+            st.caption(
+                f"Active policy: **{policy_label}** · mode: {mode}"
+                + (f" · file: `{pjfn}` · hash: {pjhs[:12]}… · n3={n3}" if mode.startswith("projected(file)") else "")
+            )
 
-            # 2) build a diagonal projector with that mask
-            P = [[1 if (i == j and auto_mask[i] == 1) else 0 for j in range(n3)] for i in range(n3)]
-            payload = {"name": "Π3 from current d3 (AUTO freeze)", "blocks": {"3": P}}
+            # 2) cache discipline (include projector hash in file mode)
+            try:
+                ckey = _cache_key_for_run(policy_label, inputs_block, proj_meta if mode.startswith("projected(file)") else {})
+                maybe_bust_projector_cache(ckey)
+            except Exception:
+                pass
 
-            os.makedirs(os.path.dirname(freeze_path), exist_ok=True)
-            with open(freeze_path, "w") as fp:
-                _json.dump(payload, fp, indent=2)
+            # 3) reload projector cache after bust
+            cache = projector.preload_projectors_from_files(cfg_active)
+            st.session_state["_projector_cache"] = cache
 
-            # 3) flip to file mode (persisted on disk)
-            _cfg_disk = projector.load_projection_config("projection_config.json")
-            _cfg_disk.setdefault("source", {})["3"] = "file"
-            _cfg_disk.setdefault("projector_files", {})["3"] = freeze_path
-            with open("projection_config.json", "w") as _f:
-                _json.dump(_cfg_disk, _f, indent=2)
+            # 4) run overlap
+            out = overlap_gate.overlap_check(
+                boundaries,
+                cmap,
+                H_local,
+                projection_config=cfg_active,
+                projector_cache=cache,
+            )
+            st.json(out)
 
-            # 4) flip to file mode (in-memory)
-            cfg_active.setdefault("source", {})["3"] = "file"
-            cfg_active.setdefault("projector_files", {})["3"] = freeze_path
-
-            # 5) projector file hash (nice to show + used for cache key)
-            with open(freeze_path, "rb") as fbin:
-                pj_hash = hashlib.sha256(fbin.read()).hexdigest()
-
-            # 6) cache-bust (overlap + A/B caches)
-            _di = st.session_state.get("_district_info", {}) or {}
-            _bound_hash = _di.get("boundaries_hash", "")
-            _cache_key_overlap = f"{_bound_hash}|src3=file|file3={freeze_path}"
-            st.session_state.pop("_projector_cache", None)
-            st.session_state["_projector_cache_key"] = _cache_key_overlap
-
-            _cache_key_ab = f"{_bound_hash}|AB|src3=file|file3={freeze_path}"
-            st.session_state.pop("_projector_cache_ab", None)
-            st.session_state["_projector_cache_key_ab"] = _cache_key_ab
-
-            st.success(f"Projector frozen → {freeze_path} (sha256={pj_hash[:12]}…) and source.3 set to file")
-            st.caption("Run Overlap or A/B now — cache was reset and the file-backed Π will be used.")
+            # 5) persist run artifacts for cert/bundle
+            st.session_state["overlap_out"] = out
+            st.session_state["overlap_cfg"] = cfg_active
+            st.session_state["overlap_policy_label"] = policy_label
+            st.session_state["overlap_H"] = H_local
+            st.session_state["proj_meta"] = proj_meta
 
         except Exception as e:
-            st.error(f"Freeze failed: {e}")
-
-
-                        
-
-  # --- Active policy badge ---------------------------------------------------
-src3 = cfg_active.get("source", {}).get("3", "")
-if policy_choice == "strict":
-    _policy_mode_badge = "strict"
-elif src3 == "file":
-    _policy_mode_badge = "projected(file)"
-else:
-    _policy_mode_badge = "projected(auto)"
-policy_label = policy_label_from_cfg(cfg_active)
-st.caption(f"Policy: **{policy_label}** · mode: {_policy_mode_badge}")
-
-# --- Projector cache-bust key (boundaries/source/file changes) -------------
-_di = st.session_state.get("_district_info", {}) or {}
-_bound_hash = _di.get("boundaries_hash", "")
-
-# We’re in the Overlap tab, so use cfg_active
-_cfg_for_cache = cfg_active
-_src3  = _cfg_for_cache.get("source", {}).get("3", "")
-_file3 = _cfg_for_cache.get("projector_files", {}).get("3", "") if _src3 == "file" else ""
-
-_cache_key = f"{_bound_hash}|src3={_src3}|file3={_file3}"
-
-if st.session_state.get("_projector_cache_key") != _cache_key:
-    st.session_state.pop("_projector_cache", None)
-    st.session_state["_projector_cache_key"] = _cache_key
-
-# Preload (rebuilt if cache-busted just above)
-cache = st.session_state.get("_projector_cache") or projector.preload_projectors_from_files(_cfg_for_cache)
-st.session_state["_projector_cache"] = cache  # keep around for cert validation
-
-def _cache_key_for_run(policy_label, inputs_block, proj_meta):
-    # inputs_block must already contain hashes (boundaries/C/H/U)
-    return "|".join([
-        f"policy={policy_label}",
-        f"b={inputs_block.get('boundaries_hash','')}",
-        f"C={inputs_block.get('C_hash','')}",
-        f"H={inputs_block.get('H_hash','')}",
-        f"U={inputs_block.get('U_hash','')}",
-        f"Pfile={proj_meta.get('projector_hash','') if proj_meta else ''}",
-    ])
-
-def maybe_bust_projector_cache(current_key, session_key="_projector_cache_key", blob_key="_projector_cache"):
-    if st.session_state.get(session_key) != current_key:
-        st.session_state.pop(blob_key, None)
-        st.session_state[session_key] = current_key
-
-# --- Projector core -----------------------------------------------------------
-import json as _json, hashlib, os
-
-def _lane_mask_from_d3(d3_mat):
-    if not d3_mat or not d3_mat[0]:
-        return []
-    cols = len(d3_mat[0])
-    return [1 if any(row[j] & 1 for row in d3_mat) else 0 for j in range(cols)]
-
-def _extract_P3_matrix(obj):
-    # Accept either raw list-of-lists or {"blocks":{"3":[...]}}
-    if isinstance(obj, list) and obj and isinstance(obj[0], list):
-        return obj
-    if isinstance(obj, dict):
-        b = obj.get("blocks", {})
-        mat = b.get("3")
-        if isinstance(mat, list) and mat and isinstance(mat[0], list):
-            return mat
-    return None
-
-def _diag_vec(P):
-    try:
-        n = min(len(P), len(P[0]))
-        return [int(P[i][i] & 1) for i in range(n)]
-    except Exception:
-        return []
-
-def _is_diagonal(P):
-    try:
-        n = len(P); m = len(P[0]) if n else 0
-        if n != m:
-            return False
-        for i in range(n):
-            for j in range(n):
-                if i != j and (P[i][j] & 1):
-                    return False
-        return True
-    except Exception:
-        return False
-
-def _gf2_idempotent(P):
-    try:
-        n = len(P); m = len(P[0]) if n else 0
-        if n != m:
-            return False
-        PP = [[0]*n for _ in range(n)]
-        for i in range(n):
-            for k in range(n):
-                if P[i][k] & 1:
-                    rowk = P[k]
-                    for j in range(n):
-                        PP[i][j] ^= (rowk[j] & 1)
-        for i in range(n):
-            for j in range(n):
-                if (PP[i][j] & 1) != (P[i][j] & 1):
-                    return False
-        return True
-    except Exception:
-        return False
-
-def _hash_json_matrix(P):
-    try:
-        # preferred: your canonical content hasher
-        return hashes.content_hash_of({"P3": P})
-    except Exception:
-        # fallback: deterministic sha256 of canonical json
-        blob = _json.dumps(P, sort_keys=True, separators=(",", ":")).encode()
-        return hashlib.sha256(blob).hexdigest()
-
-def _build_auto_projector_from_d3(d3):
-    # diagonal with lane_mask(d3)
-    mask = _lane_mask_from_d3(d3)
-    n3 = len(mask)
-    return [[1 if (i == j and mask[i] == 1) else 0 for j in range(n3)] for i in range(n3)], mask
-
-def validate_projector_file(pj_path, d3):
-    """
-    Returns (P_file, meta, err_string)
-    meta = {"projector_filename","projector_hash","projector_consistent_with_d":bool}
-    If err_string is not None, FILE mode must abort (no silent fallback).
-    """
-    if not pj_path or not os.path.exists(pj_path):
-        return None, {"projector_filename": pj_path or "", "projector_hash": "", "projector_consistent_with_d": False}, f"Projector(k=3) file not found: {pj_path!r}"
-
-    try:
-        with open(pj_path, "r") as f:
-            raw = _json.load(f)
-        P = _extract_P3_matrix(raw)
-    except Exception as e:
-        return None, {"projector_filename": pj_path, "projector_hash": "", "projector_consistent_with_d": False}, f"Projector(k=3) could not parse JSON: {e}"
-
-    if P is None:
-        return None, {"projector_filename": pj_path, "projector_hash": "", "projector_consistent_with_d": False}, 'Projector(k=3) missing "blocks"."3" matrix.'
-
-    # shape check (square n3 x n3; n3 = #cols of d3)
-    n3 = len(d3[0]) if (d3 and d3[0]) else 0
-    rows = len(P); cols = (len(P[0]) if rows else 0)
-    # also ensure all rows same length
-    same_len = all(len(r) == cols for r in P) if rows else True
-    if not (rows == cols == n3 and same_len):
-        return P, {
-            "projector_filename": pj_path,
-            "projector_hash": _hash_json_matrix(P) if rows and cols else "",
-            "projector_consistent_with_d": False,
-        }, f"Projector(k=3) shape mismatch: expected {n3}x{n3}, got {rows}x{cols}."
-
-    # idempotence over GF(2)
-    if not _gf2_idempotent(P):
-        return P, {
-            "projector_filename": pj_path,
-            "projector_hash": _hash_json_matrix(P),
-            "projector_consistent_with_d": False,
-        }, "Projector(k=3) not idempotent over GF(2): P·P != P."
-
-    # diagonal only
-    if not _is_diagonal(P):
-        return P, {
-            "projector_filename": pj_path,
-            "projector_hash": _hash_json_matrix(P),
-            "projector_consistent_with_d": False,
-        }, "Projector(k=3) must be diagonal; off-diagonal entries found."
-
-    # lane diag consistency
-    auto_mask = _lane_mask_from_d3(d3)
-    diagP = _diag_vec(P)
-    if diagP != auto_mask:
-        return P, {
-            "projector_filename": pj_path,
-            "projector_hash": _hash_json_matrix(P),
-            "projector_consistent_with_d": False,
-        }, f"Projector(k=3) diagonal {diagP} inconsistent with lane_mask(d3) {auto_mask}."
-
-    # success
-    return P, {
-        "projector_filename": pj_path,
-        "projector_hash": _hash_json_matrix(P),
-        "projector_consistent_with_d": True,
-    }, None
-
-def choose_active_projector(cfg_active, boundaries):
-    """
-    Single source of truth for ACTIVE projector & metadata.
-    mode = "strict"|"projected(auto)"|"projected(file)"
-    Returns (mode, meta, err)
-    """
-    d3 = (boundaries.blocks.__root__.get("3") or [])
-    enabled = bool(cfg_active.get("enabled_layers", []))
-    src3 = cfg_active.get("source", {}).get("3", "auto")
-
-    if not enabled:
-        return "strict", {"projector_filename": "", "projector_hash": "", "projector_consistent_with_d": None}, None
-
-    if src3 == "file":
-        pj_path = cfg_active.get("projector_files", {}).get("3")
-        P_file, meta, err = validate_projector_file(pj_path, d3)
-        # FILE mode must fail-fast on error (no fallback)
-        return "projected(file)", meta, err
-
-    # AUTO
-    P_auto, _ = _build_auto_projector_from_d3(d3)
-    return "projected(auto)", {
-        "projector_filename": "",
-        "projector_hash": _hash_json_matrix(P_auto),
-        "projector_consistent_with_d": True,
-    }, None
-
-# --- Mode badge & exact file echoed ------------------------------------------
-src3 = cfg_active.get("source", {}).get("3", "auto")
-active_mode = ("strict" if not cfg_active.get("enabled_layers")
-               else ("projected(file)" if src3 == "file" else "projected(auto)"))
-pj_file_echo = cfg_active.get("projector_files", {}).get("3", "") if src3 == "file" else ""
-st.caption(f"Active policy: **{policy_label}** · mode: {active_mode}"
-           + (f" · file: `{pj_file_echo}`" if pj_file_echo else ""))
-
-# --- Cache discipline: rebuild when policy/boundaries/C/H/U or projector file changes
-_di = st.session_state.get("_district_info", {}) or {}
-_bound_hash = _di.get("boundaries_hash", inputs_block.get("boundaries_hash", ""))
-
-proj_hash_for_key = ""
-if src3 == "file" and pj_file_echo and os.path.exists(pj_file_echo):
-    try:
-        with open(pj_file_echo, "r") as _pfk:
-            _rawP = _json.load(_pfk)
-        _P3k = _extract_P3_matrix(_rawP) or _rawP
-        proj_hash_for_key = _hash_json_matrix(_P3k)
-    except Exception:
-        proj_hash_for_key = "ERR"
-
-_cache_key = "|".join([
-    f"policy={active_mode}",
-    f"B={_bound_hash}",
-    f"C={inputs_block.get('C_hash','')}",
-    f"H={inputs_block.get('H_hash','')}",
-    f"U={inputs_block.get('U_hash','')}",
-    f"Pfile={pj_file_echo}",
-    f"Phash={proj_hash_for_key}",
-])
-
-if st.session_state.get("_projector_cache_key") != _cache_key:
-    st.session_state.pop("_projector_cache", None)
-    st.session_state["_projector_cache_key"] = _cache_key
-
-cache = st.session_state.get("_projector_cache") or projector.preload_projectors_from_files(cfg_active)
-st.session_state["_projector_cache"] = cache
+            st.error(f"Overlap run failed: {e}")
+            st.stop()
 
 
      # ---------- RUN OVERLAP ----------
