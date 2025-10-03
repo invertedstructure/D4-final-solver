@@ -17,6 +17,142 @@ st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
 # --- Policy helpers -----------------------------------------------------------
 # ---- cert helpers: diagnostics and checks (GF(2)-safe) ----
 
+def _lane_mask_from_d3(d3):
+    if not d3 or not d3[0]: return []
+    cols = len(d3[0])
+    return [1 if any(row[j] & 1 for row in d3) else 0 for j in range(cols)]
+
+def _diag_from_mask(mask):
+    n = len(mask)
+    return [[(1 if i==j else 0) & mask[i] for j in range(n)] for i in range(n)]
+
+def _gf2_mm(A, B):
+    if not A or not B: return []
+    m, k, n = len(A), len(A[0]), len(B[0])
+    # assume sizes are compatible; call sites check shape
+    C = [[0]*n for _ in range(m)]
+    for i in range(m):
+        Ai = A[i]
+        for kk in range(k):
+            if Ai[kk] & 1:
+                Bk = B[kk]
+                for j in range(n):
+                    C[i][j] ^= (Bk[j] & 1)
+    return C
+
+def _gf2_idempotent(P):
+    # P*P == P over GF(2)
+    if not P or not P[0]: return False
+    n, m = len(P), len(P[0])
+    if n != m: return False
+    PP = _gf2_mm(P, P)
+    for i in range(n):
+        for j in range(n):
+            if (PP[i][j] & 1) != (P[i][j] & 1):
+                return False
+    return True
+
+def _is_diagonal(P):
+    if not P or not P[0]: return False
+    n, m = len(P), len(P[0])
+    if n != m: return False
+    for i in range(n):
+        for j in range(n):
+            if i != j and (P[i][j] & 1):
+                return False
+    return True
+
+def _diag_vec(P):
+    if not P or not P[0]: return []
+    n = min(len(P), len(P[0]))
+    return [int(P[i][i] & 1) for i in range(n)]
+
+def _hash_json_matrix(obj):
+    try:
+        return hashlib.sha256(_json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    except Exception:
+        return ""
+
+def _read_projector_file(path):
+    with open(path, "r") as f:
+        J = _json.load(f)
+    # accept either raw list-of-lists or {"blocks":{"3":[...]}}
+    if isinstance(J, dict) and "blocks" in J and "3" in J["blocks"]:
+        return J["blocks"]["3"]
+    return J  # assume list-of-lists
+
+def projector_choose_active(cfg_active, boundaries):
+    """
+    Returns (P_active, meta) or raises ValueError with human-readable reason.
+    meta: {
+      "mode": "strict"|"projected(auto)"|"projected(file)",
+      "projector_filename": str|"",
+      "projector_hash": str|"",
+      "projector_consistent_with_d": bool|None,
+      "errors": [ ... ]    # validation errors for UI
+    }
+    """
+    d3 = boundaries.blocks.__root__.get("3") or []
+    lane_mask = _lane_mask_from_d3(d3)
+    n3r = len(d3); n3c = len(d3[0]) if d3 else 0
+
+    enabled = cfg_active.get("enabled_layers", [])
+    if not enabled:  # strict
+        return None, {"mode": "strict", "projector_filename":"", "projector_hash":"", "projector_consistent_with_d": None, "errors":[]}
+
+    src3 = cfg_active.get("source", {}).get("3", "auto")
+    if src3 == "auto":
+        P_auto = _diag_from_mask(lane_mask)
+        return P_auto, {
+            "mode": "projected(auto)",
+            "projector_filename": "",
+            "projector_hash": "",
+            "projector_consistent_with_d": True,
+            "errors": []
+        }
+
+    if src3 == "file":
+        pj_path = cfg_active.get("projector_files", {}).get("3")
+        errs = []
+        if not pj_path or not os.path.exists(pj_path):
+            errs.append(f"Projector(k=3) file not found: {pj_path!r}")
+            raise ValueError("; ".join(errs))
+        try:
+            P_file = _read_projector_file(pj_path)
+        except Exception as e:
+            raise ValueError(f"Could not parse projector file '{pj_path}': {e}")
+
+        # shape
+        rows = len(P_file) if isinstance(P_file, list) else 0
+        cols = (len(P_file[0]) if rows and isinstance(P_file[0], list) else 0)
+        if rows != n3c or cols != n3c or n3r != n3c:
+            raise ValueError(f"Projector(k=3) shape mismatch: expected {n3c}x{n3c}, got {rows}x{cols}.")
+
+        # diagonal
+        if not _is_diagonal(P_file):
+            raise ValueError("Projector(k=3) must be diagonal; off-diagonal entries found.")
+
+        # idempotence
+        if not _gf2_idempotent(P_file):
+            raise ValueError("Projector(k=3) not idempotent over GF(2): P·P != P.")
+
+        # diag consistency
+        diagP = _diag_vec(P_file)
+        if diagP != lane_mask:
+            raise ValueError(f"Projector(k=3) diagonal {diagP} inconsistent with lane_mask(d3) {lane_mask}.")
+
+        return P_file, {
+            "mode": "projected(file)",
+            "projector_filename": pj_path,
+            "projector_hash": _hash_json_matrix(P_file),
+            "projector_consistent_with_d": True,
+            "errors": []
+        }
+
+    # unknown source
+    raise ValueError(f"Unknown projector source for k=3: {src3!r}")
+
+
 def projector_provenance_hash(*, cfg: dict, lane_mask_k3: list[int], district_id: str = "D3") -> str:
     """
     Build a minimal, normalized spec for the k=3 projector and hash it.
