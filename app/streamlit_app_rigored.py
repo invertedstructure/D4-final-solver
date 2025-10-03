@@ -772,6 +772,54 @@ with tab2:
                     if "projector_files" in cfg_active and "3" in cfg_active["projector_files"]:
                         del cfg_active["projector_files"]["3"]
 
+        # --- Freeze current AUTO projector to a file (one-click) ------------------
+    import os, json as _json
+
+    with st.expander("Freeze AUTO projector → file"):
+        def _lane_mask_from_d3(_d3):
+            if not _d3 or not _d3[0]:
+                return []
+            cols = len(_d3[0])
+            return [1 if any(row[j] & 1 for row in _d3) else 0 for j in range(cols)]
+
+        default_name = "projectors/projector_auto_k3.json"
+        freeze_path = st.text_input("Output file", value=default_name, key="freeze_proj_out")
+
+        st.caption("Build a diagonal Π₃ from the current d₃ mask and switch source.3 → file.")
+        if st.button("Freeze now", key="freeze_proj_btn"):
+            try:
+                # derive n3 and mask from the currently loaded boundaries
+                d3 = (boundaries.blocks.__root__.get("3") or [])
+                n3 = len(d3[0]) if (d3 and d3[0]) else 0
+                auto_mask = _lane_mask_from_d3(d3)
+
+                # build a diagonal projector with that mask
+                P = [[1 if (i == j and auto_mask[i] == 1) else 0 for j in range(n3)] for i in range(n3)]
+                payload = {"name": "Π3 from current d3 (AUTO freeze)", "blocks": {"3": P}}
+
+                os.makedirs(os.path.dirname(freeze_path), exist_ok=True)
+                with open(freeze_path, "w") as fp:
+                    _json.dump(payload, fp, indent=2)
+
+                # flip to file mode (in-memory)
+                cfg_active.setdefault("source", {})["3"] = "file"
+                cfg_active.setdefault("projector_files", {})["3"] = freeze_path
+
+                # flip to file mode (persisted on disk)
+                _cfg_disk = projector.load_projection_config("projection_config.json")
+                _cfg_disk.setdefault("source", {})["3"] = "file"
+                _cfg_disk.setdefault("projector_files", {})["3"] = freeze_path
+                with open("projection_config.json", "w") as _f:
+                    _json.dump(_cfg_disk, _f, indent=2)
+
+                st.success(f"Projector frozen → {freeze_path} and source.3 set to file")
+                st.caption("Tip: now click “Run Overlap” to validate shape/idempotence/diag and record metadata.")
+
+            except Exception as e:
+                st.error(f"Freeze failed: {e}")
+
+                        
+
     # --- Active policy badge ---------------------------------------------------
     src3 = cfg_active.get("source", {}).get("3", "")
     if policy_choice == "strict":
@@ -787,7 +835,7 @@ with tab2:
     cache = projector.preload_projectors_from_files(cfg_active)
     st.session_state["_projector_cache"] = cache  # keep around for cert validation
 
-        # ---------- RUN OVERLAP ----------
+            # ---------- RUN OVERLAP ----------
     def _gf2_idempotent(P):
         try:
             n = len(P); m = len(P[0]) if n else 0
@@ -821,6 +869,16 @@ with tab2:
         cols = len(d3_mat[0])
         return [1 if any(row[j] & 1 for row in d3_mat) else 0 for j in range(cols)]
 
+    def _extract_P3_matrix(obj):
+        if isinstance(obj, list) and obj and isinstance(obj[0], list):
+            return obj
+        if isinstance(obj, dict):
+            b = obj.get("blocks", {})
+            mat = b.get("3")
+            if isinstance(mat, list) and mat and isinstance(mat[0], list):
+                return mat
+        return None
+
     if st.button("Run Overlap", key="run_overlap"):
         try:
             out = overlap_gate.overlap_check(
@@ -831,6 +889,77 @@ with tab2:
                 projector_cache=cache,
             )
             st.json(out)
+
+            # ---- projector(file) metadata & validation for cert --------------
+            proj_meta = {"projector_filename": "", "projector_hash": "", "projector_consistent_with_d": None}
+            if policy_choice != "strict" and cfg_active.get("source", {}).get("3") == "file":
+                pj_path = cfg_active.get("projector_files", {}).get("3")
+                if pj_path and os.path.exists(pj_path):
+                    # load & normalize matrix
+                    try:
+                        with open(pj_path, "r") as _pf:
+                            _raw = _json.load(_pf)
+                        P3 = _extract_P3_matrix(_raw)
+                    except Exception as e:
+                        P3 = None
+                        st.warning(f"Could not read projector file '{pj_path}': {e}")
+
+                    # hash projector deterministically
+                    proj_hash = ""
+                    if P3 is not None:
+                        try:
+                            proj_hash = hashes.content_hash_of({"P3": P3})
+                        except Exception:
+                            try:
+                                proj_hash = hashlib.sha256(
+                                    _json.dumps(P3, sort_keys=True, separators=(",", ":")).encode()
+                                ).hexdigest()
+                            except Exception:
+                                proj_hash = ""
+
+                    # validations (use n3 = number of columns of d3; must be n3 x n3)
+                    d3 = (boundaries.blocks.__root__.get("3") or [])
+                    n3_cols = len(d3[0]) if d3 and d3[0] else 0   # lanes at k=3
+                    shape_ok = False
+                    idem_ok  = False
+                    diag_ok  = True
+                    if isinstance(P3, list) and P3 and isinstance(P3[0], list):
+                        nP = len(P3); mP = len(P3[0])
+                        shape_ok = (nP == mP == n3_cols)
+                        if shape_ok:
+                            idem_ok  = _gf2_idempotent(P3)
+                            diagP    = _diag_vec(P3)
+                            auto_mask = _lane_mask_from_d3(d3)
+                            diag_ok  = (diagP == auto_mask[:len(diagP)]) if diagP else True
+
+                    consistent = bool(shape_ok and idem_ok and diag_ok)
+
+                    if not shape_ok:
+                        got_r = len(P3) if isinstance(P3, list) else 0
+                        got_c = (len(P3[0]) if isinstance(P3, list) and P3 and isinstance(P3[0], list) else 0)
+                        st.warning(f"Projector shape mismatch: expected {n3_cols}x{n3_cols}, got {got_r}x{got_c}.")
+                    if shape_ok and not idem_ok:
+                        st.warning("Projector is not idempotent (P·P != P over GF(2)).")
+                    if shape_ok and not diag_ok:
+                        st.warning("Projector diagonal does not match d3 auto mask.")
+
+                    proj_meta = {
+                        "projector_filename": pj_path,
+                        "projector_hash": proj_hash,
+                        "projector_consistent_with_d": consistent,
+                    }
+
+            # persist for downstream cert/bundle blocks
+            st.session_state["overlap_out"] = out
+            st.session_state["overlap_cfg"] = cfg_active
+            st.session_state["overlap_policy_label"] = policy_label
+            st.session_state["overlap_H"] = H_local
+            st.session_state["proj_meta"] = proj_meta
+
+        except Exception as e:
+            st.error(f"Overlap run failed: {e}")
+            st.stop()
+
 
             # ---- projector(file) metadata & validation for cert --------------
             proj_meta = {"projector_filename": "", "projector_hash": "", "projector_consistent_with_d": None}
@@ -1063,38 +1192,50 @@ sig_block = {
 }
 
 
-   # ---------- Policy snapshot ----------
-import os, json as _json, hashlib
+      # ---------- Policy snapshot (robust file hashing + schema normalize) ------
+    import os, json as _json, hashlib
 
-pj_hash = ""
-pj_filename = ""
-if cfg_active.get("source", {}).get("3") == "file":
-    pj_path = cfg_active.get("projector_files", {}).get("3")
-    if pj_path and os.path.exists(pj_path):
-        try:
-            with open(pj_path, "r") as _pf:
-                _P3_json = _json.load(_pf)  # list-of-lists expected
-            # Stable deterministic hash of the projector matrix contents
+    def _extract_P3_matrix(obj):
+        # Accept either raw 2-D list or {"blocks": {"3": <2-D list>}}
+        if isinstance(obj, list) and obj and isinstance(obj[0], list):
+            return obj
+        if isinstance(obj, dict):
+            b = obj.get("blocks", {})
+            mat = b.get("3")
+            if isinstance(mat, list) and mat and isinstance(mat[0], list):
+                return mat
+        return None
+
+    pj_hash = ""
+    pj_filename = ""
+    if cfg_active.get("source", {}).get("3") == "file":
+        pj_path = cfg_active.get("projector_files", {}).get("3")
+        if pj_path and os.path.exists(pj_path):
             try:
-                pj_hash = hashes.content_hash_of({"P3": _P3_json})
-            except Exception:
-                pj_hash = hashlib.sha256(
-                    _json.dumps(_P3_json, sort_keys=True, separators=(",", ":")).encode()
-                ).hexdigest()
-            pj_filename = pj_path
-        except Exception as _e:
-            st.warning(f"Could not read projector file for hashing: {pj_path} ({_e})")
+                with open(pj_path, "r") as _pf:
+                    _raw = _json.load(_pf)
+                _P3 = _extract_P3_matrix(_raw)  # <-- normalize schema
+                # Stable deterministic hash of projector contents
+                try:
+                    pj_hash = hashes.content_hash_of({"P3": _P3})
+                except Exception:
+                    pj_hash = hashlib.sha256(
+                        _json.dumps(_P3, sort_keys=True, separators=(",", ":")).encode()
+                    ).hexdigest()
+                pj_filename = pj_path
+            except Exception as _e:
+                st.warning(f"Could not read projector file for hashing: {pj_path} ({_e})")
 
-policy_block = {
-    "label":          policy_label,
-    "policy_tag":     policy_label,     # exporter expects this key
-    "enabled_layers": cfg_active.get("enabled_layers", []),
-    "modes":          cfg_active.get("modes", {}),
-    "source":         cfg_active.get("source", {}),
-    "projector_hash": pj_hash,
-}
-if pj_filename:
-    policy_block["projector_filename"] = pj_filename
+    policy_block = {
+        "label":          policy_label,          # e.g. "projected(columns@k=3,file)"
+        "policy_tag":     policy_label,
+        "enabled_layers": cfg_active.get("enabled_layers", []),
+        "modes":          cfg_active.get("modes", {}),
+        "source":         cfg_active.get("source", {}),
+        "projector_hash": pj_hash,
+    }
+    if pj_filename:
+        policy_block["projector_filename"] = pj_filename
 
 
    # ---------- Residual tag (lanes / ker / mixed / none) ----------
