@@ -908,51 +908,71 @@ with tab2:
                     if "projector_files" in cfg_active and "3" in cfg_active["projector_files"]:
                         del cfg_active["projector_files"]["3"]
 
-        # --- Freeze current AUTO projector to a file (one-click) ------------------
-    import os, json as _json
+     # --- Freeze current AUTO projector → file ------------------------------------
+import os, json as _json, hashlib
 
-    with st.expander("Freeze AUTO projector → file"):
-        def _lane_mask_from_d3(_d3):
-            if not _d3 or not _d3[0]:
-                return []
-            cols = len(_d3[0])
-            return [1 if any(row[j] & 1 for row in _d3) else 0 for j in range(cols)]
+with st.expander("Freeze AUTO projector → file"):
+    def _lane_mask_from_d3(_d3):
+        if not _d3 or not _d3[0]:
+            return []
+        cols = len(_d3[0])
+        return [1 if any(row[j] & 1 for row in _d3) else 0 for j in range(cols)]
 
-        default_name = "projectors/projector_auto_k3.json"
-        freeze_path = st.text_input("Output file", value=default_name, key="freeze_proj_out")
+    default_name = "projectors/projector_auto_k3.json"
+    freeze_path = st.text_input("Output file", value=default_name, key="freeze_proj_out")
 
-        st.caption("Build a diagonal Π₃ from the current d₃ mask and switch source.3 → file.")
-        if st.button("Freeze now", key="freeze_proj_btn"):
-            try:
-                # derive n3 and mask from the currently loaded boundaries
-                d3 = (boundaries.blocks.__root__.get("3") or [])
-                n3 = len(d3[0]) if (d3 and d3[0]) else 0
-                auto_mask = _lane_mask_from_d3(d3)
+    st.caption("Build a diagonal Π₃ from the current d₃ mask and switch source.3 → file.")
+    if st.button("Freeze now", key="freeze_proj_btn"):
+        try:
+            # 1) derive n3 and mask from the currently loaded boundaries
+            d3 = (boundaries.blocks.__root__.get("3") or [])
+            n3 = len(d3[0]) if (d3 and d3[0]) else 0
+            if n3 == 0:
+                st.error("Freeze aborted: d3 appears empty (n3=0). Load boundaries first.")
+                st.stop()
 
-                # build a diagonal projector with that mask
-                P = [[1 if (i == j and auto_mask[i] == 1) else 0 for j in range(n3)] for i in range(n3)]
-                payload = {"name": "Π3 from current d3 (AUTO freeze)", "blocks": {"3": P}}
+            auto_mask = _lane_mask_from_d3(d3)
 
-                os.makedirs(os.path.dirname(freeze_path), exist_ok=True)
-                with open(freeze_path, "w") as fp:
-                    _json.dump(payload, fp, indent=2)
+            # 2) build a diagonal projector with that mask
+            P = [[1 if (i == j and auto_mask[i] == 1) else 0 for j in range(n3)] for i in range(n3)]
+            payload = {"name": "Π3 from current d3 (AUTO freeze)", "blocks": {"3": P}}
 
-                # flip to file mode (in-memory)
-                cfg_active.setdefault("source", {})["3"] = "file"
-                cfg_active.setdefault("projector_files", {})["3"] = freeze_path
+            os.makedirs(os.path.dirname(freeze_path), exist_ok=True)
+            with open(freeze_path, "w") as fp:
+                _json.dump(payload, fp, indent=2)
 
-                # flip to file mode (persisted on disk)
-                _cfg_disk = projector.load_projection_config("projection_config.json")
-                _cfg_disk.setdefault("source", {})["3"] = "file"
-                _cfg_disk.setdefault("projector_files", {})["3"] = freeze_path
-                with open("projection_config.json", "w") as _f:
-                    _json.dump(_cfg_disk, _f, indent=2)
+            # 3) flip to file mode (persisted on disk)
+            _cfg_disk = projector.load_projection_config("projection_config.json")
+            _cfg_disk.setdefault("source", {})["3"] = "file"
+            _cfg_disk.setdefault("projector_files", {})["3"] = freeze_path
+            with open("projection_config.json", "w") as _f:
+                _json.dump(_cfg_disk, _f, indent=2)
 
-                st.success(f"Projector frozen → {freeze_path} and source.3 set to file")
-                st.caption("Tip: now click “Run Overlap” to validate shape/idempotence/diag and record metadata.")
+            # 4) flip to file mode (in-memory)
+            cfg_active.setdefault("source", {})["3"] = "file"
+            cfg_active.setdefault("projector_files", {})["3"] = freeze_path
 
-            except Exception as e:
-                st.error(f"Freeze failed: {e}")
+            # 5) projector file hash (nice to show + used for cache key)
+            with open(freeze_path, "rb") as fbin:
+                pj_hash = hashlib.sha256(fbin.read()).hexdigest()
+
+            # 6) cache-bust (overlap + A/B caches)
+            _di = st.session_state.get("_district_info", {}) or {}
+            _bound_hash = _di.get("boundaries_hash", "")
+            _cache_key_overlap = f"{_bound_hash}|src3=file|file3={freeze_path}"
+            st.session_state.pop("_projector_cache", None)
+            st.session_state["_projector_cache_key"] = _cache_key_overlap
+
+            _cache_key_ab = f"{_bound_hash}|AB|src3=file|file3={freeze_path}"
+            st.session_state.pop("_projector_cache_ab", None)
+            st.session_state["_projector_cache_key_ab"] = _cache_key_ab
+
+            st.success(f"Projector frozen → {freeze_path} (sha256={pj_hash[:12]}…) and source.3 set to file")
+            st.caption("Run Overlap or A/B now — cache was reset and the file-backed Π will be used.")
+
+        except Exception as e:
+            st.error(f"Freeze failed: {e}")
+
 
                         
 
