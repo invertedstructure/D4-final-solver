@@ -1234,78 +1234,146 @@ if ab_ctx:
 
     cert_payload.setdefault("policy", {})
 
-    # Inputs sub-blocks for snapshots (so A/B blocks can’t drift)
-    strict_inputs_boundaries = {
-        "filename":        inputs_block.get("boundaries_filename", ""),
-        "hash":            fresh_district_info["boundaries_hash"],
-        "district_id":     fresh_district_info["district_id"],
-        "district_sig":    fresh_district_info["district_signature"],
-        "lane_mask_k3":    strict_ctx.get("lane_mask_k3", []),
-        "d3_rows":         fresh_district_info["d3_rows"],
-        "d3_cols":         fresh_district_info["d3_cols"],
-    }
-    projected_inputs_boundaries = {
-        "filename":        inputs_block.get("boundaries_filename", ""),
-        "hash":            fresh_district_info["boundaries_hash"],
-        "district_id":     fresh_district_info["district_id"],
-        "district_sig":    fresh_district_info["district_signature"],
-        "lane_mask_k3":    projected_ctx.get("lane_mask_k3", []),
-        "d3_rows":         fresh_district_info["d3_rows"],
-        "d3_cols":         fresh_district_info["d3_cols"],
-    }
+    # --- District info prelude (authoritative, no UI drift) ----------------------
+_di = st.session_state.get("_district_info", {}) or {}
 
-    cert_payload["policy"]["strict_snapshot"] = {
-        "policy_tag": strict_ctx.get("label", policy_label_from_cfg(cfg_strict())),
-        "ker_guard":  strict_ctx.get("ker_guard", "enforced"),
-        "inputs": {
-            "boundaries": strict_inputs_boundaries,
-            "U_filename": inputs_block.get("U_filename", ""),
-        },
-        "lane_mask_k3":      strict_ctx.get("lane_mask_k3", []),
-        "lane_vec_H2d3":     strict_ctx.get("lane_vec_H2d3", []),
-        "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3", []),
-        "pass_vec": _pass_vec_from(strict_ctx.get("out", {})),
-        "out":      strict_ctx.get("out", {}),
-    }
-    cert_payload["policy"]["projected_snapshot"] = {
-        "policy_tag":     projected_ctx.get("label", policy_label_from_cfg(cfg_projected_base())),
-        "ker_guard":      projected_ctx.get("ker_guard", "off"),
-        "projector_hash": proj_hash_ab,
-        "inputs": {
-            "boundaries": projected_inputs_boundaries,
-            "U_filename": inputs_block.get("U_filename", ""),
-        },
-        "lane_mask_k3":      projected_ctx.get("lane_mask_k3", []),
-        "lane_vec_H2d3":     projected_ctx.get("lane_vec_H2d3", []),
-        "lane_vec_C3plusI3": projected_ctx.get("lane_vec_C3plusI3", []),
-        "pass_vec": _pass_vec_from(projected_ctx.get("out", {})),
-        "out":      projected_ctx.get("out", {}),
-    }
-    cert_payload["ab_pair_tag"] = ab_ctx.get("pair_tag", "")
+# Current d3 dims (fallbacks if _district_info is missing)
+try:
+    _d3 = (boundaries.blocks.__root__.get("3") or [])
+    _d3_rows = len(_d3)
+    _d3_cols = len(_d3[0]) if _d3 and _d3[0] else 0
+except Exception:
+    _d3_rows, _d3_cols = 0, 0
 
-    # Uniform provenance: mirror projected hash to top-level if active run is strict
-    proj_hash_from_ab = cert_payload["policy"]["projected_snapshot"].get("projector_hash", "")
-    if proj_hash_from_ab and not cert_payload["policy"].get("projector_hash"):
-        cert_payload["policy"]["projector_hash"] = proj_hash_from_ab
+fresh_district_info = {
+    "district_id": (
+        _di.get("district_id")
+        or cert_payload.get("district_id")
+        or st.session_state.get("district_id", "UNKNOWN")
+    ),
+    "boundaries_hash": (
+        _di.get("boundaries_hash")
+        or inputs_block.get("boundaries_hash", "")
+    ),
+    "district_signature": _di.get("district_signature", ""),
+    "lane_mask_k3_now": (
+        _di.get("lane_mask_k3_now")
+        if _di.get("lane_mask_k3_now") is not None
+        else (diagnostics_block.get("lane_mask_k3", []) if isinstance(diagnostics_block, dict) else [])
+    ),
+    "d3_rows": _di.get("d3_rows", _d3_rows),
+    "d3_cols": _di.get("d3_cols", _d3_cols),
+}
 
-        # Keep artifact hashes in sync as well
-        cert_payload.setdefault("artifact_hashes", {})
-        cert_payload["artifact_hashes"]["projector_hash"] = proj_hash_from_ab
+# Ensure we have a projector hash for the projected snapshot (if not already computed)
+def _prov_hash(cfg, lane_mask, district_id):
+    try:
+        return projector_provenance_hash(cfg=cfg, lane_mask_k3=lane_mask, district_id=district_id)
+    except TypeError:
+        pass
+    try:
+        return projector_provenance_hash(cfg=cfg, lane_mask=lane_mask, district_id=district_id)
+    except TypeError:
+        pass
+    try:
+        return projector_provenance_hash(
+            cfg=cfg, boundaries=boundaries, district_id=district_id,
+            diagnostics_block={"lane_mask_k3": lane_mask},
+        )
+    except TypeError:
+        pass
+    try:
+        return projector_provenance_hash(cfg=cfg)
+    except Exception:
+        return ""
+
+proj_hash_ab = locals().get("proj_hash_ab", projected_ctx.get("projector_hash", ""))
+if not proj_hash_ab:
+    proj_hash_ab = _prov_hash(
+        projected_ctx.get("cfg", {}) or {},
+        projected_ctx.get("lane_mask_k3", []),
+        fresh_district_info["district_id"],
+    )
+
+# ---- Inputs sub-blocks for snapshots (so A/B blocks can’t drift) ------------
+strict_inputs_boundaries = {
+    "filename":        inputs_block.get("boundaries_filename", ""),
+    "hash":            fresh_district_info["boundaries_hash"],
+    "district_id":     fresh_district_info["district_id"],
+    "district_sig":    fresh_district_info["district_signature"],
+    "lane_mask_k3":    strict_ctx.get("lane_mask_k3", []),
+    "d3_rows":         fresh_district_info["d3_rows"],
+    "d3_cols":         fresh_district_info["d3_cols"],
+}
+projected_inputs_boundaries = {
+    "filename":        inputs_block.get("boundaries_filename", ""),
+    "hash":            fresh_district_info["boundaries_hash"],
+    "district_id":     fresh_district_info["district_id"],
+    "district_sig":    fresh_district_info["district_signature"],
+    "lane_mask_k3":    projected_ctx.get("lane_mask_k3", []),
+    "d3_rows":         fresh_district_info["d3_rows"],
+    "d3_cols":         fresh_district_info["d3_cols"],
+}
+
+cert_payload["policy"]["strict_snapshot"] = {
+    "policy_tag": strict_ctx.get("label", policy_label_from_cfg(cfg_strict())),
+    "ker_guard":  strict_ctx.get("ker_guard", "enforced"),
+    "inputs": {
+        "boundaries": strict_inputs_boundaries,
+        "U_filename": inputs_block.get("U_filename", ""),
+    },
+    "lane_mask_k3":      strict_ctx.get("lane_mask_k3", []),
+    "lane_vec_H2d3":     strict_ctx.get("lane_vec_H2d3", []),
+    "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3", []),
+    "pass_vec": _pass_vec_from(strict_ctx.get("out", {})),
+    "out":      strict_ctx.get("out", {}),
+}
+cert_payload["policy"]["projected_snapshot"] = {
+    "policy_tag":     projected_ctx.get("label", policy_label_from_cfg(cfg_projected_base())),
+    "ker_guard":      projected_ctx.get("ker_guard", "off"),
+    "projector_hash": proj_hash_ab,
+    "inputs": {
+        "boundaries": projected_inputs_boundaries,
+        "U_filename": inputs_block.get("U_filename", ""),
+    },
+    "lane_mask_k3":      projected_ctx.get("lane_mask_k3", []),
+    "lane_vec_H2d3":     projected_ctx.get("lane_vec_H2d3", []),
+    "lane_vec_C3plusI3": projected_ctx.get("lane_vec_C3plusI3", []),
+    "pass_vec": _pass_vec_from(projected_ctx.get("out", {})),
+    "out":      projected_ctx.get("out", {}),
+}
+cert_payload["ab_pair_tag"] = ab_ctx.get("pair_tag", "")
+
+# Uniform provenance: mirror projected hash to top-level if active run is strict
+proj_hash_from_ab = cert_payload["policy"]["projected_snapshot"].get("projector_hash", "")
+if proj_hash_from_ab and not cert_payload["policy"].get("projector_hash"):
+    cert_payload["policy"]["projector_hash"] = proj_hash_from_ab
+    # Keep artifact hashes in sync as well
+    cert_payload.setdefault("artifact_hashes", {})
+    cert_payload["artifact_hashes"]["projector_hash"] = proj_hash_from_ab
 
 # ---- Integrity + top-level artifact hashes ----------------------------------
 # Mirror district/boundaries at the top (use fresh if you already set them; else fall back)
-district_id_for_cert  = cert_payload.get("district_id") or st.session_state.get("district_id", "UNKNOWN")
-boundaries_hash_for_cert = cert_payload.get("boundaries_hash") or inputs_block.get("boundaries_hash", "")
+district_id_for_cert = (
+    cert_payload.get("district_id")
+    or fresh_district_info["district_id"]
+    or st.session_state.get("district_id", "UNKNOWN")
+)
+boundaries_hash_for_cert = (
+    cert_payload.get("boundaries_hash")
+    or fresh_district_info["boundaries_hash"]
+    or inputs_block.get("boundaries_hash", "")
+)
 
 cert_payload["district_id"]     = district_id_for_cert
 cert_payload["boundaries_hash"] = boundaries_hash_for_cert
 
 # Keep artifact hashes in sync (including projector hash from top-level policy)
 cert_payload.setdefault("artifact_hashes", {
-    "boundaries_hash": inputs_block["boundaries_hash"],
-    "C_hash":          inputs_block["C_hash"],
-    "H_hash":          inputs_block["H_hash"],
-    "U_hash":          inputs_block["U_hash"],
+    "boundaries_hash": inputs_block.get("boundaries_hash", ""),
+    "C_hash":          inputs_block.get("C_hash", ""),
+    "H_hash":          inputs_block.get("H_hash", ""),
+    "U_hash":          inputs_block.get("U_hash", ""),
 })
 cert_payload["artifact_hashes"]["projector_hash"] = cert_payload.get("policy", {}).get("projector_hash", "")
 
@@ -1318,6 +1386,7 @@ cert_payload["inputs"] = inputs_block  # write-back in case we added filenames
 
 cert_payload.setdefault("integrity", {})
 cert_payload["integrity"]["content_hash"] = hashes.content_hash_of(cert_payload)
+
 
 # ---- Single write ------------------------------------------------------------
 cert_path, full_hash = export_mod.write_cert_json(cert_payload)
