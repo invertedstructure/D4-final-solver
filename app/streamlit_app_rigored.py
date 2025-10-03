@@ -1404,6 +1404,10 @@ else:
 
 
 # ---------- Checks (extend beyond eq) ----------
+# Pull the last overlap result safely (it has per-k "eq", "n_k", etc.)
+_out_ss = st.session_state.get("overlap_out")
+out = _out_ss if isinstance(_out_ss, dict) else {}
+
 # If you have real grid/fence checks elsewhere, wire them here.
 # Until then, record sensible defaults and ker_guard based on policy:
 is_strict = (policy_label == "strict")
@@ -1412,7 +1416,12 @@ checks_extended = {
     "fence": True,                # placeholder (set real result if you compute it)
     "ker_guard": "enforced" if is_strict else "off",
 }
-# Merge with your per-k out (eq, n_k)
+
+# residual_tag should have been computed earlier; provide a safe fallback
+if "residual_tag" not in locals():
+    residual_tag = "none"
+
+# Merge with your per-k out (eq, n_k, etc.)
 checks_block = {**out, **checks_extended, "residual_tag": residual_tag}
 
 # ---------- Policy snapshot (no _hash_matrix; robust hashing) -------------
@@ -1420,13 +1429,18 @@ import json as _json, hashlib, os
 
 pj_hash = ""
 pj_filename = ""
+# Grab any projector validation meta saved during the run (if projected(file))
+_proj_meta = st.session_state.get("proj_meta", {}) or {}
+proj_consistent = _proj_meta.get("projector_consistent_with_d", None)
+
 if cfg_active.get("source", {}).get("3") == "file":
     pj_path = cfg_active.get("projector_files", {}).get("3")
     if pj_path and os.path.exists(pj_path):
         try:
             with open(pj_path, "r") as _pf:
-                _P3_json = _json.load(_pf)  # expect list-of-lists
+                _P3_json = _json.load(_pf)  # expect list-of-lists or block schema
             try:
+                # Prefer your helper; else deterministic JSON hash
                 pj_hash = hashes.content_hash_of({"P3": _P3_json})
             except Exception:
                 pj_hash = hashlib.sha256(
@@ -1436,19 +1450,29 @@ if cfg_active.get("source", {}).get("3") == "file":
         except Exception as _e:
             st.warning(f"Could not read projector file for hashing: {pj_path} ({_e})")
 
-    policy_block = {
-        "label":          policy_label,          # e.g. "strict" or "projected(columns@k=3,file)"
-        "policy_tag":     policy_label,
-        "enabled_layers": cfg_active.get("enabled_layers", []),
-        "modes":          cfg_active.get("modes", {}),
-        "source":         cfg_active.get("source", {}),
-        "projector_hash": pj_hash,
-    }
-    if pj_filename:
-        policy_block["projector_filename"] = pj_filename
+# Build policy_block for ALL modes (strict / projected(auto) / projected(file))
+policy_block = {
+    "label":          policy_label,          # e.g. "strict" or "projected(columns@k=3,file)"
+    "policy_tag":     policy_label,
+    "enabled_layers": cfg_active.get("enabled_layers", []),
+    "modes":          cfg_active.get("modes", {}),
+    "source":         cfg_active.get("source", {}),
+    "projector_hash": pj_hash,               # empty unless projected(file) w/ valid file
+}
+if pj_filename:
+    policy_block["projector_filename"] = pj_filename
+if proj_consistent is not None:
+    policy_block["projector_consistent_with_d"] = bool(proj_consistent)
 
-# ---------- Identity ----------
-district_id = st.session_state.get("district_id", "D3")
+# ---------- Identity (authoritative district; robust run_id) ----------
+# Prefer the authoritative binding from _district_info
+_di = st.session_state.get("_district_info", {}) or {}
+district_id = (
+    _di.get("district_id")
+    or st.session_state.get("district_id")
+    or "UNKNOWN"
+)
+
 run_id_val  = hashes.run_id(
     hashes.bundle_content_hash([
         ("boundaries", boundaries.dict() if hasattr(boundaries, "dict") else {}),
