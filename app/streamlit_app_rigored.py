@@ -1236,12 +1236,19 @@ else:
     # strict/auto: clear stale file meta
     st.session_state.pop("proj_meta", None)
 
-# persist for downstream cert/bundle blocks
-st.session_state["overlap_out"] = out
-st.session_state["overlap_cfg"] = cfg_active
-st.session_state["overlap_policy_label"] = policy_label
-st.session_state["overlap_H"] = H_local
-st.session_state["proj_meta"] = proj_meta
+# ---- Persist last successful overlap (only if we just computed it) ----------
+# (prevents NameError when the page first loads)
+if "proj_meta" in locals():
+    # keep a default around even if we didn't just compute out
+    st.session_state.setdefault("proj_meta", proj_meta)
+
+if "out" in locals():
+    st.session_state["overlap_out"] = out
+    st.session_state["overlap_cfg"] = cfg_active
+    st.session_state["overlap_policy_label"] = policy_label
+    st.session_state["overlap_H"] = H_local
+    # overwrite projector meta from this run (even in strict/auto it clears stale file meta)
+    st.session_state["proj_meta"] = st.session_state.get("proj_meta", proj_meta)
 
 # ===== Restore last overlap run (required by cert/bundle) =====
 _ss = st.session_state
@@ -1249,24 +1256,27 @@ overlap_out          = _ss.get("overlap_out")
 overlap_cfg          = _ss.get("overlap_cfg")
 overlap_policy_label = _ss.get("overlap_policy_label")
 overlap_H            = _ss.get("overlap_H")
-proj_meta            = _ss.get("proj_meta", {"projector_filename": "", "projector_hash": "", "projector_consistent_with_d": None})
+proj_meta            = _ss.get(
+    "proj_meta",
+    {"projector_filename": "", "projector_hash": "", "projector_consistent_with_d": None}
+)
 
 if overlap_out is None or overlap_cfg is None or overlap_H is None:
     st.info("Run Overlap first to populate cert & download bundle.")
     st.stop()
 
-# use the exact data from the run
+# Use the exact data from the last successful run
 out          = overlap_out
 cfg_active   = overlap_cfg
 policy_label = overlap_policy_label
 H_local      = overlap_H
 
-# small badge echo (keeps UI consistent after reload)
+# Small badge echo (keeps UI consistent after reload)
 src3 = cfg_active.get("source", {}).get("3", "")
 _badge = "strict" if not cfg_active.get("enabled_layers") else ("projected(file)" if src3 == "file" else "projected(auto)")
 st.caption(f"Active policy: **{policy_label}** · mode: {_badge}")
 
-# shapes must be JSON-safe (needed by cert/bundle build)
+# JSON-safe shapes for cert/bundle
 shapes_payload = shapes.dict() if hasattr(shapes, "dict") else (shapes or {})
 
 
