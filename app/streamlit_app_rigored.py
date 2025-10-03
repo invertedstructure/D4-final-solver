@@ -1323,6 +1323,31 @@ cert_payload["integrity"]["content_hash"] = hashes.content_hash_of(cert_payload)
 cert_path, full_hash = export_mod.write_cert_json(cert_payload)
 st.success(f"Cert written: `{cert_path}`")
 
+# --- District info (pull from session; build safe fallbacks if missing) ------
+_di = st.session_state.get("_district_info", {}) or {}
+
+# Current d3 dims (fallbacks if _district_info missing)
+try:
+    _d3 = (boundaries.blocks.__root__.get("3") or [])
+    _d3_rows = len(_d3)
+    _d3_cols = len(_d3[0]) if _d3 and _d3[0] else 0
+except Exception:
+    _d3_rows, _d3_cols = 0, 0
+
+fresh_district_info = {
+    "district_id":       _di.get("district_id")
+                          or cert_payload.get("district_id")
+                          or st.session_state.get("district_id", "UNKNOWN"),
+    "boundaries_hash":   _di.get("boundaries_hash")
+                          or inputs_block.get("boundaries_hash", ""),
+    "district_signature": _di.get("district_signature", ""),
+    "lane_mask_k3_now":   _di.get("lane_mask_k3_now",
+                                  diagnostics_block.get("lane_mask_k3", []) if isinstance(diagnostics_block, dict) else []),
+    "d3_rows":           _di.get("d3_rows", _d3_rows),
+    "d3_cols":           _di.get("d3_cols", _d3_cols),
+}
+
+
 # ---- Gallery de-duplication row (one exemplar per key) -----------------------
 try:
     try:
@@ -1366,13 +1391,26 @@ except Exception as e:
 
 # ---- Download bundle (includes cert.json + policy.json + maps) ---------------
 try:
+    # Pull authoritative district/boundaries (prefer cert → session → inputs)
+    _di = st.session_state.get("_district_info", {}) or {}
+    district_id_for_cert = (
+        cert_payload.get("district_id")
+        or _di.get("district_id")
+        or st.session_state.get("district_id", "UNKNOWN")
+    )
+    boundaries_hash_for_cert = (
+        cert_payload.get("boundaries_hash")
+        or inputs_block.get("boundaries_hash", "")
+        or _di.get("boundaries_hash", "")
+    )
+
     # Prefer the cert's district_id for naming (not UI cache)
     district_id = district_id_for_cert
 
     # Mirror A/B info (if present) into policy.json that goes in the zip
     _policy_block_for_bundle = dict(policy_block)  # shallow copy
 
-    # NEW: read A/B context for the most authoritative projected hash
+    # Read A/B context for the most authoritative projected hash
     _ab_ctx = st.session_state.get("ab_compare", {}) or {}
     _projected_ctx = _ab_ctx.get("projected", {}) or {}
 
@@ -1387,7 +1425,7 @@ try:
             or cert_payload["policy"]["projected_snapshot"].get("projector_hash", "")
         )
 
-    # --- Uniform provenance for policy.json (bundle): mirror top-level too ---
+    # Uniform provenance for policy.json (bundle): mirror top-level too
     proj_hash_bundle = (
         _projected_ctx.get("projector_hash")
         or cert_payload.get("policy", {}).get("projected_snapshot", {}).get("projector_hash", "")
@@ -1397,8 +1435,8 @@ try:
         _policy_block_for_bundle["projector_hash"] = proj_hash_bundle
 
     # Mirror district/boundaries + filenames into policy.json in the bundle
-    _policy_block_for_bundle["district_id"]     = district_id_for_cert
-    _policy_block_for_bundle["boundaries_hash"] = boundaries_hash_for_cert
+    _policy_block_for_bundle["district_id"]         = district_id_for_cert
+    _policy_block_for_bundle["boundaries_hash"]     = boundaries_hash_for_cert
     _policy_block_for_bundle["boundaries_filename"] = inputs_block.get("boundaries_filename", "")
     _policy_block_for_bundle["U_filename"]          = inputs_block.get("U_filename", "")
 
@@ -1427,6 +1465,7 @@ try:
         )
 except Exception as e:
     st.error(f"Could not build download bundle: {e}")
+
 
 
 
