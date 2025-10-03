@@ -437,6 +437,15 @@ def read_json_file(file):
     except Exception as e:
         st.error(f"Failed to parse JSON: {e}")
         return None
+        # ---- District hash → ID map (authoritative) ---------------------------------
+# sha256(boundaries.json RAW BYTES) -> district label
+DISTRICT_MAP = {
+    "9da8b7f605c113ee059160cdaf9f93fe77e181476c72e37eadb502e7e7ef9701": "D1",
+    "4356e6b608443b315d7abc50872ed97a9e2c837ac8b85879394495e64ec71521": "D2",
+    "28f8db2a822cb765e841a35c2850a745c667f4228e782d0cfdbcb710fd4fecb9": "D3",
+    "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
+}
+
 
 with st.sidebar:
     st.markdown("### Upload core inputs")
@@ -475,173 +484,71 @@ with st.sidebar:
         payload = f"k3:{''.join(str(x) for x in mask)}|r{r}|c{c}".encode()
         return hashlib.sha256(payload).hexdigest()[:12]
 
-    # ---- District hash → ID map (authoritative) ---------------------------------
-# sha256(boundaries.json RAW BYTES) -> district label
-DISTRICT_MAP = {
-    "9da8b7f605c113ee059160cdaf9f93fe77e181476c72e37eadb502e7e7ef9701": "D1",
-    "28f8db2a822cb765e841a35c2850a745c667f4228e782d0cfdbcb710fd4fecb9": "D3",
-    "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
-    "4356e6b608443b315d7abc50872ed97a9e2c837ac8b85879394495e64ec71521": "D2",  # example you already added
-}
-
-
     # --- Peek raw-bytes boundaries hash so you can populate DISTRICT_MAP ----------
-    if f_bound is not None and hasattr(f_bound, "getvalue"):
-        import hashlib
-        _raw = f_bound.getvalue()               # RAW BYTES of uploaded boundaries.json
-        _bhash = hashlib.sha256(_raw).hexdigest()
-        st.caption(f"boundaries raw-bytes hash: {_bhash}")
-        # (Optional) Handy copy-paste line to add into DISTRICT_MAP:
-        st.code(f'DISTRICT_MAP["{_bhash}"] = "D?"  # ← fill D1/D3/D4', language="python")
+if f_bound is not None and hasattr(f_bound, "getvalue"):
+    import hashlib
+    _raw = f_bound.getvalue()  # RAW BYTES of uploaded boundaries.json
+    _bhash = hashlib.sha256(_raw).hexdigest()
+    st.caption(f"boundaries raw-bytes hash: {_bhash}")
+    # Handy copy-paste line for your map:
+    st.code(f'DISTRICT_MAP["{_bhash}"] = "D?"  # ← set D1/D2/D3/D4', language="python")
 
+# ---- load jsons -------------------------------------------------------------
+d_shapes = read_json_file(f_shapes)
+d_bound  = read_json_file(f_bound)
+d_cmap   = read_json_file(f_cmap)
 
-    # ---- load jsons ---------------------------------------------------------
-    d_shapes = read_json_file(f_shapes)
-    d_bound  = read_json_file(f_bound)
-    d_cmap   = read_json_file(f_cmap)
+# Use a shared inputs_block in session so later stages can read file names/hashes
+if "_inputs_block" not in st.session_state:
+    st.session_state["_inputs_block"] = {}
+inputs_block = st.session_state["_inputs_block"]
 
-    # Use a shared inputs_block in session so later stages can read file names/hashes
-    if "_inputs_block" not in st.session_state:
-        st.session_state["_inputs_block"] = {}
-    inputs_block = st.session_state["_inputs_block"]
+if d_shapes and d_bound and d_cmap:
+    try:
+        shapes     = io.parse_shapes(d_shapes)
+        boundaries = io.parse_boundaries(d_bound)
+        cmap       = io.parse_cmap(d_cmap)  # must have top-level "blocks"
+        support    = io.parse_support(read_json_file(f_support)) if f_support else None
+        triangle   = io.parse_triangle_schema(read_json_file(f_triangle)) if f_triangle else None
 
-    if d_shapes and d_bound and d_cmap:
+        # ---- Step 1: bind district directly from the freshly loaded boundaries
+        # 1) Fresh boundaries hash (prefer raw bytes from uploader)
         try:
-            shapes     = io.parse_shapes(d_shapes)
-            boundaries = io.parse_boundaries(d_bound)
-            cmap       = io.parse_cmap(d_cmap)  # must have top-level "blocks"
-            support    = io.parse_support(read_json_file(f_support)) if f_support else None
-            triangle   = io.parse_triangle_schema(read_json_file(f_triangle)) if f_triangle else None
-
-            # ---- Step 1: bind district directly from the freshly loaded boundaries
-            # 1) Fresh boundaries hash (prefer raw bytes from uploader)
-            try:
-                if hasattr(f_bound, "getvalue"):
-                    _raw = f_bound.getvalue()
-                    boundaries_hash_fresh = _sha256_hex_bytes(_raw)
-                else:
-                    boundaries_hash_fresh = _sha256_hex_obj(d_bound)
-            except Exception:
-                boundaries_hash_fresh = _sha256_hex_obj(d_bound)
-
-            # 2) Fresh k=3 lane mask/signature from parsed boundaries
-            d3_block          = (boundaries.blocks.__root__.get("3") or [])
-            lane_mask_k3_now  = _lane_mask_from_d3(d3_block)
-            d3_rows           = len(d3_block)
-            d3_cols           = (len(d3_block[0]) if d3_block else 0)
-            district_sig      = _district_signature(lane_mask_k3_now, d3_rows, d3_cols)
-
-            # 3) Resolve district via mapping ONLY (never from cached UI state)
-            district_id_fresh = DISTRICT_MAP.get(boundaries_hash_fresh, "UNKNOWN")
-
-            # 4) Clear stale state if boundaries changed
-            _prev_bhash = st.session_state.get("_last_boundaries_hash")
-            if _prev_bhash and _prev_bhash != boundaries_hash_fresh:
-                st.session_state.pop("ab_compare", None)
-                st.session_state.pop("district_id", None)          # avoid UI-driven drift
-                st.session_state.pop("_projector_cache", None)
-            st.session_state["_last_boundaries_hash"] = boundaries_hash_fresh
-
-            # 5) Stamp filenames + authoritative hashes into inputs_block
-            inputs_block["boundaries_filename"] = st.session_state.get("fname_boundaries", "boundaries.json")
-            inputs_block["boundaries_hash"]     = boundaries_hash_fresh
-            inputs_block["shapes_filename"]     = st.session_state.get("fname_shapes", "shapes.json")
-            inputs_block["cmap_filename"]       = st.session_state.get("fname_cmap", "cmap.json")
-            # U_filename may be set later (Unit tab); keep a placeholder for now
-            inputs_block.setdefault("U_filename", "shapes.json")
-
-            # 6) Mirror fresh district info for later blocks (cert/bundle)
-            st.session_state["_district_info"] = {
-                "district_id":        district_id_fresh,
-                "boundaries_hash":    boundaries_hash_fresh,
-                "lane_mask_k3_now":   lane_mask_k3_now,
-                "district_signature": district_sig,
-                "d3_rows": d3_rows,
-                "d3_cols": d3_cols,
-            }
-
-            # ---- validate bundle as before ----------------------------------
-            io.validate_bundle(boundaries, shapes, cmap, support)
-            st.success("Core schemas validated ✅")
-
-            # Badge: show bound district + hashes
-            st.caption(
-                f"district={district_id_fresh} · bhash={boundaries_hash_fresh[:12]} · "
-                f"k3={lane_mask_k3_now} · sig={district_sig}"
-            )
-
-            with st.expander("Hashes / provenance"):
-                named = [("boundaries", boundaries.dict()), ("shapes", shapes.dict()), ("cmap", cmap.dict())]
-                if support:  named.append(("support",  support.dict()))
-                if triangle: named.append(("triangle", triangle.dict()))
-                ch = hashes.bundle_content_hash(named)
-                ts = hashes.timestamp_iso_lisbon()
-                rid = hashes.run_id(ch, ts)
-                st.code(
-                    f"content_hash = {ch}\nrun_timestamp = {ts}\nrun_id = {rid}\napp_version = {APP_VERSION}",
-                    language="bash"
-                )
-                # Quick export here too
-                if st.button("Export ./reports → report.zip (quick)"):
-                    import pathlib as _pl
-                    reports_dir = _pl.Path("reports")
-                    if not reports_dir.exists():
-                        st.warning("No ./reports yet. Run a Tower or Manifest first.")
-                    else:
-                        zpath = reports_dir / "report.zip"
-                        export_mod.zip_report(str(reports_dir), str(zpath))
-                        st.success(f"Exported: {zpath}")
-                        with open(zpath, "rb") as fz:
-                            st.download_button("Download report.zip", fz, file_name="report.zip")
-
-        except Exception as e:
-            st.error(f"Validation error: {e}")
-            st.stop()
-    else:
-        missing = [name for name, f in [("Shapes", d_shapes), ("Boundaries", d_bound), ("CMap", d_cmap)] if not f]
-        st.info("Upload required files: " + ", ".join(missing))
-        st.stop()
-
-tab1, tab2, tab3, tab4, tab5 = st.tabs(["Unit", "Overlap", "Triangle", "Towers", "Export"])
-
-with tab1:
-    st.subheader("Unit gate")
-    # Boundaries (B)
-    f_B = st.file_uploader("Boundaries (boundaries*.json)", type=["json"], key="B_up")
-    _stamp_filename("fname_boundaries", f_B)
-    d_B = read_json_file(f_B) if f_B else None
-    if d_B:
-        boundaries = io.parse_boundaries(d_B)
-
-        # ---- Re-bind district from Unit tab override (same logic, shorter) ---
-        try:
-            if hasattr(f_B, "getvalue"):
-                _rawB = f_B.getvalue()
-                boundaries_hash_fresh = _sha256_hex_bytes(_rawB)
+            if hasattr(f_bound, "getvalue"):
+                _raw = f_bound.getvalue()
+                boundaries_hash_fresh = _sha256_hex_bytes(_raw)
             else:
-                boundaries_hash_fresh = _sha256_hex_obj(d_B)
+                boundaries_hash_fresh = _sha256_hex_obj(d_bound)
         except Exception:
-            boundaries_hash_fresh = _sha256_hex_obj(d_B)
+            boundaries_hash_fresh = _sha256_hex_obj(d_bound)
 
-        d3_block = (boundaries.blocks.__root__.get("3") or [])
+        # 2) Fresh k=3 lane mask/signature from parsed boundaries
+        d3_block         = (boundaries.blocks.__root__.get("3") or [])
         lane_mask_k3_now = _lane_mask_from_d3(d3_block)
-        d3_rows = len(d3_block)
-        d3_cols = (len(d3_block[0]) if d3_block else 0)
-        district_sig = _district_signature(lane_mask_k3_now, d3_rows, d3_cols)
+        d3_rows          = len(d3_block)
+        d3_cols          = (len(d3_block[0]) if d3_block else 0)
+        district_sig     = _district_signature(lane_mask_k3_now, d3_rows, d3_cols)
+
+        # 3) Resolve district via mapping ONLY (never from cached UI state)
         district_id_fresh = DISTRICT_MAP.get(boundaries_hash_fresh, "UNKNOWN")
 
-        # Clear stale state if boundaries changed
+        # 4) Clear stale state if boundaries changed
         _prev_bhash = st.session_state.get("_last_boundaries_hash")
         if _prev_bhash and _prev_bhash != boundaries_hash_fresh:
             st.session_state.pop("ab_compare", None)
-            st.session_state.pop("district_id", None)
+            st.session_state.pop("district_id", None)          # avoid UI-driven drift
             st.session_state.pop("_projector_cache", None)
         st.session_state["_last_boundaries_hash"] = boundaries_hash_fresh
 
-        # Update inputs + session mirrors
-        inputs_block = st.session_state["_inputs_block"]
+        # 5) Stamp filenames + authoritative hashes into inputs_block
         inputs_block["boundaries_filename"] = st.session_state.get("fname_boundaries", "boundaries.json")
         inputs_block["boundaries_hash"]     = boundaries_hash_fresh
+        inputs_block["shapes_filename"]     = st.session_state.get("fname_shapes", "shapes.json")
+        inputs_block["cmap_filename"]       = st.session_state.get("fname_cmap", "cmap.json")
+        # U_filename may be set later (Unit tab); keep a placeholder for now
+        inputs_block.setdefault("U_filename", "shapes.json")
+
+        # 6) Mirror fresh district info for later blocks (cert/bundle)
         st.session_state["_district_info"] = {
             "district_id":        district_id_fresh,
             "boundaries_hash":    boundaries_hash_fresh,
@@ -651,33 +558,47 @@ with tab1:
             "d3_cols": d3_cols,
         }
 
-        st.caption(f"[Unit override] district={district_id_fresh} · bhash={boundaries_hash_fresh[:12]} · k3={lane_mask_k3_now} · sig={district_sig}")
+        # ---- validate bundle as before --------------------------------------
+        io.validate_bundle(boundaries, shapes, cmap, support)
+        st.success("Core schemas validated ✅")
 
-    # C-map (optional override here; otherwise load it where you prefer)
-    f_C = st.file_uploader("C map (optional)", type=["json"], key="C_up")
-    _stamp_filename("fname_cmap", f_C)
-    d_C = read_json_file(f_C) if f_C else None
-    if d_C:
-        cmap = io.parse_cmap(d_C)
+        # Badge: show bound district + hashes
+        st.caption(
+            f"district={district_id_fresh} · bhash={boundaries_hash_fresh[:12]} · "
+            f"k3={lane_mask_k3_now} · sig={district_sig}"
+        )
 
-    # Shapes / carrier U (optional)
-    f_U = st.file_uploader("Shapes / carrier U (optional)", type=["json"], key="U_up")
-    _stamp_filename("fname_shapes", f_U)
-    d_U = read_json_file(f_U) if f_U else None
-    if d_U:
-        shapes = io.parse_shapes(d_U)
-        # keep filename for provenance
-        st.session_state["_inputs_block"]["U_filename"] = st.session_state.get("fname_shapes", "shapes.json")
+        with st.expander("Hashes / provenance"):
+            named = [("boundaries", boundaries.dict()), ("shapes", shapes.dict()), ("cmap", cmap.dict())]
+            if support:  named.append(("support",  support.dict()))
+            if triangle: named.append(("triangle", triangle.dict()))
+            ch = hashes.bundle_content_hash(named)
+            ts = hashes.timestamp_iso_lisbon()
+            rid = hashes.run_id(ch, ts)
+            st.code(
+                f"content_hash = {ch}\nrun_timestamp = {ts}\nrun_id = {rid}\napp_version = {APP_VERSION}",
+                language="bash"
+            )
+            # Quick export here too
+            if st.button("Export ./reports → report.zip (quick)"):
+                import pathlib as _pl
+                reports_dir = _pl.Path("reports")
+                if not reports_dir.exists():
+                    st.warning("No ./reports yet. Run a Tower or Manifest first.")
+                else:
+                    zpath = reports_dir / "report.zip"
+                    export_mod.zip_report(str(reports_dir), str(zpath))
+                    st.success(f"Exported: {zpath}")
+                    with open(zpath, "rb") as fz:
+                        st.download_button("Download report.zip", fz, file_name="report.zip")
 
-    # Reps (only if you actually use them)
-    f_reps = st.file_uploader("Reps (optional)", type=["json"], key="reps_up")
-    _stamp_filename("fname_reps", f_reps)
-    d_reps = read_json_file(f_reps) if f_reps else None
-
-    enforce = st.checkbox("Enforce rep transport (c_cod = C c_dom)", value=False)
-    if st.button("Run Unit"):
-        out = unit_gate.unit_check(boundaries, cmap, shapes, reps=d_reps, enforce_rep_transport=enforce)
-        st.json(out)
+    except Exception as e:
+        st.error(f"Validation error: {e}")
+        st.stop()
+else:
+    missing = [name for name, f in [("Shapes", d_shapes), ("Boundaries", d_bound), ("CMap", d_cmap)] if not f]
+    st.info("Upload required files: " + ", ".join(missing))
+    st.stop()
 
     
 
