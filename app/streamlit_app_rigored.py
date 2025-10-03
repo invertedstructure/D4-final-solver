@@ -475,11 +475,15 @@ with st.sidebar:
         payload = f"k3:{''.join(str(x) for x in mask)}|r{r}|c{c}".encode()
         return hashlib.sha256(payload).hexdigest()[:12]
 
-    # Fill with your known fixtures (hash(boundaries.json bytes) -> "D2"/"D3"/...)
-    DISTRICT_MAP = {
-        # "aaaaaaaa...": "D3",
-        "4356e6b608443b315d7abc50872ed97a9e2c837ac8b85879394495e64ec71521": "D2",
+    # ---- District hash → ID map (authoritative) ---------------------------------
+# sha256(boundaries.json RAW BYTES) -> district label
+DISTRICT_MAP = {
+    "9da8b7f605c113ee059160cdaf9f93fe77e181476c72e37eadb502e7e7ef9701": "D1",
+    "28f8db2a822cb765e841a35c2850a745c667f4228e782d0cfdbcb710fd4fecb9": "D3",
+    "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
+    "4356e6b608443b315d7abc50872ed97a9e2c837ac8b85879394495e64ec71521": "D2",  # example you already added
 }
+
 
     # --- Peek raw-bytes boundaries hash so you can populate DISTRICT_MAP ----------
     if f_bound is not None and hasattr(f_bound, "getvalue"):
