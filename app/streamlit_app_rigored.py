@@ -965,6 +965,52 @@ with tab2:
     policy_label = policy_label_from_cfg(cfg_active)
     st.caption(f"Policy: **{policy_label}** · mode: {_policy_mode_badge}")
 
+    # --- Active projector debug (what WILL be used) ------------------------------
+import os, json as _json, hashlib
+
+src3 = cfg_active.get("source", {}).get("3", "auto")
+pj_file = cfg_active.get("projector_files", {}).get("3", "") if src3 == "file" else ""
+
+with st.expander("Active projector (k=3) · debug", expanded=False):
+    d3_dbg = (boundaries.blocks.__root__.get("3") or [])
+    n3_dbg = len(d3_dbg[0]) if (d3_dbg and d3_dbg[0]) else 0
+    lane_dbg = [1 if any(row[j] & 1 for row in d3_dbg) else 0 for j in range(n3_dbg)]
+    st.write(f"d3: rows={len(d3_dbg)}, cols={n3_dbg}, lane_mask={lane_dbg}")
+
+    if src3 == "file":
+        st.write(f"source.3=file · path = `{pj_file}`")
+        if not pj_file or not os.path.exists(pj_file):
+            st.error(f"Projector(k=3) file not found: {pj_file!r}")
+            st.stop()
+        try:
+            rawP = _json.load(open(pj_file, "r"))
+            P3 = rawP if (isinstance(rawP, list) and rawP and isinstance(rawP[0], list)) else rawP.get("blocks", {}).get("3")
+        except Exception as e:
+            st.error(f"Projector(k=3) could not parse JSON: {e}")
+            st.stop()
+
+        # dims + diag
+        rows = len(P3) if isinstance(P3, list) else 0
+        cols = len(P3[0]) if (rows and isinstance(P3[0], list)) else 0
+        diagP = [int(P3[i][i] & 1) for i in range(min(rows, cols))] if rows and cols else []
+        pj_hash_dbg = hashlib.sha256(_json.dumps(P3, sort_keys=True, separators=(',',':')).encode()).hexdigest()
+        st.write(f"P3: rows={rows}, cols={cols}, diag={diagP}, sha256={pj_hash_dbg[:12]}…")
+
+        # quick checks
+        if rows != cols or cols != n3_dbg:
+            st.error(f"Projector(k=3) shape mismatch: expected {n3_dbg}x{n3_dbg}, got {rows}x{cols}.")
+            st.stop()
+        if any((i!=j and (P3[i][j] & 1)) for i in range(rows) for j in range(cols)):
+            st.error("Projector(k=3) must be diagonal; off-diagonal entries found.")
+            st.stop()
+        if diagP != lane_dbg:
+            st.error(f"Projector(k=3) diagonal {diagP} inconsistent with lane_mask(d3) {lane_dbg}.")
+            st.stop()
+        st.success("Projector(k=3) file looks good and matches current d3.")
+    else:
+        st.write("source.3=auto (no file). The run will build Π₃ = diag(lane_mask(d3)).")
+
+
     # ===== Cache discipline for projector preload =============================
     _di = st.session_state.get("_district_info", {}) or {}
     _bound_hash = _di.get("boundaries_hash", inputs_block.get("boundaries_hash", ""))
