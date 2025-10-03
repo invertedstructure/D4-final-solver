@@ -1659,6 +1659,7 @@ def _prov_hash(cfg, lane_mask, district_id):
         return ""
 
 if ab_ctx:
+    # 1) projector hash for projected leg (prefer A/B; else provenance)
     proj_hash_ab = projected_ctx.get("projector_hash", "")
     if not proj_hash_ab:
         proj_hash_ab = _prov_hash(
@@ -1667,6 +1668,7 @@ if ab_ctx:
             fresh_district_info["district_id"],
         )
 
+    # 2) inputs.boundaries for each snapshot (authoritative from fresh_district_info)
     strict_inputs_boundaries = {
         "filename":        inputs_block.get("boundaries_filename", ""),
         "hash":            fresh_district_info["boundaries_hash"],
@@ -1686,6 +1688,19 @@ if ab_ctx:
         "d3_cols":         fresh_district_info["d3_cols"],
     }
 
+    # 3) projector FILE metadata (prefer Run Overlap's proj_meta; fallback to A/B)
+    _proj_meta = st.session_state.get("proj_meta", {}) or {}
+    proj_filename = (
+        _proj_meta.get("projector_filename")
+        or projected_ctx.get("projector_filename", "")
+    )
+    proj_file_hash = (
+        _proj_meta.get("projector_hash")
+        or projected_ctx.get("projector_file_hash", "")
+    )
+    proj_consistent = _proj_meta.get("projector_consistent_with_d", None)
+
+    # 4) assemble snapshots
     cert_payload.setdefault("policy", {})
     cert_payload["policy"]["strict_snapshot"] = {
         "policy_tag": strict_ctx.get("label", policy_label_from_cfg(cfg_strict())),
@@ -1700,6 +1715,7 @@ if ab_ctx:
         "pass_vec": _pass_vec_from(strict_ctx.get("out", {})),
         "out":      strict_ctx.get("out", {}),
     }
+
     cert_payload["policy"]["projected_snapshot"] = {
         "policy_tag":     projected_ctx.get("label", policy_label_from_cfg(cfg_projected_base())),
         "ker_guard":      projected_ctx.get("ker_guard", "off"),
@@ -1707,6 +1723,10 @@ if ab_ctx:
         "inputs": {
             "boundaries": projected_inputs_boundaries,
             "U_filename": inputs_block.get("U_filename", ""),
+            # projector(file) metadata (meaningful only in file mode)
+            "projector_filename": proj_filename,
+            "projector_file_hash": proj_file_hash,
+            "projector_consistent_with_d": proj_consistent,
         },
         "lane_mask_k3":      projected_ctx.get("lane_mask_k3", []),
         "lane_vec_H2d3":     projected_ctx.get("lane_vec_H2d3", []),
@@ -1714,14 +1734,16 @@ if ab_ctx:
         "pass_vec": _pass_vec_from(projected_ctx.get("out", {})),
         "out":      projected_ctx.get("out", {}),
     }
+
     cert_payload["ab_pair_tag"] = ab_ctx.get("pair_tag", "")
 
-    # mirror projected hash to top-level if active run is strict
+    # 5) mirror projected hash to top-level if active run is strict
     proj_hash_from_ab = cert_payload["policy"]["projected_snapshot"].get("projector_hash", "")
     if proj_hash_from_ab and not cert_payload["policy"].get("projector_hash"):
         cert_payload["policy"]["projector_hash"] = proj_hash_from_ab
         cert_payload.setdefault("artifact_hashes", {})
         cert_payload["artifact_hashes"]["projector_hash"] = proj_hash_from_ab
+
 
 # ---------- C) Integrity + top-level artifact hashes + write ------------------
 district_id_for_cert = (
@@ -2252,6 +2274,30 @@ if _cfg_file_for_ab.get("source", {}).get("3") in ("file", "auto"):
     _cfg_proj_for_ab["source"]["3"] = _cfg_file_for_ab["source"]["3"]
 if "projector_files" in _cfg_file_for_ab and "3" in _cfg_file_for_ab["projector_files"]:
     _cfg_proj_for_ab["projector_files"]["3"] = _cfg_file_for_ab["projector_files"]["3"]
+
+# --- Projector cache-bust key (boundaries/source/file changes) -------------
+_di = st.session_state.get("_district_info", {}) or {}
+_bound_hash = _di.get("boundaries_hash", "")
+
+# Choose the cfg we’re about to load cache for
+_cfg_for_cache = cfg_active if 'cfg_active' in locals() else _cfg_proj_for_ab
+_src3  = _cfg_for_cache.get("source", {}).get("3", "")
+_file3 = _cfg_for_cache.get("projector_files", {}).get("3", "") if _src3 == "file" else ""
+
+_cache_key = f"{_bound_hash}|src3={_src3}|file3={_file3}"
+
+# Use different session keys for overlap vs A/B to avoid collisions
+_cache_key_name = "_projector_cache_key" if 'cfg_active' in locals() else "_projector_cache_key_ab"
+_cache_blob_name = "_projector_cache" if 'cfg_active' in locals() else "_projector_cache_ab"
+
+if st.session_state.get(_cache_key_name) != _cache_key:
+    st.session_state.pop(_cache_blob_name, None)
+    st.session_state[_cache_key_name] = _cache_key
+
+# finally preload (will rebuild if we just busted it)
+_cache_blob = st.session_state.get(_cache_blob_name) or projector.preload_projectors_from_files(_cfg_for_cache)
+st.session_state[_cache_blob_name] = _cache_blob
+
 
 # Use whatever caching your helper already implements (no cache_key kwarg)
 _cache_for_ab = projector.preload_projectors_from_files(_cfg_proj_for_ab)
