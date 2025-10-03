@@ -1057,75 +1057,75 @@ if st.button("Run Overlap", key="run_overlap"):
         st.stop()
 
 
-            # ---- projector(file) metadata & validation for cert --------------
-            proj_meta = {"projector_filename": "", "projector_hash": "", "projector_consistent_with_d": None}
-            if policy_choice != "strict" and cfg_active.get("source", {}).get("3") == "file":
-                pj_path = cfg_active.get("projector_files", {}).get("3")
-                if pj_path and os.path.exists(pj_path):
-                    # load & normalize matrix
+        # ---- projector(file) metadata & validation for cert --------------
+        proj_meta = {"projector_filename": "", "projector_hash": "", "projector_consistent_with_d": None}
+        if policy_choice != "strict" and cfg_active.get("source", {}).get("3") == "file":
+            pj_path = cfg_active.get("projector_files", {}).get("3")
+            if pj_path and os.path.exists(pj_path):
+                # load & normalize matrix
+                try:
+                    with open(pj_path, "r") as _pf:
+                        _raw = _json.load(_pf)
+                    P3 = _extract_P3_matrix(_raw)
+                except Exception as e:
+                    P3 = None
+                    st.warning(f"Could not read projector file '{pj_path}': {e}")
+
+                # hash projector deterministically
+                proj_hash = ""
+                if P3 is not None:
                     try:
-                        with open(pj_path, "r") as _pf:
-                            _raw = _json.load(_pf)
-                        P3 = _extract_P3_matrix(_raw)
-                    except Exception as e:
-                        P3 = None
-                        st.warning(f"Could not read projector file '{pj_path}': {e}")
-
-                    # hash projector deterministically
-                    proj_hash = ""
-                    if P3 is not None:
+                        proj_hash = hashes.content_hash_of({"P3": P3})
+                    except Exception:
                         try:
-                            proj_hash = hashes.content_hash_of({"P3": P3})
+                            proj_hash = hashlib.sha256(
+                                _json.dumps(P3, sort_keys=True, separators=(",", ":")).encode()
+                            ).hexdigest()
                         except Exception:
-                            try:
-                                proj_hash = hashlib.sha256(
-                                    _json.dumps(P3, sort_keys=True, separators=(",", ":")).encode()
-                                ).hexdigest()
-                            except Exception:
-                                proj_hash = ""
+                            proj_hash = ""
 
-                    # validations (use n3 = number of columns of d3; must be n3 x n3)
-                    d3 = (boundaries.blocks.__root__.get("3") or [])
-                    n3_cols = len(d3[0]) if d3 and d3[0] else 0   # lanes at k=3
-                    shape_ok = False
-                    idem_ok  = False
-                    diag_ok  = True
-                    if isinstance(P3, list) and P3 and isinstance(P3[0], list):
-                        nP = len(P3); mP = len(P3[0])
-                        shape_ok = (nP == mP == n3_cols)
-                        if shape_ok:
-                            idem_ok  = _gf2_idempotent(P3)
-                            diagP    = _diag_vec(P3)
-                            auto_mask = _lane_mask_from_d3(d3)
-                            diag_ok  = (diagP == auto_mask[:len(diagP)]) if diagP else True
+                # validations (use n3 = number of columns of d3; must be n3 x n3)
+                d3 = (boundaries.blocks.__root__.get("3") or [])
+                n3_cols = len(d3[0]) if d3 and d3[0] else 0   # lanes at k=3
+                shape_ok = False
+                idem_ok  = False
+                diag_ok  = True
+                if isinstance(P3, list) and P3 and isinstance(P3[0], list):
+                    nP = len(P3); mP = len(P3[0])
+                    shape_ok = (nP == mP == n3_cols)
+                    if shape_ok:
+                        idem_ok  = _gf2_idempotent(P3)
+                        diagP    = _diag_vec(P3)
+                        auto_mask = _lane_mask_from_d3(d3)
+                        diag_ok  = (diagP == auto_mask[:len(diagP)]) if diagP else True
 
-                    consistent = bool(shape_ok and idem_ok and diag_ok)
+                consistent = bool(shape_ok and idem_ok and diag_ok)
 
-                    if not shape_ok:
-                        got_r = len(P3) if isinstance(P3, list) else 0
-                        got_c = (len(P3[0]) if isinstance(P3, list) and P3 and isinstance(P3[0], list) else 0)
-                        st.warning(f"Projector shape mismatch: expected {n3_cols}x{n3_cols}, got {got_r}x{got_c}.")
-                    if shape_ok and not idem_ok:
-                        st.warning("Projector is not idempotent (P·P != P over GF(2)).")
-                    if shape_ok and not diag_ok:
-                        st.warning("Projector diagonal does not match d3 auto mask.")
+                if not shape_ok:
+                    got_r = len(P3) if isinstance(P3, list) else 0
+                    got_c = (len(P3[0]) if isinstance(P3, list) and P3 and isinstance(P3[0], list) else 0)
+                    st.warning(f"Projector shape mismatch: expected {n3_cols}x{n3_cols}, got {got_r}x{got_c}.")
+                if shape_ok and not idem_ok:
+                    st.warning("Projector is not idempotent (P·P != P over GF(2)).")
+                if shape_ok and not diag_ok:
+                    st.warning("Projector diagonal does not match d3 auto mask.")
 
-                    proj_meta = {
-                        "projector_filename": pj_path,
-                        "projector_hash": proj_hash,
-                        "projector_consistent_with_d": consistent,
-                    }
+                proj_meta = {
+                    "projector_filename": pj_path,
+                    "projector_hash": proj_hash,
+                    "projector_consistent_with_d": consistent,
+                }
 
-            # persist for downstream cert/bundle blocks
-            st.session_state["overlap_out"] = out
-            st.session_state["overlap_cfg"] = cfg_active
-            st.session_state["overlap_policy_label"] = policy_label
-            st.session_state["overlap_H"] = H_local
-            st.session_state["proj_meta"] = proj_meta
+        # persist for downstream cert/bundle blocks
+        st.session_state["overlap_out"] = out
+        st.session_state["overlap_cfg"] = cfg_active
+        st.session_state["overlap_policy_label"] = policy_label
+        st.session_state["overlap_H"] = H_local
+        st.session_state["proj_meta"] = proj_meta
 
-        except Exception as e:
-            st.error(f"Overlap run failed: {e}")
-            st.stop()
+    except Exception as e:
+        st.error(f"Overlap run failed: {e}")
+        st.stop()
 
 
             # ---- projector(file) metadata & validation for cert --------------
