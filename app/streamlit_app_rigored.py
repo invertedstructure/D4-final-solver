@@ -1868,29 +1868,29 @@ if "residual_tag" not in locals():
 # Merge with your per-k out (eq, n_k, etc.)
 checks_block = {**out, **checks_extended, "residual_tag": residual_tag}
 
-# ---------- Policy snapshot (no _hash_matrix; robust hashing) -------------
+# ---------- Policy snapshot (robust; prefers run meta) -----------------------
 import json as _json, hashlib, os
 
-pj_hash = ""
-pj_filename = ""
-# Grab any projector validation meta saved during the run (if projected(file))
-_proj_meta = st.session_state.get("proj_meta", {}) or {}
-proj_consistent = _proj_meta.get("projector_consistent_with_d", None)
+# Pull projector meta saved during the run (best source of truth)
+_run_proj_meta = st.session_state.get("proj_meta", {}) or {}
+pj_filename    = _run_proj_meta.get("projector_filename", "")
+pj_hash        = _run_proj_meta.get("projector_hash", "")
+proj_consistent = _run_proj_meta.get("projector_consistent_with_d", None)
 
-if cfg_active.get("source", {}).get("3") == "file":
+# If no run meta (e.g., first render after app reload), fall back to the file on disk
+if (not pj_hash) and cfg_active.get("source", {}).get("3") == "file":
     pj_path = cfg_active.get("projector_files", {}).get("3")
     if pj_path and os.path.exists(pj_path):
         try:
             with open(pj_path, "r") as _pf:
-                _P3_json = _json.load(_pf)  # expect list-of-lists or block schema
+                _P3_json = _json.load(_pf)  # list-of-lists or {"blocks":{"3":[...]}}
             try:
-                # Prefer your helper; else deterministic JSON hash
                 pj_hash = hashes.content_hash_of({"P3": _P3_json})
             except Exception:
                 pj_hash = hashlib.sha256(
                     _json.dumps(_P3_json, sort_keys=True, separators=(",", ":")).encode()
                 ).hexdigest()
-            pj_filename = pj_path
+            pj_filename = pj_path if not pj_filename else pj_filename
         except Exception as _e:
             st.warning(f"Could not read projector file for hashing: {pj_path} ({_e})")
 
@@ -1901,14 +1901,14 @@ policy_block = {
     "enabled_layers": cfg_active.get("enabled_layers", []),
     "modes":          cfg_active.get("modes", {}),
     "source":         cfg_active.get("source", {}),
-    "projector_hash": pj_hash,               # empty unless projected(file) w/ valid file
+    "projector_hash": pj_hash or "",         # empty unless we have one
 }
 if pj_filename:
     policy_block["projector_filename"] = pj_filename
 if proj_consistent is not None:
     policy_block["projector_consistent_with_d"] = bool(proj_consistent)
 
-# ---------- Identity (authoritative district; robust run_id) ----------
+# ---------- Identity (authoritative district; robust run_id) -----------------
 # Prefer the authoritative binding from _district_info
 _di = st.session_state.get("_district_info", {}) or {}
 district_id = (
@@ -1917,7 +1917,7 @@ district_id = (
     or "UNKNOWN"
 )
 
-run_id_val  = hashes.run_id(
+run_id_val = hashes.run_id(
     hashes.bundle_content_hash([
         ("boundaries", boundaries.dict() if hasattr(boundaries, "dict") else {}),
         ("cmap",       cmap.dict()       if hasattr(cmap,       "dict") else {}),
@@ -1935,12 +1935,7 @@ identity_block = {
     "field": "GF(2)",
 }
 
-
-# ---------- Tiny polish: filenames + signatures ----------
-# REQUIRE: inputs_block, diagnostics_block, cfg_active, policy_label, out,
-#          boundaries, cmap, (optional) f_H already exist in this scope.
-
-# -- helper: safe name lookups --
+# ---------- Tiny polish: filenames (never blank) -----------------------------
 def _name_from_state(key: str) -> str:
     v = st.session_state.get(key)
     return v if isinstance(v, str) and v.strip() else ""
@@ -1955,40 +1950,35 @@ def _name_or_default(sesskey: str, file_obj, default_name: str) -> str:
             return nm
     return default_name
 
-# 1) Attach/ensure human filenames ONCE (top-level inputs.filenames)
 inputs_block.setdefault("filenames", {})
-inputs_block["filenames"]["boundaries"] = _name_or_default("fname_boundaries", None, "boundaries.json")
-inputs_block["filenames"]["C"]          = _name_or_default("fname_cmap",       None, "cmap.json")
-inputs_block["filenames"]["U"]          = _name_or_default("fname_shapes",     None, "shapes.json")
+inputs_block["filenames"]["boundaries"] = _name_or_default("fname_boundaries", None,  "boundaries.json")
+inputs_block["filenames"]["C"]          = _name_or_default("fname_cmap",       None,  "cmap.json")
+inputs_block["filenames"]["U"]          = _name_or_default("fname_shapes",     None,  "shapes.json")
 inputs_block["filenames"]["H"]          = _name_or_default("fname_h",          f_H if 'f_H' in locals() else None, "H.json")
 
-# ---------- Ensure diagnostics + d-signature are available (robust) ----------
-
-# 0) Always get current blocks
+# ---------- Diagnostics bootstrap (if missing) --------------------------------
 _blocks_B = boundaries.blocks.__root__
 _blocks_C = cmap.blocks.__root__
 d3 = _blocks_B.get("3") or []
 C3 = _blocks_C.get("3") or []
 
-# helper: lane mask from d3 (policy-agnostic)
 def _lane_mask_from_d3(_d3):
     if not _d3 or not _d3[0]:
         return []
     cols = len(_d3[0])
     return [1 if any(row[j] & 1 for row in _d3) else 0 for j in range(cols)]
 
-# 1) Bootstrap diagnostics_block if missing
 if 'diagnostics_block' not in locals() or not isinstance(diagnostics_block, dict):
     from otcore.linalg_gf2 import mul, add, eye
     H2 = (H_local.blocks.__root__.get("2") or []) if 'H_local' in locals() else []
     lane_mask_k3 = _lane_mask_from_d3(d3)
-    # compute lane vectors (bottom rows masked to lane columns)
+
     def _bottom_row(M): return M[-1] if (M and len(M)) else []
     def _mask(vec, idx): return [vec[j] for j in idx] if (vec and idx) else []
-    idx = [j for j, m in enumerate(lane_mask_k3) if m]
 
+    idx   = [j for j, m in enumerate(lane_mask_k3) if m]
     H2d3  = (mul(H2, d3) if (H2 and d3) else [])
-    from otcore.linalg_gf2 import add, eye  # reimport safe if not above
+    from otcore.linalg_gf2 import add, eye  # safe re-import
     C3pI3 = add(C3, eye(len(C3))) if C3 else []
 
     diagnostics_block = {
@@ -1997,7 +1987,7 @@ if 'diagnostics_block' not in locals() or not isinstance(diagnostics_block, dict
         "lane_vec_C3plusI3": _mask(_bottom_row(C3pI3), idx),
     }
 
-# 2) d-signature (from current d3): rank, ker_dim, lane_pattern
+# ---------- Signatures (rank/ker + lane patterns) ----------------------------
 def _gf2_rank(M):
     if not M or not M[0]:
         return 0
@@ -2008,11 +1998,9 @@ def _gf2_rank(M):
         pivot = None
         for i in range(r, m):
             if A[i][c] & 1:
-                pivot = i
-                break
+                pivot = i; break
         if pivot is None:
-            c += 1
-            continue
+            c += 1; continue
         if pivot != r:
             A[r], A[pivot] = A[pivot], A[r]
         for i in range(m):
@@ -2025,12 +2013,9 @@ rank_d3    = _gf2_rank(d3) if d3 else 0
 ncols_d3   = len(d3[0]) if (d3 and d3[0]) else 0
 ker_dim_d3 = max(ncols_d3 - rank_d3, 0)
 
-lane_mask_top = diagnostics_block.get("lane_mask_k3", [])
-if not lane_mask_top:  # fallback if diagnostics had no mask
-    lane_mask_top = _lane_mask_from_d3(d3)
-lane_pattern = "".join("1" if x else "0" for x in lane_mask_top) if lane_mask_top else ""
+lane_mask_top = diagnostics_block.get("lane_mask_k3") or _lane_mask_from_d3(d3)
+lane_pattern  = "".join("1" if x else "0" for x in lane_mask_top) if lane_mask_top else ""
 
-# 3) fixture_signature: support(C3 + I3) on LANE columns only
 from otcore.linalg_gf2 import add, eye
 C3pI3 = add(C3, eye(len(C3))) if C3 else []
 lane_idxs = [j for j, m in enumerate(lane_mask_top) if m]
@@ -2050,8 +2035,7 @@ sig_block = {
     "echo_context": _prev_echo,
 }
 
-# ---- Policy block (with projector provenance) --------------------------------
-# provenance shims (handle various helper signatures in your codebase)
+# ---------- Provenance Π hash (active policy) --------------------------------
 def _prov_for_active(cfg, lane_mask, district_id):
     try:
         return projector_provenance_hash(cfg=cfg, lane_mask_k3=lane_mask, district_id=district_id)
@@ -2073,18 +2057,18 @@ def _prov_for_active(cfg, lane_mask, district_id):
     except Exception:
         return ""
 
-# authoritative district (prefer session binding)
-_di = st.session_state.get("_district_info", {}) or {}
-district_id_auth = _di.get("district_id") or st.session_state.get("district_id", "UNKNOWN")
+district_id_auth   = district_id
 lane_mask_for_active = lane_mask_top
+proj_hash_active   = ""
 
-proj_hash_active = ""
-if cfg_active.get("enabled_layers"):  # only when projected is active
+if cfg_active.get("enabled_layers"):  # projected mode only
     try:
         proj_hash_active = _prov_for_active(cfg_active, lane_mask_for_active, district_id_auth)
     except Exception:
         try:
-            file_hash_active, rt_hash_active = projector_hashes_from_context(cfg_active, boundaries, st.session_state.get("_projector_cache"))
+            file_hash_active, rt_hash_active = projector_hashes_from_context(
+                cfg_active, boundaries, st.session_state.get("_projector_cache")
+            )
             proj_hash_active = file_hash_active or rt_hash_active or ""
         except Exception:
             try:
@@ -2092,25 +2076,34 @@ if cfg_active.get("enabled_layers"):  # only when projected is active
             except Exception:
                 proj_hash_active = ""
 
-policy_block = {
-    "label":          policy_label,                 # e.g. "strict" or "projected(columns@k=3,auto|file)"
-    "policy_tag":     policy_label,
-    "enabled_layers": cfg_active.get("enabled_layers", []),
-    "modes":          cfg_active.get("modes", {}),
-    "source":         cfg_active.get("source", {}),
-    "projector_hash": proj_hash_active,             # provenance hash (empty for strict)
-}
+# Only backfill projector_hash if we don't already have the file hash
+if not policy_block.get("projector_hash"):
+    policy_block["projector_hash"] = proj_hash_active
 
-# ---- FULL cert payload (single source of truth) ------------------------------
+# ---------- Checks block (merge or bootstrap) --------------------------------
+# Prefer the latest run's output
+out = st.session_state.get("overlap_out", (out if 'out' in locals() else {})) or {}
 is_strict = (not cfg_active.get("enabled_layers"))
-k3_true   = bool((out or {}).get("3", {}).get("eq", False))
+checks_extended = {
+    "grid": True,                 # placeholders unless you compute real ones
+    "fence": True,
+    "ker_guard": "enforced" if is_strict else "off",
+}
+# If a checks_block already exists, extend it; else build from 'out'
+if 'checks_block' in locals() and isinstance(checks_block, dict):
+    checks_block = {**checks_block, **checks_extended}
+else:
+    checks_block = {**out, **checks_extended}
+
+# ---------- FULL cert payload (single source of truth) -----------------------
+k3_true = bool(out.get("3", {}).get("eq", False))
 
 cert_payload = {
     "identity":    identity_block,
     "policy":      policy_block,
     "inputs":      inputs_block,       # includes hashes + dims + filenames
     "diagnostics": diagnostics_block,  # lane_mask_k3 / lane_vec_*
-    "checks":      checks_block,       # per-k eq/n_k (+ grid/fence/ker_guard/residual_tag if present)
+    "checks":      checks_block,       # per-k eq/n_k (+ grid/fence/ker_guard...)
     "signatures":  sig_block,          # rank/ker/lane signatures
     "promotion": {
         "eligible_for_promotion": k3_true,
@@ -2119,6 +2112,7 @@ cert_payload = {
     },
     "policy_tag": policy_label,        # used by exporter & bundle names
 }
+
 
 # ---- Optional: embed A/B snapshots into the cert (fresh-only) ---------------
 ab_ctx = st.session_state.get("ab_compare", {}) or {}
