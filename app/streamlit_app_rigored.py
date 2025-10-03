@@ -850,26 +850,26 @@ if st.session_state.get("_projector_cache_key") != _cache_key:
 cache = st.session_state.get("_projector_cache") or projector.preload_projectors_from_files(_cfg_for_cache)
 st.session_state["_projector_cache"] = cache  # keep around for cert validation
 
-            # ---------- RUN OVERLAP ----------
-    def _gf2_idempotent(P):
-        try:
-            n = len(P); m = len(P[0]) if n else 0
-            if n != m:  # must be square
-                return False
-            PP = [[0]*n for _ in range(n)]
-            for i in range(n):
-                for k in range(n):
-                    if P[i][k] & 1:
-                        rowk = P[k]
-                        for j in range(n):
-                            PP[i][j] ^= (rowk[j] & 1)
-            for i in range(n):
-                for j in range(n):
-                    if (PP[i][j] & 1) != (P[i][j] & 1):
-                        return False
-            return True
-        except Exception:
+        # ---------- RUN OVERLAP ----------
+def _gf2_idempotent(P):
+    try:
+        n = len(P); m = len(P[0]) if n else 0
+        if n != m:  # must be square
             return False
+        PP = [[0]*n for _ in range(n)]
+        for i in range(n):
+            for k in range(n):
+                if P[i][k] & 1:
+                    rowk = P[k]
+                    for j in range(n):
+                        PP[i][j] ^= (rowk[j] & 1)
+        for i in range(n):
+            for j in range(n):
+                if (PP[i][j] & 1) != (P[i][j] & 1):
+                    return False
+        return True
+    except Exception:
+        return False
 
     def _diag_vec(P):
         try:
