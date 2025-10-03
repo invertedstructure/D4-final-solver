@@ -820,44 +820,36 @@ with tab2:
 
                         
 
-    # --- Active policy badge ---------------------------------------------------
-    src3 = cfg_active.get("source", {}).get("3", "")
-    if policy_choice == "strict":
-        _policy_mode_badge = "strict"
-    elif src3 == "file":
-        _policy_mode_badge = "projected(file)"
-    else:
-        _policy_mode_badge = "projected(auto)"
-    policy_label = policy_label_from_cfg(cfg_active)
-    st.caption(f"Policy: **{policy_label}** · mode: {_policy_mode_badge}")
+  # --- Active policy badge ---------------------------------------------------
+src3 = cfg_active.get("source", {}).get("3", "")
+if policy_choice == "strict":
+    _policy_mode_badge = "strict"
+elif src3 == "file":
+    _policy_mode_badge = "projected(file)"
+else:
+    _policy_mode_badge = "projected(auto)"
+policy_label = policy_label_from_cfg(cfg_active)
+st.caption(f"Policy: **{policy_label}** · mode: {_policy_mode_badge}")
 
-    # --- Projector cache-bust key (boundaries/source/file changes) -------------
+# --- Projector cache-bust key (boundaries/source/file changes) -------------
 _di = st.session_state.get("_district_info", {}) or {}
 _bound_hash = _di.get("boundaries_hash", "")
 
-# Choose the cfg we’re about to load cache for
-_cfg_for_cache = cfg_active if 'cfg_active' in locals() else _cfg_proj_for_ab
+# We’re in the Overlap tab, so use cfg_active
+_cfg_for_cache = cfg_active
 _src3  = _cfg_for_cache.get("source", {}).get("3", "")
 _file3 = _cfg_for_cache.get("projector_files", {}).get("3", "") if _src3 == "file" else ""
 
 _cache_key = f"{_bound_hash}|src3={_src3}|file3={_file3}"
 
-# Use different session keys for overlap vs A/B to avoid collisions
-_cache_key_name = "_projector_cache_key" if 'cfg_active' in locals() else "_projector_cache_key_ab"
-_cache_blob_name = "_projector_cache" if 'cfg_active' in locals() else "_projector_cache_ab"
+if st.session_state.get("_projector_cache_key") != _cache_key:
+    st.session_state.pop("_projector_cache", None)
+    st.session_state["_projector_cache_key"] = _cache_key
 
-if st.session_state.get(_cache_key_name) != _cache_key:
-    st.session_state.pop(_cache_blob_name, None)
-    st.session_state[_cache_key_name] = _cache_key
+# Preload (rebuilt if cache-busted just above)
+cache = st.session_state.get("_projector_cache") or projector.preload_projectors_from_files(_cfg_for_cache)
+st.session_state["_projector_cache"] = cache  # keep around for cert validation
 
-# finally preload (will rebuild if we just busted it)
-_cache_blob = st.session_state.get(_cache_blob_name) or projector.preload_projectors_from_files(_cfg_for_cache)
-st.session_state[_cache_blob_name] = _cache_blob
-
-
-    # --- Preload projectors AFTER cfg_active is finalized ---------------------
-    cache = projector.preload_projectors_from_files(cfg_active)
-    st.session_state["_projector_cache"] = cache  # keep around for cert validation
 
             # ---------- RUN OVERLAP ----------
     def _gf2_idempotent(P):
