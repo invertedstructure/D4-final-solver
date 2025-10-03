@@ -478,8 +478,18 @@ with st.sidebar:
     # Fill with your known fixtures (hash(boundaries.json bytes) -> "D2"/"D3"/...)
     DISTRICT_MAP = {
         # "aaaaaaaa...": "D3",
-        # "bbbbbbbb...": "D2",
-    }
+        "4356e6b608443b315d7abc50872ed97a9e2c837ac8b85879394495e64ec71521": "D2",
+}
+
+    # --- Peek raw-bytes boundaries hash so you can populate DISTRICT_MAP ----------
+    if f_bound is not None and hasattr(f_bound, "getvalue"):
+        import hashlib
+        _raw = f_bound.getvalue()               # RAW BYTES of uploaded boundaries.json
+        _bhash = hashlib.sha256(_raw).hexdigest()
+        st.caption(f"boundaries raw-bytes hash: {_bhash}")
+        # (Optional) Handy copy-paste line to add into DISTRICT_MAP:
+        st.code(f'DISTRICT_MAP["{_bhash}"] = "D?"  # ← fill D1/D3/D4', language="python")
+
 
     # ---- load jsons ---------------------------------------------------------
     d_shapes = read_json_file(f_shapes)
@@ -1420,6 +1430,17 @@ cert_payload.setdefault("artifact_hashes", {
     "U_hash":          inputs_block.get("U_hash", ""),
 })
 cert_payload["artifact_hashes"]["projector_hash"] = cert_payload.get("policy", {}).get("projector_hash", "")
+
+# --- Authoritative district -> force into cert before write -------------------
+_di = st.session_state.get("_district_info", {}) or {}
+if _di:
+    cert_payload["district_id"]     = _di.get("district_id", cert_payload.get("district_id", "UNKNOWN"))
+    cert_payload["boundaries_hash"] = _di.get("boundaries_hash", cert_payload.get("boundaries_hash", ""))
+
+    # keep inputs in sync to avoid parsed/bytes double-hash divergence
+    inputs_block["boundaries_hash"] = cert_payload["boundaries_hash"]
+    cert_payload["inputs"] = inputs_block
+
 
 # filenames into inputs + sync inputs.boundaries_hash to authoritative one
 if "boundaries_filename" not in inputs_block:
