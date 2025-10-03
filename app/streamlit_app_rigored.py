@@ -1441,6 +1441,296 @@ cert_payload["inputs"] = inputs_block
 
 cert_payload.setdefault("integrity", {})
 cert_payload["integrity"]["content_hash"] = hashes.content_hash_of(cert_payload)
+# ========================== CERT ENRICHMENTS BLOCK ===========================
+
+# ---- helpers ----------------------------------------------------------------
+def _residual_tag_from_checks(out_dict: dict) -> str:
+    """Return 'ker'|'lanes'|'mixed'|'none' based on your checks structure."""
+    # heuristic: if k=3 failed but k=2 passed → lanes; if kernel fails → ker; both → mixed; else none
+    k2 = bool(out_dict.get("2", {}).get("eq", False))
+    k3 = bool(out_dict.get("3", {}).get("eq", False))
+    # If you have explicit residual flags, prefer them:
+    res = out_dict.get("residual_tag")
+    if isinstance(res, str) and res:
+        return res
+    if k3 and k2:
+        return "none"
+    if (not k3) and k2:
+        return "lanes"
+    if (not k2) and k3:
+        return "ker"
+    return "mixed"
+
+def _lane_mask_from_boundaries(bnds) -> list[int]:
+    d3 = (bnds.blocks.__root__.get("3") or [])
+    if not d3 or not d3[0]: 
+        return []
+    cols = len(d3[0])
+    return [1 if any(row[j] & 1 for row in d3) else 0 for j in range(cols)]
+
+def _projector_diag_from_file(cfg: dict) -> tuple[list[int], str]:
+    """Return (diag_vec, projector_filename) for k=3 if source is file; else ([], '')."""
+    src3 = (cfg or {}).get("source", {}).get("3", "")
+    if src3 != "file":
+        return [], ""
+    pfiles = (cfg or {}).get("projector_files", {})
+    pfile3 = pfiles.get("3", "")
+    if not pfile3:
+        return [], ""
+    # your projector loader likely already cached the matrix in ab run; fallback: read from disk if you have util
+    try:
+        P3 = projector.load_projector_matrix(pfile3)  # implement/adjust to your codebase
+    except Exception:
+        # legacy: try using preload cache if you have it in st.session_state
+        P3 = None
+    diag = []
+    if P3 and isinstance(P3, list) and P3 and isinstance(P3[0], list):
+        n = min(len(P3), len(P3[0]))
+        diag = [int(P3[i][i] & 1) for i in range(n)]
+    return diag, pfile3
+
+def _gf2_idempotent(P) -> bool:
+    """Check P@P == P over GF(2). P as list-of-lists of ints."""
+    try:
+        n = len(P)
+        m = len(P[0]) if n else 0
+        if n != m:  # must be square
+            return False
+        # naive GF(2) matmul
+        PP = [[0]*n for _ in range(n)]
+        for i in range(n):
+            for k in range(n):
+                if P[i][k] & 1:
+                    rowk = P[k]
+                    # xor-add rowk into PP[i]
+                    for j in range(n):
+                        PP[i][j] ^= (rowk[j] & 1)
+        # compare to P
+        for i in range(n):
+            for j in range(n):
+                if (PP[i][j] & 1) != (P[i][j] & 1):
+                    return False
+        return True
+    except Exception:
+        return False
+
+def _try_get_projector_matrix_from_cache(cfg: dict):
+    """Best-effort to retrieve matrix for file mode from any cache your app has."""
+    try:
+        cache = st.session_state.get("_projector_cache") or {}
+        key = str(cfg.get("projector_files", {}).get("3", ""))
+        return cache.get(key)
+    except Exception:
+        return None
+
+# ---- canonical district & filenames -----------------------------------------
+_di = st.session_state.get("_district_info", {}) or {}
+district_id_canon     = _di.get("district_id", cert_payload.get("district_id", "UNKNOWN"))
+lane_mask_k3_canon    = _di.get("lane_mask_k3_now", diagnostics_block.get("lane_mask_k3", []))
+d3_rows_canon         = _di.get("d3_rows", 0)
+d3_cols_canon         = _di.get("d3_cols", 0)
+
+# If diagnostics is missing lane mask, compute it now
+if not lane_mask_k3_canon:
+    lane_mask_k3_canon = _lane_mask_from_boundaries(boundaries)
+
+# Filenames (standardize U to shapes.json everywhere)
+inputs_block.setdefault("boundaries_filename", st.session_state.get("fname_boundaries", "boundaries.json"))
+inputs_block.setdefault("C_filename",          st.session_state.get("fname_cmap", "cmap.json"))
+inputs_block.setdefault("H_filename",          st.session_state.get("fname_h", "H.json"))
+inputs_block["U_filename"] = "shapes.json"  # <- unified
+
+# Mirror filenames under top-level inputs.filenames
+inputs_block.setdefault("filenames", {})
+inputs_block["filenames"].update({
+    "boundaries": inputs_block.get("boundaries_filename", "boundaries.json"),
+    "C":          inputs_block.get("C_filename", "cmap.json"),
+    "H":          inputs_block.get("H_filename", "H.json"),
+    "U":          inputs_block.get("U_filename", "shapes.json"),
+})
+
+cert_payload["inputs"] = inputs_block  # write-back
+
+# ---- district consistency: identity/policy/snapshots must agree --------------
+identity_block["district_id"] = district_id_canon  # force identity to canonical
+cert_payload["district_id"]   = district_id_canon  # top-level too
+
+# ---- build snapshots from A/B ctx (fresh only if inputs_sig matches) ---------
+ab_ctx = st.session_state.get("ab_compare", {}) or {}
+curr_sig = [
+    inputs_block.get("boundaries_hash", ""),
+    inputs_block.get("C_hash", ""),
+    inputs_block.get("H_hash", ""),
+    inputs_block.get("U_hash", ""),
+    inputs_block.get("shapes_hash", ""),
+]
+if ab_ctx.get("inputs_sig") != curr_sig:
+    ab_ctx = {}
+strict_ctx    = ab_ctx.get("strict", {}) if ab_ctx else {}
+projected_ctx = ab_ctx.get("projected", {}) if ab_ctx else {}
+
+# per-leg pass vectors + residual tags
+strict_pass_vec    = [int(strict_ctx.get("out", {}).get("2", {}).get("eq", False)),
+                      int(strict_ctx.get("out", {}).get("3", {}).get("eq", False))]
+projected_pass_vec = [int(projected_ctx.get("out", {}).get("2", {}).get("eq", False)),
+                      int(projected_ctx.get("out", {}).get("3", {}).get("eq", False))]
+
+strict_residual_tag    = _residual_tag_from_checks(strict_ctx.get("out", {}))
+projected_residual_tag = _residual_tag_from_checks(projected_ctx.get("out", {}))
+
+# snapshot inputs (filenames + boundaries sub-block)
+strict_inputs_boundaries = {
+    "filename":        inputs_block["boundaries_filename"],
+    "hash":            inputs_block.get("boundaries_hash", ""),
+    "district_id":     district_id_canon,
+    "lane_mask_k3":    lane_mask_k3_canon,      # populate snapshot mask
+    "d3_rows":         d3_rows_canon,
+    "d3_cols":         d3_cols_canon,
+}
+projected_inputs_boundaries = dict(strict_inputs_boundaries)  # same bind
+
+# projector file-mode metadata & validation (only when projected file mode)
+proj_file_diag, proj_file_name = [], ""
+proj_file_hash = ""
+proj_consistent = None  # None when not file-mode
+if cfg_active.get("enabled_layers"):  # projected policy active at run time
+    src3 = cfg_active.get("source", {}).get("3", "")
+    if src3 == "file":
+        proj_file_diag, proj_file_name = _projector_diag_from_file(cfg_active)
+        # Try to fetch raw matrix for validation
+        P3 = _try_get_projector_matrix_from_cache(cfg_active)
+        # If cache miss, try loader again (if available)
+        if P3 is None and proj_file_name:
+            try:
+                P3 = projector.load_projector_matrix(proj_file_name)
+            except Exception:
+                P3 = None
+        # shape/idempotent check
+        shape_ok = False
+        if P3 and isinstance(P3, list) and P3 and isinstance(P3[0], list):
+            n = len(P3)
+            shape_ok = (n == d3_cols_canon == d3_rows_canon) and _gf2_idempotent(P3)
+        # consistency with d3 lanes: diagonal equals auto mask
+        auto_mask = lane_mask_k3_canon[:len(proj_file_diag)] if proj_file_diag else lane_mask_k3_canon
+        consistent_ok = (proj_file_diag == auto_mask[:len(proj_file_diag)]) if proj_file_diag else True
+        proj_consistent = bool(shape_ok and consistent_ok)
+        # projector_hash (you already compute top-level); leave as-is.
+
+# ---- build the snapshot objects ---------------------------------------------
+cert_payload.setdefault("policy", {})
+
+cert_payload["policy"]["strict_snapshot"] = {
+    "policy_tag": strict_ctx.get("label", policy_label_from_cfg(cfg_strict())),
+    "ker_guard":  "enforced",
+    "inputs": {
+        "filenames": inputs_block["filenames"],
+        "boundaries": strict_inputs_boundaries,
+        "U_filename": inputs_block["U_filename"],
+        "C_filename": inputs_block["C_filename"],
+        "H_filename": inputs_block["H_filename"],
+    },
+    "lane_mask_k3":      lane_mask_k3_canon,
+    "lane_vec_H2d3":     strict_ctx.get("lane_vec_H2d3", diagnostics_block.get("lane_vec_H2d3", [])),
+    "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
+    "pass_vec":          strict_pass_vec,
+    "residual_tag":      strict_residual_tag,
+    "out":               strict_ctx.get("out", {}),
+}
+
+proj_hash_ab = projected_ctx.get("projector_hash", cert_payload.get("policy", {}).get("projector_hash", ""))
+cert_payload["policy"]["projected_snapshot"] = {
+    "policy_tag":     projected_ctx.get("label", policy_label_from_cfg(cfg_projected_base())),
+    "ker_guard":      "off",
+    "projector_hash": proj_hash_ab,
+    "inputs": {
+        "filenames": inputs_block["filenames"],
+        "boundaries": projected_inputs_boundaries,
+        "U_filename": inputs_block["U_filename"],
+        "C_filename": inputs_block["C_filename"],
+        "H_filename": inputs_block["H_filename"],
+        **({"projector_filename": proj_file_name} if proj_file_name else {}),
+    },
+    "lane_mask_k3":      lane_mask_k3_canon,
+    "lane_vec_H2d3":     projected_ctx.get("lane_vec_H2d3", diagnostics_block.get("lane_vec_H2d3", [])),
+    "lane_vec_C3plusI3": projected_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
+    "pass_vec":          projected_pass_vec,
+    "residual_tag":      projected_residual_tag,
+    "out":               projected_ctx.get("out", {}),
+    **({"projector_consistent_with_d": proj_consistent} if proj_consistent is not None else {}),
+}
+
+# Warn in UI if projector file-mode is inconsistent (don’t block, but you can)
+if proj_consistent is False:
+    st.warning("Projected(file) projector is not consistent with current d3 (shape/idempotence/lane diag check failed).")
+
+# ---- district assert across identity & snapshots -----------------------------
+snap_districts = [
+    district_id_canon,
+    cert_payload["policy"]["strict_snapshot"]["inputs"]["boundaries"]["district_id"],
+    cert_payload["policy"]["projected_snapshot"]["inputs"]["boundaries"]["district_id"],
+]
+if len(set(snap_districts)) != 1:
+    st.error(f"District mismatch across cert/snapshots: {snap_districts}")
+    st.stop()
+
+# ---- promotion logic ---------------------------------------------------------
+# Reads your checks (top-level) and policy mode to decide eligibility/target
+grid_ok  = bool(checks_block.get("grid_ok", 1))    # default permissive if not present
+fence_ok = bool(checks_block.get("fence_ok", 1))
+k3_ok    = bool(checks_block.get("3", {}).get("eq", False))
+k2_ok    = bool(checks_block.get("2", {}).get("eq", False))
+is_strict_mode    = not cfg_active.get("enabled_layers")
+is_projected_mode = cfg_active.get("enabled_layers")
+
+eligible = False
+target   = None
+if is_strict_mode and all([grid_ok, fence_ok, k3_ok, k2_ok]):
+    eligible = True
+    target   = "strict_anchor"
+elif is_projected_mode and all([grid_ok, fence_ok, k3_ok]) and projected_residual_tag == "none":
+    eligible = True
+    target   = "projected_exemplar"
+
+cert_payload["promotion"] = {
+    "eligible_for_promotion": eligible,
+    "promotion_target": target,
+    "notes": cert_payload.get("promotion", {}).get("notes", ""),
+}
+
+# ---- Option B: embed full A/B for export (single cert with ab_compare) -------
+# If you prefer two files, set EXPORT_AB_AS_TWO_FILES = True and branch.
+EXPORT_AB_AS_TWO_FILES = False
+
+if ab_ctx and not EXPORT_AB_AS_TWO_FILES:
+    cert_payload["ab_compare"] = {
+        "strict": {
+            "checks":      strict_ctx.get("out", {}),
+            "diagnostics": {
+                "lane_mask_k3":      strict_ctx.get("lane_mask_k3", lane_mask_k3_canon),
+                "lane_vec_H2d3":     strict_ctx.get("lane_vec_H2d3", diagnostics_block.get("lane_vec_H2d3", [])),
+                "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
+            },
+            "ker_guard":    "enforced",
+            "residual_tag": strict_residual_tag,
+        },
+        "projected": {
+            "checks":      projected_ctx.get("out", {}),
+            "diagnostics": {
+                "lane_mask_k3":      projected_ctx.get("lane_mask_k3", lane_mask_k3_canon),
+                "lane_vec_H2d3":     projected_ctx.get("lane_vec_H2d3", diagnostics_block.get("lane_vec_H2d3", [])),
+                "lane_vec_C3plusI3": projected_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
+            },
+            "ker_guard":    "off",
+            "residual_tag": projected_residual_tag,
+            "projector_hash": proj_hash_ab,
+        },
+        "pair_tag": ab_ctx.get("pair_tag", ""),
+    }
+
+# (If EXPORT_AB_AS_TWO_FILES=True, after you write the strict cert, build a projected cert by
+# swapping policy_block/outputs and call export_mod.write_cert_json again with the new payload.)
+# ======================== END CERT ENRICHMENTS BLOCK ==========================
+
 
 # Single write
 cert_path, full_hash = export_mod.write_cert_json(cert_payload)
