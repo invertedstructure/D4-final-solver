@@ -1234,36 +1234,62 @@ if ab_ctx:
 
     cert_payload.setdefault("policy", {})
 
-    # --- District info prelude (authoritative, no UI drift) ----------------------
+# --- District info prelude (authoritative, no UI drift) ----------------------
 _di = st.session_state.get("_district_info", {}) or {}
 
-# Current d3 dims (fallbacks if _district_info is missing)
+# tiny helper (local scope) to compute mask from boundaries if needed
+def _lane_mask_from_d3(d3_mat):
+    if not d3_mat or not d3_mat[0]:
+        return []
+    cols = len(d3_mat[0])
+    return [1 if any(row[j] & 1 for row in d3_mat) else 0 for j in range(cols)]
+
+# Current d3 dims + mask (prefer session stamp; else compute from parsed boundaries)
 try:
     _d3 = (boundaries.blocks.__root__.get("3") or [])
-    _d3_rows = len(_d3)
-    _d3_cols = len(_d3[0]) if _d3 and _d3[0] else 0
 except Exception:
-    _d3_rows, _d3_cols = 0, 0
+    _d3 = []
+_d3_rows = len(_d3)
+_d3_cols = (len(_d3[0]) if _d3 and _d3[0] else 0)
+_lane_mask_now = _di.get("lane_mask_k3_now")
+if _lane_mask_now is None:
+    _lane_mask_now = _lane_mask_from_d3(_d3)
+
+# Resolve authoritative boundaries_hash (session → inputs → cert)
+_boundaries_hash = (
+    _di.get("boundaries_hash")
+    or inputs_block.get("boundaries_hash", "")
+    or cert_payload.get("boundaries_hash", "")
+)
+
+# Keep inputs in sync with the authoritative boundaries_hash
+if _boundaries_hash:
+    inputs_block["boundaries_hash"] = _boundaries_hash
+
+# Resolve district_id (session → cert → DISTRICT_MAP if defined → UI fallback → UNKNOWN)
+try:
+    # If you defined DISTRICT_MAP at module scope, use it; otherwise this just no-ops.
+    _district_from_map = (DISTRICT_MAP.get(_boundaries_hash) if "DISTRICT_MAP" in globals() else None)
+except Exception:
+    _district_from_map = None
+
+_district_id = (
+    _di.get("district_id")
+    or cert_payload.get("district_id")
+    or _district_from_map
+    or st.session_state.get("district_id")
+    or "UNKNOWN"
+)
 
 fresh_district_info = {
-    "district_id": (
-        _di.get("district_id")
-        or cert_payload.get("district_id")
-        or st.session_state.get("district_id", "UNKNOWN")
-    ),
-    "boundaries_hash": (
-        _di.get("boundaries_hash")
-        or inputs_block.get("boundaries_hash", "")
-    ),
+    "district_id":        _district_id,
+    "boundaries_hash":    _boundaries_hash,
     "district_signature": _di.get("district_signature", ""),
-    "lane_mask_k3_now": (
-        _di.get("lane_mask_k3_now")
-        if _di.get("lane_mask_k3_now") is not None
-        else (diagnostics_block.get("lane_mask_k3", []) if isinstance(diagnostics_block, dict) else [])
-    ),
-    "d3_rows": _di.get("d3_rows", _d3_rows),
-    "d3_cols": _di.get("d3_cols", _d3_cols),
+    "lane_mask_k3_now":   _lane_mask_now,
+    "d3_rows":            _di.get("d3_rows", _d3_rows),
+    "d3_cols":            _di.get("d3_cols", _d3_cols),
 }
+
 
 # Ensure we have a projector hash for the projected snapshot (if not already computed)
 def _prov_hash(cfg, lane_mask, district_id):
@@ -1384,13 +1410,21 @@ cert_payload.setdefault("artifact_hashes", {
 })
 cert_payload["artifact_hashes"]["projector_hash"] = cert_payload.get("policy", {}).get("projector_hash", "")
 
-# Strengthen provenance: ensure filenames are present in inputs
+# ---- Strengthen provenance: ensure filenames are present in inputs -----------
 if "boundaries_filename" not in inputs_block:
     inputs_block["boundaries_filename"] = inputs_block.get("boundaries_name", "boundaries.json")
 if "U_filename" not in inputs_block:
     inputs_block["U_filename"] = inputs_block.get("U_name", "U.json")
-cert_payload["inputs"] = inputs_block  # write-back in case we added filenames
 
+# Make sure inputs' boundaries_hash matches the authoritative top-level one
+# (prevents “raw-bytes vs parsed-json” double-hash divergence)
+if cert_payload.get("boundaries_hash"):
+    inputs_block["boundaries_hash"] = cert_payload["boundaries_hash"]
+
+# Write back the (possibly updated) inputs
+cert_payload["inputs"] = inputs_block
+
+# Final integrity stamp
 cert_payload.setdefault("integrity", {})
 cert_payload["integrity"]["content_hash"] = hashes.content_hash_of(cert_payload)
 
