@@ -1614,6 +1614,96 @@ with st.expander("Recent logs (tails)"):
     except Exception as e:
         st.warning(f"Could not render Witness tail: {e}")
 
+    # ------------------------ Freeze AUTO → FILE (write Π + registry + switch + re-run) ------------------------
+from pathlib import Path as _Path
+
+_rc = st.session_state.get("run_ctx", {}) or {}
+_out = st.session_state.get("overlap_out", {}) or {}
+_di  = st.session_state.get("_district_info", {}) or {}
+_ib  = st.session_state.get("_inputs_block", {}) or {}
+
+_can_freeze = (_rc.get("mode") == "projected(auto)") and bool(_out.get("3", {}).get("eq", False))
+st.caption("Freeze AUTO → FILE writes Π to ./projectors/, logs it, switches policy to file, and re-runs.")
+
+if st.button("Freeze AUTO → FILE", key="btn_freeze_auto_to_file", disabled=not _can_freeze):
+    try:
+        P = _rc.get("P_active") or []
+        if not P:
+            raise ValueError("No AUTO projector present. Run Overlap in projected(auto) first.")
+
+        n3 = int(_rc.get("n3", 0))
+        lm = list(_rc.get("lane_mask_k3", []))
+        if n3 <= 0:
+            raise ValueError("n3 not known in run context.")
+
+        # Basic shape/idempotence/diagonal checks (light sanity; full validator already ran)
+        if len(P) != n3 or any(len(r) != n3 for r in P):
+            raise ValueError("P3_SHAPE: projector is not n3×n3.")
+
+        # (Optional) quick diag vs lane check; we don't block here (AUTO came from our pipeline),
+        # but it's helpful to warn if something is off.
+        diag = [(int(P[i][i]) & 1) for i in range(n3)]
+        if lm and diag[:len(lm)] != [int(x) & 1 for x in lm]:
+            st.warning("AUTO Π diagonal does not match lane mask; freezing anyway (source=AUTO).")
+
+        # Prepare payload + paths
+        district = (_di.get("district_id") or st.session_state.get("district_id") or "UNKNOWN")
+        pj_hash  = hash_matrix_norm(P)
+        pj_name  = f"projector_{district}.json"
+        pj_path  = _Path("projectors") / pj_name
+
+        _Path("projectors").mkdir(parents=True, exist_ok=True)
+
+        pj_payload = {
+            "schema_version": "1.0.0",
+            "written_at_utc": hashes.timestamp_iso_lisbon(),
+            "app_version":    getattr(hashes, "APP_VERSION", "v0.1-core"),
+            "blocks": {"3": P},
+        }
+
+        # Atomic write of projector file
+        tmp = pj_path.with_suffix(pj_path.suffix + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            _json.dump(pj_payload, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, pj_path)
+
+        # Append to registry (atomic JSONL)
+        reg_row = {
+            "schema_version": "1.0.0",
+            "written_at_utc": hashes.timestamp_iso_lisbon(),
+            "app_version":    getattr(hashes, "APP_VERSION", "v0.1-core"),
+            "district":       district,
+            "lane_mask_k3":   lm,
+            "filename":       str(pj_path.as_posix()),
+            "projector_hash": pj_hash,
+        }
+        try:
+            atomic_append_jsonl(_Path("projectors") / "projector_registry.jsonl", reg_row)
+        except NameError:
+            # Fallback if atomic_append_jsonl isn't in scope
+            with open(_Path("projectors") / "projector_registry.jsonl", "a", encoding="utf-8") as f:
+                f.write(_json.dumps(reg_row, separators=(",", ":"), sort_keys=True) + "\n")
+
+        # Switch UI policy to FILE + point to saved path
+        st.session_state["ov_last_pj_path"] = str(pj_path.as_posix())
+        st.session_state["ov_policy_choice"] = "projected(file)"
+
+        # Bust run caches so the next run reflects FILE mode
+        for k in ("run_ctx", "overlap_out", "residual_tags", "ab_compare"):
+            st.session_state.pop(k, None)
+
+        # Re-run Overlap immediately using FILE policy
+        run_overlap()
+
+        st.success(f"Frozen AUTO → FILE ✔︎  Π={pj_hash[:12]}…  → {pj_path}")
+        st.caption("Active policy switched to projected(file) and re-run completed.")
+
+    except Exception as e:
+        st.error(f"Freeze failed: {e}")
+  
+
 
 
 
