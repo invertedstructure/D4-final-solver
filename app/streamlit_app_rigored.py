@@ -1083,6 +1083,54 @@ with tab2:
     if st.button("Run Overlap", key="run_overlap"):
         run_overlap()
 
+# Put this ABOVE the "Self-tests run + banner" call (and inside `with tab2:` or at module level)
+
+def run_self_tests():
+    failures, warnings = [], []
+
+    ib = st.session_state.get("_inputs_block") or {}
+    di = st.session_state.get("_district_info") or {}
+    rc = st.session_state.get("run_ctx") or {}
+    ab = st.session_state.get("ab_compare") or {}
+    out = st.session_state.get("overlap_out") or {}
+
+    # HASH_COHERENT: boundaries hash in SSOTs must match
+    bh_ib = ib.get("boundaries_hash", "")
+    bh_di = di.get("boundaries_hash", "")
+    if bh_ib and bh_di and bh_ib != bh_di:
+        failures.append("HASH_COHERENT: _inputs_block.boundaries_hash ≠ _district_info.boundaries_hash")
+
+    # AUTO_OK / FILE_OK: if projected(file), require projector_consistent_with_d True
+    mode = rc.get("mode", "")
+    if mode.startswith("projected(file)"):
+        if not bool(rc.get("projector_consistent_with_d", False)):
+            failures.append("FILE_OK: projected(file) not consistent with d3")
+    elif mode.startswith("projected(auto)"):
+        # nothing to assert beyond existence of out
+        if "3" not in out:
+            warnings.append("AUTO_OK: no overlap_out present yet")
+
+    # AB_FRESH: if A/B is present, only fresh when inputs_sig equals current hashes
+    if ab:
+        def _hz(v): return v if isinstance(v, str) else ""
+        current_sig = [
+            _hz(ib.get("boundaries_hash","")),
+            _hz(ib.get("C_hash","")),
+            _hz(ib.get("H_hash","")),
+            _hz(ib.get("U_hash","")),
+            _hz(ib.get("shapes_hash","")),
+        ]
+        if ab.get("inputs_sig") != current_sig:
+            warnings.append("AB_FRESH: A/B snapshot is stale (won’t embed)")
+
+    # Basic presence: four core hashes should exist
+    for k in ("boundaries_hash","C_hash","H_hash","U_hash"):
+        if not ib.get(k):
+            warnings.append(f"SSOT: missing {k}")
+
+    return failures, warnings
+
+
 # --- Active policy pill + run stamp + self-tests banner (place near top of Tab 2 UI) ---
 # Policy pill (mirrors current cfg_active)
 policy_label = policy_label_from_cfg(cfg_active)
