@@ -1317,6 +1317,91 @@ else:
     cert_payload.setdefault("integrity", {})
     cert_payload["integrity"]["content_hash"] = hash_json(cert_payload)
 
+    # ── A/B embed (fresh only if inputs_sig matches) ─────────────────────────────
+ab_ctx = st.session_state.get("ab_compare") or {}
+run_ctx = st.session_state.get("run_ctx") or {}
+di_ctx  = st.session_state.get("_district_info") or {}
+
+# Build current inputs signature from SSOT
+inputs_sig_now = [
+    str(inputs_block.get("boundaries_hash","")),
+    str(inputs_block.get("C_hash","")),
+    str(inputs_block.get("H_hash","")),
+    str(inputs_block.get("U_hash","")),
+    str(inputs_block.get("shapes_hash","")),
+]
+
+if ab_ctx and (ab_ctx.get("inputs_sig") == inputs_sig_now):
+    strict_ctx    = ab_ctx.get("strict", {}) or {}
+    projected_ctx = ab_ctx.get("projected", {}) or {}
+
+    def _pass_vec_from(out_dict: dict):
+        return [
+            int(out_dict.get("2", {}).get("eq", False)),
+            int(out_dict.get("3", {}).get("eq", False)),
+        ]
+
+    # strict snapshot
+    cert_payload["policy"]["strict_snapshot"] = {
+        "policy_tag": strict_ctx.get("label", "strict"),
+        "ker_guard":  "enforced",
+        "inputs": {
+            "filenames": inputs_block.get("filenames", {}),
+            "boundaries": {
+                "filename": inputs_block.get("filenames", {}).get("boundaries", ""),
+                "hash":     inputs_block.get("boundaries_hash",""),
+                "district_id": identity_block.get("district_id","UNKNOWN"),
+                "lane_mask_k3": run_ctx.get("lane_mask_k3", []),
+                "d3_rows": int(di_ctx.get("d3_rows", 0)),
+                "d3_cols": int(di_ctx.get("d3_cols", 0)),
+            },
+            "U_filename": inputs_block.get("filenames", {}).get("U", ""),
+            "C_filename": inputs_block.get("filenames", {}).get("C", ""),
+            "H_filename": inputs_block.get("filenames", {}).get("H", ""),
+        },
+        "lane_mask_k3": run_ctx.get("lane_mask_k3", []),
+        "lane_vec_H2d3": strict_ctx.get("lane_vec_H2d3", diagnostics_block.get("lane_vec_H2d3", [])),
+        "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
+        "pass_vec": _pass_vec_from(strict_ctx.get("out", {})),
+        "out": strict_ctx.get("out", {}),
+    }
+
+    # projected snapshot
+    cert_payload["policy"]["projected_snapshot"] = {
+        "policy_tag": projected_ctx.get("label", policy_block.get("policy_tag", "")),
+        "ker_guard":  "off",
+        "inputs": {
+            "filenames": inputs_block.get("filenames", {}),
+            "boundaries": {
+                "filename": inputs_block.get("filenames", {}).get("boundaries", ""),
+                "hash":     inputs_block.get("boundaries_hash",""),
+                "district_id": identity_block.get("district_id","UNKNOWN"),
+                "lane_mask_k3": run_ctx.get("lane_mask_k3", []),
+                "d3_rows": int(di_ctx.get("d3_rows", 0)),
+                "d3_cols": int(di_ctx.get("d3_cols", 0)),
+                # include projector filename only when file-mode was used in the AB leg
+                **({"projector_filename": projected_ctx.get("projector_filename","")}
+                   if projected_ctx.get("projector_filename") else {}),
+            },
+            "U_filename": inputs_block.get("filenames", {}).get("U", ""),
+            "C_filename": inputs_block.get("filenames", {}).get("C", ""),
+            "H_filename": inputs_block.get("filenames", {}).get("H", ""),
+        },
+        "lane_mask_k3": run_ctx.get("lane_mask_k3", []),
+        "lane_vec_H2d3": projected_ctx.get("lane_vec_H2d3", diagnostics_block.get("lane_vec_H2d3", [])),
+        "lane_vec_C3plusI3": projected_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
+        "pass_vec": _pass_vec_from(projected_ctx.get("out", {})),
+        "out": projected_ctx.get("out", {}),
+        "projector_hash": projected_ctx.get("projector_hash",""),
+        "projector_consistent_with_d": projected_ctx.get("projector_consistent_with_d", None),
+    }
+
+    cert_payload["ab_pair_tag"] = ab_ctx.get("pair_tag", "")
+
+else:
+    # mark stale in session so UI can show a small badge/toast
+    st.session_state["ab_stale"] = bool(ab_ctx)
+# ─────────────────────────────────────────────────────────────────────────────
     # Write cert (prefer package writer; fallback locally)
     cert_path = None
     full_hash = cert_payload["integrity"]["content_hash"]
