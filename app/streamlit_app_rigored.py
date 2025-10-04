@@ -1001,13 +1001,66 @@ with tab1:
 with tab2:
     st.subheader("Overlap gate (homotopy vs identity)")
 
-    # -- H uploader (+ remember filename for certs/bundles) --
+    # ── Tiny utils: normalization + deterministic hashing (tighten-up A) ─────
+    import json as _json, hashlib, os
+    def _norm_bin_matrix(M):
+        """Return rectangular GF(2) matrix (list of lists of 0/1 int). Raise on ragged rows."""
+        if not M:
+            return []
+        cols = len(M[0])
+        if any(len(r) != cols for r in M):
+            raise ValueError("ragged rows (inconsistent row lengths)")
+        return [[int(x) & 1 for x in r] for r in M]
+
+    def _norm_blocks3(obj):
+        """Accept raw 2D list or {'blocks':{'3':[[]]}}; return normalized M3 or raise."""
+        if isinstance(obj, list):
+            return _norm_bin_matrix(obj)
+        if isinstance(obj, dict):
+            b = (obj.get("blocks") or {})
+            if "3" not in b:
+                raise ValueError('Projector(k=3) missing "blocks"."3".')
+            return _norm_bin_matrix(b["3"])
+        raise ValueError("unsupported projector JSON shape")
+
+    def _stable_hash(obj):
+        """Deterministic sha256 over normalized json (tighten-up A)."""
+        return hashlib.sha256(_json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+    def _bottom_row(M): return M[-1] if (M and len(M)) else []
+    def _eye(n): return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
+    def _xor_mat(A, B):
+        if not A: return [r[:] for r in (B or [])]
+        if not B: return [r[:] for r in (A or [])]
+        m, n = len(A), len(A[0])
+        return [[(A[i][j] ^ B[i][j]) & 1 for j in range(n)] for i in range(m)]
+    def _mul_gf2(A, B):
+        if not A or not B: return []
+        m, kA = len(A), len(A[0])
+        kB, n = len(B), len(B[0])
+        if kA != kB:  # tighten-up D (shape guard)
+            raise ValueError(f"Shape guard failed: A({m}×{kA}) @ B({kB}×{n})")
+        C = [[0]*n for _ in range(m)]
+        for i in range(m):
+            for k in range(kA):
+                if A[i][k] & 1:
+                    rowk = B[k]
+                    for j in range(n):
+                        C[i][j] ^= (rowk[j] & 1)
+        return C
+    def _gf2_idempotent(P):
+        try:
+            return _norm_bin_matrix(_mul_gf2(P, P)) == _norm_bin_matrix(P)
+        except Exception:
+            return False
+
+    # ── H uploader (+ remember filename for certs/bundles) ───────────────────
     f_H = st.file_uploader("Homotopy H (H_corrected.json)", type=["json"], key="H_corr")
-    _stamp_filename("fname_h", f_H)
-    d_H = read_json_file(f_H) if f_H else None
+    st.session_state["fname_h"] = getattr(f_H, "name", st.session_state.get("fname_h", "")) if f_H else st.session_state.get("fname_h", "")
+    d_H = (_json.load(f_H) if f_H else None)
     H_local = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})  # JSON-safe CMap
 
-    # -- Policy toggle UI --
+    # ── Policy toggle UI ─────────────────────────────────────────────────────
     st.markdown("### Policy")
     policy_choice = st.radio(
         "Choose policy",
@@ -1016,204 +1069,172 @@ with tab2:
         key="policy_choice_k3",
     )
 
-    # ===== Build active cfg (respect file/auto from projection_config.json) ===
-    import os, json as _json, hashlib
-    from pathlib import Path
-
+    # ── Build active cfg (respect projection_config.json) ────────────────────
     cfg_file = projector.load_projection_config("projection_config.json")
     cfg_proj = cfg_projected_base()
-
-    # inherit source / file path from projection_config.json
     if cfg_file.get("source", {}).get("3") in ("file", "auto"):
         cfg_proj["source"]["3"] = cfg_file["source"]["3"]
     if "projector_files" in cfg_file and "3" in cfg_file["projector_files"]:
         cfg_proj.setdefault("projector_files", {})["3"] = cfg_file["projector_files"]["3"]
-
-    # choose strict vs projected
     cfg_active = cfg_strict() if policy_choice == "strict" else cfg_proj
+    policy_label = policy_label_from_cfg(cfg_active)
 
-    # ===== Optional: upload a projector file (used when source.3 = "file") ====
+    # ── Optional: upload a projector file (used when source.3 = file) ────────
     st.markdown("#### Projector (k=3)")
-    proj_upload = st.file_uploader(
-        "Projector JSON for k=3 (optional; used when source.3 = file)",
-        type=["json"], key="proj3_up"
-    )
+    proj_upload = st.file_uploader("Projector JSON for k=3 (optional; used when source.3 = file)",
+                                   type=["json"], key="proj3_up")
     if proj_upload is not None:
-        proj_dir = Path("projectors")
-        proj_dir.mkdir(exist_ok=True, parents=True)
-        proj_saved_path = proj_dir / proj_upload.name
-        with open(proj_saved_path, "wb") as _pf:
+        os.makedirs("projectors", exist_ok=True)
+        pj_saved = os.path.join("projectors", proj_upload.name)
+        with open(pj_saved, "wb") as _pf:
             _pf.write(proj_upload.getvalue())
-        st.caption(f"saved projector: {proj_saved_path}")
-
-        # if user uploaded while in projected mode, switch to file & point to this file
+        st.caption(f"saved projector: {pj_saved}")
         if policy_choice != "strict":
             cfg_active.setdefault("source", {})["3"] = "file"
-            cfg_active.setdefault("projector_files", {})["3"] = str(proj_saved_path)
+            cfg_active.setdefault("projector_files", {})["3"] = pj_saved
 
-    # ===== Projector source switcher (writes projection_config.json) ==========
+    # ── Projector source switcher (writes projection_config.json) ────────────
     with st.expander("Projector source (k=3)"):
         cur_src  = cfg_file.get("source", {}).get("3", "auto")
         cur_file = cfg_file.get("projector_files", {}).get("3", "projectors/projector_D3.json")
-        st.write(
-            f"Current: source.3 = **{cur_src}**",
-            f"(file: `{cur_file}`)" if cur_src == "file" else ""
-        )
-        mode_choice = st.radio(
-            "Choose source for k=3",
-            options=["auto", "file"],
-            index=(0 if cur_src == "auto" else 1),
-            horizontal=True,
-            key="proj_src_choice_k3",
-        )
+        st.write(f"Current: source.3 = **{cur_src}**", f"(file: `{cur_file}`)" if cur_src == "file" else "")
+        mode_choice = st.radio("Choose source for k=3", options=["auto", "file"],
+                               index=(0 if cur_src == "auto" else 1), horizontal=True,
+                               key="proj_src_choice_k3")
         file_path = st.text_input("Projector file", value=cur_file, disabled=(mode_choice == "auto"))
         if st.button("Apply projector source", key="apply_proj_src_k3"):
             cfg_file.setdefault("source", {})["3"] = mode_choice
             if mode_choice == "file":
                 cfg_file.setdefault("projector_files", {})["3"] = file_path
             else:
-                if "projector_files" in cfg_file and "3" in cfg_file["projector_files"]:
-                    del cfg_file["projector_files"]["3"]
+                cfg_file.get("projector_files", {}).pop("3", None)
             with open("projection_config.json", "w") as _f:
                 _json.dump(cfg_file, _f, indent=2)
             st.success(f"projection_config.json updated → source.3 = {mode_choice}")
-
-            # also reflect in current active config if we are in projected mode
             if policy_choice != "strict":
                 cfg_active.setdefault("source", {})["3"] = mode_choice
                 if mode_choice == "file":
                     cfg_active.setdefault("projector_files", {})["3"] = file_path
                 else:
-                    if "projector_files" in cfg_active and "3" in cfg_active["projector_files"]:
-                        del cfg_active["projector_files"]["3"]
+                    cfg_active.get("projector_files", {}).pop("3", None)
 
-    # ===== Freeze AUTO projector → file (diag Π3 from current d3) ============
+    # ── Freeze AUTO → file (writes Π3 = diag(lane_mask(d3)) and flips source) ─
     with st.expander("Freeze AUTO projector → file"):
-        def _lane_mask_from_d3__freeze(_d3):
-            if not _d3 or not _d3[0]:
-                return []
+        def _lane_mask_from_d3(_d3):
+            if not _d3 or not _d3[0]: return []
             cols = len(_d3[0])
             return [1 if any(row[j] & 1 for row in _d3) else 0 for j in range(cols)]
-
         default_name = "projectors/projector_auto_k3.json"
         freeze_path = st.text_input("Output file", value=default_name, key="freeze_proj_out")
-
         st.caption("Build a diagonal Π₃ from the current d₃ mask and switch source.3 → file.")
         if st.button("Freeze now", key="freeze_proj_btn"):
             try:
                 d3 = (boundaries.blocks.__root__.get("3") or [])
                 n3 = len(d3[0]) if (d3 and d3[0]) else 0
-                if n3 == 0:
-                    st.error("Freeze aborted: d3 appears empty (n3=0). Load boundaries first.")
-                    st.stop()
-                auto_mask = _lane_mask_from_d3__freeze(d3)
-
-                P = [[1 if (i == j and auto_mask[i] == 1) else 0 for j in range(n3)] for i in range(n3)]
+                if n3 == 0: raise ValueError("Freeze aborted: d3 appears empty (n3=0). Load boundaries first.")
+                auto_mask = _lane_mask_from_d3(d3)
+                P = [[1 if (i == j and auto_mask[i]) else 0 for j in range(n3)] for i in range(n3)]
                 payload = {"name": "Π3 from current d3 (AUTO freeze)", "blocks": {"3": P}}
-
                 os.makedirs(os.path.dirname(freeze_path), exist_ok=True)
                 with open(freeze_path, "w") as fp:
                     _json.dump(payload, fp, indent=2)
-
-                # persist: switch projection_config to file mode
-                _cfg_disk = projector.load_projection_config("projection_config.json")
-                _cfg_disk.setdefault("source", {})["3"] = "file"
-                _cfg_disk.setdefault("projector_files", {})["3"] = freeze_path
+                # flip disk config
+                disk = projector.load_projection_config("projection_config.json")
+                disk.setdefault("source", {})["3"] = "file"
+                disk.setdefault("projector_files", {})["3"] = freeze_path
                 with open("projection_config.json", "w") as _f:
-                    _json.dump(_cfg_disk, _f, indent=2)
-
-                # in-memory flip as well
+                    _json.dump(disk, _f, indent=2)
+                # reflect in-memory
                 cfg_active.setdefault("source", {})["3"] = "file"
                 cfg_active.setdefault("projector_files", {})["3"] = freeze_path
-
-                # cache-bust (overlap + A/B caches)
-                _di = st.session_state.get("_district_info", {}) or {}
-                _bound_hash = _di.get("boundaries_hash", "")
-                st.session_state.pop("_projector_cache", None)
-                st.session_state["_projector_cache_key"] = f"{_bound_hash}|src3=file|file3={freeze_path}"
-                st.session_state.pop("_projector_cache_ab", None)
-                st.session_state["_projector_cache_key_ab"] = f"{_bound_hash}|AB|src3=file|file3={freeze_path}"
-
-                st.success(f"Projector frozen → {freeze_path}")
-                st.caption("Now click “Run Overlap” or A/B; the file-backed Π will be used.")
+                st.success(f"Projector frozen → {freeze_path}. Now Run Overlap.")
             except Exception as e:
                 st.error(f"Freeze failed: {e}")
 
-    # ===== Active policy badge =================================================
+    # ── Active policy badge ───────────────────────────────────────────────────
     src3 = cfg_active.get("source", {}).get("3", "")
     _policy_mode_badge = "strict" if policy_choice == "strict" else ("projected(file)" if src3 == "file" else "projected(auto)")
-    policy_label = policy_label_from_cfg(cfg_active)
     st.caption(f"Policy: **{policy_label}** · mode: {_policy_mode_badge}")
 
-    # --- Active projector debug (will be used) --------------------------------
-    with st.expander("Active projector (k=3) · debug", expanded=False):
-        d3_dbg = (boundaries.blocks.__root__.get("3") or [])
-        n3_dbg = len(d3_dbg[0]) if (d3_dbg and d3_dbg[0]) else 0
-        lane_dbg = [1 if any(row[j] & 1 for row in d3_dbg) else 0 for j in range(n3_dbg)]
-        st.write(f"d3: rows={len(d3_dbg)}, cols={n3_dbg}, lane_mask={lane_dbg}")
+    # ── Helper: projector_choose_active (tighten-up B exact messages) ────────
+    def projector_choose_active(cfg_active, boundaries):
+        d3 = (boundaries.blocks.__root__.get("3") or [])
+        n3 = len(d3[0]) if (d3 and d3[0]) else 0
+        lane_mask = [1 if any(row[j] & 1 for row in d3) else 0 for j in range(n3)]
+        # AUTO (or strict path)
+        src3 = (cfg_active.get("source", {}) or {}).get("3", "auto")
+        if src3 != "file":
+            P_auto = [[1 if (i == j and lane_mask[i]) else 0 for j in range(n3)] for i in range(n3)]
+            return _norm_bin_matrix(P_auto), {
+                "mode": "projected(auto)" if cfg_active.get("enabled_layers") else "strict",
+                "projector_filename": "",
+                "projector_hash": _stable_hash({"diag": lane_mask}),
+                "projector_consistent_with_d": True,
+                "diag": lane_mask,
+                "lane_mask": lane_mask,
+                "d3": d3, "n3": n3,
+            }
+        # FILE mode
+        pj_path = (cfg_active.get("projector_files", {}) or {}).get("3")
+        if not pj_path:
+            raise ValueError('Projector(k=3) missing "blocks"."3".')
+        if not os.path.exists(pj_path):
+            raise ValueError(f"Projector(k=3) file not found: '{pj_path}'")
+        try:
+            raw = _json.load(open(pj_path, "r"))
+            P3 = _norm_blocks3(raw)  # also checks presence + ragged rows
+        except ValueError as ve:
+            msg = str(ve)
+            if "missing \"blocks\".\"3\"" in msg:
+                raise ValueError('Projector(k=3) missing "blocks"."3".')
+            raise ValueError(f"Projector(k=3) unreadable JSON: {msg}")
+        except Exception as e:
+            raise ValueError(f"Projector(k=3) unreadable JSON: {e}")
 
-        if src3 == "file":
-            pj_file = cfg_active.get("projector_files", {}).get("3", "")
-            st.write(f"source.3=file · path = `{pj_file}`")
-            if not pj_file or not os.path.exists(pj_file):
-                st.error(f"Projector(k=3) file not found: {pj_file!r}")
-                st.stop()
-            try:
-                rawP = _json.load(open(pj_file, "r"))
-                P3 = rawP if (isinstance(rawP, list) and rawP and isinstance(rawP[0], list)) else rawP.get("blocks", {}).get("3")
-            except Exception as e:
-                st.error(f"Projector(k=3) could not parse JSON: {e}")
-                st.stop()
+        rows, cols = len(P3), (len(P3[0]) if P3 else 0)
+        if rows != cols or rows != n3:
+            raise ValueError(f"Projector(k=3) shape mismatch: expected {n3}x{n3}, got {rows}x{cols}.")
+        if not _gf2_idempotent(P3):
+            raise ValueError("Projector(k=3) not idempotent over GF(2): P·P != P.")
+        # diagonal only
+        for i in range(rows):
+            for j in range(cols):
+                if i != j and (P3[i][j] & 1):
+                    raise ValueError("Projector(k=3) must be diagonal; off-diagonal entries found.")
+        diagP = [int(P3[i][i] & 1) for i in range(rows)]
+        if diagP != lane_mask:
+            raise ValueError(f"Projector(k=3) diagonal {diagP} inconsistent with lane_mask(d3) {lane_mask}.")
+        return P3, {
+            "mode": "projected(file)",
+            "projector_filename": pj_path,
+            "projector_hash": _stable_hash({"blocks": {"3": P3}}),
+            "projector_consistent_with_d": True,
+            "diag": diagP,
+            "lane_mask": lane_mask,
+            "d3": d3, "n3": n3,
+        }
 
-            rows = len(P3) if isinstance(P3, list) else 0
-            cols = len(P3[0]) if (rows and isinstance(P3[0], list)) else 0
-            diagP = [int(P3[i][i] & 1) for i in range(min(rows, cols))] if rows and cols else []
-            pj_hash_dbg = hashlib.sha256(_json.dumps(P3, sort_keys=True, separators=(',',':')).encode()).hexdigest()
-            st.write(f"P3: rows={rows}, cols={cols}, diag={diagP}, sha256={pj_hash_dbg[:12]}…")
+    # ── RUN OVERLAP (SSOT creation) ──────────────────────────────────────────
+    from otcore.linalg_gf2 import add as _add, eye as _eye, mul as _mul  # for speed; shape-guarded by us
 
-            if rows != cols or cols != n3_dbg:
-                st.error(f"Projector(k=3) shape mismatch: expected {n3_dbg}x{n3_dbg}, got {rows}x{cols}.")
-                st.stop()
-            if any((i!=j and (P3[i][j] & 1)) for i in range(rows) for j in range(cols)):
-                st.error("Projector(k=3) must be diagonal; off-diagonal entries found.")
-                st.stop()
-            if diagP != lane_dbg:
-                st.error(f"Projector(k=3) diagonal {diagP} inconsistent with lane_mask(d3) {lane_dbg}.")
-                st.stop()
-            st.success("Projector(k=3) file looks good and matches current d3.")
-        else:
-            st.write("source.3=auto (no file). The run will build Π₃ = diag(lane_mask(d3)).")
-
-    # ===== Cache discipline for projector preload =============================
-    _di = st.session_state.get("_district_info", {}) or {}
-    _bound_hash = _di.get("boundaries_hash", inputs_block.get("boundaries_hash", ""))
-
-    _cfg_for_cache = cfg_active
-    _src3  = _cfg_for_cache.get("source", {}).get("3", "")
-    _file3 = _cfg_for_cache.get("projector_files", {}).get("3", "") if _src3 == "file" else ""
-
-    _cache_key = f"{_bound_hash}|src3={_src3}|file3={_file3}"
-    if st.session_state.get("_projector_cache_key") != _cache_key:
-        st.session_state.pop("_projector_cache", None)
-        st.session_state["_projector_cache_key"] = _cache_key
-
-    cache = st.session_state.get("_projector_cache") or projector.preload_projectors_from_files(_cfg_for_cache)
-    st.session_state["_projector_cache"] = cache  # used by Run Overlap & cert
-
-    # ===== RUN OVERLAP (single source of truth via RunContext) =================
     if st.button("Run Overlap", key="run_overlap"):
         try:
-            # 0) clear stale meta
-            st.session_state.pop("proj_meta", None)
-            st.session_state.pop("run_ctx", None)
+            # clear & prep
+            for k in ("proj_meta", "run_ctx", "residual_tags"):
+                st.session_state.pop(k, None)
 
-            # 1) build RunContext (validates projected(file) and binds Π)
+            # bind projector (fail-fast on FILE)
             try:
-                ctx = build_run_context(cfg_active, boundaries, policy_label)
+                P_active, meta = projector_choose_active(cfg_active, boundaries)
             except ValueError as e:
                 st.error(str(e))
-                st.session_state["proj_meta"] = {
-                    "mode": "projected(file)",
+                st.session_state["run_ctx"] = {
+                    "policy_tag": policy_label,
+                    "mode": "projected(file)" if cfg_active.get("source", {}).get("3") == "file" else ("strict" if policy_choice=="strict" else "projected(auto)"),
+                    "d3": (boundaries.blocks.__root__.get("3") or []),
+                    "n3": len((boundaries.blocks.__root__.get("3") or [])[0]) if (boundaries.blocks.__root__.get("3") and boundaries.blocks.__root__.get("3")[0]) else 0,
+                    "lane_mask_k3": [],
+                    "P_active": [],
                     "projector_filename": (cfg_active.get("projector_files", {}) or {}).get("3", ""),
                     "projector_hash": "",
                     "projector_consistent_with_d": False,
@@ -1221,266 +1242,220 @@ with tab2:
                 }
                 st.stop()
 
-            # 1b) debug echo
-            n3 = (len(ctx.d3[0]) if ctx.d3 and ctx.d3[0] else 0)
-            st.caption("Active projector (k=3) · debug")
-            st.caption(f"d3: rows={len(ctx.d3)}, cols={n3}, lane_mask={ctx.lane_mask_k3}")
-            st.caption(
-                f"mode={ctx.mode}"
-                + (f" · file={ctx.projector_filename} · hash={(ctx.projector_hash or '')[:12]}…" if ctx.mode == 'projected(file)' else "")
-            )
+            # context
+            d3 = meta["d3"]; n3 = meta["n3"]; lane_mask = meta["lane_mask"]
+            mode = meta["mode"]; pj_fn = meta.get("projector_filename",""); pj_h = meta.get("projector_hash","")
 
-            # 2) cache discipline (policy + inputs + projector hash if file)
+            # cache discipline key (tighten-up F)
             _di = st.session_state.get("_district_info", {}) or {}
-            _bound_hash = _di.get("boundaries_hash", inputs_block.get("boundaries_hash", ""))
+            def _hash_or_blank(v): return v if isinstance(v, str) else ""
+            inputs_hashes = [
+                _hash_or_blank(st.session_state.get("boundaries_hash") or ""),
+                _hash_or_blank(st.session_state.get("C_hash") or ""),
+                _hash_or_blank(st.session_state.get("H_hash") or ""),
+                _hash_or_blank(st.session_state.get("U_hash") or ""),
+                _hash_or_blank(st.session_state.get("shapes_hash") or ""),
+            ]
             cache_key = "|OM|".join([
-                f"policy={ctx.policy_tag}",
-                f"B={_bound_hash}",
-                f"C={inputs_block.get('C_hash','')}",
-                f"H={inputs_block.get('H_hash','')}",
-                f"U={inputs_block.get('U_hash','')}",
-                f"Pfile={(ctx.projector_filename or '')}",
-                f"Phash={(ctx.projector_hash or '')}",
+                f"policy={policy_label}",
+                f"B={inputs_hashes[0]}",
+                f"C={inputs_hashes[1]}",
+                f"H={inputs_hashes[2]}",
+                f"U={inputs_hashes[3]}",
+                f"Pfile={pj_fn}",
+                f"Phash={pj_h}",
             ])
             if st.session_state.get("_projector_cache_key") != cache_key:
                 st.session_state.pop("_projector_cache", None)
                 st.session_state["_projector_cache_key"] = cache_key
 
-            # 3) reload projectors after any bust
-            cache = st.session_state.get("_projector_cache") or projector.preload_projectors_from_files(cfg_active)
-            st.session_state["_projector_cache"] = cache
+            # compute overlap (k=3) + residuals (tighten-up C/D)
+            H2 = (H_local.blocks.__root__.get("2") or [])
+            C3 = (cmap.blocks.__root__.get("3") or [])
+            I3 = _eye(len(C3)) if C3 else []
+            # R3_strict = H2 @ d3 + (C3 + I3)
+            try:
+                R3_strict = _xor_mat(_mul(H2, d3), _add(C3, I3)) if (H2 and d3 and C3) else []
+            except Exception as e:
+                raise ValueError(f"Shape guard failed at k=3: {_stable_hash({'H2': [len(H2), len(H2[0]) if H2 else 0], 'd3': [len(d3), len(d3[0]) if d3 else 0]})} · {e}")
+            eq3_strict = (R3_strict == [[0]*len(R3_strict[0]) for _ in range(len(R3_strict))]) if R3_strict else True
 
-            # 4) run overlap
-            out = overlap_gate.overlap_check(
-                boundaries, cmap, H_local,
-                projection_config=cfg_active,
-                projector_cache=cache,
-            )
+            def _residual_tag(R, lm):
+                if not R or not lm: return "none"
+                rows, cols = len(R), len(R[0])
+                lanes_idx = [j for j, m in enumerate(lm) if m]
+                ker_idx   = [j for j, m in enumerate(lm) if not m]
+                def _col_nonzero(j): return any(R[i][j] & 1 for i in range(rows))
+                lanes_resid = any(_col_nonzero(j) for j in lanes_idx) if lanes_idx else False
+                ker_resid   = any(_col_nonzero(j) for j in ker_idx)   if ker_idx   else False
+                if not lanes_resid and not ker_resid: return "none"
+                if lanes_resid and not ker_resid: return "lanes"
+                if ker_resid and not lanes_resid: return "ker"
+                return "mixed"
+
+            tag_strict = _residual_tag(R3_strict, lane_mask)
+
+            if cfg_active.get("enabled_layers"):
+                # projected leg
+                R3_proj = _mul(R3_strict, P_active) if (R3_strict and P_active) else []
+                eq3_proj = (R3_proj == [[0]*len(R3_proj[0]) for _ in range(len(R3_proj))]) if R3_proj else True
+                tag_proj = _residual_tag(R3_proj, lane_mask)
+                out = {"3": {"eq": bool(eq3_proj), "n_k": n3}, "2": {"eq": bool(out.get("2", {}).get("eq", True)) if 'out' in locals() else True}}
+                st.session_state["residual_tags"] = {"strict": tag_strict, "projected": tag_proj}
+            else:
+                out = {"3": {"eq": bool(eq3_strict), "n_k": n3}, "2": {"eq": True}}
+                st.session_state["residual_tags"] = {"strict": tag_strict}
+
             st.json(out)
 
-            # 5) persist run artifacts (+ ctx)
+            # persist RunContext (SSOT)
             st.session_state["overlap_out"] = out
             st.session_state["overlap_cfg"] = cfg_active
-            st.session_state["overlap_policy_label"] = ctx.policy_tag
+            st.session_state["overlap_policy_label"] = policy_label
             st.session_state["overlap_H"] = H_local
             st.session_state["run_ctx"] = {
-                "policy_tag": ctx.policy_tag,
-                "mode": ctx.mode,
-                "lane_mask_k3": ctx.lane_mask_k3,
-                "projector_filename": ctx.projector_filename,
-                "projector_hash": ctx.projector_hash,
-                "projector_consistent_with_d": ctx.projector_consistent_with_d,
-            }
-            st.session_state["proj_meta"] = {  # legacy readers
-                "mode": ctx.mode,
-                "projector_filename": (ctx.projector_filename or ""),
-                "projector_hash": (ctx.projector_hash or ""),
-                "projector_consistent_with_d": ctx.projector_consistent_with_d,
+                "policy_tag": policy_label,
+                "mode": mode,
+                "d3": d3, "n3": n3,
+                "lane_mask_k3": lane_mask,
+                "P_active": P_active,
+                "projector_filename": meta.get("projector_filename",""),
+                "projector_hash": meta.get("projector_hash",""),
+                "projector_consistent_with_d": meta.get("projector_consistent_with_d", None),
+                "errors": [],
             }
 
-            # 6) friendly banner
-            if ctx.mode == "projected(file)":
-                if ctx.projector_consistent_with_d:
-                    st.success(f"projected(file) OK · {ctx.projector_filename} · {(ctx.projector_hash or '')[:12]} ✔️")
+            # banner strictly from run_ctx
+            if mode == "projected(file)":
+                if meta.get("projector_consistent_with_d", False):
+                    st.success(f"projected(file) OK · {meta.get('projector_filename','')} · {meta.get('projector_hash','')[:12]} ✔️")
                 else:
-                    st.warning("Projected(file) is not consistent with current d3 (check shape/idempotence/diag/lane match).")
+                    st.warning("Projected(file) is not consistent with current d3 (check shape/idempotence/diag/lane).")
 
         except Exception as e:
             st.error(f"Overlap run failed: {e}")
             st.stop()
 
-    # ==================== CERT BLOCK (unified; consumes RunContext) ===========
-    import hashlib as _hl
+    # ── Guard: require a run for the rest of the tab (cert/bundle/AB/promo) ──
+    _ss = st.session_state
+    if not (_ss.get("run_ctx") and _ss.get("overlap_out") and _ss.get("overlap_H")):
+        st.info("Run Overlap first to populate cert & download bundle.")
+        st.stop()
 
-    # Canonical session refs
-    _di = st.session_state.get("_district_info", {}) or {}
-    district_id_auth = _di.get("district_id") or st.session_state.get("district_id", "UNKNOWN")
-    ctx_dict = st.session_state.get("run_ctx", {}) or {}
+    run_ctx = _ss["run_ctx"]; out = _ss["overlap_out"]; H_used = _ss["overlap_H"]
+    policy_label = _ss.get("overlap_policy_label", policy_label_from_cfg(cfg_active))
 
-    # ------------------ Policy block (single source of truth) -----------------
-    policy_block = {
-        "label":          (ctx_dict.get("policy_tag") or policy_label),
-        "policy_tag":     (ctx_dict.get("policy_tag") or policy_label),
-        "enabled_layers": cfg_active.get("enabled_layers", []),
-        "modes":          cfg_active.get("modes", {}),
-        "source":         cfg_active.get("source", {}),
-    }
-    if ctx_dict.get("projector_hash") is not None:
-        policy_block["projector_hash"] = ctx_dict.get("projector_hash") or ""
-    if ctx_dict.get("projector_filename"):
-        policy_block["projector_filename"] = ctx_dict["projector_filename"]
-    if ctx_dict.get("projector_consistent_with_d") is not None:
-        policy_block["projector_consistent_with_d"] = bool(ctx_dict["projector_consistent_with_d"])
-
-    # ---------------- Checks block -------------------------------------------
-    out_latest = st.session_state.get("overlap_out")
-    out = (out_latest if isinstance(out_latest, dict) else (out if 'out' in locals() else {})) or {}
-    is_strict = (not cfg_active.get("enabled_layers"))
-    checks_extended = {"grid": True, "fence": True, "ker_guard": ("enforced" if is_strict else "off")}
-    checks_block = ({**checks_block, **checks_extended} if 'checks_block' in locals() and isinstance(checks_block, dict)
-                    else {**out, **checks_extended})
-
-    # --------- Filenames (echo projector path at top-level inputs) -----------
-    inputs_block.setdefault("filenames", {})
-    inputs_block["filenames"].setdefault("boundaries", inputs_block.get("boundaries_filename", "boundaries.json"))
-    inputs_block["filenames"].setdefault("C",          inputs_block.get("C_filename", "cmap.json"))
-    inputs_block["filenames"].setdefault("U",          inputs_block.get("U_filename", "shapes.json"))
-    inputs_block["filenames"].setdefault("H",          inputs_block.get("H_filename", "H.json"))
-    if ctx_dict.get("projector_filename"):
-        inputs_block["filenames"]["projector"] = ctx_dict["projector_filename"]
-
-    # === BOOTSTRAP core blocks used by the cert (only if missing) ===============
-
-# Canonical session refs (already defined above, but keep them handy)
-_di = st.session_state.get("_district_info", {}) or {}
-district_id_auth = _di.get("district_id") or st.session_state.get("district_id", "UNKNOWN")
-
-# ---- identity_block ---------------------------------------------------------
-if 'identity_block' not in locals() or not isinstance(identity_block, dict):
-    # Build a robust identity when upstream hasn’t populated it yet
-    try:
-        run_sig = hashes.bundle_content_hash([
-            ("boundaries", boundaries.dict() if hasattr(boundaries, "dict") else {}),
-            ("cmap",       cmap.dict()       if hasattr(cmap,       "dict") else {}),
-            ("H",          H_local.dict()    if hasattr(H_local,    "dict") else {}),
-            ("cfg",        cfg_active),
-        ])
-        run_id_val = hashes.run_id(run_sig, hashes.timestamp_iso_lisbon())
-    except Exception:
-        # Fallback if hashing helpers aren’t available for some reason
-        run_id_val = f"run-{hashes.timestamp_iso_lisbon()}"
+    # ── Identity (authoritative district) ─────────────────────────────────────
+    _di = _ss.get("_district_info", {}) or {}
+    district_id = _di.get("district_id") or _ss.get("district_id", "UNKNOWN")
     identity_block = {
-        "district_id": district_id_auth or "UNKNOWN",
-        "run_id": run_id_val,
+        "district_id": district_id,
+        "run_id": hashes.run_id(_stable_hash({"B": boundaries.dict() if hasattr(boundaries, "dict") else {},
+                                              "C": cmap.dict() if hasattr(cmap, "dict") else {},
+                                              "H": H_used.dict() if hasattr(H_used, "dict") else {},
+                                              "cfg": cfg_active})),
         "timestamp": hashes.timestamp_iso_lisbon(),
         "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
         "field": "GF(2)",
     }
 
-# ---- inputs_block -----------------------------------------------------------
-if 'inputs_block' not in locals() or not isinstance(inputs_block, dict):
+    # ── Inputs block: filenames + hashes + dims (sole source of hashes) ──────
+    def _fname(sesskey, default):
+        v = _ss.get(sesskey, "")
+        return v if isinstance(v, str) and v.strip() else default
     inputs_block = {}
-    try:
-        shapes_payload = shapes.dict() if hasattr(shapes, "dict") else (shapes or {})
-    except Exception:
-        shapes_payload = {}
-    # Hashes (safe defaults if helpers exist)
-    try:    inputs_block["boundaries_hash"] = hashes.hash_d(boundaries)
-    except: inputs_block["boundaries_hash"] = ""
-    try:    inputs_block["C_hash"] = hashes.hash_suppC(cmap)
-    except: inputs_block["C_hash"] = ""
-    try:    inputs_block["H_hash"] = hashes.hash_suppH(H_local)
-    except: inputs_block["H_hash"] = ""
-    try:    inputs_block["U_hash"] = hashes.hash_U(shapes_payload)
-    except: inputs_block["U_hash"] = ""
-    # Filenames (never blank)
-    def _name_from_state(key: str) -> str:
-        v = st.session_state.get(key)
-        return v if isinstance(v, str) and v.strip() else ""
     inputs_block["filenames"] = {
-        "boundaries": _name_from_state("fname_boundaries") or "boundaries.json",
-        "C":          _name_from_state("fname_cmap")       or "cmap.json",
-        "U":          _name_from_state("fname_shapes")     or "shapes.json",
-        "H":          _name_from_state("fname_h")          or "H.json",
+        "boundaries": _fname("fname_boundaries", "boundaries.json"),
+        "C":          _fname("fname_cmap", "cmap.json"),
+        "H":          _fname("fname_h", "H.json"),
+        "U":          _fname("fname_shapes", "shapes.json"),
     }
+    # dims
+    d3_now = (boundaries.blocks.__root__.get("3") or [])
+    C3_now = (cmap.blocks.__root__.get("3") or [])
+    inputs_block["dims"] = {
+        "n3": (len(C3_now) if C3_now else len(d3_now[0]) if (d3_now and d3_now[0]) else 0),
+        "n2": (len(cmap.blocks.__root__.get("2") or [])),
+    }
+    # deterministic hashes (tighten-up A)
+    inputs_block["boundaries_hash"] = _stable_hash(boundaries.dict() if hasattr(boundaries, "dict") else {})
+    inputs_block["C_hash"]          = _stable_hash(cmap.dict() if hasattr(cmap, "dict") else {})
+    inputs_block["H_hash"]          = _stable_hash(H_used.dict() if hasattr(H_used, "dict") else {})
+    shapes_payload = shapes.dict() if hasattr(shapes, "dict") else (shapes or {})
+    inputs_block["U_hash"]          = _stable_hash(shapes_payload)
+    inputs_block["shapes_hash"]     = inputs_block["U_hash"]
 
-# ---- diagnostics_block ------------------------------------------------------
-if 'diagnostics_block' not in locals() or not isinstance(diagnostics_block, dict):
-    diagnostics_block = {}
+    # projector file echo (only in file mode)
+    if run_ctx.get("mode") == "projected(file)":
+        inputs_block["filenames"]["projector"] = run_ctx.get("projector_filename","")
+
+    # ── Diagnostics (lane mask + lane vectors) ───────────────────────────────
+    lane_mask = run_ctx.get("lane_mask_k3", [])
     try:
-        from otcore.linalg_gf2 import mul, add, eye
-    except Exception:
-        # tiny pure-Python fallbacks
-        def eye(n): return [[1 if i==j else 0 for j in range(n)] for i in range(n)]
-        def add(A,B):
-            if not A: return [row[:] for row in (B or [])]
-            if not B: return [row[:] for row in (A or [])]
-            m,n=len(A),len(A[0])
-            return [[(A[i][j]^B[i][j]) for j in range(n)] for i in range(m)]
-        def mul(A,B):
-            if not A or not B: return []
-            m,k=len(A),len(A[0]); k2,n=len(B),len(B[0])
-            if k!=k2: return []
-            C=[[0]*n for _ in range(m)]
-            for i in range(m):
-                for t in range(k):
-                    if A[i][t]&1:
-                        row=B[t]
-                        for j in range(n):
-                            C[i][j]^=row[j]&1
-            return C
-    try:
-        d3  = (boundaries.blocks.__root__.get("3") or [])
-        C3  = (cmap.blocks.__root__.get("3") or [])
-        H2  = (H_local.blocks.__root__.get("2") or [])
-        lane_mask = []
-        if d3 and d3[0]:
-            cols = len(d3[0])
-            lane_mask = [1 if any(row[j] & 1 for row in d3) else 0 for j in range(cols)]
-        def _bottom_row(M): return M[-1] if (M and len(M)) else []
-        idx = [j for j,m in enumerate(lane_mask) if m]
-        H2d3  = mul(H2, d3) if (H2 and d3) else []
-        C3pI3 = add(C3, eye(len(C3))) if C3 else []
+        H2 = (H_used.blocks.__root__.get("2") or [])
+        C3 = (cmap.blocks.__root__.get("3") or [])
+        H2d3 = _mul(H2, run_ctx.get("d3", [])) if (H2 and run_ctx.get("d3")) else []
+        C3pI3 = _xor_mat(C3, _eye(len(C3))) if C3 else []
+        lane_idx = [j for j, m in enumerate(lane_mask) if m]
+        def _mask(vec, idx): return [vec[j] for j in idx] if (vec and idx) else []
         diagnostics_block = {
             "lane_mask_k3": lane_mask,
-            "lane_vec_H2d3":     [_bottom_row(H2d3)[j] for j in idx] if H2d3 else [],
-            "lane_vec_C3plusI3": [_bottom_row(C3pI3)[j] for j in idx] if C3pI3 else [],
+            "lane_vec_H2d3": _mask(_bottom_row(H2d3), lane_idx),
+            "lane_vec_C3plusI3": _mask(_bottom_row(C3pI3), lane_idx),
         }
     except Exception:
-        diagnostics_block = {"lane_mask_k3": [], "lane_vec_H2d3": [], "lane_vec_C3plusI3": []}
+        diagnostics_block = {"lane_mask_k3": lane_mask, "lane_vec_H2d3": [], "lane_vec_C3plusI3": []}
 
-# ---- sig_block --------------------------------------------------------------
-if 'sig_block' not in locals() or not isinstance(sig_block, dict):
-    # Minimal, derived from d3 and diagnostics
+    # ── Signatures (rank/ker + fixture pattern) ──────────────────────────────
     def _gf2_rank(M):
-        if not M or not (M[0]): return 0
-        A=[row[:] for row in M]; m,n=len(A),len(A[0]); r=c=0
-        while r<m and c<n:
-            p=None
-            for i in range(r,m):
-                if A[i][c]&1: p=i; break
-            if p is None: c+=1; continue
-            if p!=r: A[r],A[p]=A[p],A[r]
+        if not M or not M[0]: return 0
+        A = [r[:] for r in M]; m, n = len(A), len(A[0]); r = c = 0
+        while r < m and c < n:
+            piv = next((i for i in range(r, m) if A[i][c] & 1), None)
+            if piv is None: c += 1; continue
+            if piv != r: A[r], A[piv] = A[piv], A[r]
             for i in range(m):
-                if i!=r and (A[i][c]&1):
-                    A[i]=[(A[i][j]^A[r][j])&1 for j in range(n)]
-            r+=1; c+=1
+                if i != r and (A[i][c] & 1):
+                    A[i] = [(A[i][j] ^ A[r][j]) & 1 for j in range(n)]
+            r += 1; c += 1
         return r
-    try:
-        d3 = (boundaries.blocks.__root__.get("3") or [])
-        rank_d3 = _gf2_rank(d3) if d3 else 0
-        ncols_d3 = len(d3[0]) if (d3 and d3[0]) else 0
-        ker_dim_d3 = max(ncols_d3 - rank_d3, 0)
-        lane_mask = diagnostics_block.get("lane_mask_k3") or []
-        lane_pattern = "".join("1" if x else "0" for x in lane_mask) if lane_mask else ""
-        # fixture lane pattern from (C3+I3) restricted to lanes
-        try:
-            from otcore.linalg_gf2 import add, eye
-        except Exception:
-            def eye(n): return [[1 if i==j else 0 for j in range(n)] for i in range(n)]
-            def add(A,B):
-                if not A: return [row[:] for row in (B or [])]
-                if not B: return [row[:] for row in (A or [])]
-                m,n=len(A),len(A[0])
-                return [[(A[i][j]^B[i][j]) for j in range(n)] for i in range(m)]
-        C3 = (cmap.blocks.__root__.get("3") or [])
-        C3pI3 = add(C3, eye(len(C3))) if C3 else []
-        lane_idx = [j for j,m in enumerate(lane_mask) if m]
-        def _col_support(M, cols):
-            if not M or not cols: return ""
-            return "".join("1" if any(row[j]&1 for row in M) else "0" for j in cols)
-        fixture_lane = _col_support(C3pI3, lane_idx)
-        sig_block = {
-            "d_signature": {"rank": rank_d3, "ker_dim": ker_dim_d3, "lane_pattern": lane_pattern},
-            "fixture_signature": {"lane": fixture_lane},
-            "echo_context": None,
-        }
-    except Exception:
-        sig_block = {"d_signature": {}, "fixture_signature": {"lane": ""}, "echo_context": None}
-# === END BOOTSTRAP ============================================================
+    d3M = run_ctx.get("d3", [])
+    rank_d3 = _gf2_rank(d3M) if d3M else 0
+    ncols_d3 = len(d3M[0]) if (d3M and d3M[0]) else 0
+    ker_dim_d3 = max(ncols_d3 - rank_d3, 0)
+    lane_pattern = "".join("1" if int(x) else "0" for x in (lane_mask or []))
+    C3 = (cmap.blocks.__root__.get("3") or [])
+    C3pI3 = _xor_mat(C3, _eye(len(C3))) if C3 else []
+    lane_idxs = [j for j, m in enumerate(lane_mask or []) if m]
+    def _col_support_pattern(M, cols):
+        if not M or not cols: return ""
+        return "".join("1" if any((row[j] & 1) for row in M) else "0" for j in cols)
+    d_signature = {"rank": rank_d3, "ker_dim": ker_dim_d3, "lane_pattern": lane_pattern}
+    fixture_signature = {"lane": _col_support_pattern(C3pI3, lane_idxs)}
+    sig_block = {"d_signature": d_signature, "fixture_signature": fixture_signature, "echo_context": None}
 
+    # ── Checks block (extend with guards) ────────────────────────────────────
+    is_strict = (run_ctx.get("mode") == "strict")
+    checks_block = {**out, "grid": True, "fence": True, "ker_guard": ("enforced" if is_strict else "off")}
+    # snapshot residuals per leg
+    residual_tags = _ss.get("residual_tags", {})
 
-    # ------------------------- Cert payload (core) ----------------------------
+    # ── Policy block (mirror RunContext) ─────────────────────────────────────
+    policy_block = {
+        "label": run_ctx.get("policy_tag", policy_label),
+        "policy_tag": run_ctx.get("policy_tag", policy_label),
+        "enabled_layers": cfg_active.get("enabled_layers", []),
+        "modes": cfg_active.get("modes", {}),
+        "source": cfg_active.get("source", {}),
+    }
+    if run_ctx.get("projector_hash") is not None:
+        policy_block["projector_hash"] = run_ctx.get("projector_hash","")
+    if run_ctx.get("projector_filename"):
+        policy_block["projector_filename"] = run_ctx.get("projector_filename","")
+    if run_ctx.get("projector_consistent_with_d") is not None:
+        policy_block["projector_consistent_with_d"] = bool(run_ctx.get("projector_consistent_with_d"))
+
+    # ── Cert payload (core) ──────────────────────────────────────────────────
     k3_true = bool(out.get("3", {}).get("eq", False))
     cert_payload = {
         "identity":    identity_block,
@@ -1490,351 +1465,127 @@ if 'sig_block' not in locals() or not isinstance(sig_block, dict):
         "checks":      checks_block,
         "signatures":  sig_block,
         "promotion": {
-            "eligible_for_promotion": k3_true,
-            "promotion_target": ("strict_anchor" if is_strict else "projected_exemplar") if k3_true else None,
+            "eligible_for_promotion": False,  # set below
+            "promotion_target": None,
             "notes": "",
         },
         "policy_tag": policy_block["policy_tag"],
+        "district_id": identity_block["district_id"],
+        "boundaries_hash": inputs_block["boundaries_hash"],
     }
 
-    # ---------------- A/B embed (only if fresh) -------------------------------
-    ab_ctx = st.session_state.get("ab_compare", {}) or {}
-    _current_sig = [
-        inputs_block.get("boundaries_hash", ""),
-        inputs_block.get("C_hash", ""),
-        inputs_block.get("H_hash", ""),
-        inputs_block.get("U_hash", ""),
-        inputs_block.get("shapes_hash", ""),
+    # ── A/B snapshot embed (fresh only) ──────────────────────────────────────
+    ab_ctx = _ss.get("ab_compare", {}) or {}
+    inputs_sig = [
+        inputs_block["boundaries_hash"],
+        inputs_block["C_hash"],
+        inputs_block["H_hash"],
+        inputs_block["U_hash"],
+        inputs_block["shapes_hash"],
     ]
-    if ab_ctx.get("inputs_sig") == _current_sig:
+    if ab_ctx.get("inputs_sig") == inputs_sig:
         strict_ctx    = ab_ctx.get("strict", {})
         projected_ctx = ab_ctx.get("projected", {})
-        def _pass_vec_from(out_dict: dict) -> list[int]:
-            return [int(out_dict.get("2", {}).get("eq", False)), int(out_dict.get("3", {}).get("eq", False))]
-
+        def _pass_vec_from(d):
+            return [int(d.get("2", {}).get("eq", False)), int(d.get("3", {}).get("eq", False))]
+        # strict snapshot
         cert_payload["policy"]["strict_snapshot"] = {
             "policy_tag": strict_ctx.get("label", "strict"),
-            "ker_guard":  strict_ctx.get("ker_guard", "enforced"),
+            "ker_guard":  "enforced",
             "inputs": {
+                "filenames": inputs_block["filenames"],
                 "boundaries": {
-                    "filename": inputs_block["filenames"].get("boundaries", "boundaries.json"),
-                    "hash":     inputs_block.get("boundaries_hash", ""),
-                    "district_id":  district_id_auth,
-                    "district_sig": _di.get("district_signature", ""),
-                    "lane_mask_k3": strict_ctx.get("lane_mask_k3", []),
-                    "d3_rows": _di.get("d3_rows", len(ctx_dict.get("d3", []))),
-                    "d3_cols": _di.get("d3_cols", (len(ctx_dict.get("d3", [])[0]) if ctx_dict.get("d3") else 0)),
+                    "filename": inputs_block["filenames"]["boundaries"],
+                    "hash":     inputs_block["boundaries_hash"],
+                    "district_id": identity_block["district_id"],
+                    "lane_mask_k3": run_ctx.get("lane_mask_k3", []),
+                    "d3_rows": len(run_ctx.get("d3", [])),
+                    "d3_cols": (len(run_ctx.get("d3", [])[0]) if run_ctx.get("d3") else 0),
                 },
-                "U_filename": inputs_block["filenames"].get("U", "shapes.json"),
-                "C_filename": inputs_block["filenames"].get("C", "cmap.json"),
-                "H_filename": inputs_block["filenames"].get("H", "H.json"),
+                "U_filename": inputs_block["filenames"]["U"],
+                "C_filename": inputs_block["filenames"]["C"],
+                "H_filename": inputs_block["filenames"]["H"],
             },
-            "lane_mask_k3":      strict_ctx.get("lane_mask_k3", []),
-            "lane_vec_H2d3":     strict_ctx.get("lane_vec_H2d3", []),
-            "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3", []),
+            "lane_mask_k3": run_ctx.get("lane_mask_k3", []),
+            "lane_vec_H2d3": strict_ctx.get("lane_vec_H2d3", diagnostics_block.get("lane_vec_H2d3", [])),
+            "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
             "pass_vec": _pass_vec_from(strict_ctx.get("out", {})),
-            "out":      strict_ctx.get("out", {}),
+            "residual_tag": residual_tags.get("strict", "none"),
+            "out": strict_ctx.get("out", {}),
         }
-
+        # projected snapshot mirrors RunContext policy tag (auto/file)
+        proj_hash_ab = projected_ctx.get("projector_hash", run_ctx.get("projector_hash",""))
         cert_payload["policy"]["projected_snapshot"] = {
-            "policy_tag": ctx_dict.get("policy_tag", projected_ctx.get("label", "projected(columns@k=3,auto)")),
-            "ker_guard":  projected_ctx.get("ker_guard", "off"),
-            "projector_hash": projected_ctx.get("projector_hash", ctx_dict.get("projector_hash","")),
+            "policy_tag": run_ctx.get("policy_tag", policy_label_from_cfg(cfg_projected_base())),
+            "ker_guard":  "off",
+            "projector_hash": proj_hash_ab,
             "inputs": {
+                "filenames": inputs_block["filenames"],
                 "boundaries": {
-                    "filename": inputs_block["filenames"].get("boundaries", "boundaries.json"),
-                    "hash":     inputs_block.get("boundaries_hash", ""),
-                    "district_id":  district_id_auth,
-                    "district_sig": _di.get("district_signature", ""),
-                    "lane_mask_k3": projected_ctx.get("lane_mask_k3", []),
-                    "d3_rows": _di.get("d3_rows", len(ctx_dict.get("d3", []))),
-                    "d3_cols": _di.get("d3_cols", (len(ctx_dict.get("d3", [])[0]) if ctx_dict.get("d3") else 0)),
-                    "projector_filename": ctx_dict.get("projector_filename",""),
-                    "projector_file_hash": ctx_dict.get("projector_hash",""),
-                    "projector_consistent_with_d": ctx_dict.get("projector_consistent_with_d", None),
+                    "filename": inputs_block["filenames"]["boundaries"],
+                    "hash":     inputs_block["boundaries_hash"],
+                    "district_id": identity_block["district_id"],
+                    "lane_mask_k3": run_ctx.get("lane_mask_k3", []),
+                    "d3_rows": len(run_ctx.get("d3", [])),
+                    "d3_cols": (len(run_ctx.get("d3", [])[0]) if run_ctx.get("d3") else 0),
+                    **({"projector_filename": run_ctx.get("projector_filename","")} if run_ctx.get("mode")=="projected(file)" else {}),
                 },
-                "U_filename": inputs_block["filenames"].get("U", "shapes.json"),
-                "C_filename": inputs_block["filenames"].get("C", "cmap.json"),
-                "H_filename": inputs_block["filenames"].get("H", "H.json"),
+                "U_filename": inputs_block["filenames"]["U"],
+                "C_filename": inputs_block["filenames"]["C"],
+                "H_filename": inputs_block["filenames"]["H"],
             },
-            "lane_mask_k3":      projected_ctx.get("lane_mask_k3", []),
-            "lane_vec_H2d3":     projected_ctx.get("lane_vec_H2d3", []),
-            "lane_vec_C3plusI3": projected_ctx.get("lane_vec_C3plusI3", []),
+            "lane_mask_k3": run_ctx.get("lane_mask_k3", []),
+            "lane_vec_H2d3": projected_ctx.get("lane_vec_H2d3", diagnostics_block.get("lane_vec_H2d3", [])),
+            "lane_vec_C3plusI3": projected_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
             "pass_vec": _pass_vec_from(projected_ctx.get("out", {})),
-            "out":      projected_ctx.get("out", {}),
+            "residual_tag": residual_tags.get("projected", "none"),
+            "out": projected_ctx.get("out", {}),
+            **({"projector_consistent_with_d": bool(run_ctx.get("projector_consistent_with_d"))}
+               if run_ctx.get("mode")=="projected(file)" else {}),
         }
         cert_payload["ab_pair_tag"] = ab_ctx.get("pair_tag", "")
 
-    # ---------------- Artifact hashes (derive once) ---------------------------
-    cert_payload.setdefault("artifact_hashes", {
-        "boundaries_hash": inputs_block.get("boundaries_hash", ""),
-        "C_hash":          inputs_block.get("C_hash", ""),
-        "H_hash":          inputs_block.get("H_hash", ""),
-        "U_hash":          inputs_block.get("U_hash", ""),
-    })
-    cert_payload["artifact_hashes"]["projector_hash"] = policy_block.get("projector_hash", "")
+    # ── Artifact hashes (copy from inputs) ────────────────────────────────────
+    cert_payload["artifact_hashes"] = {
+        "boundaries_hash": inputs_block["boundaries_hash"],
+        "C_hash":          inputs_block["C_hash"],
+        "H_hash":          inputs_block["H_hash"],
+        "U_hash":          inputs_block["U_hash"],
+        "projector_hash":  policy_block.get("projector_hash",""),
+    }
 
-    # ---------------- Keep top-level hashes in sync --------------------------
-    cert_payload["district_id"] = cert_payload.get("district_id") or district_id_auth or "UNKNOWN"
-    cert_payload["boundaries_hash"] = cert_payload.get("boundaries_hash") or _di.get("boundaries_hash") or inputs_block.get("boundaries_hash", "")
-    if cert_payload.get("boundaries_hash"):
-        inputs_block["boundaries_hash"] = cert_payload["boundaries_hash"]
-    cert_payload["inputs"] = inputs_block
+    # ── Promotion eligibility (tighten-up H/I rules) ─────────────────────────
+    grid_ok  = bool(checks_block.get("grid", True))
+    fence_ok = bool(checks_block.get("fence", True))
+    k3_ok    = bool(out.get("3", {}).get("eq", False))
+    k2_ok    = bool(out.get("2", {}).get("eq", False))
+    mode = run_ctx.get("mode")
+    eligible, target = False, None
+    if mode == "strict" and all([grid_ok, fence_ok, k3_ok, k2_ok]):
+        eligible, target = True, "strict_anchor"
+    elif mode in ("projected(auto)", "projected(file)") and all([grid_ok, fence_ok, k3_ok]) and residual_tags.get("projected","none") == "none":
+        eligible, target = True, "projected_exemplar"
+    cert_payload["promotion"] = {"eligible_for_promotion": eligible, "promotion_target": target, "notes": ""}
 
-    # ---------------- Integrity ----------------------------------------------
+    # ── Integrity (deterministic) ────────────────────────────────────────────
     cert_payload.setdefault("integrity", {})
-    cert_payload["integrity"]["content_hash"] = hashes.content_hash_of(cert_payload)
+    cert_payload["integrity"]["content_hash"] = _stable_hash(cert_payload)
+    district_id_for_cert = cert_payload["district_id"]  # for gallery/bundle below
 
-    # define before gallery/bundle use
-    district_id_for_cert = cert_payload["district_id"]
-
-    # ========================== CERT ENRICHMENTS ==============================
-    def _residual_tag_from_checks(out_dict: dict) -> str:
-        res = out_dict.get("residual_tag")
-        if isinstance(res, str) and res:
-            return res
-        k2 = bool(out_dict.get("2", {}).get("eq", False))
-        k3 = bool(out_dict.get("3", {}).get("eq", False))
-        if k3 and k2: return "none"
-        if (not k3) and k2: return "lanes"
-        if (not k2) and k3: return "ker"
-        return "mixed"
-
-    def _lane_mask_from_boundaries(bnds) -> list[int]:
-        d3_local = (bnds.blocks.__root__.get("3") or [])
-        if not d3_local or not d3_local[0]: return []
-        cols = len(d3_local[0])
-        return [1 if any(row[j] & 1 for row in d3_local) else 0 for j in range(cols)]
-
-    def _projector_diag_from_file(cfg: dict) -> tuple[list[int], str]:
-        src3 = (cfg or {}).get("source", {}).get("3", "")
-        if src3 != "file": return [], ""
-        pfile3 = (cfg or {}).get("projector_files", {}).get("3", "")
-        if not pfile3: return [], ""
-        try:
-            P3 = projector.load_projector_matrix(pfile3)
-        except Exception:
-            P3 = None
-        diag = []
-        if P3 and isinstance(P3, list) and P3 and isinstance(P3[0], list):
-            n = min(len(P3), len(P3[0]))
-            diag = [int(P3[i][i] & 1) for i in range(n)]
-        return diag, pfile3
-
-    def _try_get_projector_matrix_from_cache(cfg: dict):
-        try:
-            cache = st.session_state.get("_projector_cache") or {}
-            key = str(cfg.get("projector_files", {}).get("3", ""))
-            return cache.get(key)
-        except Exception:
-            return None
-
-    # canonical district & filenames
-    district_id_canon  = _di.get("district_id", cert_payload.get("district_id", "UNKNOWN"))
-    lane_mask_k3_canon = _di.get("lane_mask_k3_now", diagnostics_block.get("lane_mask_k3", []))
-    try:
-        d3 = boundaries.blocks.__root__.get("3") or []
-    except Exception:
-        d3 = []
-    d3_rows_canon = len(d3)
-    d3_cols_canon = (len(d3[0]) if (d3 and d3[0]) else 0)
-    if not lane_mask_k3_canon:
-        lane_mask_k3_canon = _lane_mask_from_boundaries(boundaries)
-
-    # filenames (standardize)
-    inputs_block.setdefault("boundaries_filename", st.session_state.get("fname_boundaries", "boundaries.json"))
-    inputs_block.setdefault("C_filename",          st.session_state.get("fname_cmap", "cmap.json"))
-    inputs_block.setdefault("H_filename",          st.session_state.get("fname_h", "H.json"))
-    inputs_block["U_filename"] = "shapes.json"
-    inputs_block.setdefault("filenames", {})
-    inputs_block["filenames"].update({
-        "boundaries": inputs_block.get("boundaries_filename", "boundaries.json"),
-        "C":          inputs_block.get("C_filename", "cmap.json"),
-        "H":          inputs_block.get("H_filename", "H.json"),
-        "U":          inputs_block.get("U_filename", "shapes.json"),
-    })
-    cert_payload["inputs"] = inputs_block
-    identity_block["district_id"] = district_id_canon
-    cert_payload["district_id"]   = district_id_canon
-
-    # snapshots from A/B (fresh only)
-    ab_ctx = st.session_state.get("ab_compare", {}) or {}
-    curr_sig = [
-        inputs_block.get("boundaries_hash", ""),
-        inputs_block.get("C_hash", ""),
-        inputs_block.get("H_hash", ""),
-        inputs_block.get("U_hash", ""),
-        inputs_block.get("shapes_hash", ""),
-    ]
-    if ab_ctx.get("inputs_sig") != curr_sig:
-        ab_ctx = {}
-    strict_ctx    = ab_ctx.get("strict", {}) if ab_ctx else {}
-    projected_ctx = ab_ctx.get("projected", {}) if ab_ctx else {}
-
-    strict_pass_vec    = [int(strict_ctx.get("out", {}).get("2", {}).get("eq", False)),
-                          int(strict_ctx.get("out", {}).get("3", {}).get("eq", False))]
-    projected_pass_vec = [int(projected_ctx.get("out", {}).get("2", {}).get("eq", False)),
-                          int(projected_ctx.get("out", {}).get("3", {}).get("eq", False))]
-    strict_residual_tag    = _residual_tag_from_checks(strict_ctx.get("out", {}))
-    projected_residual_tag = _residual_tag_from_checks(projected_ctx.get("out", {}))
-
-    strict_inputs_boundaries = {
-        "filename":        inputs_block["boundaries_filename"],
-        "hash":            inputs_block.get("boundaries_hash", ""),
-        "district_id":     district_id_canon,
-        "lane_mask_k3":    lane_mask_k3_canon,
-        "d3_rows":         d3_rows_canon,
-        "d3_cols":         d3_cols_canon,
-    }
-    projected_inputs_boundaries = dict(strict_inputs_boundaries)
-
-    # projector file-mode metadata & validation (only when projected file mode)
-    proj_file_diag, proj_file_name = [], ""
-    proj_consistent = None
-    if cfg_active.get("enabled_layers") and cfg_active.get("source", {}).get("3") == "file":
-        proj_file_diag, proj_file_name = _projector_diag_from_file(cfg_active)
-        P3 = _try_get_projector_matrix_from_cache(cfg_active)
-        if P3 is None and proj_file_name:
-            try:
-                P3 = projector.load_projector_matrix(proj_file_name)
-            except Exception:
-                P3 = None
-        shape_ok = False
-        if P3 and isinstance(P3, list) and P3 and isinstance(P3[0], list):
-            n = len(P3)  # must match number of columns of d3/C3
-            shape_ok = (n == d3_cols_canon)
-            # idempotence check happens earlier in RunContext; here we only mirror consistency
-        auto_mask = lane_mask_k3_canon[:len(proj_file_diag)] if proj_file_diag else lane_mask_k3_canon
-        consistent_ok = (proj_file_diag == auto_mask[:len(proj_file_diag)]) if proj_file_diag else True
-        proj_consistent = bool(shape_ok and consistent_ok)
-
-    cert_payload.setdefault("policy", {})
-    cert_payload["policy"]["strict_snapshot"] = {
-        "policy_tag": policy_label_from_cfg(cfg_strict()),
-        "ker_guard":  "enforced",
-        "inputs": {
-            "filenames": inputs_block["filenames"],
-            "boundaries": strict_inputs_boundaries,
-            "U_filename": inputs_block["U_filename"],
-            "C_filename": inputs_block["C_filename"],
-            "H_filename": inputs_block["H_filename"],
-        },
-        "lane_mask_k3":      lane_mask_k3_canon,
-        "lane_vec_H2d3":     strict_ctx.get("lane_vec_H2d3", diagnostics_block.get("lane_vec_H2d3", [])),
-        "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
-        "pass_vec":          strict_pass_vec,
-        "residual_tag":      strict_residual_tag,
-        "out":               strict_ctx.get("out", {}),
-    }
-
-    proj_hash_ab = projected_ctx.get("projector_hash", cert_payload.get("policy", {}).get("projector_hash", ""))
-    cert_payload["policy"]["projected_snapshot"] = {
-        "policy_tag":     ctx_dict.get("policy_tag", policy_label_from_cfg(cfg_projected_base())),
-        "ker_guard":      "off",
-        "projector_hash": proj_hash_ab,
-        "inputs": {
-            "filenames": inputs_block["filenames"],
-            "boundaries": projected_inputs_boundaries,
-            "U_filename": inputs_block["U_filename"],
-            "C_filename": inputs_block["C_filename"],
-            "H_filename": inputs_block["H_filename"],
-            **({"projector_filename": proj_file_name} if proj_file_name else {}),
-        },
-        "lane_mask_k3":      lane_mask_k3_canon,
-        "lane_vec_H2d3":     projected_ctx.get("lane_vec_H2d3", diagnostics_block.get("lane_vec_H2d3", [])),
-        "lane_vec_C3plusI3": projected_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
-        "pass_vec":          projected_pass_vec,
-        "residual_tag":      projected_residual_tag,
-        "out":               projected_ctx.get("out", {}),
-        **({"projector_consistent_with_d": proj_consistent} if proj_consistent is not None else {}),
-    }
-
-    if proj_consistent is False:
-        st.warning("Projected(file) projector is not consistent with current d3 (shape/idempotence/lane diag check failed).")
-
-    # district assert across snapshots
-    _snap_dids = [
-        district_id_canon,
-        cert_payload["policy"]["strict_snapshot"]["inputs"]["boundaries"]["district_id"],
-        cert_payload["policy"]["projected_snapshot"]["inputs"]["boundaries"]["district_id"],
-    ]
-    if len(set(_snap_dids)) != 1:
-        st.error(f"District mismatch across cert/snapshots: {_snap_dids}")
-        st.stop()
-
-    # ---- promotion summary in cert ------------------------------------------
-    grid_ok  = bool(checks_block.get("grid_ok", 1))
-    fence_ok = bool(checks_block.get("fence_ok", 1))
-    k3_ok    = bool(checks_block.get("3", {}).get("eq", False))
-    k2_ok    = bool(checks_block.get("2", {}).get("eq", False))
-    is_strict_mode    = not cfg_active.get("enabled_layers")
-    is_projected_mode = cfg_active.get("enabled_layers")
-
-    eligible = False
-    target   = None
-    if is_strict_mode and all([grid_ok, fence_ok, k3_ok, k2_ok]):
-        eligible = True
-        target   = "strict_anchor"
-    elif is_projected_mode and all([grid_ok, fence_ok, k3_ok]) and projected_residual_tag == "none":
-        eligible = True
-        target   = "projected_exemplar"
-
-    cert_payload["promotion"] = {
-        "eligible_for_promotion": eligible,
-        "promotion_target": target,
-        "notes": cert_payload.get("promotion", {}).get("notes", ""),
-    }
-
-    # Optional: embed full A/B
-    if ab_ctx:
-        cert_payload["ab_compare"] = {
-            "strict": {
-                "checks":      strict_ctx.get("out", {}),
-                "diagnostics": {
-                    "lane_mask_k3":      strict_ctx.get("lane_mask_k3", lane_mask_k3_canon),
-                    "lane_vec_H2d3":     strict_ctx.get("lane_vec_H2d3", diagnostics_block.get("lane_vec_H2d3", [])),
-                    "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
-                },
-                "ker_guard":    "enforced",
-                "residual_tag": strict_residual_tag,
-            },
-            "projected": {
-                "checks":      projected_ctx.get("out", {}),
-                "diagnostics": {
-                    "lane_mask_k3":      projected_ctx.get("lane_mask_k3", lane_mask_k3_canon),
-                    "lane_vec_H2d3":     projected_ctx.get("lane_vec_H2d3", diagnostics_block.get("lane_vec_H2d3", [])),
-                    "lane_vec_C3plusI3": projected_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
-                },
-                "ker_guard":    "off",
-                "residual_tag": projected_residual_tag,
-                "projector_hash": proj_hash_ab,
-            },
-            "pair_tag": ab_ctx.get("pair_tag", ""),
-        }
-
-    # ------------------------------ Write cert --------------------------------
+    # ── Write cert ───────────────────────────────────────────────────────────
     cert_path, full_hash = export_mod.write_cert_json(cert_payload)
     st.success(f"Cert written: `{cert_path}`")
 
-    # ---------- Gallery de-duplication row -----------------------------------
+    # ── Gallery de-dup row (stable key) ──────────────────────────────────────
     try:
-        try:
-            key = gallery_key_from(
-                cert_payload=cert_payload,
-                cmap=cmap,
-                diagnostics_block=diagnostics_block,
-                policy_label=policy_label,
-            )
-        except Exception:
-            key = (
-                district_id_for_cert,
-                inputs_block.get("boundaries_hash", ""),
-                inputs_block.get("U_hash", ""),
-                inputs_block.get("suppC_hash", inputs_block.get("C_hash", "")),
-                tuple(cert_payload.get("diagnostics", {}).get("lane_vec_H2d3", [])),
-                policy_label,
-            )
-
+        key = (
+            district_id_for_cert,
+            inputs_block.get("boundaries_hash",""),
+            inputs_block.get("U_hash",""),
+            inputs_block.get("C_hash",""),
+            tuple(diagnostics_block.get("lane_vec_H2d3", [])),
+            policy_block.get("policy_tag",""),
+        )
         row = {
             "district_id":     key[0],
             "boundaries_hash": key[1],
@@ -1845,33 +1596,19 @@ if 'sig_block' not in locals() or not isinstance(sig_block, dict):
             "cert_path":       cert_path,
             "content_hash":    cert_payload.get("integrity", {}).get("content_hash", ""),
         }
-
         if district_id_for_cert == "UNKNOWN":
-            st.warning("registry insert skipped: district_id is UNKNOWN (bind via boundaries hash mapping).")
+            st.warning("gallery insert skipped: district_id is UNKNOWN.")
         else:
             res = export_mod.write_gallery_row(row, key, path="gallery.csv")
             st.toast("gallery: added exemplar row" if res == "written" else "gallery: duplicate skipped")
     except Exception as e:
         st.warning(f"gallery dedupe failed: {e}")
 
-    # ---------- Download bundle (cert + policy + maps) ------------------------
+    # ── Download bundle (cert + policy + maps) ───────────────────────────────
     try:
-        _di2 = st.session_state.get("_district_info", {}) or {}
-        district_id_for_cert = (
-            cert_payload.get("district_id")
-            or _di2.get("district_id")
-            or "UNKNOWN"
-        )
-        boundaries_hash_for_cert = (
-            cert_payload.get("boundaries_hash")
-            or inputs_block.get("boundaries_hash", "")
-            or _di2.get("boundaries_hash", "")
-        )
-
-        _policy_block_for_bundle = dict(policy_block)
-        _ab_ctx = st.session_state.get("ab_compare", {}) or {}
+        _ab_ctx = _ss.get("ab_compare", {}) or {}
         _projected_ctx = _ab_ctx.get("projected", {}) or {}
-
+        _policy_block_for_bundle = dict(policy_block)
         if "policy" in cert_payload and "projected_snapshot" in cert_payload["policy"]:
             _policy_block_for_bundle["ab_policies"] = {
                 "strict":    cert_payload["policy"]["strict_snapshot"]["policy_tag"],
@@ -1879,88 +1616,57 @@ if 'sig_block' not in locals() or not isinstance(sig_block, dict):
             }
             _policy_block_for_bundle["ab_projector_hash"] = (
                 _projected_ctx.get("projector_hash")
-                or cert_payload["policy"]["projected_snapshot"].get("projector_hash", "")
+                or cert_payload["policy"]["projected_snapshot"].get("projector_hash","")
             )
-
         proj_hash_bundle = (
             _projected_ctx.get("projector_hash")
-            or cert_payload.get("policy", {}).get("projected_snapshot", {}).get("projector_hash", "")
-            or _policy_block_for_bundle.get("projector_hash", "")
+            or cert_payload.get("policy", {}).get("projected_snapshot", {}).get("projector_hash","")
+            or _policy_block_for_bundle.get("projector_hash","")
         )
         if proj_hash_bundle and not _policy_block_for_bundle.get("projector_hash"):
             _policy_block_for_bundle["projector_hash"] = proj_hash_bundle
-
         _policy_block_for_bundle["district_id"]         = district_id_for_cert
-        _policy_block_for_bundle["boundaries_hash"]     = boundaries_hash_for_cert
-        _policy_block_for_bundle["boundaries_filename"] = inputs_block.get("boundaries_filename", "")
-        _policy_block_for_bundle["U_filename"]          = inputs_block.get("U_filename", "")
-
+        _policy_block_for_bundle["boundaries_hash"]     = inputs_block.get("boundaries_hash","")
+        _policy_block_for_bundle["boundaries_filename"] = inputs_block["filenames"]["boundaries"]
+        _policy_block_for_bundle["U_filename"]          = inputs_block["filenames"]["U"]
         tag = policy_label.replace(" ", "_")
         if "policy" in cert_payload and "strict_snapshot" in cert_payload["policy"]:
             tag = f"{tag}__withAB"
-
         bundle_name = f"overlap_bundle__{district_id_for_cert}__{tag}__{full_hash[:12]}.zip"
         zip_path = export_mod.build_overlap_bundle(
             boundaries=boundaries,
             cmap=cmap,
-            H=H_local,
-            shapes=(shapes.dict() if hasattr(shapes, "dict") else (shapes or {})),
+            H=H_used,
+            shapes=shapes_payload,
             policy_block=_policy_block_for_bundle,
             cert_path=cert_path,
             out_zip=bundle_name,
         )
-        with open(zip_path, "rb") as f:
-            st.download_button(
-                "⬇️ Download bundle (.zip)",
-                data=f,
-                file_name=bundle_name,
-                mime="application/zip",
-                key="dl_overlap_bundle",
-            )
+        with open(zip_path, "rb") as fz:
+            st.download_button("⬇️ Download bundle (.zip)", data=fz, file_name=bundle_name,
+                               mime="application/zip", key="dl_overlap_bundle")
     except Exception as e:
         st.error(f"Could not build download bundle: {e}")
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # Promotion (optional) — uses latest overlap_out
-    # ──────────────────────────────────────────────────────────────────────────
-    _out_latest = st.session_state.get("overlap_out")
-    out = (_out_latest if isinstance(_out_latest, dict) else (out if 'out' in locals() else {})) or {}
-    _pass_vec = [int(out.get("2", {}).get("eq", False)),
-                 int(out.get("3", {}).get("eq", False))]
-    _all_green = all(v == 1 for v in _pass_vec)
-
-    if _all_green:
-        st.success("Green — eligible for promotion.")
-        flip_to_file = st.checkbox(
-            "After promotion, switch to FILE-backed projector",
-            value=True, key="flip_to_file_k3"
-        )
-        keep_auto = st.checkbox(
-            "…or keep AUTO (don’t lock now)",
-            value=False, key="keep_auto_k3"
-        )
-
+    # ── Promotion (optional) ─────────────────────────────────────────────────
+    _pass_vec = [int(out.get("2", {}).get("eq", False)), int(out.get("3", {}).get("eq", False))]
+    if cert_payload["promotion"]["eligible_for_promotion"]:
+        st.success(f"Green — eligible for promotion ({cert_payload['promotion']['promotion_target']}).")
+        flip_to_file = st.checkbox("After promotion, switch to FILE-backed projector", value=True, key="flip_to_file_k3")
+        keep_auto    = st.checkbox("…or keep AUTO (don’t lock now)", value=False, key="keep_auto_k3")
         if st.button("Promote & Freeze Projector", key="promote_k3"):
             try:
-                d3_now = boundaries.blocks.__root__.get("3") or []
+                d3_now = (boundaries.blocks.__root__.get("3") or [])
                 if not d3_now or not d3_now[0]:
-                    st.error("No d3; cannot freeze projector.")
-                    st.stop()
-
+                    st.error("No d3; cannot freeze projector."); st.stop()
                 n3 = len(d3_now[0])
-                lane_mask = [1 if any(row[j] & 1 for row in d3_now) else 0 for j in range(n3)]
-                P_used = [[1 if (i == j and lane_mask[i] == 1) else 0 for j in range(n3)] for i in range(n3)]
-
-                pj_path = (cfg_file.get("projector_files", {}) or {}).get("3", "projectors/projector_D3.json")
+                lane = [1 if any(row[j] & 1 for row in d3_now) else 0 for j in range(n3)]
+                P_used = [[1 if (i==j and lane[i]) else 0 for j in range(n3)] for i in range(n3)]
+                pj_path = (cfg_file.get("projector_files", {}) or {}).get("3", f"projectors/projector_{district_id}.json")
                 os.makedirs(os.path.dirname(pj_path), exist_ok=True)
                 with open(pj_path, "w") as _f:
                     _json.dump({"name": "Π3 freeze (lane-mask of current d3)", "blocks": {"3": P_used}}, _f, indent=2)
-
-                try:
-                    pj_hash = hashes.content_hash_of({"P3": P_used})
-                except Exception:
-                    pj_hash = hashlib.sha256(_json.dumps(P_used, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
+                pj_hash = _stable_hash({"blocks":{"3": P_used}})
                 st.info(f"Projector frozen → {pj_path} (hash={pj_hash[:12]}…)")
 
                 if flip_to_file and not keep_auto:
@@ -1968,192 +1674,124 @@ if 'sig_block' not in locals() or not isinstance(sig_block, dict):
                     cfg_file.setdefault("projector_files", {})["3"] = pj_path
                 else:
                     cfg_file.setdefault("source", {})["3"] = "auto"
-                    if "projector_files" in cfg_file and "3" in cfg_file["projector_files"]:
-                        del cfg_file["projector_files"]["3"]
-
+                    cfg_file.get("projector_files", {}).pop("3", None)
                 with open("projection_config.json", "w") as _f:
                     _json.dump(cfg_file, _f, indent=2)
 
-                # Optional registry note
+                # best-effort registry note
                 try:
                     import time as _time
                     export_mod.write_registry_row(
                         fix_id=f"overlap-{int(_time.time())}",
                         pass_vector=_pass_vec,
-                        policy=st.session_state.get("overlap_policy_label", ""),
-                        hash_d=hashes.hash_d(boundaries),
-                        hash_U=(hashes.hash_U(shapes) if 'shapes' in locals() else ""),
-                        hash_suppC=hashes.hash_suppC(cmap),
-                        hash_suppH=hashes.hash_suppH(H_local),
-                        notes=f"proj_hash={pj_hash}"
+                        policy=policy_label,
+                        hash_d=inputs_block["boundaries_hash"],
+                        hash_U=inputs_block["U_hash"],
+                        hash_suppC=inputs_block["C_hash"],
+                        hash_suppH=inputs_block["H_hash"],
+                        notes=f"proj_hash={pj_hash}",
                     )
                     st.success("Registry updated with projector hash.")
-                except Exception as e:
-                    st.warning(f"Registry note failed (non-fatal): {e}")
-
+                except Exception as ee:
+                    st.warning(f"Registry note failed (non-fatal): {ee}")
             except Exception as e:
                 st.error(f"Promotion failed: {e}")
 
-    # ──────────────────────────────────────────────────────────────────────────
-    # A/B compare (strict vs projected) — mirrors ACTIVE source (auto|file)
-    # ──────────────────────────────────────────────────────────────────────────
+    # ── A/B compare (strict vs projected) — mirrors active source ────────────
     st.markdown("### A/B: strict vs projected")
-
-    _ab_ctx_existing = st.session_state.get("ab_compare")
+    _ab_ctx_existing = _ss.get("ab_compare")
     if _ab_ctx_existing:
         s_ok = bool(_ab_ctx_existing.get("strict", {}).get("out", {}).get("3", {}).get("eq", False))
         p_ok = bool(_ab_ctx_existing.get("projected", {}).get("out", {}).get("3", {}).get("eq", False))
-        s_badge = "✅" if s_ok else "❌"
-        p_badge = "✅" if p_ok else "❌"
-        st.caption(f"A/B: strict={s_badge} · projected={p_badge}")
-        st.caption(f"pair: {_ab_ctx_existing.get('pair_tag','')}")
+        st.caption(f"A/B: strict={'✅' if s_ok else '❌'} · projected={'✅' if p_ok else '❌'} · pair: {_ab_ctx_existing.get('pair_tag','')}")
     else:
         st.caption("A/B: (no snapshot yet)")
 
-    # Build projected cfg for A/B (prefer ACTIVE cfg if projected is on)
-    _cfg_disk_for_ab = projector.load_projection_config("projection_config.json")
-    _cfg_proj_for_ab = cfg_projected_base()
-    if _cfg_disk_for_ab.get("source", {}).get("3") in ("file", "auto"):
-        _cfg_proj_for_ab["source"]["3"] = _cfg_disk_for_ab["source"]["3"]
-    if "projector_files" in _cfg_disk_for_ab and "3" in _cfg_disk_for_ab["projector_files"]:
-        _cfg_proj_for_ab.setdefault("projector_files", {})["3"] = _cfg_disk_for_ab["projector_files"]["3"]
-    try:
-        if cfg_active.get("enabled_layers"):
-            _cfg_proj_for_ab = cfg_active
-    except NameError:
-        pass
-
-    # independent cache namespace for A/B
-    _di = st.session_state.get("_district_info", {}) or {}
-    _bound_hash = _di.get("boundaries_hash", inputs_block.get("boundaries_hash", ""))
-
-    _src3_ab  = _cfg_proj_for_ab.get("source", {}).get("3", "")
-    _file3_ab = _cfg_proj_for_ab.get("projector_files", {}).get("3", "") if _src3_ab == "file" else ""
-    _phash_ab = ""
-    if _file3_ab and os.path.exists(_file3_ab):
+    def _prov_hash(cfg, lane_mask_k3, district_id):
         try:
-            with open(_file3_ab, "r") as _pf:
-                _rawP = _json.load(_pf)
-            _P3ab = _rawP if (isinstance(_rawP, list) and _rawP and isinstance(_rawP[0], list)) else (_rawP.get("blocks", {}).get("3"))
-            try:
-                _phash_ab = hashes.content_hash_of({"P3": _P3ab})
-            except Exception:
-                _phash_ab = hashlib.sha256(_json.dumps(_P3ab, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            return projector_provenance_hash(cfg=cfg, lane_mask_k3=lane_mask_k3, district_id=district_id)
         except Exception:
-            _phash_ab = "ERR"
+            try:
+                return projector_provenance_hash(cfg=cfg)
+            except Exception:
+                return ""
 
-    _ab_cache_key = f"{_bound_hash}|AB|src3={_src3_ab}|file3={_file3_ab}|Phash={_phash_ab}"
-    if st.session_state.get("_projector_cache_key_ab") != _ab_cache_key:
-        st.session_state.pop("_projector_cache_ab", None)
-        st.session_state["_projector_cache_key_ab"] = _ab_cache_key
-
-    _cache_for_ab = st.session_state.get("_projector_cache_ab") or projector.preload_projectors_from_files(_cfg_proj_for_ab)
-    st.session_state["_projector_cache_ab"] = _cache_for_ab
-
-    # Parse H once for both legs
-    H_obj = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})
-
-    # A/B run (use build_run_context to validate projected leg)
+    # A/B runner
     if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
+        # strict leg
+        out_strict   = overlap_gate.overlap_check(boundaries, cmap, H_used)
+        label_strict = policy_label_from_cfg(cfg_strict())
+        # projected leg mirrors active source (tighten-up G)
+        _cfg_proj_ab = cfg_active if cfg_active.get("enabled_layers") else cfg_projected_base()
+        if not _cfg_proj_ab.get("enabled_layers"):
+            # mirror disk source when strict currently selected
+            disk = projector.load_projection_config("projection_config.json")
+            if disk.get("source", {}).get("3") in ("file","auto"):
+                _cfg_proj_ab["source"]["3"] = disk["source"]["3"]
+            if disk.get("projector_files", {}).get("3"):
+                _cfg_proj_ab.setdefault("projector_files", {})["3"] = disk["projector_files"]["3"]
+        # validate FILE leg (fail-fast)
         try:
-            # Validate projected leg config via RunContext (no silent fallback)
-            try:
-                _ctx_ab = build_run_context(_cfg_proj_for_ab, boundaries, policy_label_from_cfg(_cfg_proj_for_ab))
-            except ValueError as e:
-                st.error(f"A/B projected(file) invalid: {e}")
-                st.stop()
+            _P_ab, _meta_ab = projector_choose_active(_cfg_proj_ab, boundaries)
+        except ValueError as e:
+            st.error(f"A/B projected(file) invalid: {e}")
+            st.stop()
+        out_proj = overlap_gate.overlap_check(boundaries, cmap, H_used,
+                                              projection_config=_cfg_proj_ab,
+                                              projector_cache=None)
+        label_proj = policy_label_from_cfg(_cfg_proj_ab)
+        # lanes diag
+        d3  = run_ctx.get("d3", [])
+        H2  = (H_used.blocks.__root__.get("2") or [])
+        C3  = (cmap.blocks.__root__.get("3") or [])
+        lane_idx  = [j for j, m in enumerate(run_ctx.get("lane_mask_k3", [])) if m]
+        H2d3 = _mul(H2, d3) if (H2 and d3) else []
+        C3pI3 = _xor_mat(C3, _eye(len(C3))) if C3 else []
+        def _mask(vec, idx): return [vec[j] for j in idx] if (vec and idx) else []
+        strict_lane_vec_H2d3, strict_lane_vec_C3pI3 = _mask(_bottom_row(H2d3), lane_idx), _mask(_bottom_row(C3pI3), lane_idx)
+        proj_lane_vec_H2d3,   proj_lane_vec_C3pI3   = strict_lane_vec_H2d3[:], strict_lane_vec_C3pI3[:]
+        # provenance
+        proj_hash_prov = _prov_hash(_cfg_proj_ab, run_ctx.get("lane_mask_k3", []), district_id)
+        # persist
+        _inputs_sig = [inputs_block["boundaries_hash"], inputs_block["C_hash"], inputs_block["H_hash"], inputs_block["U_hash"], inputs_block["shapes_hash"]]
+        st.session_state["ab_compare"] = {
+            "pair_tag": f"{label_strict}__VS__{label_proj}",
+            "inputs_sig": _inputs_sig,
+            "lane_mask_k3": run_ctx.get("lane_mask_k3", []),
+            "strict": {
+                "label": label_strict,
+                "cfg":   cfg_strict(),
+                "out":   out_strict,
+                "ker_guard": "enforced",
+                "lane_vec_H2d3":     strict_lane_vec_H2d3,
+                "lane_vec_C3plusI3": strict_lane_vec_C3pI3,
+                "projector_hash": "",
+                "pass_vec": [
+                    int(out_strict.get("2", {}).get("eq", False)),
+                    int(out_strict.get("3", {}).get("eq", False)),
+                ],
+            },
+            "projected": {
+                "label": label_proj,
+                "cfg":   _cfg_proj_ab,
+                "out":   out_proj,
+                "ker_guard": "off",
+                "projector_hash": proj_hash_prov,
+                "lane_vec_H2d3":     proj_lane_vec_H2d3,
+                "lane_vec_C3plusI3": proj_lane_vec_C3pI3,
+                "pass_vec": [
+                    int(out_proj.get("2", {}).get("eq", False)),
+                    int(out_proj.get("3", {}).get("eq", False)),
+                ],
+                "projector_filename": _meta_ab.get("projector_filename",""),
+                "projector_file_hash": _meta_ab.get("projector_hash",""),
+                "projector_consistent_with_d": _meta_ab.get("projector_consistent_with_d", None),
+            },
+        }
+        s_ok = bool(out_strict.get("3", {}).get("eq", False))
+        p_ok = bool(out_proj.get("3", {}).get("eq", False))
+        st.success(f"A/B: strict={'GREEN' if s_ok else 'RED'} · projected={'GREEN' if p_ok else 'RED'}")
 
-            # A) strict
-            out_strict   = overlap_gate.overlap_check(boundaries, cmap, H_obj)
-            label_strict = policy_label_from_cfg(cfg_strict())
-
-            # B) projected (auto|file per ACTIVE/disk config)
-            out_proj = overlap_gate.overlap_check(
-                boundaries, cmap, H_obj,
-                projection_config=_cfg_proj_for_ab,
-                projector_cache=_cache_for_ab,
-            )
-            label_proj = policy_label_from_cfg(_cfg_proj_for_ab)  # mirrors file/auto
-
-            # Lane diagnostics (fresh)
-            d3  = boundaries.blocks.__root__.get("3") or []
-            H2  = (H_obj.blocks.__root__.get("2") or [])
-            C3  = (cmap.blocks.__root__.get("3") or [])
-            lane_mask = [1 if d3 and any(row[j] & 1 for row in d3) else 0 for j in range(len(d3[0]))] if (d3 and d3[0]) else []
-            lane_idx  = [j for j, m in enumerate(lane_mask) if m]
-
-            from otcore.linalg_gf2 import mul, add, eye
-            def __bottom_row(M): return M[-1] if (M and len(M)) else []
-            H2d3   = mul(H2, d3) if (H2 and d3) else []
-            C3pI3  = add(C3, eye(len(C3))) if C3 else []
-            strict_lane_vec_H2d3 = [__bottom_row(H2d3)[j] for j in lane_idx] if H2d3 else []
-            strict_lane_vec_C3pI3 = [__bottom_row(C3pI3)[j] for j in lane_idx] if C3pI3 else []
-            proj_lane_vec_H2d3   = strict_lane_vec_H2d3[:]   # same geometry
-            proj_lane_vec_C3pI3  = strict_lane_vec_C3pI3[:]
-
-            # Provenance hash for projected leg (for easy audit)
-            district_id = (st.session_state.get("_district_info", {}) or {}).get("district_id") \
-                          or st.session_state.get("district_id", "UNKNOWN")
-            try:
-                proj_hash_prov = projector_provenance_hash(
-                    cfg=_cfg_proj_for_ab, lane_mask_k3=lane_mask, district_id=district_id
-                )
-            except TypeError:
-                proj_hash_prov = projector_provenance_hash(_cfg_proj_for_ab) if 'projector_provenance_hash' in globals() else ""
-
-            # Inputs signature for freshness guard
-            inputs_sig = [
-                inputs_block.get("boundaries_hash", ""),
-                inputs_block.get("C_hash", ""),
-                inputs_block.get("H_hash", ""),
-                inputs_block.get("U_hash", ""),
-                inputs_block.get("shapes_hash", ""),
-            ]
-
-            # Persist compact A/B context
-            pair_tag = f"{label_strict}__VS__{label_proj}"
-            st.session_state["ab_compare"] = {
-                "pair_tag": pair_tag,
-                "inputs_sig": inputs_sig,
-                "lane_mask_k3": lane_mask,
-                "strict": {
-                    "label": label_strict,
-                    "cfg":   cfg_strict(),
-                    "out":   out_strict,
-                    "ker_guard": "enforced",
-                    "lane_vec_H2d3":     strict_lane_vec_H2d3,
-                    "lane_vec_C3plusI3": strict_lane_vec_C3pI3,
-                    "projector_hash": "",
-                    "pass_vec": [
-                        int(out_strict.get("2", {}).get("eq", False)),
-                        int(out_strict.get("3", {}).get("eq", False)),
-                    ],
-                },
-                "projected": {
-                    "label": label_proj,                # “…file” when file is active
-                    "cfg":   _cfg_proj_for_ab,         # exact cfg used
-                    "out":   out_proj,
-                    "ker_guard": "off",
-                    "projector_hash": proj_hash_prov,
-                    "lane_vec_H2d3":     proj_lane_vec_H2d3,
-                    "lane_vec_C3plusI3": proj_lane_vec_C3pI3,
-                    "pass_vec": [
-                        int(out_proj.get("2", {}).get("eq", False)),
-                        int(out_proj.get("3", {}).get("eq", False)),
-                    ],
-                    "projector_filename": (_ctx_ab.projector_filename or ""),
-                    "projector_file_hash": (_ctx_ab.projector_hash or ""),
-                    "projector_consistent_with_d": _ctx_ab.projector_consistent_with_d,
-                },
-            }
-
-            # UI badge
-            s_ok = bool(out_strict.get("3", {}).get("eq", False))
-            p_ok = bool(out_proj.get("3", {}).get("eq", False))
-            st.success(f"A/B: strict={'GREEN' if s_ok else 'RED'} · projected={'GREEN' if p_ok else 'RED'}")
-
-        except Exception as e:
-            st.error(f"A/B compare failed: {e}")
 
 
 
