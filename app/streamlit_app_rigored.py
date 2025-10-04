@@ -2508,48 +2508,48 @@ identity_block = {
 }
 
 
-    # ── inputs block (sole source of hashes + filenames + dims)
-    def _fname(k, default): 
-        v = _ss.get(k, ""); 
-        return v if isinstance(v, str) and v.strip() else default
-    inputs_block = {}
-    inputs_block["filenames"] = {
-        "boundaries": _fname("fname_boundaries", "boundaries.json"),
-        "C":          _fname("fname_cmap", "cmap.json"),
-        "H":          _fname("fname_h", "H.json"),
-        "U":          _fname("fname_shapes", "shapes.json"),
-    }
-    d3_now = (boundaries.blocks.__root__.get("3") or [])
-    C3_now = (cmap.blocks.__root__.get("3") or [])
-    inputs_block["dims"] = {
-        "n3": (len(C3_now) if C3_now else len(d3_now[0]) if (d3_now and d3_now[0]) else 0),
-        "n2": (len(cmap.blocks.__root__.get("2") or [])),
-    }
-    shapes_payload = shapes.dict() if hasattr(shapes, "dict") else (shapes or {})
-    inputs_block["boundaries_hash"] = _stable_hash(boundaries.dict() if hasattr(boundaries, "dict") else {})
-    inputs_block["C_hash"]          = _stable_hash(cmap.dict() if hasattr(cmap, "dict") else {})
-    inputs_block["H_hash"]          = _stable_hash(H_used.dict() if hasattr(H_used, "dict") else {})
-    inputs_block["U_hash"]          = _stable_hash(shapes_payload)
-    inputs_block["shapes_hash"]     = inputs_block["U_hash"]
-    if run_ctx.get("mode") == "projected(file)":
-        inputs_block["filenames"]["projector"] = run_ctx.get("projector_filename","")
+# ── inputs block (sole source of hashes + filenames + dims)
+def _fname(k, default): 
+    v = _ss.get(k, ""); 
+    return v if isinstance(v, str) and v.strip() else default
+inputs_block = {}
+inputs_block["filenames"] = {
+    "boundaries": _fname("fname_boundaries", "boundaries.json"),
+    "C":          _fname("fname_cmap", "cmap.json"),
+    "H":          _fname("fname_h", "H.json"),
+    "U":          _fname("fname_shapes", "shapes.json"),
+}
+d3_now = (boundaries.blocks.__root__.get("3") or [])
+C3_now = (cmap.blocks.__root__.get("3") or [])
+inputs_block["dims"] = {
+    "n3": (len(C3_now) if C3_now else len(d3_now[0]) if (d3_now and d3_now[0]) else 0),
+    "n2": (len(cmap.blocks.__root__.get("2") or [])),
+}
+shapes_payload = shapes.dict() if hasattr(shapes, "dict") else (shapes or {})
+inputs_block["boundaries_hash"] = _stable_hash(boundaries.dict() if hasattr(boundaries, "dict") else {})
+inputs_block["C_hash"]          = _stable_hash(cmap.dict() if hasattr(cmap, "dict") else {})
+inputs_block["H_hash"]          = _stable_hash(H_used.dict() if hasattr(H_used, "dict") else {})
+inputs_block["U_hash"]          = _stable_hash(shapes_payload)
+inputs_block["shapes_hash"]     = inputs_block["U_hash"]
+if run_ctx.get("mode") == "projected(file)":
+    inputs_block["filenames"]["projector"] = run_ctx.get("projector_filename","")
 
-    # ── diagnostics
-    lane_mask = run_ctx.get("lane_mask_k3", [])
-    try:
-        H2 = (H_used.blocks.__root__.get("2") or [])
-        C3 = (cmap.blocks.__root__.get("3") or [])
-        H2d3 = mul(H2, run_ctx.get("d3", [])) if (H2 and run_ctx.get("d3")) else []
-        C3pI3 = _xor_mat(C3, _eye(len(C3))) if C3 else []
-        lane_idx = [j for j, m in enumerate(lane_mask) if m]
-        def _mask(vec, idx): return [vec[j] for j in idx] if (vec and idx) else []
-        diagnostics_block = {
-            "lane_mask_k3": lane_mask,
-            "lane_vec_H2d3": _mask(_bottom_row(H2d3), lane_idx),
-            "lane_vec_C3plusI3": _mask(_bottom_row(C3pI3), lane_idx),
-        }
-    except Exception:
-        diagnostics_block = {"lane_mask_k3": lane_mask, "lane_vec_H2d3": [], "lane_vec_C3plusI3": []}
+# ── diagnostics
+lane_mask = run_ctx.get("lane_mask_k3", [])
+try:
+    H2 = (H_used.blocks.__root__.get("2") or [])
+    C3 = (cmap.blocks.__root__.get("3") or [])
+    H2d3 = mul(H2, run_ctx.get("d3", [])) if (H2 and run_ctx.get("d3")) else []
+    C3pI3 = _xor_mat(C3, _eye(len(C3))) if C3 else []
+    lane_idx = [j for j, m in enumerate(lane_mask) if m]
+    def _mask(vec, idx): return [vec[j] for j in idx] if (vec and idx) else []
+    diagnostics_block = {
+        "lane_mask_k3": lane_mask,
+        "lane_vec_H2d3": _mask(_bottom_row(H2d3), lane_idx),
+        "lane_vec_C3plusI3": _mask(_bottom_row(C3pI3), lane_idx),
+    }
+except Exception:
+    diagnostics_block = {"lane_mask_k3": lane_mask, "lane_vec_H2d3": [], "lane_vec_C3plusI3": []}
 
     # ── signatures
     def _gf2_rank(M):
