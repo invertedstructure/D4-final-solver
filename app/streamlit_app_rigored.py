@@ -24,6 +24,86 @@ if PKG_NAME not in sys.modules:
     pkg.__file__ = str(PKG_DIR / "__init__.py")
     sys.modules[PKG_NAME] = pkg
 
+# --- bundle builder (cross-device safe, tidy arcnames) ---
+import os, json, zipfile, tempfile, shutil
+from pathlib import Path
+
+BUNDLES_DIR = Path("bundles")
+BUNDLES_DIR.mkdir(parents=True, exist_ok=True)
+
+def _zip_arcname(abspath: str) -> str:
+    """
+    Make a nice path inside the zip. Prefer CWD-relative; fallback to basename.
+    """
+    p = Path(abspath)
+    try:
+        rel = p.resolve().relative_to(Path.cwd().resolve())
+        return rel.as_posix()
+    except Exception:
+        return p.name  # last resort
+
+def build_cert_bundle(*,
+    district_id: str,
+    policy_tag: str,
+    cert_path: str,                  # required: path to the cert JSON we just wrote
+    content_hash: str | None = None, # optional: cert["integrity"]["content_hash"]
+    extras: list[str] | None = None  # optional: extra files to include if present
+) -> str:
+    """
+    Creates bundles/overlap_bundle__{district}__{policy}__{hash[:12]}.zip
+    Includes the cert and any existing files in `extras`.
+    Writes temp file in the same directory as the target → avoids cross-device errors.
+    Returns the bundle path (str).
+    """
+    cert_p = Path(cert_path)
+    if not cert_p.exists():
+        raise FileNotFoundError(f"Cert not found: {cert_path}")
+
+    # Read cert to infer default content hash if needed
+    with open(cert_p, "r", encoding="utf-8") as f:
+        cert = json.load(f)
+    if not content_hash:
+        content_hash = ((cert.get("integrity") or {}).get("content_hash") or "")
+
+    suffix = content_hash[:12] if content_hash else "nohash"
+    safe_policy = (policy_tag or cert.get("policy", {}).get("policy_tag", "policy")) \
+                    .replace("/", "_").replace(" ", "_")
+
+    zname = f"overlap_bundle__{district_id or 'UNKNOWN'}__{safe_policy}__{suffix}.zip"
+    zpath = (BUNDLES_DIR / zname).resolve()
+
+    # Collect files (cert first, then extras that actually exist)
+    files = [str(cert_p)]
+    for p in (extras or []):
+        if p and os.path.exists(p):
+            files.append(p)
+
+    # Write the zip to a temp file **in the same folder** as the target
+    fd, tmp_name = tempfile.mkstemp(dir=BUNDLES_DIR, prefix=".tmp_bundle_", suffix=".zip")
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+
+    try:
+        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for abspath in files:
+                abspath = str(Path(abspath).resolve())
+                zf.write(abspath, arcname=_zip_arcname(abspath))
+
+        # Try atomic replace; if cross-device (shouldn’t happen now), fall back to move
+        try:
+            os.replace(tmp_path, zpath)
+        except OSError:
+            shutil.move(str(tmp_path), str(zpath))
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except Exception:
+            pass
+        raise
+
+    return str(zpath)
+
+
 def _load_pkg_module(fullname: str, rel_path: str):
     path = PKG_DIR / rel_path
     if not path.exists():
