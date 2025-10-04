@@ -1466,6 +1466,80 @@ if st.button("Run A/B compare", key="ab_run_btn"):
     except Exception as e:
         st.error(f"A/B compare failed: {e}")
 
+    # ───────────────────────── Gallery / Witness actions ─────────────────────────
+# Pull SSOT bits we need
+_ss          = st.session_state
+run_ctx      = _ss.get("run_ctx") or {}
+overlap_out  = _ss.get("overlap_out") or {}
+last_cert    = _ss.get("last_cert_path", "")
+cert_cached  = _ss.get("cert_payload")  # set by your cert writer step
+
+def _load_cert_dict():
+    if cert_cached:
+        return cert_cached
+    if last_cert and os.path.exists(last_cert):
+        try:
+            with open(last_cert, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return None
+
+# Predicates
+k3_ok     = bool(overlap_out.get("3", {}).get("eq", False))
+k2_ok     = bool(overlap_out.get("2", {}).get("eq", False))
+grid_ok   = bool(overlap_out.get("grid", True))
+fence_ok  = bool(overlap_out.get("fence", True))
+is_proj   = str(run_ctx.get("mode","")).startswith("projected")
+can_gallery = (is_proj and k3_ok and bool(last_cert))
+can_witness = (grid_ok and fence_ok and (not k3_ok) and bool(last_cert))
+
+st.markdown("---")
+cA, cB = st.columns(2)
+
+with cA:
+    st.caption("Gallery")
+    growth_bumps = st.number_input("Growth bumps", min_value=0, max_value=9, value=0, step=1, key="gal_gb")
+    if st.button("Add to Gallery", key="btn_add_gallery", disabled=not can_gallery):
+        cert = _load_cert_dict()
+        if not cert:
+            st.error("No cert available to log. Run Overlap to produce a cert first.")
+        else:
+            appended = append_gallery_row(cert, growth_bumps=growth_bumps, strictify="tbd")
+            if appended:
+                st.success("Added to Gallery.")
+            else:
+                st.info("Skipped (duplicate per dedupe key).")
+
+    # gentle hints if disabled
+    if not can_gallery:
+        st.caption("↳ Requires: projected mode + k3=✓ + a written cert.")
+
+with cB:
+    st.caption("Witness")
+    reason = st.selectbox(
+        "Reason",
+        ["lanes-persist", "policy-mismatch", "needs-new-R", "grammar-drift", "other"],
+        index=0,
+        key="wit_reason",
+    )
+    note = st.text_input("Note (optional)", value="", key="wit_note")
+
+    if st.button("Log Witness", key="btn_log_witness", disabled=not can_witness):
+        cert = _load_cert_dict()
+        if not cert:
+            st.error("No cert available to log. Run Overlap to produce a cert first.")
+        else:
+            # choose residual tag from session if present, fallback
+            rtags = _ss.get("residual_tags", {})
+            tag_val = rtags.get("projected" if is_proj else "strict", "none")
+            append_witness_row(cert, reason=reason, residual_tag_val=tag_val, note=note)
+            st.success("Witness logged.")
+
+    if not can_witness:
+        st.caption("↳ Requires: grid=✓, fence=✓, k3=✗, and a written cert.")
+
+
 
     # ------------------------ Parity import/export & sample queue ------------------------
     PARITY_SCHEMA_VERSION = "1.0.0"
