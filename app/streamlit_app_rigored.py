@@ -2760,58 +2760,80 @@ if _ab_ctx_existing:
 else:
     st.caption("A/B: (no snapshot yet)")
 
-# Build projected cfg from disk choices (so A/B mirrors what's on disk)
-_cfg_file_for_ab = projector.load_projection_config("projection_config.json")
+# --- Build projected cfg for A/B (mirror ACTIVE cfg if projected is on) -----
+_cfg_disk_for_ab = projector.load_projection_config("projection_config.json")
 _cfg_proj_for_ab = cfg_projected_base()
-if _cfg_file_for_ab.get("source", {}).get("3") in ("file", "auto"):
-    _cfg_proj_for_ab["source"]["3"] = _cfg_file_for_ab["source"]["3"]
-if "projector_files" in _cfg_file_for_ab and "3" in _cfg_file_for_ab["projector_files"]:
-    _cfg_proj_for_ab["projector_files"]["3"] = _cfg_file_for_ab["projector_files"]["3"]
+if _cfg_disk_for_ab.get("source", {}).get("3") in ("file", "auto"):
+    _cfg_proj_for_ab["source"]["3"] = _cfg_disk_for_ab["source"]["3"]
+if "projector_files" in _cfg_disk_for_ab and "3" in _cfg_disk_for_ab["projector_files"]:
+    _cfg_proj_for_ab.setdefault("projector_files", {})["3"] = _cfg_disk_for_ab["projector_files"]["3"]
+
+# If the active tab is already projected(auto|file), prefer that exact cfg
+try:
+    if cfg_active.get("enabled_layers"):
+        _cfg_proj_for_ab = cfg_active
+except NameError:
+    pass  # no cfg_active in scope if pasted elsewhere
 
 # ---------- projector cache discipline (A/B has its own cache namespace) ----
-try:
-    # prefer authoritative boundaries hash from session
-    _di = st.session_state.get("_district_info", {}) or {}
-    _bound_hash = _di.get("boundaries_hash", inputs_block.get("boundaries_hash", ""))
+import os, json as _json
+def _extract_P3_matrix(obj):
+    if isinstance(obj, list) and obj and isinstance(obj[0], list):
+        return obj
+    if isinstance(obj, dict):
+        b = obj.get("blocks", {})
+        M = b.get("3")
+        if isinstance(M, list) and M and isinstance(M[0], list):
+            return M
+    return None
 
-    _src3  = _cfg_proj_for_ab.get("source", {}).get("3", "")
-    _file3 = _cfg_proj_for_ab.get("projector_files", {}).get("3", "") if _src3 == "file" else ""
-    _ab_cache_key = f"{_bound_hash}|AB|src3={_src3}|file3={_file3}"
+def _hash_json_matrix(P):
+    try:
+        return hashes.content_hash_of({"P3": P})
+    except Exception:
+        blob = _json.dumps(P, sort_keys=True, separators=(",", ":")).encode()
+        import hashlib as _hl
+        return _hl.sha256(blob).hexdigest()
 
-    if st.session_state.get("_projector_cache_key_ab") != _ab_cache_key:
-        st.session_state.pop("_projector_cache_ab", None)
-        st.session_state["_projector_cache_key_ab"] = _ab_cache_key
+_di = st.session_state.get("_district_info", {}) or {}
+_bound_hash = _di.get("boundaries_hash", inputs_block.get("boundaries_hash", ""))
 
-    _cache_for_ab = st.session_state.get("_projector_cache_ab") or projector.preload_projectors_from_files(_cfg_proj_for_ab)
-    st.session_state["_projector_cache_ab"] = _cache_for_ab
-except Exception:
-    # fallback: just preload with current projected cfg
-    _cache_for_ab = projector.preload_projectors_from_files(_cfg_proj_for_ab)
+_src3_ab  = _cfg_proj_for_ab.get("source", {}).get("3", "")
+_file3_ab = _cfg_proj_for_ab.get("projector_files", {}).get("3", "") if _src3_ab == "file" else ""
+_phash_ab = ""
+if _file3_ab and os.path.exists(_file3_ab):
+    try:
+        with open(_file3_ab, "r") as _pf:
+            _rawP = _json.load(_pf)
+        _P3ab = _extract_P3_matrix(_rawP) or _rawP
+        _phash_ab = _hash_json_matrix(_P3ab)
+    except Exception:
+        _phash_ab = "ERR"
+
+_ab_cache_key = f"{_bound_hash}|AB|src3={_src3_ab}|file3={_file3_ab}|Phash={_phash_ab}"
+
+if st.session_state.get("_projector_cache_key_ab") != _ab_cache_key:
+    st.session_state.pop("_projector_cache_ab", None)
+    st.session_state["_projector_cache_key_ab"] = _ab_cache_key
+
+_cache_for_ab = st.session_state.get("_projector_cache_ab") or projector.preload_projectors_from_files(_cfg_proj_for_ab)
+st.session_state["_projector_cache_ab"] = _cache_for_ab
 
 # Parse H once for both runs
 H_obj = io.parse_cmap(d_H) if d_H else io.parse_cmap({"blocks": {}})
 
-# Small helpers
+# Small helpers (lanes)
 from otcore.linalg_gf2 import mul, add, eye
-
-def _bottom_row(M):
-    return M[-1] if (M and len(M)) else []
-
+def _bottom_row(M): return M[-1] if (M and len(M)) else []
 def _lane_mask_from_d3(d3_mat):
-    if not d3_mat or not d3_mat[0]:
-        return []
+    if not d3_mat or not d3_mat[0]: return []
     cols = len(d3_mat[0])
     return [1 if any(row[j] & 1 for row in d3_mat) else 0 for j in range(cols)]
-
-def _mask(vec, idx):
-    return [vec[j] for j in idx] if (vec and idx) else []
-
+def _mask(vec, idx): return [vec[j] for j in idx] if (vec and idx) else []
 def _compute_lane_vectors(H2_block, d3_block, C3_block, lane_indices):
     H2d3   = mul(H2_block, d3_block) if (H2_block and d3_block) else []
     C3pI3  = add(C3_block, eye(len(C3_block))) if C3_block else []
-    v_H2d3 = _mask(_bottom_row(H2d3), lane_indices)
-    v_C3I  = _mask(_bottom_row(C3pI3), lane_indices)
-    return v_H2d3, v_C3I
+    return _mask(_bottom_row(H2d3), lane_indices), _mask(_bottom_row(C3pI3), lane_indices)
 
 # provenance hash shim
 def _provenance_hash(cfg, lane_mask_k3, district_id):
@@ -2836,10 +2858,10 @@ def _provenance_hash(cfg, lane_mask_k3, district_id):
         return ""
 
 if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
-    # --- Validate projected(file), fail fast if invalid (don’t silently use AUTO)
+    # --- Validate projected(file), fail fast (no silent AUTO fallback)
     proj_meta_ab = {}
     try:
-        P_active_ab, proj_meta_ab = projector_choose_active(_cfg_proj_for_ab, boundaries)
+        _P_active_ab, proj_meta_ab = projector_choose_active(_cfg_proj_for_ab, boundaries)
     except ValueError as e:
         st.error(f"A/B projected(file) invalid: {e}")
         st.stop()
@@ -2848,7 +2870,7 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
     out_strict   = overlap_gate.overlap_check(boundaries, cmap, H_obj)
     label_strict = policy_label_from_cfg(cfg_strict())
 
-    # --- B) projected (columns@k=3, auto|file per config)
+    # --- B) projected (auto|file per ACTIVE/disk config)
     out_proj = overlap_gate.overlap_check(
         boundaries, cmap, H_obj,
         projection_config=_cfg_proj_for_ab,
@@ -2856,24 +2878,22 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
     )
     label_proj = policy_label_from_cfg(_cfg_proj_for_ab)
 
-    # --- Lane diagnostics (compute fresh from current buffers) ----------------
+    # --- Lane diagnostics (fresh each leg)
     d3  = boundaries.blocks.__root__.get("3") or []
     H2  = (H_obj.blocks.__root__.get("2") or [])
     C3  = (cmap.blocks.__root__.get("3") or [])
-
     lane_mask = _lane_mask_from_d3(d3)
     lane_idx  = [j for j, m in enumerate(lane_mask) if m]
-
     strict_lane_vec_H2d3, strict_lane_vec_C3pI3 = _compute_lane_vectors(H2, d3, C3, lane_idx)
     proj_lane_vec_H2d3,   proj_lane_vec_C3pI3   = _compute_lane_vectors(H2, d3, C3, lane_idx)
 
-    # --- Projector provenance hash for PROJECTED leg --------------------------
+    # --- Projector provenance hash (projected leg)
     district_id = (st.session_state.get("_district_info", {}) or {}).get("district_id") \
                   or st.session_state.get("district_id", "UNKNOWN")
     proj_hash_prov = _provenance_hash(_cfg_proj_for_ab, lane_mask, district_id)
     st.caption(f"projected Π provenance hash: {proj_hash_prov[:12]}…")
 
-    # --- Inputs signature for freshness guard ---------------------------------
+    # --- Inputs signature for freshness
     inputs_sig = [
         inputs_block.get("boundaries_hash", ""),
         inputs_block.get("C_hash", ""),
@@ -2882,12 +2902,12 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
         inputs_block.get("shapes_hash", ""),
     ]
 
-    # --- Persist compact A/B context -----------------------------------------
+    # --- Persist compact A/B context (note: projected.label mirrors FILE|AUTO) --
     pair_tag = f"{label_strict}__VS__{label_proj}"
     st.session_state["ab_compare"] = {
         "pair_tag": pair_tag,
-        "inputs_sig": inputs_sig,          # freshness guard
-        "lane_mask_k3": lane_mask,         # shared mask
+        "inputs_sig": inputs_sig,
+        "lane_mask_k3": lane_mask,
         "strict": {
             "label": label_strict,
             "cfg":   cfg_strict(),
@@ -2895,15 +2915,15 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
             "ker_guard": "enforced",
             "lane_vec_H2d3":     strict_lane_vec_H2d3,
             "lane_vec_C3plusI3": strict_lane_vec_C3pI3,
-            "projector_hash": "",  # none in strict
+            "projector_hash": "",
             "pass_vec": [
                 int(out_strict.get("2", {}).get("eq", False)),
                 int(out_strict.get("3", {}).get("eq", False)),
             ],
         },
         "projected": {
-            "label": label_proj,
-            "cfg":   _cfg_proj_for_ab,
+            "label": label_proj,                 # <- will be "...file" when file is active
+            "cfg":   _cfg_proj_for_ab,          # <- exact cfg used (auto/file and path)
             "out":   out_proj,
             "ker_guard": "off",
             "projector_hash": proj_hash_prov,
@@ -2924,6 +2944,7 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
     s_ok = bool(out_strict.get("3", {}).get("eq", False))
     p_ok = bool(out_proj.get("3", {}).get("eq", False))
     st.success(f"A/B: strict={'GREEN' if s_ok else 'RED'} · projected={'GREEN' if p_ok else 'RED'}")
+
 
 
 
