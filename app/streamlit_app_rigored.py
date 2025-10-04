@@ -765,6 +765,99 @@ with tab2:
     if st.button("Run Overlap", key="run_overlap"):
         run_overlap()
 
+    # ------------------------ A/B compare (strict vs active projected) ------------------------
+if st.button("Run A/B compare", key="ab_run_btn"):
+    try:
+        # Inputs + context
+        rc  = st.session_state.get("run_ctx") or {}
+        ib  = st.session_state.get("_inputs_block") or {}
+        H_used = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
+
+        # --- strict leg
+        out_strict   = overlap_gate.overlap_check(boundaries, cmap, H_used)
+        label_strict = policy_label_from_cfg(cfg_strict())
+
+        # --- projected leg mirrors ACTIVE (auto/file), with FILE validation
+        cfg_proj = st.session_state.get("overlap_cfg") or cfg_active  # prefer last run if exists
+        # fail-fast on FILE Π validity (shape/idempotence/diag/lane)
+        _P_ab, _meta_ab = projector_choose_active(cfg_proj, boundaries)
+        out_proj   = overlap_gate.overlap_check(boundaries, cmap, H_used, projection_config=cfg_proj)
+        label_proj = policy_label_from_cfg(cfg_proj)
+
+        # --- lightweight provenance lane vectors
+        d3 = rc.get("d3") or (boundaries.blocks.__root__.get("3") or [])
+        H2 = (H_used.blocks.__root__.get("2") or [])
+        C3 = (cmap.blocks.__root__.get("3") or [])
+        I3 = eye(len(C3)) if C3 else []
+        lane_idx = [j for j,m in enumerate(rc.get("lane_mask_k3", [])) if m]
+
+        def _bottom_row(M): return M[-1] if (M and len(M)) else []
+        def _xor(A,B):
+            if not A: return B or []
+            if not B: return A or []
+            return [[(A[i][j]^B[i][j]) for j in range(len(A[0]))] for i in range(len(A))]
+        def _mask(vec, idx): return [vec[j] for j in idx] if (vec and idx) else []
+
+        H2d3  = mul(H2, d3) if (H2 and d3) else []
+        C3pI3 = _xor(C3, I3) if C3 else []
+        lane_vec_H2d3 = _mask(_bottom_row(H2d3), lane_idx)
+        lane_vec_C3I  = _mask(_bottom_row(C3pI3), lane_idx)
+
+        # --- freshness key from inputs (so A/B only embeds when fresh)
+        def _hz(v): return v if isinstance(v, str) else ""
+        inputs_sig = [
+            _hz(ib.get("boundaries_hash","")),
+            _hz(ib.get("C_hash","")),
+            _hz(ib.get("H_hash","")),
+            _hz(ib.get("U_hash","")),
+            _hz(ib.get("shapes_hash","")),
+        ]
+
+        # --- persist snapshot
+        ab_payload = {
+            "pair_tag": f"{label_strict}__VS__{label_proj}",
+            "inputs_sig": inputs_sig,
+            "lane_mask_k3": rc.get("lane_mask_k3", []),
+            "strict": {
+                "label": label_strict,
+                "cfg":   cfg_strict(),
+                "out":   out_strict,
+                "ker_guard": "enforced",
+                "lane_vec_H2d3": lane_vec_H2d3,
+                "lane_vec_C3plusI3": lane_vec_C3I,
+                "pass_vec": [int(out_strict.get("2",{}).get("eq",False)), int(out_strict.get("3",{}).get("eq",False))],
+                "projector_hash": "",
+            },
+            "projected": {
+                "label": label_proj,
+                "cfg":   cfg_proj,
+                "out":   out_proj,
+                "ker_guard": "off",
+                "lane_vec_H2d3": lane_vec_H2d3[:],
+                "lane_vec_C3plusI3": lane_vec_C3I[:],
+                "pass_vec": [int(out_proj.get("2",{}).get("eq",False)), int(out_proj.get("3",{}).get("eq",False))],
+                "projector_filename": _meta_ab.get("projector_filename",""),
+                "projector_hash": _meta_ab.get("projector_hash",""),
+                "projector_consistent_with_d": _meta_ab.get("projector_consistent_with_d", None),
+            },
+        }
+        st.session_state["ab_compare"] = ab_payload
+
+        # quick status line
+        s_ok = bool(out_strict.get("3",{}).get("eq", False))
+        p_ok = bool(out_proj.get("3",{}).get("eq", False))
+        st.success(f"A/B updated → strict={'✅' if s_ok else '❌'} · projected={'✅' if p_ok else '❌'} · {ab_payload['pair_tag']}")
+
+        # note for certs: your cert writer will embed A/B iff inputs_sig matches current _inputs_block
+        st.caption("A/B snapshot saved. It will embed in the next cert if inputs haven’t changed (fresh).")
+
+    except ValueError as e:
+        # typical FILE Π validator errors (P3_SHAPE / P3_IDEMP / P3_DIAGONAL / P3_LANE_MISMATCH)
+        st.error(f"A/B projected(file) invalid: {e}")
+    except Exception as e:
+        st.error(f"A/B compare failed: {e}")
+
+
     # ------------------------ Parity import/export & sample queue ------------------------
     PARITY_SCHEMA_VERSION = "1.0.0"
     DEFAULT_PARITY_PATH = Path("logs") / "parity_pairs.json"
