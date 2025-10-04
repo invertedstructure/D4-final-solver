@@ -102,6 +102,281 @@ def _ensure_session_keys():
 
 _ensure_session_keys()
 
+# === Step 1: Core helpers (config, hashing, filenames, projector selection) ===
+import json as _json
+import io as _io
+import os as _os
+from pathlib import Path as _Path
+
+# -- tiny hash helpers (bytes + json-obj) --------------------------------------
+def _sha256_hex_bytes(b: bytes) -> str:
+    import hashlib as _hh
+    return _hh.sha256(b).hexdigest()
+
+def _sha256_hex_obj(obj) -> str:
+    import hashlib as _hh, json as _jj
+    blob = _jj.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return _hh.sha256(blob).hexdigest()
+
+# -- file-uploader helpers ------------------------------------------------------
+def read_json_file(upload):
+    """
+    Accepts a Streamlit uploaded file, a str/Path, or already-parsed dict.
+    Returns a dict or None.
+    """
+    if upload is None:
+        return None
+    if isinstance(upload, (str, _Path)):
+        with open(str(upload), "r", encoding="utf-8") as f:
+            return _json.load(f)
+    if isinstance(upload, dict):
+        return upload
+    # Streamlit UploadedFile
+    try:
+        data = upload.getvalue() if hasattr(upload, "getvalue") else upload.read()
+        return _json.loads(data.decode("utf-8"))
+    except Exception:
+        return None
+
+def _stamp_filename(state_key: str, upload):
+    """Record the uploaded filename into st.session_state[state_key] when present."""
+    try:
+        if upload is not None and hasattr(upload, "name"):
+            st.session_state[state_key] = str(upload.name)
+    except Exception:
+        pass
+
+# -- lane mask + signature utilities -------------------------------------------
+def _lane_mask_from_d3(boundaries) -> list[int]:
+    """
+    Best-effort lane mask from d3.
+    Strategy:
+      1) If boundaries exposes lane_mask_k3, use it.
+      2) Else: use the bottom row of d3 (common convention in this app).
+      3) Else: [] (unknown).
+    """
+    try:
+        # 1) attribute or dict key
+        if hasattr(boundaries, "lane_mask_k3"):
+            lm = getattr(boundaries, "lane_mask_k3")
+            if isinstance(lm, list) and all(isinstance(x, (int, bool)) for x in lm):
+                return [int(bool(x)) for x in lm]
+        bd = boundaries.dict() if hasattr(boundaries, "dict") else {}
+        lm = bd.get("lane_mask_k3")
+        if isinstance(lm, list) and all(isinstance(x, (int, bool)) for x in lm):
+            return [int(bool(x)) for x in lm]
+    except Exception:
+        pass
+
+    # 2) bottom row of d3
+    try:
+        d3 = (boundaries.blocks.__root__.get("3") or [])
+        if d3 and d3[-1]:
+            return [int(r & 1) for r in d3[-1]]
+    except Exception:
+        pass
+
+    # 3) default: empty (unknown)
+    return []
+
+def _district_signature(lane_mask: list[int], r: int, c: int) -> str:
+    pat = "".join("1" if int(x) else "0" for x in (lane_mask or []))
+    return f"{r}x{c}:{pat}"
+
+# -- cfg builders + label -------------------------------------------------------
+def cfg_strict() -> dict:
+    return {
+        "enabled_layers": [],        # nothing projected
+        "modes": {},
+        "source": {},                # no source in strict
+        "projector_files": {},       # empty
+    }
+
+def cfg_projected_base() -> dict:
+    return {
+        "enabled_layers": [3],       # we project k=3
+        "modes": {},
+        "source": {"3": "auto"},     # default AUTO
+        "projector_files": {},       # filled only in FILE mode
+    }
+
+def policy_label_from_cfg(cfg: dict) -> str:
+    if not cfg or not cfg.get("enabled_layers"):
+        return "strict"
+    src = (cfg.get("source", {}) or {}).get("3", "auto")
+    if src == "file":
+        return "projected(columns@k=3,file)"
+    return "projected(columns@k=3,auto)"
+
+# -- tiny GF(2) ops (local, small + fast) --------------------------------------
+def _eye(n: int):
+    return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
+
+def _mul_gf2(A, B):
+    if not A or not B or not A[0] or not B[0]:
+        return []
+    r, k = len(A), len(A[0])
+    k2, c = len(B), len(B[0])
+    if k != k2:
+        raise ValueError(f"dim mismatch for GF(2) multiply: {r}x{k} @ {k2}x{c}")
+    out = [[0]*c for _ in range(r)]
+    for i in range(r):
+        Ai = A[i]
+        for t in range(k):
+            if Ai[t] & 1:
+                Bt = B[t]
+                for j in range(c):
+                    out[i][j] ^= (Bt[j] & 1)
+    return out
+
+def _is_idempotent_gf2(P):
+    # P·P == P
+    try:
+        PP = _mul_gf2(P, P)
+        return PP == P
+    except Exception:
+        return False
+
+def _is_diagonal(P):
+    m = len(P) or 0
+    n = len(P[0]) if m else 0
+    if m != n:
+        return False
+    for i in range(m):
+        for j in range(n):
+            if i != j and (P[i][j] & 1):
+                return False
+    return True
+
+def _diag(P):
+    return [int(P[i][i] & 1) for i in range(len(P))] if P and P[0] else []
+
+# -- projector chooser (strict/auto/file)  -------------------------------------
+class _P3Error(ValueError):
+    def __init__(self, code: str, msg: str):
+        super().__init__(f"{code}: {msg}")
+        self.code = code
+
+def _read_projector_matrix(path_str: str):
+    """
+    Accepts either:
+      {"blocks":{"3":[[...]]}}  or just  [[...]]
+    Returns the 2D list for k=3.
+    """
+    p = _Path(path_str)
+    if not p.exists():
+        raise _P3Error("P3_SHAPE", f"projector file not found: {path_str}")
+    with open(p, "r", encoding="utf-8") as f:
+        d = _json.load(f)
+    if isinstance(d, dict):
+        b = (d.get("blocks", {}) or {}).get("3")
+        if isinstance(b, list):
+            return b
+    if isinstance(d, list):
+        return d
+    raise _P3Error("P3_SHAPE", "unrecognized projector JSON structure")
+
+def projector_choose_active(cfg_active: dict, boundaries):
+    """
+    Returns (P_active, meta) where:
+      P_active: 2D list (nxn) for k=3 (or [] for strict)
+      meta: {
+        "d3", "n3", "lane_mask", "mode",
+        "projector_filename", "projector_hash",
+        "projector_consistent_with_d": True|False|None
+      }
+    Raises _P3Error on FILE validation issues (fail-fast).
+    """
+    d3 = (boundaries.blocks.__root__.get("3") or [])
+    n3 = len(d3[0]) if (d3 and d3[0]) else 0
+    lane_mask = _lane_mask_from_d3(boundaries)
+    mode = "strict"
+    P_active = []
+    pj_filename = ""
+    pj_hash = ""
+    pj_consistent = None
+
+    # strict?
+    if not cfg_active or not cfg_active.get("enabled_layers"):
+        return P_active, {
+            "d3": d3, "n3": n3, "lane_mask": lane_mask, "mode": mode,
+            "projector_filename": pj_filename, "projector_hash": pj_hash,
+            "projector_consistent_with_d": pj_consistent,
+        }
+
+    source = (cfg_active.get("source", {}) or {}).get("3", "auto")
+    mode = "projected(auto)" if source == "auto" else "projected(file)"
+
+    if source == "auto":
+        # AUTO = diag(lane_mask)
+        diag = (lane_mask if lane_mask else [1]*n3)
+        P_active = [[1 if i == j and diag[j] else 0 for j in range(n3)] for i in range(n3)]
+        pj_hash = _sha256_hex_obj(P_active)
+        pj_consistent = True  # by construction it follows our lane mask
+        return P_active, {
+            "d3": d3, "n3": n3, "lane_mask": lane_mask, "mode": mode,
+            "projector_filename": "", "projector_hash": pj_hash,
+            "projector_consistent_with_d": pj_consistent,
+        }
+
+    # FILE
+    pj_filename = (cfg_active.get("projector_files", {}) or {}).get("3", "")
+    if not pj_filename:
+        raise _P3Error("P3_SHAPE", "no projector file provided for file-mode")
+
+    P = _read_projector_matrix(pj_filename)
+
+    # shape check
+    m = len(P) or 0
+    n = len(P[0]) if m else 0
+    if n3 == 0 or m != n3 or n != n3:
+        raise _P3Error("P3_SHAPE", f"expected {n3}x{n3}, got {m}x{n}")
+
+    # idempotent check
+    if not _is_idempotent_gf2(P):
+        raise _P3Error("P3_IDEMP", "P is not idempotent over GF(2)")
+
+    # diagonal check
+    if not _is_diagonal(P):
+        raise _P3Error("P3_DIAGONAL", "P has off-diagonal non-zeros")
+
+    # lane mask match (only if we could infer a mask)
+    pj_diag = _diag(P)
+    if lane_mask and pj_diag != [int(x) for x in lane_mask]:
+        raise _P3Error("P3_LANE_MISMATCH", f"diag(P) != lane_mask(d3) → {pj_diag} vs {lane_mask}")
+
+    pj_hash = _sha256_hex_obj(P)
+    pj_consistent = True if lane_mask else None
+
+    return P, {
+        "d3": d3, "n3": n3, "lane_mask": lane_mask, "mode": mode,
+        "projector_filename": pj_filename, "projector_hash": pj_hash,
+        "projector_consistent_with_d": pj_consistent,
+    }
+
+# -- atomic JSONL append (small, safe enough for single-writer Streamlit) ------
+def atomic_append_jsonl(path: _Path, row: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    line = _json.dumps(row, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n"
+    # Best-effort atomic-ish: write a tmp then append; if append fails we don't corrupt the main file.
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(line)
+        f.flush()
+        _os.fsync(f.fileno())
+    try:
+        with open(path, "a", encoding="utf-8") as g:
+            with open(tmp, "r", encoding="utf-8") as f:
+                g.write(f.read())
+                g.flush()
+                _os.fsync(g.fileno())
+    finally:
+        try:
+            tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
 # ────────────────────────────── SMALL HELPERS ──────────────────────────────
 def _iso_utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
