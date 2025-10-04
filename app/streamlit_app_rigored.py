@@ -2597,21 +2597,35 @@ except Exception:
     if run_ctx.get("projector_consistent_with_d") is not None:
         policy_block["projector_consistent_with_d"] = bool(run_ctx.get("projector_consistent_with_d"))
 
-    # ── cert payload (core)
-    cert_payload = {
-        "identity":    identity_block,
-        "policy":      policy_block,
-        "inputs":      inputs_block,
-        "diagnostics": diagnostics_block,
-        "checks":      checks_block,
-        "signatures":  sig_block,
-        "promotion":   {"eligible_for_promotion": False, "promotion_target": None, "notes": ""},
-        "policy_tag":  policy_block["policy_tag"],
-        "district_id": identity_block["district_id"],
-        "boundaries_hash": inputs_block["boundaries_hash"],
-    }
-    cert_path, full_hash = export_mod.write_cert_json(cert_payload)
-st.session_state["last_cert_path"] = cert_path
+# ── cert payload (core)
+# (Optionally ensure schema/app/python tags are present)
+cert_payload.setdefault("schema_version", SCHEMA_VERS if "SCHEMA_VERS" in globals() else LAB_SCHEMA_VERSION)
+cert_payload.setdefault("app_version", APP_VERSION)
+cert_payload.setdefault("python_version", PY_VERSION_STR)
+
+cert_path: str | None = None
+full_hash: str = ""
+
+try:
+    # Preferred API: returns (path, full_hash)
+    result = export_mod.write_cert_json(cert_payload)
+    if isinstance(result, (list, tuple)) and len(result) >= 2:
+        cert_path, full_hash = result[0], result[1]
+    else:
+        # Some older writers return just the path
+        cert_path = result
+        # fall back to content_hash already embedded in payload
+        full_hash = (cert_payload.get("integrity", {}) or {}).get("content_hash", "") or ""
+except Exception as e:
+    st.error(f"Cert write failed: {e}")
+
+# Only touch session if we actually produced a path
+if cert_path:
+    st.session_state["last_cert_path"] = cert_path
+    st.session_state["cert_payload"] = cert_payload  # handy for Gallery/Witness rows
+    st.success(f"Cert written: `{cert_path}`" + (f" · {full_hash[:12]}…" if full_hash else ""))
+else:
+    st.warning("No cert file was produced. Check the error above and try again.")
 
 
 # ── A/B embed (fresh only if inputs_sig matches)
