@@ -162,6 +162,25 @@ def build_cert_bundle(*,
 
     return str(zpath)
 
+# safe_expander.py
+import streamlit as st
+from contextlib import contextmanager
+
+_EXP_STACK = []
+
+@contextmanager
+def safe_expander(title: str, **kwargs):
+    global _EXP_STACK
+    if _EXP_STACK:
+        st.warning(f"Nested expander detected: “{title}” inside “{_EXP_STACK[-1]}”. Consider moving it out.")
+    _EXP_STACK.append(title)
+    try:
+        with st.expander(title, **kwargs):
+            yield
+    finally:
+        _EXP_STACK.pop()
+
+
 
 # == Versions / schema tags (bump when you change artifact fields) ==
 LAB_SCHEMA_VERSION = "1.0.0"
