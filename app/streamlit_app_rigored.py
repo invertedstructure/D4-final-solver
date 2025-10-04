@@ -2509,9 +2509,11 @@ identity_block = {
 
 
 # ── inputs block (sole source of hashes + filenames + dims)
-def _fname(k, default): 
-    v = _ss.get(k, ""); 
+_ss = st.session_state  # ensure we have the alias
+def _fname(k, default):
+    v = _ss.get(k, "")
     return v if isinstance(v, str) and v.strip() else default
+
 inputs_block = {}
 inputs_block["filenames"] = {
     "boundaries": _fname("fname_boundaries", "boundaries.json"),
@@ -2519,20 +2521,26 @@ inputs_block["filenames"] = {
     "H":          _fname("fname_h", "H.json"),
     "U":          _fname("fname_shapes", "shapes.json"),
 }
+
 d3_now = (boundaries.blocks.__root__.get("3") or [])
 C3_now = (cmap.blocks.__root__.get("3") or [])
 inputs_block["dims"] = {
-    "n3": (len(C3_now) if C3_now else len(d3_now[0]) if (d3_now and d3_now[0]) else 0),
+    "n3": (len(C3_now) if C3_now else (len(d3_now[0]) if (d3_now and d3_now[0]) else 0)),
     "n2": (len(cmap.blocks.__root__.get("2") or [])),
 }
+
 shapes_payload = shapes.dict() if hasattr(shapes, "dict") else (shapes or {})
 inputs_block["boundaries_hash"] = _stable_hash(boundaries.dict() if hasattr(boundaries, "dict") else {})
 inputs_block["C_hash"]          = _stable_hash(cmap.dict() if hasattr(cmap, "dict") else {})
-inputs_block["H_hash"]          = _stable_hash(H_used.dict() if hasattr(H_used, "dict") else {})
+inputs_block["H_hash"]          = _stable_hash(H_used.dict() if ('H_used' in globals() and hasattr(H_used, "dict")) else {})
 inputs_block["U_hash"]          = _stable_hash(shapes_payload)
 inputs_block["shapes_hash"]     = inputs_block["U_hash"]
-if run_ctx.get("mode") == "projected(file)":
-    inputs_block["filenames"]["projector"] = run_ctx.get("projector_filename","")
+
+# Guarded read of run_ctx before using it
+_run_ctx_local = _ss.get("run_ctx", {}) or {}
+if _run_ctx_local.get("mode") == "projected(file)":
+    inputs_block["filenames"]["projector"] = _run_ctx_local.get("projector_filename", "")
+
 
 # ── diagnostics
 lane_mask = run_ctx.get("lane_mask_k3", [])
@@ -2728,19 +2736,28 @@ else:
 
 
 # ── A/B embed (fresh only if inputs_sig matches)
-ab_ctx = _ss.get("ab_compare", {}) or {}
+_ss = st.session_state
+ab_ctx        = _ss.get("ab_compare", {}) or {}
+out           = _ss.get("overlap_out", {}) or {}
+run_ctx       = _ss.get("run_ctx", {}) or {}
+residual_tags = _ss.get("residual_tags", {}) or {}
+
 inputs_sig = [
-    inputs_block["boundaries_hash"],
-    inputs_block["C_hash"],
-    inputs_block["H_hash"],
-    inputs_block["U_hash"],
-    inputs_block["shapes_hash"],
+    inputs_block.get("boundaries_hash",""),
+    inputs_block.get("C_hash",""),
+    inputs_block.get("H_hash",""),
+    inputs_block.get("U_hash",""),
+    inputs_block.get("shapes_hash",""),
 ]
+
 if ab_ctx.get("inputs_sig") == inputs_sig:
-    strict_ctx    = ab_ctx.get("strict", {})
-    projected_ctx = ab_ctx.get("projected", {})
+    strict_ctx    = ab_ctx.get("strict", {}) or {}
+    projected_ctx = ab_ctx.get("projected", {}) or {}
+
     def _pass_vec_from(d):
         return [int(d.get("2", {}).get("eq", False)), int(d.get("3", {}).get("eq", False))]
+
+    # strict snapshot
     cert_payload["policy"]["strict_snapshot"] = {
         "policy_tag": strict_ctx.get("label", "strict"),
         "ker_guard":  "enforced",
@@ -2759,12 +2776,13 @@ if ab_ctx.get("inputs_sig") == inputs_sig:
             "H_filename": inputs_block["filenames"]["H"],
         },
         "lane_mask_k3": run_ctx.get("lane_mask_k3", []),
-        "lane_vec_H2d3": strict_ctx.get("lane_vec_H2d3", diagnostics_block.get("lane_vec_H2d3", [])),
-        "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
+        "lane_vec_H2d3": strict_ctx.get("lane_vec_H2d3", _ss.get("diagnostics_block", {}).get("lane_vec_H2d3", [])),
+        "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3", _ss.get("diagnostics_block", {}).get("lane_vec_C3plusI3", [])),
         "pass_vec": _pass_vec_from(strict_ctx.get("out", {})),
         "residual_tag": residual_tags.get("strict", "none"),
         "out": strict_ctx.get("out", {}),
     }
+
     proj_hash_ab = projected_ctx.get("projector_hash", run_ctx.get("projector_hash",""))
     cert_payload["policy"]["projected_snapshot"] = {
         "policy_tag": run_ctx.get("policy_tag", policy_label_from_cfg(cfg_projected_base())),
@@ -2786,8 +2804,8 @@ if ab_ctx.get("inputs_sig") == inputs_sig:
             "H_filename": inputs_block["filenames"]["H"],
         },
         "lane_mask_k3": run_ctx.get("lane_mask_k3", []),
-        "lane_vec_H2d3": projected_ctx.get("lane_vec_H2d3", diagnostics_block.get("lane_vec_H2d3", [])),
-        "lane_vec_C3plusI3": projected_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
+        "lane_vec_H2d3": projected_ctx.get("lane_vec_H2d3", _ss.get("diagnostics_block", {}).get("lane_vec_H2d3", [])),
+        "lane_vec_C3plusI3": projected_ctx.get("lane_vec_C3plusI3", _ss.get("diagnostics_block", {}).get("lane_vec_C3plusI3", [])),
         "pass_vec": _pass_vec_from(projected_ctx.get("out", {})),
         "residual_tag": residual_tags.get("projected", "none"),
         "out": projected_ctx.get("out", {}),
@@ -2796,154 +2814,159 @@ if ab_ctx.get("inputs_sig") == inputs_sig:
     }
     cert_payload["ab_pair_tag"] = ab_ctx.get("pair_tag", "")
 
-    # ── artifacts, promotion, integrity
-    cert_payload["artifact_hashes"] = {
-        "boundaries_hash": inputs_block["boundaries_hash"],
-        "C_hash":          inputs_block["C_hash"],
-        "H_hash":          inputs_block["H_hash"],
-        "U_hash":          inputs_block["U_hash"],
-        "projector_hash":  policy_block.get("projector_hash",""),
+# ── artifacts, promotion, integrity (always run, independent of A/B freshness)
+cert_payload["artifact_hashes"] = {
+    "boundaries_hash": inputs_block.get("boundaries_hash",""),
+    "C_hash":          inputs_block.get("C_hash",""),
+    "H_hash":          inputs_block.get("H_hash",""),
+    "U_hash":          inputs_block.get("U_hash",""),
+    "projector_hash":  policy_block.get("projector_hash",""),
+}
+
+grid_ok  = bool(out.get("grid", True))
+fence_ok = bool(out.get("fence", True))
+k3_ok    = bool(out.get("3", {}).get("eq", False))
+k2_ok    = bool(out.get("2", {}).get("eq", False))
+mode_now = run_ctx.get("mode", "strict")
+
+eligible, target = False, None
+if mode_now == "strict" and all([grid_ok, fence_ok, k3_ok, k2_ok]):
+    eligible, target = True, "strict_anchor"
+elif mode_now in ("projected(auto)", "projected(file)") and all([grid_ok, fence_ok, k3_ok]) and residual_tags.get("projected","none") == "none":
+    eligible, target = True, "projected_exemplar"
+
+cert_payload["promotion"] = {"eligible_for_promotion": eligible, "promotion_target": target, "notes": ""}
+cert_payload.setdefault("integrity", {})
+cert_payload["integrity"]["content_hash"] = _stable_hash(cert_payload)
+
+# (You can leave your cert-write code right after this; it will now have all deps.)
+
+# ── write cert
+cert_path, full_hash = export_mod.write_cert_json(cert_payload)
+st.success(f"Cert written: `{cert_path}`")
+
+# ── gallery row
+try:
+    key = (
+        cert_payload["district_id"],
+        inputs_block.get("boundaries_hash",""),
+        inputs_block.get("U_hash",""),
+        inputs_block.get("C_hash",""),
+        tuple(diagnostics_block.get("lane_vec_H2d3", [])),
+        policy_block.get("policy_tag",""),
+    )
+    row = {
+        "district_id":     key[0],
+        "boundaries_hash": key[1],
+        "U_hash":          key[2],
+        "suppC_hash":      key[3],
+        "lane_vec_H2d3":   key[4],
+        "policy_mode":     key[5],
+        "cert_path":       cert_path,
+        "content_hash":    cert_payload.get("integrity", {}).get("content_hash", ""),
     }
-    grid_ok  = bool(out.get("grid", True))
-    fence_ok = bool(out.get("fence", True))
-    k3_ok    = bool(out.get("3", {}).get("eq", False))
-    k2_ok    = bool(out.get("2", {}).get("eq", False))
-    mode_now = run_ctx.get("mode")
-    eligible, target = False, None
-    if mode_now == "strict" and all([grid_ok, fence_ok, k3_ok, k2_ok]):
-        eligible, target = True, "strict_anchor"
-    elif mode_now in ("projected(auto)", "projected(file)") and all([grid_ok, fence_ok, k3_ok]) and _ss.get("residual_tags", {}).get("projected","none") == "none":
-        eligible, target = True, "projected_exemplar"
-    cert_payload["promotion"] = {"eligible_for_promotion": eligible, "promotion_target": target, "notes": ""}
-    cert_payload.setdefault("integrity", {})
-    cert_payload["integrity"]["content_hash"] = _stable_hash(cert_payload)
+    if cert_payload["district_id"] == "UNKNOWN":
+        st.warning("gallery insert skipped: district_id is UNKNOWN.")
+    else:
+        res = export_mod.write_gallery_row(row, key, path="gallery.csv")
+        st.toast("gallery: added exemplar row" if res == "written" else "gallery: duplicate skipped")
+except Exception as e:
+    st.warning(f"gallery dedupe failed: {e}")
 
-    # ── write cert
-    cert_path, full_hash = export_mod.write_cert_json(cert_payload)
-    st.success(f"Cert written: `{cert_path}`")
-
-    # ── gallery row
-    try:
-        key = (
-            cert_payload["district_id"],
-            inputs_block.get("boundaries_hash",""),
-            inputs_block.get("U_hash",""),
-            inputs_block.get("C_hash",""),
-            tuple(diagnostics_block.get("lane_vec_H2d3", [])),
-            policy_block.get("policy_tag",""),
-        )
-        row = {
-            "district_id":     key[0],
-            "boundaries_hash": key[1],
-            "U_hash":          key[2],
-            "suppC_hash":      key[3],
-            "lane_vec_H2d3":   key[4],
-            "policy_mode":     key[5],
-            "cert_path":       cert_path,
-            "content_hash":    cert_payload.get("integrity", {}).get("content_hash", ""),
+# ── bundle download
+try:
+    _ab_ctx = _ss.get("ab_compare", {}) or {}
+    _projected_ctx = _ab_ctx.get("projected", {}) or {}
+    _policy_block_for_bundle = dict(policy_block)
+    if "policy" in cert_payload and "projected_snapshot" in cert_payload["policy"]:
+        _policy_block_for_bundle["ab_policies"] = {
+            "strict":    cert_payload["policy"]["strict_snapshot"]["policy_tag"],
+            "projected": cert_payload["policy"]["projected_snapshot"]["policy_tag"],
         }
-        if cert_payload["district_id"] == "UNKNOWN":
-            st.warning("gallery insert skipped: district_id is UNKNOWN.")
-        else:
-            res = export_mod.write_gallery_row(row, key, path="gallery.csv")
-            st.toast("gallery: added exemplar row" if res == "written" else "gallery: duplicate skipped")
-    except Exception as e:
-        st.warning(f"gallery dedupe failed: {e}")
-
-    # ── bundle download
-    try:
-        _ab_ctx = _ss.get("ab_compare", {}) or {}
-        _projected_ctx = _ab_ctx.get("projected", {}) or {}
-        _policy_block_for_bundle = dict(policy_block)
-        if "policy" in cert_payload and "projected_snapshot" in cert_payload["policy"]:
-            _policy_block_for_bundle["ab_policies"] = {
-                "strict":    cert_payload["policy"]["strict_snapshot"]["policy_tag"],
-                "projected": cert_payload["policy"]["projected_snapshot"]["policy_tag"],
-            }
-            _policy_block_for_bundle["ab_projector_hash"] = (
-                _projected_ctx.get("projector_hash")
-                or cert_payload["policy"]["projected_snapshot"].get("projector_hash","")
-            )
-        proj_hash_bundle = (
+        _policy_block_for_bundle["ab_projector_hash"] = (
             _projected_ctx.get("projector_hash")
-            or cert_payload.get("policy", {}).get("projected_snapshot", {}).get("projector_hash","")
-            or _policy_block_for_bundle.get("projector_hash","")
+            or cert_payload["policy"]["projected_snapshot"].get("projector_hash","")
         )
-        if proj_hash_bundle and not _policy_block_for_bundle.get("projector_hash"):
-            _policy_block_for_bundle["projector_hash"] = proj_hash_bundle
-        _policy_block_for_bundle["district_id"]         = cert_payload["district_id"]
-        _policy_block_for_bundle["boundaries_hash"]     = inputs_block.get("boundaries_hash","")
-        _policy_block_for_bundle["boundaries_filename"] = inputs_block["filenames"]["boundaries"]
-        _policy_block_for_bundle["U_filename"]          = inputs_block["filenames"]["U"]
-        tag = policy_label.replace(" ", "_")
-        if "policy" in cert_payload and "strict_snapshot" in cert_payload["policy"]:
-            tag = f"{tag}__withAB"
-        bundle_name = f"overlap_bundle__{cert_payload['district_id']}__{tag}__{full_hash[:12]}.zip"
-        zip_path = export_mod.build_overlap_bundle(
-            boundaries=boundaries,
-            cmap=cmap,
-            H=H_used,
-            shapes=shapes_payload,
-            policy_block=_policy_block_for_bundle,
-            cert_path=cert_path,
-            out_zip=bundle_name,
-        )
-        with open(zip_path, "rb") as fz:
-            st.download_button("⬇️ Download bundle (.zip)", data=fz, file_name=bundle_name,
-                               mime="application/zip", key="dl_overlap_bundle")
-    except Exception as e:
-        st.error(f"Could not build download bundle: {e}")
-        st.session_state["last_bundle_path"] = zip_path
+    proj_hash_bundle = (
+        _projected_ctx.get("projector_hash")
+        or cert_payload.get("policy", {}).get("projected_snapshot", {}).get("projector_hash","")
+        or _policy_block_for_bundle.get("projector_hash","")
+    )
+    if proj_hash_bundle and not _policy_block_for_bundle.get("projector_hash"):
+        _policy_block_for_bundle["projector_hash"] = proj_hash_bundle
+    _policy_block_for_bundle["district_id"]         = cert_payload["district_id"]
+    _policy_block_for_bundle["boundaries_hash"]     = inputs_block.get("boundaries_hash","")
+    _policy_block_for_bundle["boundaries_filename"] = inputs_block["filenames"]["boundaries"]
+    _policy_block_for_bundle["U_filename"]          = inputs_block["filenames"]["U"]
+    tag = policy_label.replace(" ", "_")
+    if "policy" in cert_payload and "strict_snapshot" in cert_payload["policy"]:
+        tag = f"{tag}__withAB"
+    bundle_name = f"overlap_bundle__{cert_payload['district_id']}__{tag}__{full_hash[:12]}.zip"
+    zip_path = export_mod.build_overlap_bundle(
+        boundaries=boundaries,
+        cmap=cmap,
+        H=H_used,
+        shapes=shapes_payload,
+        policy_block=_policy_block_for_bundle,
+        cert_path=cert_path,
+        out_zip=bundle_name,
+    )
+    with open(zip_path, "rb") as fz:
+        st.download_button("⬇️ Download bundle (.zip)", data=fz, file_name=bundle_name,
+                           mime="application/zip", key="dl_overlap_bundle")
+except Exception as e:
+    st.error(f"Could not build download bundle: {e}")
+    st.session_state["last_bundle_path"] = zip_path
 
 
-    # ── promotion (optional)
-    _pass_vec = [int(out.get("2", {}).get("eq", False)), int(out.get("3", {}).get("eq", False))]
-    if cert_payload["promotion"]["eligible_for_promotion"]:
-        st.success(f"Green — eligible for promotion ({cert_payload['promotion']['promotion_target']}).")
-        flip_to_file = st.checkbox("After promotion, switch to FILE-backed projector", value=True, key="flip_to_file_k3")
-        keep_auto    = st.checkbox("…or keep AUTO (don’t lock now)", value=False, key="keep_auto_k3")
-        if st.button("Promote & Freeze Projector", key="promote_k3"):
+# ── promotion (optional)
+_pass_vec = [int(out.get("2", {}).get("eq", False)), int(out.get("3", {}).get("eq", False))]
+if cert_payload["promotion"]["eligible_for_promotion"]:
+    st.success(f"Green — eligible for promotion ({cert_payload['promotion']['promotion_target']}).")
+    flip_to_file = st.checkbox("After promotion, switch to FILE-backed projector", value=True, key="flip_to_file_k3")
+    keep_auto    = st.checkbox("…or keep AUTO (don’t lock now)", value=False, key="keep_auto_k3")
+    if st.button("Promote & Freeze Projector", key="promote_k3"):
+        try:
+            d3_now = (boundaries.blocks.__root__.get("3") or [])
+            if not d3_now or not d3_now[0]:
+                st.error("No d3; cannot freeze projector."); st.stop()
+            n3 = len(d3_now[0])
+            lane = [1 if any(row[j] & 1 for row in d3_now) else 0 for j in range(n3)]
+            P_used = [[1 if (i==j and lane[i]) else 0 for j in range(n3)] for i in range(n3)]
+            pj_path = (cfg_file.get("projector_files", {}) or {}).get("3", f"projectors/projector_{cert_payload['district_id']}.json")
+            os.makedirs(os.path.dirname(pj_path), exist_ok=True)
+            with open(pj_path, "w") as _f:
+                _json.dump({"name": "Π3 freeze (lane-mask of current d3)", "blocks": {"3": P_used}}, _f, indent=2)
+            pj_hash = _stable_hash({"blocks":{"3": P_used}})
+            st.info(f"Projector frozen → {pj_path} (hash={pj_hash[:12]}…)")
+
+            if flip_to_file and not keep_auto:
+                cfg_file.setdefault("source", {})["3"] = "file"
+                cfg_file.setdefault("projector_files", {})["3"] = pj_path
+            else:
+                cfg_file.setdefault("source", {})["3"] = "auto"
+                cfg_file.get("projector_files", {}).pop("3", None)
+            with open("projection_config.json", "w") as _f:
+                _json.dump(cfg_file, _f, indent=2)
+
+            # best-effort registry note
             try:
-                d3_now = (boundaries.blocks.__root__.get("3") or [])
-                if not d3_now or not d3_now[0]:
-                    st.error("No d3; cannot freeze projector."); st.stop()
-                n3 = len(d3_now[0])
-                lane = [1 if any(row[j] & 1 for row in d3_now) else 0 for j in range(n3)]
-                P_used = [[1 if (i==j and lane[i]) else 0 for j in range(n3)] for i in range(n3)]
-                pj_path = (cfg_file.get("projector_files", {}) or {}).get("3", f"projectors/projector_{cert_payload['district_id']}.json")
-                os.makedirs(os.path.dirname(pj_path), exist_ok=True)
-                with open(pj_path, "w") as _f:
-                    _json.dump({"name": "Π3 freeze (lane-mask of current d3)", "blocks": {"3": P_used}}, _f, indent=2)
-                pj_hash = _stable_hash({"blocks":{"3": P_used}})
-                st.info(f"Projector frozen → {pj_path} (hash={pj_hash[:12]}…)")
-
-                if flip_to_file and not keep_auto:
-                    cfg_file.setdefault("source", {})["3"] = "file"
-                    cfg_file.setdefault("projector_files", {})["3"] = pj_path
-                else:
-                    cfg_file.setdefault("source", {})["3"] = "auto"
-                    cfg_file.get("projector_files", {}).pop("3", None)
-                with open("projection_config.json", "w") as _f:
-                    _json.dump(cfg_file, _f, indent=2)
-
-                # best-effort registry note
-                try:
-                    import time as _time
-                    export_mod.write_registry_row(
-                        fix_id=f"overlap-{int(_time.time())}",
-                        pass_vector=_pass_vec,
-                        policy=policy_label,
-                        hash_d=inputs_block["boundaries_hash"],
-                        hash_U=inputs_block["U_hash"],
-                        hash_suppC=inputs_block["C_hash"],
-                        hash_suppH=inputs_block["H_hash"],
-                        notes=f"proj_hash={pj_hash}",
-                    )
-                    st.success("Registry updated with projector hash.")
-                except Exception as ee:
-                    st.warning(f"Registry note failed (non-fatal): {ee}")
-            except Exception as e:
-                st.error(f"Promotion failed: {e}")
+                import time as _time
+                export_mod.write_registry_row(
+                    fix_id=f"overlap-{int(_time.time())}",
+                    pass_vector=_pass_vec,
+                    policy=policy_label,
+                    hash_d=inputs_block["boundaries_hash"],
+                    hash_U=inputs_block["U_hash"],
+                    hash_suppC=inputs_block["C_hash"],
+                    hash_suppH=inputs_block["H_hash"],
+                    notes=f"proj_hash={pj_hash}",
+                )
+                st.success("Registry updated with projector hash.")
+            except Exception as ee:
+                st.warning(f"Registry note failed (non-fatal): {ee}")
+        except Exception as e:
+            st.error(f"Promotion failed: {e}")
 
     # ── A/B compare (strict vs projected)
     st.markdown("### A/B: strict vs projected")
