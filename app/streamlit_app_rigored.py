@@ -1345,23 +1345,18 @@ with st.expander("Active projector (k=3) · debug", expanded=False):
             "n3": n3,
         }
 
- # ===== RUN OVERLAP (single source of truth via RunContext) ====================
+# ===== RUN OVERLAP (single source of truth via RunContext) ====================
 if st.button("Run Overlap", key="run_overlap"):
     try:
-        # 0) clear any stale projector meta/context from previous runs
+        # 0) clear stale meta
         st.session_state.pop("proj_meta", None)
         st.session_state.pop("run_ctx", None)
 
         # 1) build RunContext (fail-fast if projected(file) invalid)
-        #    build_run_context must:
-        #    - validate file Π (shape/idempotence/diag/lane) if source.3=="file"
-        #    - return an object with: policy_tag, mode, d3, lane_mask_k3,
-        #      projector_filename, projector_hash, projector_consistent_with_d
         try:
             ctx = build_run_context(cfg_active, boundaries, policy_label)
         except ValueError as e:
             st.error(str(e))
-            # persist minimal meta so cert/bundle blocks can surface the reason
             st.session_state["proj_meta"] = {
                 "mode": "projected(file)",
                 "projector_filename": (cfg_active.get("projector_files", {}) or {}).get("3", ""),
@@ -1371,20 +1366,18 @@ if st.button("Run Overlap", key="run_overlap"):
             }
             st.stop()
 
-        # 1b) tiny debug echo (helps confirm file vs auto path)
-        d3 = ctx.d3
-        n3 = (len(d3[0]) if d3 and d3[0] else 0)
+        # 1b) small debug echo
+        n3 = (len(ctx.d3[0]) if ctx.d3 and ctx.d3[0] else 0)
         st.caption("Active projector (k=3) · debug")
-        st.caption(f"d3: rows={len(d3)}, cols={n3}, lane_mask={ctx.lane_mask_k3}")
-        if ctx.mode == "projected(file)":
-            st.caption(f"mode=projected(file) · file={ctx.projector_filename} · hash={(ctx.projector_hash or '')[:12]}…")
-        else:
-            st.caption(f"mode={ctx.mode}")
+        st.caption(f"d3: rows={len(ctx.d3)}, cols={n3}, lane_mask={ctx.lane_mask_k3}")
+        st.caption(
+            f"mode={ctx.mode}"
+            + (f" · file={ctx.projector_filename} · hash={(ctx.projector_hash or '')[:12]}…" if ctx.mode == 'projected(file)' else "")
+        )
 
         # 2) cache discipline (policy + inputs + projector hash if file)
         _di = st.session_state.get("_district_info", {}) or {}
         _bound_hash = _di.get("boundaries_hash", inputs_block.get("boundaries_hash", ""))
-
         cache_key = "|OM|".join([
             f"policy={ctx.policy_tag}",
             f"B={_bound_hash}",
@@ -1398,11 +1391,11 @@ if st.button("Run Overlap", key="run_overlap"):
             st.session_state.pop("_projector_cache", None)
             st.session_state["_projector_cache_key"] = cache_key
 
-        # 3) reload projector cache after any bust
+        # 3) (re)load projectors
         cache = st.session_state.get("_projector_cache") or projector.preload_projectors_from_files(cfg_active)
-        st.session_state["_projector_cache"] = cache  # keep around for cert/A-B
+        st.session_state["_projector_cache"] = cache
 
-        # 4) run overlap with finalized cfg/cache
+        # 4) run overlap
         out = overlap_gate.overlap_check(
             boundaries, cmap, H_local,
             projection_config=cfg_active,
@@ -1410,13 +1403,11 @@ if st.button("Run Overlap", key="run_overlap"):
         )
         st.json(out)
 
-        # 5) persist run artifacts (single source for cert/A-B)
+        # 5) persist run artifacts (+ ctx)
         st.session_state["overlap_out"] = out
         st.session_state["overlap_cfg"] = cfg_active
-        st.session_state["overlap_policy_label"] = ctx.policy_tag   # <- use ctx
+        st.session_state["overlap_policy_label"] = ctx.policy_tag
         st.session_state["overlap_H"] = H_local
-
-        # persist full ctx (so snapshots/cert can’t drift)
         st.session_state["run_ctx"] = {
             "policy_tag": ctx.policy_tag,
             "mode": ctx.mode,
@@ -1424,11 +1415,7 @@ if st.button("Run Overlap", key="run_overlap"):
             "projector_filename": ctx.projector_filename,
             "projector_hash": ctx.projector_hash,
             "projector_consistent_with_d": ctx.projector_consistent_with_d,
-            # (optional but handy)
-            "d3_rows": len(d3),
-            "d3_cols": n3,
         }
-        # keep proj_meta for any legacy readers
         st.session_state["proj_meta"] = {
             "mode": ctx.mode,
             "projector_filename": (ctx.projector_filename or ""),
@@ -1436,7 +1423,7 @@ if st.button("Run Overlap", key="run_overlap"):
             "projector_consistent_with_d": ctx.projector_consistent_with_d,
         }
 
-        # 6) friendly banner for file mode
+        # 6) banner (reads ONLY ctx—no drift)
         if ctx.mode == "projected(file)":
             if ctx.projector_consistent_with_d:
                 st.success(f"projected(file) OK · {ctx.projector_filename} · {(ctx.projector_hash or '')[:12]} ✔️")
@@ -1446,6 +1433,7 @@ if st.button("Run Overlap", key="run_overlap"):
     except Exception as e:
         st.error(f"Overlap run failed: {e}")
         st.stop()
+
 
 
 
@@ -2214,18 +2202,11 @@ if cfg_active.get("enabled_layers"):  # projected mode only
                 proj_hash_active = ""
 
 # ==================== CERT BLOCK (unified; consumes RunContext) ===============
-
-# --- Safe refs ---------------------------------------------------------------
 _di = st.session_state.get("_district_info", {}) or {}
 district_id_auth = _di.get("district_id") or st.session_state.get("district_id", "UNKNOWN")
 ctx_dict = st.session_state.get("run_ctx", {}) or {}
 
-# Fallbacks if this is immediately after a run (these should already exist)
-out_latest = st.session_state.get("overlap_out")
-out = (out_latest if isinstance(out_latest, dict) else (out if 'out' in locals() else {})) or {}
-is_strict = not bool(cfg_active.get("enabled_layers"))
-
-# --- Policy block (single source of truth from ctx) --------------------------
+# Policy block directly from ctx (authoritative)
 policy_block = {
     "label":          (ctx_dict.get("policy_tag") or policy_label),
     "policy_tag":     (ctx_dict.get("policy_tag") or policy_label),
@@ -2240,27 +2221,24 @@ if ctx_dict.get("projector_filename"):
 if ctx_dict.get("projector_consistent_with_d") is not None:
     policy_block["projector_consistent_with_d"] = bool(ctx_dict["projector_consistent_with_d"])
 
-# --- Checks block (merge or bootstrap) ---------------------------------------
-checks_extended = {
-    "grid": True,
-    "fence": True,
-    "ker_guard": "enforced" if is_strict else "off",
-}
-checks_block = ({**checks_block, **checks_extended}
-                if 'checks_block' in locals() and isinstance(checks_block, dict)
+# Checks block
+out_latest = st.session_state.get("overlap_out")
+out = (out_latest if isinstance(out_latest, dict) else (out if 'out' in locals() else {})) or {}
+is_strict = (not cfg_active.get("enabled_layers"))
+checks_extended = {"grid": True, "fence": True, "ker_guard": ("enforced" if is_strict else "off")}
+checks_block = ({**checks_block, **checks_extended} if 'checks_block' in locals() and isinstance(checks_block, dict)
                 else {**out, **checks_extended})
 
-# --- Filenames: ensure present & consistent ----------------------------------
+# Ensure filenames exist (and echo projector file path at top-level inputs)
 inputs_block.setdefault("filenames", {})
 inputs_block["filenames"].setdefault("boundaries", inputs_block.get("boundaries_filename", "boundaries.json"))
 inputs_block["filenames"].setdefault("C",          inputs_block.get("C_filename", "cmap.json"))
 inputs_block["filenames"].setdefault("U",          inputs_block.get("U_filename", "shapes.json"))
 inputs_block["filenames"].setdefault("H",          inputs_block.get("H_filename", "H.json"))
-# Optional: echo projector filename at top-level inputs (handy audit)
 if ctx_dict.get("projector_filename"):
     inputs_block["filenames"]["projector"] = ctx_dict["projector_filename"]
 
-# --- FULL cert payload --------------------------------------------------------
+# Cert payload (single source)
 k3_true = bool(out.get("3", {}).get("eq", False))
 cert_payload = {
     "identity":    identity_block,
@@ -2274,10 +2252,10 @@ cert_payload = {
         "promotion_target": ("strict_anchor" if is_strict else "projected_exemplar") if k3_true else None,
         "notes": "",
     },
-    "policy_tag": policy_block["policy_tag"],   # keep in sync
+    "policy_tag": policy_block["policy_tag"],
 }
 
-# --- A/B embed (only if fresh & matching inputs signature) -------------------
+# A/B embed (only if fresh)
 ab_ctx = st.session_state.get("ab_compare", {}) or {}
 _current_sig = [
     inputs_block.get("boundaries_hash", ""),
@@ -2289,16 +2267,10 @@ _current_sig = [
 if ab_ctx.get("inputs_sig") == _current_sig:
     strict_ctx    = ab_ctx.get("strict", {})
     projected_ctx = ab_ctx.get("projected", {})
-
     def _pass_vec_from(out_dict: dict) -> list[int]:
-        return [
-            int(out_dict.get("2", {}).get("eq", False)),
-            int(out_dict.get("3", {}).get("eq", False)),
-        ]
+        return [int(out_dict.get("2", {}).get("eq", False)), int(out_dict.get("3", {}).get("eq", False))]
 
-    cert_payload.setdefault("policy", {})
-
-    # Strict snapshot
+    # strict snapshot
     cert_payload["policy"]["strict_snapshot"] = {
         "policy_tag": strict_ctx.get("label", "strict"),
         "ker_guard":  strict_ctx.get("ker_guard", "enforced"),
@@ -2323,11 +2295,11 @@ if ab_ctx.get("inputs_sig") == _current_sig:
         "out":      strict_ctx.get("out", {}),
     }
 
-    # Projected snapshot — policy_tag must mirror ctx.policy_tag
+    # projected snapshot — MUST mirror ctx.policy_tag and ctx projector meta
     cert_payload["policy"]["projected_snapshot"] = {
         "policy_tag": ctx_dict.get("policy_tag", projected_ctx.get("label", "projected(columns@k=3,auto)")),
         "ker_guard":  projected_ctx.get("ker_guard", "off"),
-        "projector_hash": projected_ctx.get("projector_hash", ctx_dict.get("projector_hash", "")),
+        "projector_hash": projected_ctx.get("projector_hash", ctx_dict.get("projector_hash","")),
         "inputs": {
             "boundaries": {
                 "filename": inputs_block["filenames"].get("boundaries", "boundaries.json"),
@@ -2337,9 +2309,8 @@ if ab_ctx.get("inputs_sig") == _current_sig:
                 "lane_mask_k3": projected_ctx.get("lane_mask_k3", []),
                 "d3_rows": _di.get("d3_rows", len(ctx_dict.get("d3", []))),
                 "d3_cols": _di.get("d3_cols", (len(ctx_dict.get("d3", [])[0]) if ctx_dict.get("d3") else 0)),
-                # FILE-mode extras from ctx so they can't drift
-                "projector_filename": ctx_dict.get("projector_filename", ""),
-                "projector_file_hash": ctx_dict.get("projector_hash", ""),
+                "projector_filename": ctx_dict.get("projector_filename",""),
+                "projector_file_hash": ctx_dict.get("projector_hash",""),
                 "projector_consistent_with_d": ctx_dict.get("projector_consistent_with_d", None),
             },
             "U_filename": inputs_block["filenames"].get("U", "shapes.json"),
@@ -2354,17 +2325,18 @@ if ab_ctx.get("inputs_sig") == _current_sig:
     }
     cert_payload["ab_pair_tag"] = ab_ctx.get("pair_tag", "")
 
-# ---- Artifact hashes: always derive from inputs once (no double hashing)
+# Artifact hashes (derive once)
 cert_payload.setdefault("artifact_hashes", {
-    "boundaries_hash": inputs_block.get("boundaries_hash",""),
-    "C_hash":          inputs_block.get("C_hash",""),
-    "H_hash":          inputs_block.get("H_hash",""),
-    "U_hash":          inputs_block.get("U_hash",""),
+    "boundaries_hash": inputs_block.get("boundaries_hash", ""),
+    "C_hash":          inputs_block.get("C_hash", ""),
+    "H_hash":          inputs_block.get("H_hash", ""),
+    "U_hash":          inputs_block.get("U_hash", ""),
 })
-# projector hash: from policy (which itself came from ctx)
-cert_payload["artifact_hashes"]["projector_hash"] = cert_payload.get("policy",{}).get("projector_hash","")
+cert_payload["artifact_hashes"]["projector_hash"] = policy_block.get("projector_hash", "")
 
-# Keep inputs.boundaries_hash synced to authoritative cert value (prevents drift)
+# Keep top-level hashes in sync
+cert_payload["district_id"] = cert_payload.get("district_id") or district_id_auth or "UNKNOWN"
+cert_payload["boundaries_hash"] = cert_payload.get("boundaries_hash") or _di.get("boundaries_hash") or inputs_block.get("boundaries_hash", "")
 if cert_payload.get("boundaries_hash"):
     inputs_block["boundaries_hash"] = cert_payload["boundaries_hash"]
 cert_payload["inputs"] = inputs_block
@@ -2373,11 +2345,9 @@ cert_payload["inputs"] = inputs_block
 cert_payload.setdefault("integrity", {})
 cert_payload["integrity"]["content_hash"] = hashes.content_hash_of(cert_payload)
 
-# ---- Gallery de-duplication key (robust; no NameError)
-_gallery_district = cert_payload.get("district_id") or st.session_state.get("district_id") or "UNKNOWN"
-_gallery_policy   = cert_payload.get("policy_tag", "")
-_gallery_key = f"{_gallery_district}__{_gallery_policy}__{cert_payload['integrity']['content_hash'][:12]}"
-# (use _gallery_key where you previously referenced district_id_for_cert)
+# (Fix for gallery dedupe code that referenced district_id_for_cert)
+district_id_for_cert = cert_payload["district_id"]  # <- define before any later usage
+
 
 # ================== END CERT BLOCK ===========================================
 
