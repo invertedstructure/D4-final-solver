@@ -609,12 +609,14 @@ with tab2:
     # ------------------------ Imports & small utils local to Tab 2 ------------------------
     import json as _json
     from pathlib import Path
-    import os, tempfile, csv
+    import os, tempfile, csv, hashlib  # add hashlib for _stable_hash
 
     # reuse global GF(2) helpers: mul, add, eye
     def _xor_mat(A, B):  # uses integers (0/1), XOR per entry
-        if not A: return [r[:] for r in (B or [])]
-        if not B: return [r[:] for r in (A or [])]
+        if not A:
+            return [r[:] for r in (B or [])]
+        if not B:
+            return [r[:] for r in (A or [])]
         m, n = len(A), len(A[0])
         return [[(A[i][j] ^ B[i][j]) & 1 for j in range(n)] for i in range(m)]
 
@@ -625,19 +627,23 @@ with tab2:
         return hashlib.sha256(_json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
     # ------------------------ UI: policy + H + projector ------------------------
-    colA, colB = st.columns([2,2])
+    colA, colB = st.columns([2, 2])
     with colA:
         policy_choice = st.radio(
             "Policy",
             ["strict", "projected(auto)", "projected(file)"],
             index=0,
             horizontal=True,
-            key="ov_policy_choice"
+            key="ov_policy_choice",
         )
     with colB:
         f_H = st.file_uploader("Homotopy H (optional)", type=["json"], key="H_up")
 
-    proj_upload = st.file_uploader("Projector Π (k=3) file (only for projected(file))", type=["json"], key="pj_up")
+    proj_upload = st.file_uploader(
+        "Projector Π (k=3) file (only for projected(file))",
+        type=["json"],
+        key="pj_up",
+    )
 
     # load H (or empty cmap)
     def _load_h_local():
@@ -649,20 +655,20 @@ with tab2:
             # last resort: empty structure to keep downstream shape guards alive
             return io.parse_cmap({"blocks": {}})
 
-def _cfg_from_policy(policy_choice_str: str, pj_path: str | None) -> dict:
-if policy_choice_str == "strict":
-    return cfg_strict()
-cfg = cfg_projected_base()
-if policy_choice_str.endswith("(auto)"):
-    cfg.setdefault("source", {})["3"] = "auto"
-    # leave projector_files empty in AUTO
-    cfg.setdefault("projector_files", {})
-else:  # projected(file)
-    cfg.setdefault("source", {})["3"] = "file"
-    if pj_path:
-        cfg.setdefault("projector_files", {})["3"] = pj_path
-return cfg
-
+    # active config builder (defensive)
+    def _cfg_from_policy(policy_choice_str: str, pj_path: str | None) -> dict:
+        if policy_choice_str == "strict":
+            return cfg_strict()
+        cfg = cfg_projected_base()
+        if policy_choice_str.endswith("(auto)"):
+            cfg.setdefault("source", {})["3"] = "auto"
+            # leave projector_files empty in AUTO
+            cfg.setdefault("projector_files", {})
+        else:  # projected(file)
+            cfg.setdefault("source", {})["3"] = "file"
+            if pj_path:
+                cfg.setdefault("projector_files", {})["3"] = pj_path
+        return cfg
 
     # handle projector upload (if provided)
     pj_saved_path = ""
@@ -672,12 +678,17 @@ return cfg
         with open(pj_saved_path, "wb") as _pf:
             _pf.write(proj_upload.getvalue())
         st.caption(f"Saved projector: `{pj_saved_path}`")
+        st.session_state["ov_last_pj_path"] = pj_saved_path
 
     # compute active cfg
-    cfg_active = _cfg_from_policy(policy_choice, pj_saved_path or (st.session_state.get("ov_last_pj_path","") or ""))
+    cfg_active = _cfg_from_policy(
+        policy_choice,
+        st.session_state.get("ov_last_pj_path") or pj_saved_path or "",
+    )
 
     # display active policy pill
     st.caption(f"Active policy: `{policy_label_from_cfg(cfg_active)}`")
+
 
     # ------------------------ Run Overlap button ------------------------
     H_local = _load_h_local()
