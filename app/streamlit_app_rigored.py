@@ -451,6 +451,34 @@ else:
     missing = [name for name, f in [("Shapes", d_shapes), ("Boundaries", d_bound), ("CMap", d_cmap)] if not f]
     st.info("Upload required files: " + ", ".join(missing))
     st.stop()
+
+# ---- Policy config helpers (define once, before Tab 2 uses them) -------------
+def cfg_strict() -> dict:
+    # No projection in strict mode; keep projector fields empty
+    return {
+        "enabled_layers": [],        # nothing enabled ⇒ strict
+        "modes": {},                 # no k=3 mode
+        "source": {},                # no projector source
+        "projector_files": {},       # no files
+    }
+
+def cfg_projected_base() -> dict:
+    # Baseline projected config: k=3 columns, AUTO by default
+    return {
+        "enabled_layers": [3],
+        "modes": {"3": "columns"},
+        "source": {"3": "auto"},     # "auto" | "file"
+        "projector_files": {},       # if file-mode, we'll fill ["3"]
+    }
+
+def policy_label_from_cfg(cfg: dict) -> str:
+    # Pretty label used in the UI + certs
+    if not cfg or not cfg.get("enabled_layers"):
+        return "strict"
+    src = (cfg.get("source", {}) or {}).get("3", "auto")
+    mode = (cfg.get("modes", {}) or {}).get("3", "columns")
+    return f"projected({mode}@k=3,{src})"
+
 # --- FIX: ensure tabs exist even if earlier branches ran before creating them
 if "tab1" not in globals():
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["Unit", "Overlap", "Triangle", "Towers", "Export"])
@@ -621,19 +649,20 @@ with tab2:
             # last resort: empty structure to keep downstream shape guards alive
             return io.parse_cmap({"blocks": {}})
 
-    # active config builder
     def _cfg_from_policy(policy_choice_str: str, pj_path: str | None) -> dict:
-        if policy_choice_str == "strict":
-            return cfg_strict()
-        cfg = cfg_projected_base()
-        if policy_choice_str.endswith("(auto)"):
-            cfg["source"]["3"] = "auto"
-            cfg["projector_files"]["3"] = cfg["projector_files"].get("3", "projector_D3.json")
-        else:
-            cfg["source"]["3"] = "file"
-            if pj_path:
-                cfg["projector_files"]["3"] = pj_path
-        return cfg
+    if policy_choice_str == "strict":
+        return cfg_strict()
+    cfg = cfg_projected_base()
+    if policy_choice_str.endswith("(auto)"):
+        cfg.setdefault("source", {})["3"] = "auto"
+        # leave projector_files empty in AUTO
+        cfg.setdefault("projector_files", {})
+    else:  # projected(file)
+        cfg.setdefault("source", {})["3"] = "file"
+        if pj_path:
+            cfg.setdefault("projector_files", {})["3"] = pj_path
+    return cfg
+
 
     # handle projector upload (if provided)
     pj_saved_path = ""
