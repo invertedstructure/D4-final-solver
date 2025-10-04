@@ -1541,6 +1541,80 @@ with cB:
     if not can_witness:
         st.caption("↳ Requires: grid=✓, fence=✓, k3=✗, and a written cert.")
 
+    # ------------------------ Gallery & Witness actions ------------------------
+st.divider()
+st.caption("Gallery & Witness")
+
+# SSOT reads
+_rc   = st.session_state.get("run_ctx") or {}
+_out  = st.session_state.get("overlap_out") or {}
+_cert = st.session_state.get("cert_payload")  # prefer in-memory cert
+if _cert is None:
+    # fall back to reading the last-written cert if available
+    _lp = st.session_state.get("last_cert_path", "")
+    if _lp and os.path.exists(_lp):
+        try:
+            with open(_lp, "r", encoding="utf-8") as f:
+                _cert = _json.load(f)
+        except Exception:
+            _cert = None
+
+mode_now      = _rc.get("mode", "strict")
+is_projected  = isinstance(mode_now, str) and mode_now.startswith("projected")
+k3_ok         = bool(_out.get("3", {}).get("eq", False))
+grid_ok       = bool(_out.get("grid", True))
+fence_ok      = bool(_out.get("fence", True))
+residual_tags = st.session_state.get("residual_tags", {}) or {}
+
+# --- Gallery (enabled only when projected & k3 is green & cert exists)
+g_disabled = not (_cert and is_projected and k3_ok)
+g_help = "Enabled when you have a cert, policy is projected(auto/file), and k3 is ✓."
+
+colG, colW = st.columns(2)
+with colG:
+    if st.button("Add to Gallery", disabled=g_disabled, help=g_help, key="btn_gallery_add"):
+        try:
+            appended = append_gallery_row(_cert, growth_bumps=0, strictify="tbd")
+            if appended:
+                st.success("Gallery row appended.")
+            else:
+                st.info("Already in Gallery (dedup key matched).")
+        except Exception as e:
+            st.error(f"Gallery append failed: {e}")
+
+# --- Witness (enabled only when grid/fence ✓, k3 is red, and cert exists)
+w_disabled = not (_cert and grid_ok and fence_ok and (not k3_ok))
+w_help = "Enabled when a cert exists, grid/fence are ✓, and k3 is ✗ (stubborn red)."
+
+with colW:
+    reason = st.selectbox(
+        "Reason",
+        ["lanes-persist", "policy-mismatch", "needs-new-R", "grammar-drift", "other"],
+        index=0,
+        key="witness_reason",
+        help="Pick the closest why-not-green reason."
+    )
+    note = st.text_input("Note (optional)", value="", key="witness_note")
+    if st.button("Log Witness", disabled=w_disabled, help=w_help, key="btn_witness_add"):
+        try:
+            tag = residual_tags.get("projected" if is_projected else "strict", "none")
+            append_witness_row(_cert, reason=reason, residual_tag_val=tag, note=note)
+            st.success(f"Witness logged (residual={tag}).")
+        except Exception as e:
+            st.error(f"Witness log failed: {e}")
+
+# Tiny tails for quick visibility (optional, lightweight)
+with st.expander("Recent logs (tails)"):
+    try:
+        render_gallery_tail(limit=5)
+    except Exception as e:
+        st.warning(f"Could not render Gallery tail: {e}")
+    try:
+        render_witness_tail(limit=5)
+    except Exception as e:
+        st.warning(f"Could not render Witness tail: {e}")
+
+
 
 
     # ------------------------ Parity import/export & sample queue ------------------------
