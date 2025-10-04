@@ -95,6 +95,91 @@ for _d in DIRS.values():
 def _iso_utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+def hash_json(obj) -> str:
+    import json, hashlib
+    s = json.dumps(obj, sort_keys=True, separators=(",",":")).encode("utf-8")
+    return hashlib.sha256(s).hexdigest()
+
+def hash_matrix_norm(M) -> str:
+    if not M: return hash_json([])
+    norm = [[int(x) & 1 for x in row] for row in M]
+    return hash_json(norm)
+
+def build_inputs_block(boundaries, cmap, H_used, shapes, filenames: dict) -> dict:
+    C3 = (cmap.blocks.__root__.get("3") or [])
+    d3 = (boundaries.blocks.__root__.get("3") or [])
+    dims = {"n3": len(C3) if C3 else (len(d3[0]) if (d3 and d3[0]) else 0),
+            "n2": len(cmap.blocks.__root__.get("2") or [])}
+    hashes = {
+        "boundaries_hash": hash_json(boundaries.dict() if hasattr(boundaries,"dict") else {}),
+        "C_hash":          hash_json(cmap.dict()       if hasattr(cmap,"dict")       else {}),
+        "H_hash":          hash_json(H_used.dict()     if hasattr(H_used,"dict")     else {}),
+        "U_hash":          hash_json(shapes.dict()     if hasattr(shapes,"dict")     else {}),
+    }
+    block = {
+        "filenames": filenames,
+        "dims": dims,
+        **hashes,
+        "shapes_hash": hashes["U_hash"],
+    }
+    return block
+
+def residual_tag(R, lane_mask):
+    if not R: return "none"
+    rows, cols = len(R), len(R[0]) if R and R[0] else 0
+    if cols == 0: return "none"
+    lanes = [j for j,m in enumerate(lane_mask or []) if m]
+    ker   = [j for j,m in enumerate(lane_mask or []) if not m]
+    def col_nz(j): return any(R[i][j] & 1 for i in range(rows))
+    L = any(col_nz(j) for j in lanes) if lanes else False
+    K = any(col_nz(j) for j in ker)   if ker   else False
+    if not L and not K: return "none"
+    if L and not K: return "lanes"
+    if K and not L: return "ker"
+    return "mixed"
+
+def append_gallery_row(cert: dict, growth_bumps: int = 0, strictify: str = "tbd") -> bool:
+    from pathlib import Path
+    row = {
+        "schema_version":"1.0.0","written_at_utc": hashes.timestamp_iso_lisbon(),
+        "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
+        "district": cert["identity"]["district_id"],
+        "policy": cert["policy"]["policy_tag"],
+        "projector_hash": cert["policy"].get("projector_hash",""),
+        "hashes": {k: cert["artifact_hashes"][k] for k in ("boundaries_hash","C_hash","H_hash","U_hash")},
+        "growth_bumps": growth_bumps,
+        "strictify": strictify,
+        "cert_content_hash": cert["integrity"]["content_hash"],
+        "run_id": cert["identity"]["run_id"],
+    }
+    # dedupe: (district, b, C, H, U, policy)
+    key = (row["district"], *[row["hashes"][k] for k in ("boundaries_hash","C_hash","H_hash","U_hash")], row["policy"])
+    reg = st.session_state.setdefault("_gallery_keys", set())
+    if key in reg: return False
+    reg.add(key)
+    Path("logs").mkdir(parents=True, exist_ok=True)
+    atomic_append_jsonl(Path("logs")/"gallery.jsonl", row)
+    return True
+
+def append_witness_row(cert: dict, reason: str, residual_tag_val: str, note: str = "") -> None:
+    from pathlib import Path
+    row = {
+        "schema_version":"1.0.0","written_at_utc": hashes.timestamp_iso_lisbon(),
+        "app_version": getattr(hashes,"APP_VERSION","v0.1-core"),
+        "district": cert["identity"]["district_id"],
+        "reason": reason,
+        "residual_tag": residual_tag_val,
+        "policy": cert["policy"]["policy_tag"],
+        "projector_hash": cert["policy"].get("projector_hash",""),
+        "hashes": {k: cert["artifact_hashes"][k] for k in ("boundaries_hash","C_hash","H_hash","U_hash")},
+        "cert_content_hash": cert["integrity"]["content_hash"],
+        "run_id": cert["identity"]["run_id"],
+        "note": note,
+    }
+    Path("logs").mkdir(parents=True, exist_ok=True)
+    atomic_append_jsonl(Path("logs")/"witnesses.jsonl", row)
+
+
 def _short(h: str, n: int = 8) -> str:
     return (h or "")[:n]
 
