@@ -649,19 +649,19 @@ with tab2:
             # last resort: empty structure to keep downstream shape guards alive
             return io.parse_cmap({"blocks": {}})
 
-    def _cfg_from_policy(policy_choice_str: str, pj_path: str | None) -> dict:
-    if policy_choice_str == "strict":
-        return cfg_strict()
-    cfg = cfg_projected_base()
-    if policy_choice_str.endswith("(auto)"):
-        cfg.setdefault("source", {})["3"] = "auto"
-        # leave projector_files empty in AUTO
-        cfg.setdefault("projector_files", {})
-    else:  # projected(file)
-        cfg.setdefault("source", {})["3"] = "file"
-        if pj_path:
-            cfg.setdefault("projector_files", {})["3"] = pj_path
-    return cfg
+def _cfg_from_policy(policy_choice_str: str, pj_path: str | None) -> dict:
+if policy_choice_str == "strict":
+    return cfg_strict()
+cfg = cfg_projected_base()
+if policy_choice_str.endswith("(auto)"):
+    cfg.setdefault("source", {})["3"] = "auto"
+    # leave projector_files empty in AUTO
+    cfg.setdefault("projector_files", {})
+else:  # projected(file)
+    cfg.setdefault("source", {})["3"] = "file"
+    if pj_path:
+        cfg.setdefault("projector_files", {})["3"] = pj_path
+return cfg
 
 
     # handle projector upload (if provided)
