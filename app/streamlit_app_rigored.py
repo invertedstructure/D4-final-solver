@@ -2603,74 +2603,74 @@ with st.expander("Parity Suite (reuse active policy)"):
 st.session_state["last_cert_path"] = cert_path
 
 
-    # ── A/B embed (fresh only if inputs_sig matches)
-    ab_ctx = _ss.get("ab_compare", {}) or {}
-    inputs_sig = [
-        inputs_block["boundaries_hash"],
-        inputs_block["C_hash"],
-        inputs_block["H_hash"],
-        inputs_block["U_hash"],
-        inputs_block["shapes_hash"],
-    ]
-    if ab_ctx.get("inputs_sig") == inputs_sig:
-        strict_ctx    = ab_ctx.get("strict", {})
-        projected_ctx = ab_ctx.get("projected", {})
-        def _pass_vec_from(d):
-            return [int(d.get("2", {}).get("eq", False)), int(d.get("3", {}).get("eq", False))]
-        cert_payload["policy"]["strict_snapshot"] = {
-            "policy_tag": strict_ctx.get("label", "strict"),
-            "ker_guard":  "enforced",
-            "inputs": {
-                "filenames": inputs_block["filenames"],
-                "boundaries": {
-                    "filename": inputs_block["filenames"]["boundaries"],
-                    "hash":     inputs_block["boundaries_hash"],
-                    "district_id": identity_block["district_id"],
-                    "lane_mask_k3": run_ctx.get("lane_mask_k3", []),
-                    "d3_rows": len(run_ctx.get("d3", [])),
-                    "d3_cols": (len(run_ctx.get("d3", [])[0]) if run_ctx.get("d3") else 0),
-                },
-                "U_filename": inputs_block["filenames"]["U"],
-                "C_filename": inputs_block["filenames"]["C"],
-                "H_filename": inputs_block["filenames"]["H"],
+# ── A/B embed (fresh only if inputs_sig matches)
+ab_ctx = _ss.get("ab_compare", {}) or {}
+inputs_sig = [
+    inputs_block["boundaries_hash"],
+    inputs_block["C_hash"],
+    inputs_block["H_hash"],
+    inputs_block["U_hash"],
+    inputs_block["shapes_hash"],
+]
+if ab_ctx.get("inputs_sig") == inputs_sig:
+    strict_ctx    = ab_ctx.get("strict", {})
+    projected_ctx = ab_ctx.get("projected", {})
+    def _pass_vec_from(d):
+        return [int(d.get("2", {}).get("eq", False)), int(d.get("3", {}).get("eq", False))]
+    cert_payload["policy"]["strict_snapshot"] = {
+        "policy_tag": strict_ctx.get("label", "strict"),
+        "ker_guard":  "enforced",
+        "inputs": {
+            "filenames": inputs_block["filenames"],
+            "boundaries": {
+                "filename": inputs_block["filenames"]["boundaries"],
+                "hash":     inputs_block["boundaries_hash"],
+                "district_id": identity_block["district_id"],
+                "lane_mask_k3": run_ctx.get("lane_mask_k3", []),
+                "d3_rows": len(run_ctx.get("d3", [])),
+                "d3_cols": (len(run_ctx.get("d3", [])[0]) if run_ctx.get("d3") else 0),
             },
-            "lane_mask_k3": run_ctx.get("lane_mask_k3", []),
-            "lane_vec_H2d3": strict_ctx.get("lane_vec_H2d3", diagnostics_block.get("lane_vec_H2d3", [])),
-            "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
-            "pass_vec": _pass_vec_from(strict_ctx.get("out", {})),
-            "residual_tag": residual_tags.get("strict", "none"),
-            "out": strict_ctx.get("out", {}),
-        }
-        proj_hash_ab = projected_ctx.get("projector_hash", run_ctx.get("projector_hash",""))
-        cert_payload["policy"]["projected_snapshot"] = {
-            "policy_tag": run_ctx.get("policy_tag", policy_label_from_cfg(cfg_projected_base())),
-            "ker_guard":  "off",
-            "projector_hash": proj_hash_ab,
-            "inputs": {
-                "filenames": inputs_block["filenames"],
-                "boundaries": {
-                    "filename": inputs_block["filenames"]["boundaries"],
-                    "hash":     inputs_block["boundaries_hash"],
-                    "district_id": identity_block["district_id"],
-                    "lane_mask_k3": run_ctx.get("lane_mask_k3", []),
-                    "d3_rows": len(run_ctx.get("d3", [])),
-                    "d3_cols": (len(run_ctx.get("d3", [])[0]) if run_ctx.get("d3") else 0),
-                    **({"projector_filename": run_ctx.get("projector_filename","")} if run_ctx.get("mode")=="projected(file)" else {}),
-                },
-                "U_filename": inputs_block["filenames"]["U"],
-                "C_filename": inputs_block["filenames"]["C"],
-                "H_filename": inputs_block["filenames"]["H"],
+            "U_filename": inputs_block["filenames"]["U"],
+            "C_filename": inputs_block["filenames"]["C"],
+            "H_filename": inputs_block["filenames"]["H"],
+        },
+        "lane_mask_k3": run_ctx.get("lane_mask_k3", []),
+        "lane_vec_H2d3": strict_ctx.get("lane_vec_H2d3", diagnostics_block.get("lane_vec_H2d3", [])),
+        "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
+        "pass_vec": _pass_vec_from(strict_ctx.get("out", {})),
+        "residual_tag": residual_tags.get("strict", "none"),
+        "out": strict_ctx.get("out", {}),
+    }
+    proj_hash_ab = projected_ctx.get("projector_hash", run_ctx.get("projector_hash",""))
+    cert_payload["policy"]["projected_snapshot"] = {
+        "policy_tag": run_ctx.get("policy_tag", policy_label_from_cfg(cfg_projected_base())),
+        "ker_guard":  "off",
+        "projector_hash": proj_hash_ab,
+        "inputs": {
+            "filenames": inputs_block["filenames"],
+            "boundaries": {
+                "filename": inputs_block["filenames"]["boundaries"],
+                "hash":     inputs_block["boundaries_hash"],
+                "district_id": identity_block["district_id"],
+                "lane_mask_k3": run_ctx.get("lane_mask_k3", []),
+                "d3_rows": len(run_ctx.get("d3", [])),
+                "d3_cols": (len(run_ctx.get("d3", [])[0]) if run_ctx.get("d3") else 0),
+                **({"projector_filename": run_ctx.get("projector_filename","")} if run_ctx.get("mode")=="projected(file)" else {}),
             },
-            "lane_mask_k3": run_ctx.get("lane_mask_k3", []),
-            "lane_vec_H2d3": projected_ctx.get("lane_vec_H2d3", diagnostics_block.get("lane_vec_H2d3", [])),
-            "lane_vec_C3plusI3": projected_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
-            "pass_vec": _pass_vec_from(projected_ctx.get("out", {})),
-            "residual_tag": residual_tags.get("projected", "none"),
-            "out": projected_ctx.get("out", {}),
-            **({"projector_consistent_with_d": bool(run_ctx.get("projector_consistent_with_d"))}
-               if run_ctx.get("mode")=="projected(file)" else {}),
-        }
-        cert_payload["ab_pair_tag"] = ab_ctx.get("pair_tag", "")
+            "U_filename": inputs_block["filenames"]["U"],
+            "C_filename": inputs_block["filenames"]["C"],
+            "H_filename": inputs_block["filenames"]["H"],
+        },
+        "lane_mask_k3": run_ctx.get("lane_mask_k3", []),
+        "lane_vec_H2d3": projected_ctx.get("lane_vec_H2d3", diagnostics_block.get("lane_vec_H2d3", [])),
+        "lane_vec_C3plusI3": projected_ctx.get("lane_vec_C3plusI3", diagnostics_block.get("lane_vec_C3plusI3", [])),
+        "pass_vec": _pass_vec_from(projected_ctx.get("out", {})),
+        "residual_tag": residual_tags.get("projected", "none"),
+        "out": projected_ctx.get("out", {}),
+        **({"projector_consistent_with_d": bool(run_ctx.get("projector_consistent_with_d"))}
+           if run_ctx.get("mode")=="projected(file)" else {}),
+    }
+    cert_payload["ab_pair_tag"] = ab_ctx.get("pair_tag", "")
 
     # ── artifacts, promotion, integrity
     cert_payload["artifact_hashes"] = {
