@@ -100,6 +100,59 @@ def hash_json(obj) -> str:
     s = json.dumps(obj, sort_keys=True, separators=(",",":")).encode("utf-8")
     return hashlib.sha256(s).hexdigest()
 
+# ───────────────────────── Gallery / Witness tail viewers (UI helpers) ─────────────────────────
+from pathlib import Path
+import json as _json
+
+def _read_jsonl_tail(path: Path, limit: int = 5) -> list[dict]:
+    if not path.exists():
+        return []
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            lines = f.readlines()[-limit:]
+        out = []
+        for ln in lines:
+            try:
+                out.append(_json.loads(ln))
+            except Exception:
+                continue
+        return out
+    except Exception:
+        return []
+
+def render_gallery_tail(limit: int = 5):
+    p = Path("logs") / "gallery.jsonl"
+    rows = _read_jsonl_tail(p, limit)
+    st.markdown("**Recent Gallery entries**")
+    if not rows:
+        st.caption("Gallery: (empty)")
+        return
+    for r in reversed(rows):
+        d = r.get("district","?")
+        pol = r.get("policy","?")
+        gh = r.get("hashes",{})
+        pH = r.get("projector_hash","")
+        st.caption(f"{r.get('written_at_utc','')} · {d} · {pol} · Π={pH[:12]} · b={gh.get('boundaries_hash','')[:8]} C={gh.get('C_hash','')[:8]} H={gh.get('H_hash','')[:8]} U={gh.get('U_hash','')[:8]}")
+    with st.expander("Gallery tail (JSON)"):
+        st.code("\n".join(_json.dumps(r, indent=2, sort_keys=True) for r in rows), language="json")
+
+def render_witness_tail(limit: int = 5):
+    p = Path("logs") / "witnesses.jsonl"
+    rows = _read_jsonl_tail(p, limit)
+    st.markdown("**Recent Witnesses**")
+    if not rows:
+        st.caption("Witnesses: (empty)")
+        return
+    for r in reversed(rows):
+        d = r.get("district","?")
+        reason = r.get("reason","?")
+        tag = r.get("residual_tag","?")
+        pol = r.get("policy","?")
+        st.caption(f"{r.get('written_at_utc','')} · {d} · {reason} · residual={tag} · {pol}")
+    with st.expander("Witness tail (JSON)"):
+        st.code("\n".join(_json.dumps(r, indent=2, sort_keys=True) for r in rows), language="json")
+
+
 def hash_matrix_norm(M) -> str:
     if not M: return hash_json([])
     norm = [[int(x) & 1 for x in row] for row in M]
@@ -432,6 +485,123 @@ def _pj_is_diagonal(P) -> bool:
         for j in range(n):
             if i != j and (P[i][j] & 1): return False
     return True
+
+# ───────────────────────── Coverage sampling (deterministic toy) ─────────────────────────
+import csv, random
+
+def _gf2_rank_local(M: list[list[int]]) -> int:
+    if not M or not (M[0]): return 0
+    A = [row[:] for row in M]; m, n = len(A), len(A[0]); r = c = 0
+    while r < m and c < n:
+        piv = next((i for i in range(r, m) if A[i][c] & 1), None)
+        if piv is None: c += 1; continue
+        if piv != r: A[r], A[piv] = A[piv], A[r]
+        for i in range(m):
+            if i != r and (A[i][c] & 1):
+                A[i] = [(A[i][j] ^ A[r][j]) & 1 for j in range(n)]
+        r += 1; c += 1
+    return r
+
+def coverage_sample_csv(*, boundaries, cmap, N: int = 100, seed: str|None = None) -> str:
+    """
+    Toy sampler: draws random column masks over d3 to produce a signature row.
+    Deterministic for same (N, seed).
+    """
+    rnd = random.Random(seed or "fixed-seed")
+    d3 = (boundaries.blocks.__root__.get("3") or [])
+    C3 = (cmap.blocks.__root__.get("3") or [])
+    n3 = len(d3[0]) if (d3 and d3[0]) else 0
+    lane_mask = [1 if any(row[j] & 1 for row in d3) else 0 for j in range(n3)] if n3 else []
+
+    outdir = Path("reports"); outdir.mkdir(parents=True, exist_ok=True)
+    csv_path = outdir / "coverage_sampling.csv"
+
+    header = ["idx","lane_pattern","rand_mask","rank_d3","ker_dim","in_lane_support"]
+    rows = []
+    rank_d3 = _gf2_rank_local(d3) if d3 else 0
+    ker_dim = max(n3 - rank_d3, 0)
+    lane_pat = "".join("1" if x else "0" for x in lane_mask)
+
+    for i in range(N):
+        mask = [rnd.randint(0,1) for _ in range(n3)] if n3 else []
+        in_lane = "".join("1" if (lane_mask[j] and mask[j]) else "0" for j in range(n3)) if n3 else ""
+        rows.append([i, lane_pat, "".join(str(x) for x in mask), rank_d3, ker_dim, in_lane])
+
+    atomic_write_csv(csv_path, header, rows)
+    return str(csv_path)
+
+# ───────────────────────── Export helpers (inputs bundle + cert bundle) ─────────────────────────
+import zipfile, os
+
+def write_inputs_bundle(*, district_id: str, run_id: str, inputs_block: dict) -> str:
+    """
+    Zips input files + manifest.json into bundles/inputs__{district}__{run_id}.zip
+    inputs_block must contain 'filenames' and hashes/dims.
+    """
+    bundles = Path("bundles"); bundles.mkdir(parents=True, exist_ok=True)
+    zpath = bundles / f"inputs__{district_id}__{run_id}.zip"
+
+    manifest = {
+        "schema_version": LAB_SCHEMA_VERSION,
+        "run_id": run_id,
+        "timestamp": hashes.timestamp_iso_lisbon(),
+        "app_version": APP_VERSION_STR,
+        "python_version": PY_VERSION_STR,
+        "policy_tag": st.session_state.get("run_ctx", {}).get("policy_tag",""),
+        "hashes": {
+            "boundaries_hash": inputs_block.get("boundaries_hash",""),
+            "C_hash": inputs_block.get("C_hash",""),
+            "H_hash": inputs_block.get("H_hash",""),
+            "U_hash": inputs_block.get("U_hash",""),
+            "shapes_hash": inputs_block.get("shapes_hash",""),
+            "projector_hash": st.session_state.get("run_ctx", {}).get("projector_hash",""),
+        },
+        "filenames": inputs_block.get("filenames", {}),
+        "dims": inputs_block.get("dims", {}),
+    }
+
+    with zipfile.ZipFile(zpath, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        # add manifest
+        z.writestr("manifest.json", _json.dumps(manifest, sort_keys=True, indent=2).encode("utf-8"))
+        # add files if present
+        for key, fname in (inputs_block.get("filenames") or {}).items():
+            if not fname: continue
+            try:
+                if os.path.exists(fname):
+                    z.write(fname, arcname=f"inputs/{os.path.basename(fname)}")
+            except Exception:
+                pass
+    return str(zpath)
+
+def write_cert_bundle(*, cert_path: str, policy_json_path: str|None = None, residual_path: str|None = None) -> str:
+    """
+    Zips cert + optional policy/residual + projector file if file-mode.
+    bundles/overlap_bundle__{district}__{policy}__{content_hash[:12]}.zip
+    """
+    try:
+        with open(cert_path, "r", encoding="utf-8") as f:
+            cert = _json.load(f)
+    except Exception as e:
+        raise RuntimeError(f"Cannot open cert.json: {e}")
+
+    district = cert["identity"]["district_id"]
+    pol = cert["policy"]["policy_tag"]
+    ch = (cert.get("integrity",{}) or {}).get("content_hash","")[:12]
+    bundles = Path("bundles"); bundles.mkdir(parents=True, exist_ok=True)
+    zpath = bundles / f"overlap_bundle__{district}__{pol.replace(' ','_')}__{ch}.zip"
+
+    pj_file = cert["policy"].get("projector_filename","") if cert["policy"].get("source",{}).get("3")=="file" else ""
+    with zipfile.ZipFile(zpath, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        z.write(cert_path, arcname="cert.json")
+        if policy_json_path and os.path.exists(policy_json_path):
+            z.write(policy_json_path, arcname="policy.json")
+        if residual_path and os.path.exists(residual_path):
+            z.write(residual_path, arcname="residual.json")
+        if pj_file and os.path.exists(pj_file):
+            z.write(pj_file, arcname=f"projectors/{os.path.basename(pj_file)}")
+    return str(zpath)
+
+
 
 # == lane mask from current boundaries (no recompute elsewhere) ==
 def lane_mask_from_boundaries(boundaries) -> list[int]:
@@ -1613,6 +1783,9 @@ with st.expander("Witness Tracker (why it didn’t go green)"):
 # ───────────────────────── Parity Suite: pair helpers ─────────────────────────
 from pathlib import Path
 import json as _json
+PARITY_DEFAULT_PATH = Path("configs/parity_pairs.json")
+
+
 
 def _safe_parse_json(path: str) -> dict:
     p = Path(path)
@@ -1695,6 +1868,28 @@ def set_parity_pairs_from_fixtures(pairs_spec: list[dict]):
         )
         add_parity_pair(label=label, left_fixture=L, right_fixture=R)
     return len(st.session_state.get("parity_pairs", []))
+
+# ───────────────────────── Parity report writer (stable schema) ─────────────────────────
+from pathlib import Path
+
+def write_parity_report(*, mode: str, pairs_out: list[dict], policy_tag: str, projector_hash: str|None) -> str:
+    """
+    pairs_out: [{"label": str, "strict":{"k2":bool,"k3":bool}, "projected":{"k2":bool,"k3":bool}}...]
+    """
+    payload = {
+        "schema_version": LAB_SCHEMA_VERSION,
+        "written_at_utc": hashes.timestamp_iso_lisbon(),
+        "app_version": APP_VERSION_STR,
+        "policy_tag": policy_tag,
+        "projector_hash": projector_hash or "",
+        "mode": mode,
+        "pairs": pairs_out,
+    }
+    outdir = Path("reports"); outdir.mkdir(parents=True, exist_ok=True)
+    outpath = outdir / "parity_report.json"
+    atomic_write_json(outpath, payload)
+    return str(outpath)
+
 
 # ───────────────── Parity sample pairs (optional, guarded) ──────────────────
 from pathlib import Path
@@ -2976,6 +3171,43 @@ cert_payload["integrity"]["content_hash"] = _stable_hash(cert_payload)
 cert_path, full_hash = export_mod.write_cert_json(cert_payload)
 st.success(f"Cert written: `{cert_path}`")
 
+# ---- UI: Exports (place right after cert write / last_cert_path set)
+with st.expander("Exports"):
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Export inputs bundle", key="btn_inputs_bundle"):
+            rc = st.session_state.get("run_ctx", {}) or {}
+            di = st.session_state.get("_district_info",{}) or {}
+            # a deterministic-ish run_id just for the bundle; fine to reuse your helper
+            rid = hashes.run_id(
+                hashes.bundle_content_hash([("inputs", st.session_state.get("_inputs_block",{}))]),
+                hashes.timestamp_iso_lisbon()
+            )
+            try:
+                path = write_inputs_bundle(
+                    district_id=di.get("district_id","UNKNOWN"),
+                    run_id=rid,
+                    inputs_block=st.session_state.get("_inputs_block",{})
+                )
+                st.success(f"Inputs bundle: {path}")
+            except Exception as e:
+                st.error(f"Inputs bundle failed: {e}")
+
+    with col2:
+        if st.button("Export cert bundle", key="btn_cert_bundle"):
+            cpath = st.session_state.get("last_cert_path","")
+            if not cpath:
+                st.warning("Produce a cert first.")
+            else:
+                try:
+                    pol_path = "policy.json" if os.path.exists("policy.json") else None
+                    resid_path = "reports/residual.json" if os.path.exists("reports/residual.json") else None
+                    bpath = write_cert_bundle(cert_path=cpath, policy_json_path=pol_path, residual_path=resid_path)
+                    st.success(f"Cert bundle: {bpath}")
+                except Exception as e:
+                    st.error(f"Cert bundle failed: {e}")
+
+
 # ── gallery row
 try:
     key = (
@@ -3098,6 +3330,19 @@ if cert_payload["promotion"]["eligible_for_promotion"]:
                 st.warning(f"Registry note failed (non-fatal): {ee}")
         except Exception as e:
             st.error(f"Promotion failed: {e}")
+
+    # ───────────────────────── A/B snapshot quick viewer ─────────────────────────
+def render_ab_tail():
+    ab = st.session_state.get("ab_compare")
+    if not ab:
+        st.caption("A/B: (no snapshot yet)")
+        return
+    s_ok = bool(ab.get("strict", {}).get("out", {}).get("3", {}).get("eq", False))
+    p_ok = bool(ab.get("projected", {}).get("out", {}).get("3", {}).get("eq", False))
+    st.caption(f"A/B pair: {ab.get('pair_tag','')} · strict={'✅' if s_ok else '❌'} · projected={'✅' if p_ok else '❌'}")
+    with st.expander("A/B snapshot JSON"):
+        st.code(_json.dumps(ab, indent=2, sort_keys=True), language="json")
+
 
     # ── A/B compare (strict vs projected)
     st.markdown("### A/B: strict vs projected")
@@ -3565,6 +3810,12 @@ with st.expander("Self-tests (plumbing health check)"):
 
         except Exception as e:
             st.error(f"Self-tests crashed: {e}")
+
+with st.expander("Logs — gallery & witnesses (tail)"):
+    colG, colW = st.columns(2)
+    with colG: render_gallery_tail(5)
+    with colW: render_witness_tail(5)
+
 
 
 
