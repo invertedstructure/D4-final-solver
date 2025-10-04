@@ -42,7 +42,7 @@ for _mod in (f"{PKG_NAME}.overlap_gate", f"{PKG_NAME}.projector"):
 overlap_gate = _load_pkg_module(f"{PKG_NAME}.overlap_gate", "overlap_gate.py")
 projector    = _load_pkg_module(f"{PKG_NAME}.projector",    "projector.py")
 
-io            = _load_pkg_module(f"{PKG_NAME}.io",            "io.py")
+otio          = _load_pkg_module(f"{PKG_NAME}.io",            "io.py")
 hashes        = _load_pkg_module(f"{PKG_NAME}.hashes",        "hashes.py")
 unit_gate     = _load_pkg_module(f"{PKG_NAME}.unit_gate",     "unit_gate.py")
 triangle_gate = _load_pkg_module(f"{PKG_NAME}.triangle_gate", "triangle_gate.py")
@@ -59,7 +59,8 @@ st.caption(f"projector loaded from: {getattr(projector, '__file__', '<none>')}")
 
 # ─────────────────────────── MATH LAB FOUNDATION ─────────────────────────────
 # Schema + paths + atomic IO + run IDs + residual snapshot + tiny UI widgets.
-import os, io, json, csv, hashlib, sys, platform
+import os, json, csv, hashlib, sys, platform
+import io as pyio  # stdlib io lives here
 from datetime import datetime, timezone
 from pathlib import Path
 
