@@ -2542,68 +2542,114 @@ if _run_ctx_local.get("mode") == "projected(file)":
     inputs_block["filenames"]["projector"] = _run_ctx_local.get("projector_filename", "")
 
 
-# ── diagnostics
-lane_mask = run_ctx.get("lane_mask_k3", [])
+# ── diagnostics (safe, session-backed)
+_ss = st.session_state
+run_ctx = _ss.get("run_ctx", {}) or {}
+out     = _ss.get("overlap_out", {}) or {}
+
+# Prefer the H used during the run; if missing, treat as empty (no k=2 effect)
+H_used_local = _ss.get("overlap_H", None)
+
+lane_mask = run_ctx.get("lane_mask_k3", []) or []
+
+def _bottom_row(M):
+    return M[-1] if (M and isinstance(M, list) and len(M) > 0) else []
+
 try:
-    H2 = (H_used.blocks.__root__.get("2") or [])
-    C3 = (cmap.blocks.__root__.get("3") or [])
-    H2d3 = mul(H2, run_ctx.get("d3", [])) if (H2 and run_ctx.get("d3")) else []
-    C3pI3 = _xor_mat(C3, _eye(len(C3))) if C3 else []
-    lane_idx = [j for j, m in enumerate(lane_mask) if m]
+    H2 = (H_used_local.blocks.__root__.get("2") if (H_used_local and hasattr(H_used_local, "blocks")) else []) or []
+    C3 = (cmap.blocks.__root__.get("3") if (cmap and hasattr(cmap, "blocks")) else []) or []
+
+    d3_now = run_ctx.get("d3", []) or []
+    H2d3   = mul(H2, d3_now) if (H2 and d3_now) else []
+    C3pI3  = _xor_mat(C3, _eye(len(C3))) if C3 else []
+
+    lane_idx = [j for j, m in enumerate(lane_mask) if int(m)]
     def _mask(vec, idx): return [vec[j] for j in idx] if (vec and idx) else []
+
     diagnostics_block = {
-        "lane_mask_k3": lane_mask,
-        "lane_vec_H2d3": _mask(_bottom_row(H2d3), lane_idx),
+        "lane_mask_k3":    lane_mask[:],
+        "lane_vec_H2d3":   _mask(_bottom_row(H2d3), lane_idx),
         "lane_vec_C3plusI3": _mask(_bottom_row(C3pI3), lane_idx),
     }
 except Exception:
-    diagnostics_block = {"lane_mask_k3": lane_mask, "lane_vec_H2d3": [], "lane_vec_C3plusI3": []}
-
-    # ── signatures
-    def _gf2_rank(M):
-        if not M or not M[0]: return 0
-        A = [r[:] for r in M]; m, n = len(A), len(A[0]); r = c = 0
-        while r < m and c < n:
-            piv = next((i for i in range(r, m) if A[i][c] & 1), None)
-            if piv is None: c += 1; continue
-            if piv != r: A[r], A[piv] = A[piv], A[r]
-            for i in range(m):
-                if i != r and (A[i][c] & 1):
-                    A[i] = [(A[i][j] ^ A[r][j]) & 1 for j in range(n)]
-            r += 1; c += 1
-        return r
-    d3M = run_ctx.get("d3", [])
-    rank_d3 = _gf2_rank(d3M) if d3M else 0
-    ncols_d3 = len(d3M[0]) if (d3M and d3M[0]) else 0
-    ker_dim_d3 = max(ncols_d3 - rank_d3, 0)
-    lane_pattern = "".join("1" if int(x) else "0" for x in (lane_mask or []))
-    C3 = (cmap.blocks.__root__.get("3") or [])
-    C3pI3 = _xor_mat(C3, _eye(len(C3))) if C3 else []
-    lane_idxs = [j for j, m in enumerate(lane_mask or []) if m]
-    def _col_support_pattern(M, cols):
-        if not M or not cols: return ""
-        return "".join("1" if any((row[j] & 1) for row in M) else "0" for j in cols)
-    d_signature = {"rank": rank_d3, "ker_dim": ker_dim_d3, "lane_pattern": lane_pattern}
-    fixture_signature = {"lane": _col_support_pattern(C3pI3, lane_idxs)}
-    sig_block = {"d_signature": d_signature, "fixture_signature": fixture_signature, "echo_context": None}
-
-    # ── checks & policy block
-    is_strict = (run_ctx.get("mode") == "strict")
-    checks_block = {**out, "grid": True, "fence": True, "ker_guard": ("enforced" if is_strict else "off")}
-    residual_tags = _ss.get("residual_tags", {})
-    policy_block = {
-        "label": run_ctx.get("policy_tag", policy_label),
-        "policy_tag": run_ctx.get("policy_tag", policy_label),
-        "enabled_layers": cfg_active.get("enabled_layers", []),
-        "modes": cfg_active.get("modes", {}),
-        "source": cfg_active.get("source", {}),
+    diagnostics_block = {
+        "lane_mask_k3": lane_mask[:],
+        "lane_vec_H2d3": [],
+        "lane_vec_C3plusI3": [],
     }
-    if run_ctx.get("projector_hash") is not None:
-        policy_block["projector_hash"] = run_ctx.get("projector_hash","")
-    if run_ctx.get("projector_filename"):
-        policy_block["projector_filename"] = run_ctx.get("projector_filename","")
-    if run_ctx.get("projector_consistent_with_d") is not None:
-        policy_block["projector_consistent_with_d"] = bool(run_ctx.get("projector_consistent_with_d"))
+
+# also stash for any later readers
+_ss["diagnostics_block"] = diagnostics_block
+
+# ── signatures (rank/ker/lane + fixture lane pattern on C3+I3)
+def _gf2_rank(M):
+    if not M or not (isinstance(M, list) and isinstance(M[0], list)): return 0
+    A = [row[:] for row in M]
+    m, n = len(A), len(A[0])
+    r = c = 0
+    while r < m and c < n:
+        piv = next((i for i in range(r, m) if (A[i][c] & 1)), None)
+        if piv is None:
+            c += 1
+            continue
+        if piv != r:
+            A[r], A[piv] = A[piv], A[r]
+        for i in range(m):
+            if i != r and (A[i][c] & 1):
+                A[i] = [(A[i][j] ^ A[r][j]) & 1 for j in range(n)]
+        r += 1; c += 1
+    return r
+
+d3M        = run_ctx.get("d3", []) or []
+rank_d3    = _gf2_rank(d3M) if d3M else 0
+ncols_d3   = (len(d3M[0]) if (d3M and d3M[0]) else 0)
+ker_dim_d3 = max(ncols_d3 - rank_d3, 0)
+lane_pattern = "".join("1" if int(x) else "0" for x in (lane_mask or []))
+
+C3        = (cmap.blocks.__root__.get("3") if (cmap and hasattr(cmap, "blocks")) else []) or []
+C3pI3     = _xor_mat(C3, _eye(len(C3))) if C3 else []
+lane_idxs = [j for j, m in enumerate(lane_mask or []) if int(m)]
+
+def _col_support_pattern(M, cols):
+    if not M or not cols: return ""
+    rows = len(M)
+    return "".join(
+        "1" if any((M[i][j] & 1) for i in range(rows)) else "0"
+        for j in cols
+    )
+
+d_signature = {"rank": rank_d3, "ker_dim": ker_dim_d3, "lane_pattern": lane_pattern}
+fixture_signature = {"lane": _col_support_pattern(C3pI3, lane_idxs)}
+sig_block = {"d_signature": d_signature, "fixture_signature": fixture_signature, "echo_context": None}
+
+# ── checks & policy block
+is_strict    = (run_ctx.get("mode") == "strict")
+checks_block = {
+    **(out or {}),
+    "grid": True,       # grid/fence are plumbing-level in this build
+    "fence": True,
+    "ker_guard": ("enforced" if is_strict else "off"),
+}
+
+residual_tags = _ss.get("residual_tags", {}) or {}
+
+# derive a policy label safely even if you didn’t store one earlier
+policy_label_safe = _ss.get("overlap_policy_label", policy_label_from_cfg(cfg_active))
+
+policy_block = {
+    "label": policy_label_safe,
+    "policy_tag": run_ctx.get("policy_tag", policy_label_safe),
+    "enabled_layers": (cfg_active.get("enabled_layers", []) if isinstance(cfg_active, dict) else []),
+    "modes":          (cfg_active.get("modes", {})            if isinstance(cfg_active, dict) else {}),
+    "source":         (cfg_active.get("source", {})           if isinstance(cfg_active, dict) else {}),
+}
+if run_ctx.get("projector_hash") is not None:
+    policy_block["projector_hash"] = run_ctx.get("projector_hash","")
+if run_ctx.get("projector_filename"):
+    policy_block["projector_filename"] = run_ctx.get("projector_filename","")
+if run_ctx.get("projector_consistent_with_d") is not None:
+    policy_block["projector_consistent_with_d"] = bool(run_ctx.get("projector_consistent_with_d"))
+
 
 ## ── CERT WRITE (robust & self-contained)
 
