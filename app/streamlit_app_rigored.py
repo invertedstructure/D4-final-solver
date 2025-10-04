@@ -1125,6 +1125,85 @@ with tab2:
                 P_active, meta = projector_choose_active(cfg_active, boundaries)
             except ValueError as e:
                 st.error(str(e))
+                # ---- A/B compare (strict vs projected) — standalone + resilient -------------
+with st.expander("A/B compare (strict vs projected)"):
+    rc  = st.session_state.get("run_ctx") or {}
+    ib  = st.session_state.get("_inputs_block") or {}
+    if not rc:
+        st.info("Run Overlap once to enable A/B.")
+    else:
+        # status line if we already have a snapshot
+        ab = st.session_state.get("ab_compare")
+        if ab:
+            s_ok = bool(ab.get("strict", {}).get("out", {}).get("3", {}).get("eq", False))
+            p_ok = bool(ab.get("projected", {}).get("out", {}).get("3", {}).get("eq", False))
+            st.caption(f"Last A/B → strict={'✅' if s_ok else '❌'} · projected={'✅' if p_ok else '❌'} · pair={ab.get('pair_tag','')}")
+        if st.button("Run A/B compare", key="ab_run_btn"):
+            try:
+                # strict leg
+                H_used = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
+                out_strict   = overlap_gate.overlap_check(boundaries, cmap, H_used)
+                label_strict = policy_label_from_cfg(cfg_strict())
+
+                # projected leg mirrors ACTIVE (auto/file)
+                cfg_proj = st.session_state.get("overlap_cfg") or cfg_projected_base()
+                # Fail-fast on FILE projector validity
+                _P_ab, _meta_ab = projector_choose_active(cfg_proj, boundaries)
+
+                out_proj  = overlap_gate.overlap_check(boundaries, cmap, H_used, projection_config=cfg_proj)
+                label_proj = policy_label_from_cfg(cfg_proj)
+
+                # provenance + lane vectors (lightweight)
+                d3 = rc.get("d3", [])
+                H2 = (H_used.blocks.__root__.get("2") or [])
+                C3 = (cmap.blocks.__root__.get("3") or [])
+                lane_idx = [j for j,m in enumerate(rc.get("lane_mask_k3", [])) if m]
+                def _bottom_row(M): return M[-1] if (M and len(M)) else []
+                def _xor(A,B):
+                    if not A: return B or []
+                    if not B: return A or []
+                    return [[(A[i][j]^B[i][j]) for j in range(len(A[0]))] for i in range(len(A))]
+                H2d3  = mul(H2, d3) if (H2 and d3) else []
+                C3pI3 = _xor(C3, eye(len(C3))) if C3 else []
+                def _mask(vec, idx): return [vec[j] for j in idx] if (vec and idx) else []
+                lane_vec_H2d3 = _mask(_bottom_row(H2d3), lane_idx)
+                lane_vec_C3I  = _mask(_bottom_row(C3pI3), lane_idx)
+
+                # persist snapshot
+                inputs_sig = [ib.get("boundaries_hash",""), ib.get("C_hash",""), ib.get("H_hash",""), ib.get("U_hash",""), ib.get("shapes_hash","")]
+                st.session_state["ab_compare"] = {
+                    "pair_tag": f"{label_strict}__VS__{label_proj}",
+                    "inputs_sig": inputs_sig,
+                    "lane_mask_k3": rc.get("lane_mask_k3", []),
+                    "strict": {
+                        "label": label_strict,
+                        "cfg":   cfg_strict(),
+                        "out":   out_strict,
+                        "ker_guard": "enforced",
+                        "lane_vec_H2d3": lane_vec_H2d3,
+                        "lane_vec_C3plusI3": lane_vec_C3I,
+                        "pass_vec": [int(out_strict.get("2",{}).get("eq",False)), int(out_strict.get("3",{}).get("eq",False))],
+                        "projector_hash": "",
+                    },
+                    "projected": {
+                        "label": label_proj,
+                        "cfg":   cfg_proj,
+                        "out":   out_proj,
+                        "ker_guard": "off",
+                        "lane_vec_H2d3": lane_vec_H2d3[:],
+                        "lane_vec_C3plusI3": lane_vec_C3I[:],
+                        "pass_vec": [int(out_proj.get("2",{}).get("eq",False)), int(out_proj.get("3",{}).get("eq",False))],
+                        "projector_filename": _meta_ab.get("projector_filename",""),
+                        "projector_hash": _meta_ab.get("projector_hash",""),
+                        "projector_consistent_with_d": _meta_ab.get("projector_consistent_with_d", None),
+                    },
+                }
+                st.success("A/B snapshot updated.")
+            except ValueError as e:
+                st.error(f"A/B projected(file) invalid: {e}")
+            except Exception as e:
+                st.error(f"A/B compare failed: {e}")
+
                 # minimal run_ctx so the rest of the UI doesn't recompute lanes/Π
                 d3_now = (boundaries.blocks.__root__.get("3") or [])
                 st.session_state["run_ctx"] = {
@@ -1219,11 +1298,13 @@ with tab2:
             st.error(f"Overlap run failed: {e}")
             st.stop()
 
-    # ── require a run for the rest of the tab
-    _ss = st.session_state
-    if not (_ss.get("run_ctx") and _ss.get("overlap_out") and _ss.get("overlap_H")):
-        st.info("Run Overlap first to populate cert & download bundle.")
-        st.stop()
+  # ── require a run for the rest of the tab
+_ss = st.session_state
+if not (_ss.get("run_ctx") and _ss.get("overlap_out")):
+    # Allow A/B and Downloads to render even before a full cert run.
+    st.info("Run Overlap first to see results sections.")
+    # no st.stop()
+
 
     run_ctx = _ss["run_ctx"]; out = _ss["overlap_out"]; H_used = _ss["overlap_H"]
     policy_label = _ss.get("overlap_policy_label", policy_label_from_cfg(cfg_active))
@@ -2515,6 +2596,9 @@ with st.expander("Parity Suite (reuse active policy)"):
         "district_id": identity_block["district_id"],
         "boundaries_hash": inputs_block["boundaries_hash"],
     }
+    cert_path, full_hash = export_mod.write_cert_json(cert_payload)
+st.session_state["last_cert_path"] = cert_path
+
 
     # ── A/B embed (fresh only if inputs_sig matches)
     ab_ctx = _ss.get("ab_compare", {}) or {}
@@ -2682,6 +2766,8 @@ with st.expander("Parity Suite (reuse active policy)"):
                                mime="application/zip", key="dl_overlap_bundle")
     except Exception as e:
         st.error(f"Could not build download bundle: {e}")
+        st.session_state["last_bundle_path"] = zip_path
+
 
     # ── promotion (optional)
     _pass_vec = [int(out.get("2", {}).get("eq", False)), int(out.get("3", {}).get("eq", False))]
@@ -2996,6 +3082,22 @@ with st.expander("Export Inputs (reproducible zip)"):
 
         except Exception as e:
             st.error(f"Export failed: {e}")
+
+# ---- Downloads drawer: always visible if files exist ------------------------
+with st.expander("Downloads"):
+    cp = st.session_state.get("last_cert_path")
+    if cp and os.path.exists(cp):
+        with open(cp, "rb") as f:
+            st.download_button("⬇️ Download cert.json", f, file_name=os.path.basename(cp), key="dl_cert_latest")
+    else:
+        st.caption("No cert yet.")
+    zp = st.session_state.get("last_bundle_path")
+    if zp and os.path.exists(zp):
+        with open(zp, "rb") as f:
+            st.download_button("⬇️ Download overlap bundle (.zip)", f, file_name=os.path.basename(zp), key="dl_bundle_latest")
+    else:
+        st.caption("No bundle yet.")
+
 
 # ─────────────────────────────── Self-tests (red gate) ───────────────────────────────
 import os, json as _json
