@@ -8,6 +8,7 @@ import os
 from io import BytesIO
 import zipfile
 
+
 st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
 
 # ────────────────────────────── PACKAGE LOADER ────────────────────────────────
@@ -41,13 +42,19 @@ for _mod in (f"{PKG_NAME}.overlap_gate", f"{PKG_NAME}.projector"):
 
 overlap_gate = _load_pkg_module(f"{PKG_NAME}.overlap_gate", "overlap_gate.py")
 projector    = _load_pkg_module(f"{PKG_NAME}.projector",    "projector.py")
-
+from typing import TYPE_CHECKING
+if TYPE_CHECKING:
+    from . import io as _io_pkg
+# now `otio: _io_pkg`  # type: ignore
 otio          = _load_pkg_module(f"{PKG_NAME}.io",            "io.py")
 hashes        = _load_pkg_module(f"{PKG_NAME}.hashes",        "hashes.py")
 unit_gate     = _load_pkg_module(f"{PKG_NAME}.unit_gate",     "unit_gate.py")
 triangle_gate = _load_pkg_module(f"{PKG_NAME}.triangle_gate", "triangle_gate.py")
 towers        = _load_pkg_module(f"{PKG_NAME}.towers",        "towers.py")
 export_mod    = _load_pkg_module(f"{PKG_NAME}.export",        "export.py")
+# Hotfix alias so any lingering `io.parse_*` still work:
+if "io" not in globals():
+    io = otio  # keeps old references alive while you migrate to `otio.*`
 
 APP_VERSION = getattr(hashes, "APP_VERSION", "v0.1-core")
 
@@ -61,6 +68,7 @@ st.caption(f"projector loaded from: {getattr(projector, '__file__', '<none>')}")
 # Schema + paths + atomic IO + run IDs + residual snapshot + tiny UI widgets.
 import os, json, csv, hashlib, sys, platform
 import io as pyio  # stdlib io lives here
+from io import BytesIO       # optional; safe to keep
 from datetime import datetime, timezone
 from pathlib import Path
 
