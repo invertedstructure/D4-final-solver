@@ -1284,11 +1284,15 @@ with st.expander("Active projector (k=3) · debug", expanded=False):
  # ===== RUN OVERLAP (single source of truth via RunContext) ====================
 if st.button("Run Overlap", key="run_overlap"):
     try:
-        # 0) clear any stale projector meta from previous runs
+        # 0) clear any stale projector meta/context from previous runs
         st.session_state.pop("proj_meta", None)
         st.session_state.pop("run_ctx", None)
 
         # 1) build RunContext (fail-fast if projected(file) invalid)
+        #    build_run_context must:
+        #    - validate file Π (shape/idempotence/diag/lane) if source.3=="file"
+        #    - return an object with: policy_tag, mode, d3, lane_mask_k3,
+        #      projector_filename, projector_hash, projector_consistent_with_d
         try:
             ctx = build_run_context(cfg_active, boundaries, policy_label)
         except ValueError as e:
@@ -1304,17 +1308,19 @@ if st.button("Run Overlap", key="run_overlap"):
             st.stop()
 
         # 1b) tiny debug echo (helps confirm file vs auto path)
-        n3 = (len(ctx.d3[0]) if ctx.d3 and ctx.d3[0] else 0)
+        d3 = ctx.d3
+        n3 = (len(d3[0]) if d3 and d3[0] else 0)
         st.caption("Active projector (k=3) · debug")
-        st.caption(f"d3: rows={len(ctx.d3)}, cols={n3}, lane_mask={ctx.lane_mask_k3}")
-        st.caption(
-            f"mode={ctx.mode}"
-            + (f" · file={ctx.projector_filename} · hash={(ctx.projector_hash or '')[:12]}…" if ctx.mode == 'projected(file)' else "")
-        )
+        st.caption(f"d3: rows={len(d3)}, cols={n3}, lane_mask={ctx.lane_mask_k3}")
+        if ctx.mode == "projected(file)":
+            st.caption(f"mode=projected(file) · file={ctx.projector_filename} · hash={(ctx.projector_hash or '')[:12]}…")
+        else:
+            st.caption(f"mode={ctx.mode}")
 
         # 2) cache discipline (policy + inputs + projector hash if file)
         _di = st.session_state.get("_district_info", {}) or {}
         _bound_hash = _di.get("boundaries_hash", inputs_block.get("boundaries_hash", ""))
+
         cache_key = "|OM|".join([
             f"policy={ctx.policy_tag}",
             f"B={_bound_hash}",
@@ -1330,7 +1336,7 @@ if st.button("Run Overlap", key="run_overlap"):
 
         # 3) reload projector cache after any bust
         cache = st.session_state.get("_projector_cache") or projector.preload_projectors_from_files(cfg_active)
-        st.session_state["_projector_cache"] = cache
+        st.session_state["_projector_cache"] = cache  # keep around for cert/A-B
 
         # 4) run overlap with finalized cfg/cache
         out = overlap_gate.overlap_check(
@@ -1354,6 +1360,9 @@ if st.button("Run Overlap", key="run_overlap"):
             "projector_filename": ctx.projector_filename,
             "projector_hash": ctx.projector_hash,
             "projector_consistent_with_d": ctx.projector_consistent_with_d,
+            # (optional but handy)
+            "d3_rows": len(d3),
+            "d3_cols": n3,
         }
         # keep proj_meta for any legacy readers
         st.session_state["proj_meta"] = {
@@ -2281,23 +2290,31 @@ if ab_ctx.get("inputs_sig") == _current_sig:
     }
     cert_payload["ab_pair_tag"] = ab_ctx.get("pair_tag", "")
 
-# --- Artifact hashes (derive once from inputs; keep consistent) ---------------
+# ---- Artifact hashes: always derive from inputs once (no double hashing)
 cert_payload.setdefault("artifact_hashes", {
-    "boundaries_hash": inputs_block.get("boundaries_hash", ""),
-    "C_hash":          inputs_block.get("C_hash", ""),
-    "H_hash":          inputs_block.get("H_hash", ""),
-    "U_hash":          inputs_block.get("U_hash", ""),
+    "boundaries_hash": inputs_block.get("boundaries_hash",""),
+    "C_hash":          inputs_block.get("C_hash",""),
+    "H_hash":          inputs_block.get("H_hash",""),
+    "U_hash":          inputs_block.get("U_hash",""),
 })
-cert_payload["artifact_hashes"]["projector_hash"] = policy_block.get("projector_hash", "")
+# projector hash: from policy (which itself came from ctx)
+cert_payload["artifact_hashes"]["projector_hash"] = cert_payload.get("policy",{}).get("projector_hash","")
 
-# --- Keep inputs.boundaries_hash synced to authoritative one ------------------
+# Keep inputs.boundaries_hash synced to authoritative cert value (prevents drift)
 if cert_payload.get("boundaries_hash"):
     inputs_block["boundaries_hash"] = cert_payload["boundaries_hash"]
 cert_payload["inputs"] = inputs_block
 
-# --- Integrity ----------------------------------------------------------------
+# Integrity
 cert_payload.setdefault("integrity", {})
 cert_payload["integrity"]["content_hash"] = hashes.content_hash_of(cert_payload)
+
+# ---- Gallery de-duplication key (robust; no NameError)
+_gallery_district = cert_payload.get("district_id") or st.session_state.get("district_id") or "UNKNOWN"
+_gallery_policy   = cert_payload.get("policy_tag", "")
+_gallery_key = f"{_gallery_district}__{_gallery_policy}__{cert_payload['integrity']['content_hash'][:12]}"
+# (use _gallery_key where you previously referenced district_id_for_cert)
+
 # ================== END CERT BLOCK ===========================================
 
 
@@ -2791,7 +2808,7 @@ try:
     if cfg_active.get("enabled_layers"):
         _cfg_proj_for_ab = cfg_active
 except NameError:
-    pass  # no cfg_active in scope if pasted elsewhere
+    pass  # no cfg_active in scope if this block is moved
 
 # ---------- projector cache discipline (A/B has its own cache namespace) ----
 import os, json as _json
@@ -2809,8 +2826,8 @@ def _hash_json_matrix(P):
     try:
         return hashes.content_hash_of({"P3": P})
     except Exception:
-        blob = _json.dumps(P, sort_keys=True, separators=(",", ":")).encode()
         import hashlib as _hl
+        blob = _json.dumps(P, sort_keys=True, separators=(",", ":")).encode()
         return _hl.sha256(blob).hexdigest()
 
 _di = st.session_state.get("_district_info", {}) or {}
@@ -2920,7 +2937,7 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
         inputs_block.get("shapes_hash", ""),
     ]
 
-    # --- Persist compact A/B context (note: projected.label mirrors FILE|AUTO) --
+    # --- Persist compact A/B context (projected.label mirrors AUTO|FILE) -----
     pair_tag = f"{label_strict}__VS__{label_proj}"
     st.session_state["ab_compare"] = {
         "pair_tag": pair_tag,
@@ -2940,8 +2957,8 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
             ],
         },
         "projected": {
-            "label": label_proj,                 # <- will be "...file" when file is active
-            "cfg":   _cfg_proj_for_ab,          # <- exact cfg used (auto/file and path)
+            "label": label_proj,                 # ← "...file" when file is active
+            "cfg":   _cfg_proj_for_ab,          # ← exact cfg used (auto/file and path)
             "out":   out_proj,
             "ker_guard": "off",
             "projector_hash": proj_hash_prov,
@@ -2962,6 +2979,7 @@ if st.button("Run A/B compare (strict vs projected)", key="run_ab_overlap"):
     s_ok = bool(out_strict.get("3", {}).get("eq", False))
     p_ok = bool(out_proj.get("3", {}).get("eq", False))
     st.success(f"A/B: strict={'GREEN' if s_ok else 'RED'} · projected={'GREEN' if p_ok else 'RED'}")
+
 
 
 
