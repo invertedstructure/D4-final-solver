@@ -12,41 +12,65 @@ import zipfile
 st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
 
 # ────────────────────────────── PACKAGE LOADER ────────────────────────────────
+import sys, pathlib, importlib.util, types
+
 HERE   = pathlib.Path(__file__).resolve().parent
 OTCORE = HERE / "otcore"
 CORE   = HERE / "core"
 PKG_DIR = OTCORE if OTCORE.exists() else CORE
 PKG_NAME = "otcore" if OTCORE.exists() else "core"
 
+# Ensure a package object exists in sys.modules so submodules can bind to it
 if PKG_NAME not in sys.modules:
     pkg = types.ModuleType(PKG_NAME)
     pkg.__path__ = [str(PKG_DIR)]
     pkg.__file__ = str(PKG_DIR / "__init__.py")
     sys.modules[PKG_NAME] = pkg
 
+def _load_pkg_module(fullname: str, rel_path: str):
+    """Load a module from PKG_DIR under the given fullname."""
+    path = PKG_DIR / rel_path
+    if not path.exists():
+        raise ImportError(f"Required module file not found: {path}")
+    spec = importlib.util.spec_from_file_location(fullname, str(path))
+    mod = importlib.util.module_from_spec(spec)
+    # make relative imports inside that file resolve under its package
+    mod.__package__ = fullname.rsplit('.', 1)[0]
+    sys.modules[fullname] = mod
+    spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+    return mod
 
-# Fresh-load core modules
-for _mod in (f"{PKG_NAME}.overlap_gate", f"{PKG_NAME}.projector"):
+# Fresh-load core modules if they were previously imported
+for _mod in (
+    f"{PKG_NAME}.overlap_gate",
+    f"{PKG_NAME}.projector",
+    f"{PKG_NAME}.io",
+    f"{PKG_NAME}.hashes",
+    f"{PKG_NAME}.unit_gate",
+    f"{PKG_NAME}.triangle_gate",
+    f"{PKG_NAME}.towers",
+    f"{PKG_NAME}.export",
+):
     if _mod in sys.modules:
         del sys.modules[_mod]
 
+# Import the package modules
 overlap_gate = _load_pkg_module(f"{PKG_NAME}.overlap_gate", "overlap_gate.py")
 projector    = _load_pkg_module(f"{PKG_NAME}.projector",    "projector.py")
-from typing import TYPE_CHECKING
-if TYPE_CHECKING:
-    from . import io as _io_pkg
-# now `otio: _io_pkg`  # type: ignore
-otio          = _load_pkg_module(f"{PKG_NAME}.io",            "io.py")
-hashes        = _load_pkg_module(f"{PKG_NAME}.hashes",        "hashes.py")
-unit_gate     = _load_pkg_module(f"{PKG_NAME}.unit_gate",     "unit_gate.py")
-triangle_gate = _load_pkg_module(f"{PKG_NAME}.triangle_gate", "triangle_gate.py")
-towers        = _load_pkg_module(f"{PKG_NAME}.towers",        "towers.py")
-export_mod    = _load_pkg_module(f"{PKG_NAME}.export",        "export.py")
+otio         = _load_pkg_module(f"{PKG_NAME}.io",           "io.py")
+hashes       = _load_pkg_module(f"{PKG_NAME}.hashes",       "hashes.py")
+unit_gate    = _load_pkg_module(f"{PKG_NAME}.unit_gate",    "unit_gate.py")
+triangle_gate= _load_pkg_module(f"{PKG_NAME}.triangle_gate","triangle_gate.py")
+towers       = _load_pkg_module(f"{PKG_NAME}.towers",       "towers.py")
+export_mod   = _load_pkg_module(f"{PKG_NAME}.export",       "export.py")
+
 # Hotfix alias so any lingering `io.parse_*` still work:
 if "io" not in globals():
     io = otio  # keeps old references alive while you migrate to `otio.*`
 
 APP_VERSION = getattr(hashes, "APP_VERSION", "v0.1-core")
+# ─────────────────────────── END PACKAGE LOADER ───────────────────────────────
+
 
 # ─────────────────────────────── UI HEADER ────────────────────────────────────
 st.title("Odd Tetra — Phase U (v0.1 core)")
