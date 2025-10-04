@@ -1527,38 +1527,62 @@ def set_parity_pairs_from_fixtures(pairs_spec: list[dict]):
         add_parity_pair(label=label, left_fixture=L, right_fixture=R)
     return len(st.session_state.get("parity_pairs", []))
 
-# Build two fixtures from disk
-fix_D2 = load_fixture_from_paths(
-    boundaries_path="inputs/D2/boundaries.json",
-    cmap_path="inputs/D2/cmap.json",
-    H_path="inputs/D2/H.json",
-    shapes_path="inputs/D2/shapes.json",
-)
-fix_D3 = load_fixture_from_paths(
-    boundaries_path="inputs/D3/boundaries.json",
-    cmap_path="inputs/D3/cmap.json",
-    H_path="inputs/D3/H.json",
-    shapes_path="inputs/D3/shapes.json",
-)
+# ───────────────── Parity sample pairs (optional, guarded) ──────────────────
+from pathlib import Path
 
-# Queue the pair
-add_parity_pair(label="D2(101)↔D3(110)", left_fixture=fix_D2, right_fixture=fix_D3)
+def _all_exist(paths: list[str]) -> bool:
+    return all(Path(p).exists() for p in paths)
 
-pairs_spec = [
-    {
-        "label": "D2(101)↔D3(110)",
-        "left":  {"boundaries":"inputs/D2/boundaries.json","cmap":"inputs/D2/cmap.json","H":"inputs/D2/H.json","shapes":"inputs/D2/shapes.json"},
-        "right": {"boundaries":"inputs/D3/boundaries.json","cmap":"inputs/D3/cmap.json","H":"inputs/D3/H.json","shapes":"inputs/D3/shapes.json"},
-    },
-    {
-        "label": "D3(110)↔D4(101)",
-        "left":  {"boundaries":"inputs/D3/boundaries.json","cmap":"inputs/D3/cmap.json","H":"inputs/D3/H.json","shapes":"inputs/D3/shapes.json"},
-        "right": {"boundaries":"inputs/D4/boundaries.json","cmap":"inputs/D4/cmap.json","H":"inputs/D4/H.json","shapes":"inputs/D4/shapes.json"},
-    },
-]
-set_parity_pairs_from_fixtures(pairs_spec)
+with st.expander("Parity: queue sample D2/D3/D4 pairs (optional)"):
+    st.caption("Only queues pairs if the example files exist under ./inputs/. "
+               "If you don't have these, skip this section.")
+    col1, col2 = st.columns(2)
+    with col1:
+        do_self = st.button("Queue SELF (current fixture vs itself)", key="pp_self_btn")
+    with col2:
+        do_examples = st.button("Queue D2↔D3, D3↔D4 examples", key="pp_examples_btn")
 
-# Now click the “Run parity on provided pairs” button in the UI.
+    if do_self:
+        try:
+            fixture = {
+                "boundaries": boundaries,
+                "cmap": cmap,
+                "H": st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}}),
+                "shapes": shapes,
+            }
+            add_parity_pair(label="SELF", left_fixture=fixture, right_fixture=fixture)
+            st.success("Queued SELF parity pair.")
+        except Exception as e:
+            st.error(f"Could not queue SELF: {e}")
+
+    if do_examples:
+        spec = [
+            {
+                "label": "D2(101)↔D3(110)",
+                "left":  {"boundaries":"inputs/D2/boundaries.json","cmap":"inputs/D2/cmap.json","H":"inputs/D2/H.json","shapes":"inputs/D2/shapes.json"},
+                "right": {"boundaries":"inputs/D3/boundaries.json","cmap":"inputs/D3/cmap.json","H":"inputs/D3/H.json","shapes":"inputs/D3/shapes.json"},
+            },
+            {
+                "label": "D3(110)↔D4(101)",
+                "left":  {"boundaries":"inputs/D3/boundaries.json","cmap":"inputs/D3/cmap.json","H":"inputs/D3/H.json","shapes":"inputs/D3/shapes.json"},
+                "right": {"boundaries":"inputs/D4/boundaries.json","cmap":"inputs/D4/cmap.json","H":"inputs/D4/H.json","shapes":"inputs/D4/shapes.json"},
+            },
+        ]
+        # Flatten to check existence
+        flat = []
+        for row in spec:
+            L, R = row["left"], row["right"]
+            flat += [L["boundaries"], L["cmap"], L["H"], L["shapes"],
+                     R["boundaries"], R["cmap"], R["H"], R["shapes"]]
+        if not _all_exist(flat):
+            st.info("Example files not found under ./inputs — skipping queuing (this is fine).")
+        else:
+            try:
+                set_parity_pairs_from_fixtures(spec)
+                st.success("Queued D2↔D3 and D3↔D4 example pairs.")
+            except Exception as e:
+                st.error(f"Could not queue examples: {e}")
+
 
 
 
