@@ -2481,21 +2481,32 @@ with st.expander("Parity Suite (reuse active policy)"):
 
 
 
-    # ── identity (authoritative)
-    _di = _ss.get("_district_info", {}) or {}
-    district_id = _di.get("district_id") or _ss.get("district_id", "UNKNOWN")
-    identity_block = {
-        "district_id": district_id,
-        "run_id": hashes.run_id(hashes.bundle_content_hash([
-            ("d", boundaries.dict() if hasattr(boundaries, "dict") else {}),
-            ("C", cmap.dict() if hasattr(cmap, "dict") else {}),
-            ("H", H_used.dict() if hasattr(H_used, "dict") else {}),
+   # ── identity (authoritative)
+_ss = st.session_state
+_di = _ss.get("_district_info", {}) or {}
+district_id = _di.get("district_id") or _ss.get("district_id", "UNKNOWN")
+
+# Safe H handle: prefer the one persisted by Run Overlap, else fall back to the local upload,
+# else use an empty cmap so hashing/serialization still works.
+H_used = _ss.get("overlap_H") \
+          or (H_local if "H_local" in locals() and H_local is not None else io.parse_cmap({"blocks": {}}))
+
+identity_block = {
+    "district_id": district_id,
+    "run_id": hashes.run_id(
+        hashes.bundle_content_hash([
+            ("d",   boundaries.dict() if hasattr(boundaries, "dict") else {}),
+            ("C",   cmap.dict()       if hasattr(cmap, "dict")       else {}),
+            ("H",   H_used.dict()     if hasattr(H_used, "dict")     else {}),
             ("cfg", cfg_active),
-        ]), hashes.timestamp_iso_lisbon()),
-        "timestamp": hashes.timestamp_iso_lisbon(),
-        "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
-        "field": "GF(2)",
-    }
+        ]),
+        hashes.timestamp_iso_lisbon()
+    ),
+    "timestamp": hashes.timestamp_iso_lisbon(),
+    "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
+    "field": "GF(2)",
+}
+
 
     # ── inputs block (sole source of hashes + filenames + dims)
     def _fname(k, default): 
