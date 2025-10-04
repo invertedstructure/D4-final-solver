@@ -2076,20 +2076,57 @@ if cfg_active.get("enabled_layers"):  # projected mode only
             except Exception:
                 proj_hash_active = ""
 
-# Only backfill projector_hash if we don't already have the file hash
-if not policy_block.get("projector_hash"):
+# ==================== CERT BLOCK (safe, unified) =============================
+
+# --- Prelude: safe refs & helpers (prevents NameErrors) ----------------------
+_di = st.session_state.get("_district_info", {}) or {}
+district_id_auth = _di.get("district_id") or st.session_state.get("district_id", "UNKNOWN")
+
+def _lane_mask_from_d3(_d3):
+    if not _d3 or not _d3[0]:
+        return []
+    cols = len(_d3[0])
+    return [1 if any(row[j] & 1 for row in _d3) else 0 for j in range(cols)]
+
+try:
+    d3 = boundaries.blocks.__root__.get("3") or []
+except Exception:
+    d3 = []
+
+# If policy_block didn’t exist yet, construct a minimal one now
+if "policy_block" not in locals() or not isinstance(policy_block, dict):
+    policy_block = {
+        "label":          policy_label,
+        "policy_tag":     policy_label,
+        "enabled_layers": cfg_active.get("enabled_layers", []),
+        "modes":          cfg_active.get("modes", {}),
+        "source":         cfg_active.get("source", {}),
+        "projector_hash": "",
+    }
+
+# Prefer validated projector info saved during the run (projected(file) path)
+_proj_meta = st.session_state.get("proj_meta", {}) or {}
+if _proj_meta.get("projector_hash"):
+    policy_block["projector_hash"] = _proj_meta["projector_hash"]
+    policy_block["projector_filename"] = _proj_meta.get("projector_filename", policy_block.get("projector_filename",""))
+    if "projector_consistent_with_d" in _proj_meta:
+        policy_block["projector_consistent_with_d"] = bool(_proj_meta["projector_consistent_with_d"])
+
+# If caller computed a provenance hash for ACTIVE policy, backfill only if still empty
+proj_hash_active = locals().get("proj_hash_active", "")
+if not policy_block.get("projector_hash") and proj_hash_active:
     policy_block["projector_hash"] = proj_hash_active
 
 # ---------- Checks block (merge or bootstrap) --------------------------------
 # Prefer the latest run's output
-out = st.session_state.get("overlap_out", (out if 'out' in locals() else {})) or {}
+out_latest = st.session_state.get("overlap_out")
+out = (out_latest if isinstance(out_latest, dict) else (out if 'out' in locals() else {})) or {}
 is_strict = (not cfg_active.get("enabled_layers"))
 checks_extended = {
     "grid": True,                 # placeholders unless you compute real ones
     "fence": True,
     "ker_guard": "enforced" if is_strict else "off",
 }
-# If a checks_block already exists, extend it; else build from 'out'
 if 'checks_block' in locals() and isinstance(checks_block, dict):
     checks_block = {**checks_block, **checks_extended}
 else:
@@ -2098,6 +2135,7 @@ else:
 # ---------- FULL cert payload (single source of truth) -----------------------
 k3_true = bool(out.get("3", {}).get("eq", False))
 
+# identity_block is assumed built earlier (your code already does this)
 cert_payload = {
     "identity":    identity_block,
     "policy":      policy_block,
@@ -2107,16 +2145,14 @@ cert_payload = {
     "signatures":  sig_block,          # rank/ker/lane signatures
     "promotion": {
         "eligible_for_promotion": k3_true,
-        "promotion_target": ("strict_anchor" if is_strict else "projected_anchor") if k3_true else None,
+        "promotion_target": ("strict_anchor" if is_strict else "projected_exemplar") if k3_true else None,
         "notes": "",
     },
     "policy_tag": policy_label,        # used by exporter & bundle names
 }
 
-
 # ---- Optional: embed A/B snapshots into the cert (fresh-only) ---------------
 ab_ctx = st.session_state.get("ab_compare", {}) or {}
-
 _current_sig = [
     inputs_block.get("boundaries_hash", ""),
     inputs_block.get("C_hash", ""),
@@ -2155,6 +2191,7 @@ fresh_district_info = {
 
 # ---------- B) Embed A/B snapshots (if fresh) --------------------------------
 def _prov_hash(cfg, lane_mask, district_id):
+    # tolerate multiple helper signatures present in your codebase
     try:
         return projector_provenance_hash(cfg=cfg, lane_mask_k3=lane_mask, district_id=district_id)
     except TypeError:
@@ -2184,8 +2221,9 @@ if ab_ctx:
             fresh_district_info["district_id"],
         )
 
+    # Snapshot inputs.boundaries derived from the authoritative fresh info
     strict_inputs_boundaries = {
-        "filename":        inputs_block.get("boundaries_filename", inputs_block["filenames"].get("boundaries","")),
+        "filename":        inputs_block.get("boundaries_filename", inputs_block.get("filenames", {}).get("boundaries","")),
         "hash":            fresh_district_info["boundaries_hash"],
         "district_id":     fresh_district_info["district_id"],
         "district_sig":    fresh_district_info["district_signature"],
@@ -2194,7 +2232,7 @@ if ab_ctx:
         "d3_cols":         fresh_district_info["d3_cols"],
     }
     projected_inputs_boundaries = {
-        "filename":        inputs_block.get("boundaries_filename", inputs_block["filenames"].get("boundaries","")),
+        "filename":        inputs_block.get("boundaries_filename", inputs_block.get("filenames", {}).get("boundaries","")),
         "hash":            fresh_district_info["boundaries_hash"],
         "district_id":     fresh_district_info["district_id"],
         "district_sig":    fresh_district_info["district_signature"],
@@ -2203,9 +2241,10 @@ if ab_ctx:
         "d3_cols":         fresh_district_info["d3_cols"],
     }
 
+    # Prefer run-time validated projector meta from session (file mode)
     _proj_meta = st.session_state.get("proj_meta", {}) or {}
-    proj_filename  = _proj_meta.get("projector_filename", "")
-    proj_file_hash = _proj_meta.get("projector_hash", "")
+    proj_filename   = _proj_meta.get("projector_filename", "")
+    proj_file_hash  = _proj_meta.get("projector_hash", "")
     proj_consistent = _proj_meta.get("projector_consistent_with_d", None)
 
     cert_payload.setdefault("policy", {})
@@ -2214,9 +2253,9 @@ if ab_ctx:
         "ker_guard":  strict_ctx.get("ker_guard", "enforced"),
         "inputs": {
             "boundaries": strict_inputs_boundaries,
-            "U_filename": inputs_block["filenames"].get("U", "shapes.json"),
-            "C_filename": inputs_block["filenames"].get("C", "cmap.json"),
-            "H_filename": inputs_block["filenames"].get("H", "H.json"),
+            "U_filename": inputs_block.get("filenames", {}).get("U", "shapes.json"),
+            "C_filename": inputs_block.get("filenames", {}).get("C", "cmap.json"),
+            "H_filename": inputs_block.get("filenames", {}).get("H", "H.json"),
         },
         "lane_mask_k3":      strict_ctx.get("lane_mask_k3", []),
         "lane_vec_H2d3":     strict_ctx.get("lane_vec_H2d3", []),
@@ -2230,9 +2269,9 @@ if ab_ctx:
         "projector_hash": proj_hash_ab,
         "inputs": {
             "boundaries": projected_inputs_boundaries,
-            "U_filename": inputs_block["filenames"].get("U", "shapes.json"),
-            "C_filename": inputs_block["filenames"].get("C", "cmap.json"),
-            "H_filename": inputs_block["filenames"].get("H", "H.json"),
+            "U_filename": inputs_block.get("filenames", {}).get("U", "shapes.json"),
+            "C_filename": inputs_block.get("filenames", {}).get("C", "cmap.json"),
+            "H_filename": inputs_block.get("filenames", {}).get("H", "H.json"),
             "projector_filename": proj_filename,
             "projector_file_hash": proj_file_hash,
             "projector_consistent_with_d": proj_consistent,
@@ -2245,7 +2284,7 @@ if ab_ctx:
     }
     cert_payload["ab_pair_tag"] = ab_ctx.get("pair_tag", "")
 
-    # mirror projected hash to top-level if active run is strict
+    # Mirror projected hash to top-level policy if active run is strict (nice for anchors)
     proj_hash_from_ab = cert_payload["policy"]["projected_snapshot"].get("projector_hash", "")
     if proj_hash_from_ab and not cert_payload["policy"].get("projector_hash"):
         cert_payload["policy"]["projector_hash"] = proj_hash_from_ab
@@ -2273,6 +2312,7 @@ cert_payload.setdefault("artifact_hashes", {
     "H_hash":          inputs_block.get("H_hash", ""),
     "U_hash":          inputs_block.get("U_hash", ""),
 })
+# keep artifact projector hash in sync with policy
 cert_payload["artifact_hashes"]["projector_hash"] = cert_payload.get("policy", {}).get("projector_hash", "")
 
 # keep inputs.boundaries_hash synced to authoritative one (avoid bytes/parsed divergence)
@@ -2280,8 +2320,11 @@ if cert_payload.get("boundaries_hash"):
     inputs_block["boundaries_hash"] = cert_payload["boundaries_hash"]
 cert_payload["inputs"] = inputs_block
 
+# final integrity hash
 cert_payload.setdefault("integrity", {})
 cert_payload["integrity"]["content_hash"] = hashes.content_hash_of(cert_payload)
+# ================== END CERT BLOCK ===========================================
+
 
 # ========================== CERT ENRICHMENTS BLOCK ===========================
 
