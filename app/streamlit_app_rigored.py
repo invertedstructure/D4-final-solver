@@ -17,6 +17,70 @@ st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
 # --- Policy helpers -----------------------------------------------------------
 # ---- cert helpers: diagnostics and checks (GF(2)-safe) ----
 # ===== RUN CONTEXT (single source of truth) =====
+# ===== RunContext (single source of truth for a run) =========================
+from dataclasses import dataclass
+
+@dataclass
+class RunContext:
+    policy_tag: str                # "strict" | "projected(columns@k=3,auto|file)"
+    mode: str                      # "strict" | "projected(auto)" | "projected(file)"
+    d3: list                       # current boundary block k=3
+    lane_mask_k3: list[int]        # from d3 only
+    projector_filename: str|None   # file path in file-mode; else None
+    projector_hash: str|None       # hash of P (auto or file)
+    projector_consistent_with_d: bool|None  # True/False for projected; None for strict
+
+def build_run_context(cfg_active: dict, boundaries, policy_label: str) -> RunContext:
+    # helpers assumed present: _lane_mask_from_d3, _build_auto_projector_from_d3,
+    #                          validate_projector_file, _hash_json_matrix
+    d3 = (boundaries.blocks.__root__.get("3") or [])
+    lane_mask = _lane_mask_from_d3(d3)
+
+    enabled = bool(cfg_active.get("enabled_layers"))
+    if not enabled:
+        return RunContext(
+            policy_tag="strict",
+            mode="strict",
+            d3=d3,
+            lane_mask_k3=lane_mask,
+            projector_filename=None,
+            projector_hash=None,
+            projector_consistent_with_d=None,
+        )
+
+    src3 = cfg_active.get("source", {}).get("3", "auto")
+    if src3 == "file":
+        pj_path = (cfg_active.get("projector_files", {}) or {}).get("3")
+        P_file, meta, err = validate_projector_file(pj_path, d3)
+        if err:
+            # Fail fast; UI will show the validator’s precise message.
+            raise ValueError(err)
+        # validate_projector_file already enforced diag(P) == lane_mask
+        pj_hash = meta.get("projector_hash", "") or _hash_json_matrix(P_file)
+        return RunContext(
+            policy_tag="projected(columns@k=3,file)",
+            mode="projected(file)",
+            d3=d3,
+            lane_mask_k3=lane_mask,
+            projector_filename=pj_path,
+            projector_hash=pj_hash,
+            projector_consistent_with_d=True,
+        )
+
+    # AUTO
+    P_auto, lane_mask_auto = _build_auto_projector_from_d3(d3)
+    pj_hash = _hash_json_matrix(P_auto)
+    return RunContext(
+        policy_tag="projected(columns@k=3,auto)",
+        mode="projected(auto)",
+        d3=d3,
+        lane_mask_k3=lane_mask_auto,   # equals lane_mask from d3
+        projector_filename=None,
+        projector_hash=pj_hash,
+        projector_consistent_with_d=True,
+    )
+
+
 from dataclasses import dataclass
 import json as _json, os, hashlib
 
