@@ -519,6 +519,49 @@ with tab1:
     if st.button("Run Unit"):
         out = unit_gate.unit_check(boundaries, cmap, shapes, reps=d_reps, enforce_rep_transport=enforce)
         st.json(out)
+        # ───────────────────────── GF(2) ops shim for Tab 2 ──────────────────────────
+# Provides mul, add, eye exactly as Tab 2 expects. If the library is present,
+# we import; otherwise we use local pure-python fallbacks (bit-wise XOR math).
+
+try:
+    from otcore.linalg_gf2 import mul as _mul_lib, add as _add_lib, eye as _eye_lib
+    mul = _mul_lib
+    add = _add_lib
+    eye = _eye_lib
+except Exception:
+    # local fallbacks — identical behavior for small matrices
+    def mul(A, B):
+        if not A or not B or not A[0] or not B[0]:
+            return []
+        m, kA = len(A), len(A[0])
+        kB, n = len(B), len(B[0])
+        if kA != kB:
+            # keep same failure mode as your guard (callers can raise a friendly error)
+            return []
+        C = [[0]*n for _ in range(m)]
+        for i in range(m):
+            Ai = A[i]
+            for k in range(kA):
+                if Ai[k] & 1:
+                    Bk = B[k]
+                    for j in range(n):
+                        C[i][j] ^= (Bk[j] & 1)
+        return C
+
+    def add(A, B):
+        if not A: return B or []
+        if not B: return A or []
+        r, c = len(A), len(A[0])
+        if len(B) != r or len(B[0]) != c:
+            # mismatch → mirror upstream behavior (let caller decide)
+            return A
+        return [[(A[i][j] ^ B[i][j]) for j in range(c)] for i in range(r)]
+
+    def eye(n):
+        return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
+
+
+
 
 # ----------------------------- OVERLAP TAB -----------------------------------
 with tab2:
