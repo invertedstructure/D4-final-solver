@@ -451,6 +451,9 @@ else:
     missing = [name for name, f in [("Shapes", d_shapes), ("Boundaries", d_bound), ("CMap", d_cmap)] if not f]
     st.info("Upload required files: " + ", ".join(missing))
     st.stop()
+# --- FIX: ensure tabs exist even if earlier branches ran before creating them
+if "tab1" not in globals():
+    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Unit", "Overlap", "Triangle", "Towers", "Export"])
 
 # ------------------------------ UNIT TAB -------------------------------------
 with tab1:
