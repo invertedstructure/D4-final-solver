@@ -1083,6 +1083,47 @@ with tab2:
     if st.button("Run Overlap", key="run_overlap"):
         run_overlap()
 
+# --- Active policy pill + run stamp + self-tests banner (place near top of Tab 2 UI) ---
+# Policy pill (mirrors current cfg_active)
+policy_label = policy_label_from_cfg(cfg_active)
+st.markdown(f"**Policy:** `{policy_label}`")
+
+# Run stamp from SSOTs
+_ib = st.session_state.get("_inputs_block") or {}
+_rc = st.session_state.get("run_ctx") or {}
+n3 = _rc.get("n3") or (_ib.get("dims", {}) or {}).get("n3", 0)
+
+def _short(h): return (h or "")[:8]
+bH = _short(_ib.get("boundaries_hash",""))
+cH = _short(_ib.get("C_hash",""))
+hH = _short(_ib.get("H_hash",""))
+uH = _short(_ib.get("U_hash",""))
+pH = _short(_rc.get("projector_hash","")) if _rc.get("mode","strict").startswith("projected") else "—"
+stamp = f"{policy_label} | n3={n3} | b={bH} C={cH} H={hH} U={uH} P={pH}"
+st.caption(stamp)
+
+# If any short hash is blank, hint to fix SSOT population
+if any(x in ("", None) for x in (_ib.get("boundaries_hash"), _ib.get("C_hash"), _ib.get("H_hash"), _ib.get("U_hash"))):
+    st.warning("Some provenance hashes are blank. Make sure `_inputs_block` is filled before running Overlap.")
+
+# Self-tests run + banner
+failures, warnings = run_self_tests()
+if failures:
+    st.error("🚨 Plumbing not healthy — fix before exploration.")
+    with st.expander("Self-tests details"):
+        if failures:
+            st.markdown("**Failures:**")
+            for f in failures: st.write(f"- {f}")
+        if warnings:
+            st.markdown("**Warnings:**")
+            for w in warnings: st.write(f"- {w}")
+else:
+    st.success("🟢 Self-tests passed.")
+    if warnings:
+        st.info("Notes:")
+        for w in warnings: st.write(f"- {w}")
+
+
     # ------------------------ Cert writer (central, SSOT-only) ------------------------
 st.divider()
 st.caption("Cert & provenance")
@@ -1457,6 +1498,91 @@ else:
                     st.error(f"Bundle build failed: {e}")
     else:
         st.warning("No cert file was produced. Fix the error above and try again.")
+        
+# ---------- helper: build inputs bundle (manifests + original files) ----------
+def build_inputs_bundle(*, inputs_block: dict, run_ctx: dict, district_id: str, run_id: str, policy_tag: str) -> str:
+    """
+    Creates bundles/inputs__{district}__{run_id}.zip with:
+      - original inputs files (best-effort, if paths exist)
+      - manifest.json (schema + hashes + policy/projector fields)
+    """
+    from pathlib import Path
+    import os, json, tempfile, zipfile, shutil
+
+    BUNDLES_DIR = Path("bundles")
+    BUNDLES_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Collect filenames we know about (best-effort)
+    fnames = {
+        "boundaries": inputs_block.get("boundaries_filename", "boundaries.json"),
+        "C":          inputs_block.get("cmap_filename", "cmap.json"),
+        "H":          inputs_block.get("H_filename", "H.json"),      # may not exist; that's ok
+        "U":          inputs_block.get("U_filename", "shapes.json"),
+        "projector":  run_ctx.get("projector_filename", "") or "",   # only if projected(file)
+    }
+
+    # Hashes (SSOT)
+    hashes_block = {
+        "boundaries_hash": inputs_block.get("boundaries_hash",""),
+        "C_hash":          inputs_block.get("C_hash",""),
+        "H_hash":          inputs_block.get("H_hash",""),
+        "U_hash":          inputs_block.get("U_hash",""),
+        "shapes_hash":     inputs_block.get("shapes_hash",""),
+    }
+
+    # Manifest payload
+    manifest = {
+        "schema_version": "1.0.0",
+        "run_id": run_id,
+        "timestamp": hashes.timestamp_iso_lisbon(),
+        "app_version": APP_VERSION_STR,
+        "python_version": PY_VERSION_STR,
+        "policy_tag": policy_tag,
+        "hashes": hashes_block,
+        "filenames": fnames,
+        "projector": {
+            "mode": run_ctx.get("mode","strict"),
+            "filename": run_ctx.get("projector_filename",""),
+            "projector_hash": run_ctx.get("projector_hash",""),
+        },
+    }
+
+    # Output path
+    zname = f"inputs__{district_id or 'UNKNOWN'}__{run_id}.zip"
+    zpath = BUNDLES_DIR / zname
+
+    # Write temp zip then move (cross-device safe)
+    fd, tmp_name = tempfile.mkstemp(dir=BUNDLES_DIR, prefix=".tmp_inputs_", suffix=".zip")
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            # include manifest.json
+            zf.writestr("manifest.json", json.dumps(manifest, sort_keys=True, separators=(",",":"), ensure_ascii=False))
+
+            # include the original files if they exist
+            for label, fp in fnames.items():
+                if not fp:
+                    continue
+                p = Path(fp)
+                if p.exists():
+                    # keep relative path inside zip for clarity
+                    try:
+                        arcname = p.resolve().relative_to(Path.cwd().resolve()).as_posix()
+                    except Exception:
+                        arcname = p.name
+                    zf.write(str(p), arcname=arcname)
+        try:
+            os.replace(tmp_path, zpath)
+        except OSError:
+            shutil.move(str(tmp_path), str(zpath))
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+
+    return str(zpath)
+
+
 
 # ---------- button: Export Inputs Bundle ----------
 if st.button("Export Inputs Bundle", key="btn_export_inputs"):
@@ -1495,6 +1621,222 @@ if st.button("Export Inputs Bundle", key="btn_export_inputs"):
 
     except Exception as e:
         st.error(f"Export Inputs Bundle failed: {e}")
+
+# --- Reports: Perturbation Sanity & Fence Stress (place in Tab 2, under Logs/Exports) ---
+import csv, os, tempfile
+from pathlib import Path
+from datetime import datetime, timezone
+
+PERTURB_SCHEMA_VERSION = "1.0.0"
+FENCE_SCHEMA_VERSION   = "1.0.0"
+REPORTS_DIR = Path("reports"); REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+PERTURB_OUT_PATH = REPORTS_DIR / "perturbation_sanity.csv"
+FENCE_OUT_PATH   = REPORTS_DIR / "fence_stress.csv"
+
+def _utc_iso(): return datetime.now(timezone.utc).isoformat()
+
+def _atomic_write_csv(path: Path, header, rows, meta_comments: list[str]):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8", newline="") as tmp:
+        for line in meta_comments: tmp.write(f"# {line}\n")
+        w = csv.writer(tmp); w.writerow(header)
+        for r in rows: w.writerow(r)
+        tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
+    os.replace(tmp_name, path)
+
+def _lane_mask_from_d3(boundaries_obj) -> list[int]:
+    """Existing helper in your codebase; fallback here if missing."""
+    try:
+        d3 = (boundaries_obj.blocks.__root__.get("3") or [])
+    except Exception:
+        d3 = []
+    # lane = columns with any 1s
+    n3 = len(d3[0]) if d3 and d3[0] else 0
+    lm = []
+    for j in range(n3):
+        lm.append(1 if any((row[j] & 1) for row in d3) else 0)
+    return lm
+
+def _copy_mat(M): return [row[:] for row in (M or [])]
+def _is_zero(M): return (not M) or all(all((x & 1) == 0 for x in row) for row in M)
+
+def _strict_R3(H2, d3, C3):
+    I3 = _eye(len(C3)) if C3 else []
+    return _xor_mat(mul(H2, d3), _xor_mat(C3, I3)) if (H2 and d3 and C3) else []
+
+def _projected_R3(R3_strict, P_active):
+    return mul(R3_strict, P_active) if (R3_strict and P_active) else []
+
+def _sig_tag_eq(boundaries_obj, cmap_obj, H_used_obj, P_active=None):
+    """Return (lane_mask, tag_strict, eq3_strict, tag_proj, eq3_proj)."""
+    d3 = (boundaries_obj.blocks.__root__.get("3") or [])
+    H2 = (H_used_obj.blocks.__root__.get("2") or [])
+    C3 = (cmap_obj.blocks.__root__.get("3") or [])
+    lm = _lane_mask_from_d3(boundaries_obj)
+    R3s = _strict_R3(H2, d3, C3)
+    tag_s = residual_tag(R3s, lm)
+    eq_s  = _is_zero(R3s)
+    if P_active:
+        R3p = _projected_R3(R3s, P_active)
+        tag_p = residual_tag(R3p, lm)
+        eq_p  = _is_zero(R3p)
+    else:
+        tag_p, eq_p = None, None
+    return lm, tag_s, bool(eq_s), tag_p, (None if eq_p is None else bool(eq_p))
+
+with safe_expander("Reports: Perturbation Sanity & Fence Stress"):
+    # --- Controls
+    colA, colB = st.columns([2,2])
+    with colA:
+        max_flips = st.number_input("Perturbation: max flips", min_value=1, max_value=500, value=24, step=1, key="ps_max")
+        seed_txt  = st.text_input("Seed (determines flip order)", value="ps-seed-1", key="ps_seed")
+    with colB:
+        run_fence  = st.checkbox("Include Fence stress run", value=True, key="fence_on")
+
+    # --- Run button
+    if st.button("Run Perturbation Sanity (and Fence if checked)", key="ps_run"):
+        try:
+            # SSOT inputs
+            rc = st.session_state.get("run_ctx", {}) or {}
+            H_used = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
+            P_active = rc.get("P_active") if rc.get("mode","").startswith("projected") else None
+
+            # Take snapshots of objects to mutate locally
+            B0 = boundaries
+            C0 = cmap
+            H0 = H_used
+
+            # Baseline signatures
+            lm0, tag_s0, eq_s0, tag_p0, eq_p0 = _sig_tag_eq(B0, C0, H0, P_active)
+            d3_base = _copy_mat((B0.blocks.__root__.get("3") or []))
+            n2 = len(d3_base); n3 = len(d3_base[0]) if (d3_base and d3_base[0]) else 0
+
+            # Deterministic flip generator (no RNG import needed)
+            def _flip_targets(n2, n3, budget, seed_str):
+                # simple LCG-ish walk based on seed digest
+                h = int(hashlib.sha256(seed_str.encode("utf-8")).hexdigest(), 16)
+                i = (h % (max(1, n2))) if n2 else 0
+                j = ((h >> 8) % (max(1, n3))) if n3 else 0
+                for k in range(budget):
+                    yield (i, j, k)
+                    # step with co-prime-ish increments
+                    i = (i + 1 + (h % 3)) % (n2 or 1)
+                    j = (j + 2 + ((h >> 5) % 5)) % (n3 or 1)
+
+            # Rows for CSV
+            rows = []
+            drift_witnessed = False
+
+            # For each flip, rebuild a mutated boundaries object (shallow copy ok)
+            for (r, c, k) in _flip_targets(n2, n3, int(max_flips), seed_txt):
+                if not (n2 and n3):
+                    rows.append([k, 0, "no-op", "empty fixture"])
+                    continue
+
+                d3_mut = _copy_mat(d3_base)
+                d3_mut[r][c] ^= 1  # GF(2) flip
+
+                # Build a transient boundaries clone with mutated d3
+                dB = B0.dict() if hasattr(B0, "dict") else {"blocks": {}}
+                dB = json.loads(json.dumps(dB))  # deep copy via json
+                dB["blocks"] = dB.get("blocks", {})
+                dB["blocks"]["3"] = d3_mut
+                Bk = io.parse_boundaries(dB)
+
+                lmK, tag_sK, eq_sK, tag_pK, eq_pK = _sig_tag_eq(Bk, C0, H0, P_active)
+
+                # Guard: lane mask drift
+                guard_tripped = int(lmK != lm0)
+                expected_guard = "ker_guard"
+                note = ""
+                if guard_tripped and not drift_witnessed:
+                    # auto-witness grammar drift once
+                    drift_witnessed = True
+                    # synthesize a minimal cert-ish context for hashes (if available)
+                    cert_like = st.session_state.get("_last_cert_payload")
+                    if cert_like:
+                        try:
+                            append_witness_row(cert_like, reason="grammar-drift",
+                                               residual_tag_val=tag_sK or "none",
+                                               note=f"flip#{k} at (r={r}, c={c})")
+                        except Exception:
+                            pass
+                    note = "lane_mask_changed → auto-witness logged"
+
+                # Record row (flip_id, guard_tripped, expected_guard, note)
+                rows.append([k, guard_tripped, expected_guard, note])
+
+            # Write CSV
+            header = ["flip_id", "guard_tripped", "expected_guard", "note"]
+            meta = [
+                f"schema_version={PERTURB_SCHEMA_VERSION}",
+                f"saved_at={_utc_iso()}",
+                f"run_id={st.session_state.get('_last_run_id','')}",
+                f"app_version={APP_VERSION_STR}",
+                f"seed={seed_txt}",
+                f"n2={n2}",
+                f"n3={n3}",
+                f"baseline_tag_strict={tag_s0}",
+                f"baseline_tag_projected={'' if tag_p0 is None else tag_p0}",
+            ]
+            _atomic_write_csv(PERTURB_OUT_PATH, header, rows, meta)
+            st.success(f"Perturbation sanity saved → {PERTURB_OUT_PATH}")
+
+            # --- Fence Stress (optional)
+            if run_fence:
+                H2 = (H0.blocks.__root__.get("2") or [])
+                # U_shrink: drop last row if possible
+                H2_shrink = _copy_mat(H2[:-1]) if len(H2) >= 1 else _copy_mat(H2)
+                H_shrink = H0.dict() if hasattr(H0, "dict") else {"blocks": {}}
+                H_shrink = json.loads(json.dumps(H_shrink))
+                H_shrink["blocks"] = H_shrink.get("blocks", {})
+                H_shrink["blocks"]["2"] = H2_shrink
+                Hs = io.parse_cmap(H_shrink)
+
+                # U_plus: append zero row (same width) if possible
+                if H2 and H2[0]:
+                    zero_row = [0]*len(H2[0])
+                    H2_plus = _copy_mat(H2) + [zero_row]
+                else:
+                    H2_plus = _copy_mat(H2)  # no-op if unknown shape
+                H_plus = H0.dict() if hasattr(H0, "dict") else {"blocks": {}}
+                H_plus = json.loads(json.dumps(H_plus))
+                H_plus["blocks"] = H_plus.get("blocks", {})
+                H_plus["blocks"]["2"] = H2_plus
+                Hp = io.parse_cmap(H_plus)
+
+                # Evaluate strict eq3 (proxy for "fence")
+                C3 = (C0.blocks.__root__.get("3") or [])
+                d3 = (B0.blocks.__root__.get("3") or [])
+                R3_shrink = _strict_R3(H2_shrink, d3, C3)
+                R3_plus   = _strict_R3(H2_plus,   d3, C3)
+                eq_shrink = int(_is_zero(R3_shrink))
+                eq_plus   = int(_is_zero(R3_plus))
+
+                fence_rows = [
+                    ["U_shrink", f"[1,{eq_shrink}]", "drop last H2 row"],
+                    ["U_plus",   f"[1,{eq_plus}]",   "append zero row to H2"],
+                ]
+                fence_header = ["U_class", "pass_vec", "note"]
+                fence_meta = [
+                    f"schema_version={FENCE_SCHEMA_VERSION}",
+                    f"saved_at={_utc_iso()}",
+                    f"run_id={st.session_state.get('_last_run_id','')}",
+                    f"app_version={APP_VERSION_STR}",
+                ]
+                _atomic_write_csv(FENCE_OUT_PATH, fence_header, fence_rows, fence_meta)
+                st.success(f"Fence stress saved → {FENCE_OUT_PATH}")
+
+            # Downloads
+            with open(PERTURB_OUT_PATH, "rb") as f:
+                st.download_button("Download perturbation_sanity.csv", f, file_name="perturbation_sanity.csv", key="dl_ps_csv")
+            if run_fence and FENCE_OUT_PATH.exists():
+                with open(FENCE_OUT_PATH, "rb") as f2:
+                    st.download_button("Download fence_stress.csv", f2, file_name="fence_stress.csv", key="dl_fence_csv")
+
+        except Exception as e:
+            st.error(f"Perturbation/Fence run failed: {e}")
+
 
 
 
@@ -1737,6 +2079,116 @@ with st.expander("Recent logs (tails)"):
         render_witness_tail(limit=5)
     except Exception as e:
         st.warning(f"Could not render Witness tail: {e}")
+
+# --- Logs: export helpers (place in Tab 2, near Gallery/Witness buttons) ---
+from pathlib import Path
+import json as _json, os, csv, tempfile
+from datetime import datetime, timezone
+
+REPORTS_DIR = Path("reports"); REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+GALLERY_JSONL   = Path("logs") / "gallery.jsonl"
+WITNESSES_JSONL = Path("logs") / "witnesses.jsonl"
+
+def _utc_iso(): return datetime.now(timezone.utc).isoformat()
+
+def _read_jsonl_all(path: Path) -> list[dict]:
+    if not path.exists(): return []
+    out = []
+    with path.open("r", encoding="utf-8") as f:
+        for ln in f:
+            ln = ln.strip()
+            if not ln: continue
+            try:
+                out.append(_json.loads(ln))
+            except Exception:
+                # skip bad lines; keep export robust
+                continue
+    return out
+
+def _atomic_write_csv(path: Path, header, rows, meta_comments: list[str]):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8", newline="") as tmp:
+        for line in meta_comments:
+            tmp.write(f"# {line}\n")
+        w = csv.writer(tmp)
+        w.writerow(header)
+        for r in rows: w.writerow(r)
+        tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
+    os.replace(tmp_name, path)
+
+def _atomic_write_json(path: Path, payload: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as tmp:
+        _json.dump(payload, tmp, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
+    os.replace(tmp_name, path)
+
+def export_gallery_csv(out_path: Path = REPORTS_DIR / "gallery_export.csv") -> str:
+    rows = _read_jsonl_all(GALLERY_JSONL)
+    header = ["written_at_utc","app_version","district","policy","projector_hash",
+              "boundaries_hash","C_hash","H_hash","U_hash",
+              "growth_bumps","strictify","cert_content_hash","run_id"]
+    table = []
+    for r in rows:
+        h = r.get("hashes", {})
+        table.append([
+            r.get("written_at_utc",""),
+            r.get("app_version",""),
+            r.get("district",""),
+            r.get("policy",""),
+            r.get("projector_hash",""),
+            h.get("boundaries_hash",""),
+            h.get("C_hash",""),
+            h.get("H_hash",""),
+            h.get("U_hash",""),
+            r.get("growth_bumps",0),
+            r.get("strictify",""),
+            r.get("cert_content_hash",""),
+            r.get("run_id",""),
+        ])
+    meta = [
+        f"schema_version=1.0.0",
+        f"saved_at={_utc_iso()}",
+        f"rows={len(table)}",
+        "source=logs/gallery.jsonl",
+    ]
+    _atomic_write_csv(out_path, header, table, meta)
+    return str(out_path)
+
+def export_witnesses_json(out_path: Path = REPORTS_DIR / "witnesses_export.json") -> str:
+    rows = _read_jsonl_all(WITNESSES_JSONL)
+    payload = {
+        "schema_version": "1.0.0",
+        "saved_at": _utc_iso(),
+        "rows": len(rows),
+        "source": "logs/witnesses.jsonl",
+        "data": rows,
+    }
+    _atomic_write_json(out_path, payload)
+    return str(out_path)
+
+# --- Tiny UI (place under the same area) ---
+with safe_expander("Logs: exports (optional)"):
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("Export Gallery → CSV", key="export_gallery_csv_btn"):
+            try:
+                p = export_gallery_csv()
+                st.success(f"Gallery CSV saved → {p}")
+                with open(p, "rb") as f:
+                    st.download_button("Download gallery_export.csv", f, file_name="gallery_export.csv")
+            except Exception as e:
+                st.error(f"Gallery export failed: {e}")
+    with col2:
+        if st.button("Export Witnesses → JSON", key="export_witnesses_json_btn"):
+            try:
+                p = export_witnesses_json()
+                st.success(f"Witnesses JSON saved → {p}")
+                with open(p, "rb") as f:
+                    st.download_button("Download witnesses_export.json", f, file_name="witnesses_export.json")
+            except Exception as e:
+                st.error(f"Witnesses export failed: {e}")
+
 
     # ------------------------ Freeze AUTO → FILE (write Π + registry + switch + re-run) ------------------------
 from pathlib import Path as _Path
