@@ -1329,6 +1329,157 @@ with tab2:
     if ctx_dict.get("projector_filename"):
         inputs_block["filenames"]["projector"] = ctx_dict["projector_filename"]
 
+    # === BOOTSTRAP core blocks used by the cert (only if missing) ===============
+
+# Canonical session refs (already defined above, but keep them handy)
+_di = st.session_state.get("_district_info", {}) or {}
+district_id_auth = _di.get("district_id") or st.session_state.get("district_id", "UNKNOWN")
+
+# ---- identity_block ---------------------------------------------------------
+if 'identity_block' not in locals() or not isinstance(identity_block, dict):
+    # Build a robust identity when upstream hasn’t populated it yet
+    try:
+        run_sig = hashes.bundle_content_hash([
+            ("boundaries", boundaries.dict() if hasattr(boundaries, "dict") else {}),
+            ("cmap",       cmap.dict()       if hasattr(cmap,       "dict") else {}),
+            ("H",          H_local.dict()    if hasattr(H_local,    "dict") else {}),
+            ("cfg",        cfg_active),
+        ])
+        run_id_val = hashes.run_id(run_sig, hashes.timestamp_iso_lisbon())
+    except Exception:
+        # Fallback if hashing helpers aren’t available for some reason
+        run_id_val = f"run-{hashes.timestamp_iso_lisbon()}"
+    identity_block = {
+        "district_id": district_id_auth or "UNKNOWN",
+        "run_id": run_id_val,
+        "timestamp": hashes.timestamp_iso_lisbon(),
+        "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
+        "field": "GF(2)",
+    }
+
+# ---- inputs_block -----------------------------------------------------------
+if 'inputs_block' not in locals() or not isinstance(inputs_block, dict):
+    inputs_block = {}
+    try:
+        shapes_payload = shapes.dict() if hasattr(shapes, "dict") else (shapes or {})
+    except Exception:
+        shapes_payload = {}
+    # Hashes (safe defaults if helpers exist)
+    try:    inputs_block["boundaries_hash"] = hashes.hash_d(boundaries)
+    except: inputs_block["boundaries_hash"] = ""
+    try:    inputs_block["C_hash"] = hashes.hash_suppC(cmap)
+    except: inputs_block["C_hash"] = ""
+    try:    inputs_block["H_hash"] = hashes.hash_suppH(H_local)
+    except: inputs_block["H_hash"] = ""
+    try:    inputs_block["U_hash"] = hashes.hash_U(shapes_payload)
+    except: inputs_block["U_hash"] = ""
+    # Filenames (never blank)
+    def _name_from_state(key: str) -> str:
+        v = st.session_state.get(key)
+        return v if isinstance(v, str) and v.strip() else ""
+    inputs_block["filenames"] = {
+        "boundaries": _name_from_state("fname_boundaries") or "boundaries.json",
+        "C":          _name_from_state("fname_cmap")       or "cmap.json",
+        "U":          _name_from_state("fname_shapes")     or "shapes.json",
+        "H":          _name_from_state("fname_h")          or "H.json",
+    }
+
+# ---- diagnostics_block ------------------------------------------------------
+if 'diagnostics_block' not in locals() or not isinstance(diagnostics_block, dict):
+    diagnostics_block = {}
+    try:
+        from otcore.linalg_gf2 import mul, add, eye
+    except Exception:
+        # tiny pure-Python fallbacks
+        def eye(n): return [[1 if i==j else 0 for j in range(n)] for i in range(n)]
+        def add(A,B):
+            if not A: return [row[:] for row in (B or [])]
+            if not B: return [row[:] for row in (A or [])]
+            m,n=len(A),len(A[0])
+            return [[(A[i][j]^B[i][j]) for j in range(n)] for i in range(m)]
+        def mul(A,B):
+            if not A or not B: return []
+            m,k=len(A),len(A[0]); k2,n=len(B),len(B[0])
+            if k!=k2: return []
+            C=[[0]*n for _ in range(m)]
+            for i in range(m):
+                for t in range(k):
+                    if A[i][t]&1:
+                        row=B[t]
+                        for j in range(n):
+                            C[i][j]^=row[j]&1
+            return C
+    try:
+        d3  = (boundaries.blocks.__root__.get("3") or [])
+        C3  = (cmap.blocks.__root__.get("3") or [])
+        H2  = (H_local.blocks.__root__.get("2") or [])
+        lane_mask = []
+        if d3 and d3[0]:
+            cols = len(d3[0])
+            lane_mask = [1 if any(row[j] & 1 for row in d3) else 0 for j in range(cols)]
+        def _bottom_row(M): return M[-1] if (M and len(M)) else []
+        idx = [j for j,m in enumerate(lane_mask) if m]
+        H2d3  = mul(H2, d3) if (H2 and d3) else []
+        C3pI3 = add(C3, eye(len(C3))) if C3 else []
+        diagnostics_block = {
+            "lane_mask_k3": lane_mask,
+            "lane_vec_H2d3":     [_bottom_row(H2d3)[j] for j in idx] if H2d3 else [],
+            "lane_vec_C3plusI3": [_bottom_row(C3pI3)[j] for j in idx] if C3pI3 else [],
+        }
+    except Exception:
+        diagnostics_block = {"lane_mask_k3": [], "lane_vec_H2d3": [], "lane_vec_C3plusI3": []}
+
+# ---- sig_block --------------------------------------------------------------
+if 'sig_block' not in locals() or not isinstance(sig_block, dict):
+    # Minimal, derived from d3 and diagnostics
+    def _gf2_rank(M):
+        if not M or not (M[0]): return 0
+        A=[row[:] for row in M]; m,n=len(A),len(A[0]); r=c=0
+        while r<m and c<n:
+            p=None
+            for i in range(r,m):
+                if A[i][c]&1: p=i; break
+            if p is None: c+=1; continue
+            if p!=r: A[r],A[p]=A[p],A[r]
+            for i in range(m):
+                if i!=r and (A[i][c]&1):
+                    A[i]=[(A[i][j]^A[r][j])&1 for j in range(n)]
+            r+=1; c+=1
+        return r
+    try:
+        d3 = (boundaries.blocks.__root__.get("3") or [])
+        rank_d3 = _gf2_rank(d3) if d3 else 0
+        ncols_d3 = len(d3[0]) if (d3 and d3[0]) else 0
+        ker_dim_d3 = max(ncols_d3 - rank_d3, 0)
+        lane_mask = diagnostics_block.get("lane_mask_k3") or []
+        lane_pattern = "".join("1" if x else "0" for x in lane_mask) if lane_mask else ""
+        # fixture lane pattern from (C3+I3) restricted to lanes
+        try:
+            from otcore.linalg_gf2 import add, eye
+        except Exception:
+            def eye(n): return [[1 if i==j else 0 for j in range(n)] for i in range(n)]
+            def add(A,B):
+                if not A: return [row[:] for row in (B or [])]
+                if not B: return [row[:] for row in (A or [])]
+                m,n=len(A),len(A[0])
+                return [[(A[i][j]^B[i][j]) for j in range(n)] for i in range(m)]
+        C3 = (cmap.blocks.__root__.get("3") or [])
+        C3pI3 = add(C3, eye(len(C3))) if C3 else []
+        lane_idx = [j for j,m in enumerate(lane_mask) if m]
+        def _col_support(M, cols):
+            if not M or not cols: return ""
+            return "".join("1" if any(row[j]&1 for row in M) else "0" for j in cols)
+        fixture_lane = _col_support(C3pI3, lane_idx)
+        sig_block = {
+            "d_signature": {"rank": rank_d3, "ker_dim": ker_dim_d3, "lane_pattern": lane_pattern},
+            "fixture_signature": {"lane": fixture_lane},
+            "echo_context": None,
+        }
+    except Exception:
+        sig_block = {"d_signature": {}, "fixture_signature": {"lane": ""}, "echo_context": None}
+# === END BOOTSTRAP ============================================================
+
+
     # ------------------------- Cert payload (core) ----------------------------
     k3_true = bool(out.get("3", {}).get("eq", False))
     cert_payload = {
