@@ -2597,35 +2597,134 @@ except Exception:
     if run_ctx.get("projector_consistent_with_d") is not None:
         policy_block["projector_consistent_with_d"] = bool(run_ctx.get("projector_consistent_with_d"))
 
-# ── cert payload (core)
-# (Optionally ensure schema/app/python tags are present)
-cert_payload.setdefault("schema_version", SCHEMA_VERS if "SCHEMA_VERS" in globals() else LAB_SCHEMA_VERSION)
-cert_payload.setdefault("app_version", APP_VERSION)
-cert_payload.setdefault("python_version", PY_VERSION_STR)
+## ── CERT WRITE (robust & self-contained)
 
+# 0) Try to reuse the existing cert_payload; if missing, synthesize one from session.
+try:
+    cert_payload  # noqa: F401
+except NameError:
+    _ss = st.session_state
+    _di = _ss.get("_district_info", {}) or {}
+    _ib = _ss.get("_inputs_block", {}) or {}
+    _rc = _ss.get("run_ctx", {}) or {}
+    _out = _ss.get("overlap_out", {}) or {}
+
+    # minimal identity/policy/inputs fallbacks
+    _district_id = _di.get("district_id", "UNKNOWN")
+    _policy_tag  = _ss.get("overlap_policy_label", _rc.get("policy_tag", "strict"))
+    _timestamp   = getattr(hashes, "timestamp_iso_lisbon", lambda: _iso_utc_now())()
+
+    # try to build a reproducible run_id from what we have
+    try:
+        _content_for_id = [
+            ("boundaries_hash", _ib.get("boundaries_hash","")),
+            ("C_hash", _ib.get("C_hash","")),
+            ("H_hash", _ib.get("H_hash","")),
+            ("U_hash", _ib.get("U_hash","")),
+            ("projector_hash", _rc.get("projector_hash","")),
+            ("policy_tag", _policy_tag),
+        ]
+        _content_hash_for_id = hashes.bundle_content_hash(_content_for_id)  # accepts list-of-tuples in your helpers
+        _run_id = hashes.run_id(_content_hash_for_id, _timestamp)
+    except Exception:
+        _run_id = ""
+
+    identity_block = {
+        "district_id": _district_id,
+        "run_id": _run_id,
+        "timestamp": _timestamp,
+        "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
+        "field": "GF(2)",
+    }
+
+    policy_block = {
+        "label": _policy_tag,
+        "policy_tag": _policy_tag,
+        # reflect a few projector bits if present
+        **({"projector_hash": _rc.get("projector_hash","")} if _rc.get("projector_hash") else {}),
+        **({"projector_filename": _rc.get("projector_filename","")} if _rc.get("projector_filename") else {}),
+        **({"projector_consistent_with_d": _rc.get("projector_consistent_with_d")} if _rc.get("projector_consistent_with_d") is not None else {}),
+    }
+
+    inputs_block = {
+        "filenames": {
+            "boundaries": _ib.get("boundaries_filename","boundaries.json"),
+            "C":          _ib.get("cmap_filename","cmap.json"),
+            "H":          _ib.get("H_filename","H.json"),
+            "U":          _ib.get("U_filename","shapes.json"),
+        },
+        "boundaries_hash": _ib.get("boundaries_hash",""),
+        "C_hash":          _ib.get("C_hash",""),
+        "H_hash":          _ib.get("H_hash",""),
+        "U_hash":          _ib.get("U_hash",""),
+        "shapes_hash":     _ib.get("shapes_hash", _ib.get("U_hash","")),
+    }
+
+    diagnostics_block = _ss.get("diagnostics_block", {}) or {}
+    sig_block         = _ss.get("sig_block", {}) or {}
+
+    checks_block = {
+        **_out,
+        # keep your default guard echoes if not present
+        "grid":  bool(_out.get("grid", True)),
+        "fence": bool(_out.get("fence", True)),
+    }
+
+    cert_payload = {
+        "identity":        identity_block,
+        "policy":          policy_block,
+        "inputs":          inputs_block,
+        "diagnostics":     diagnostics_block,
+        "checks":          checks_block,
+        "signatures":      sig_block,
+        "promotion":       {"eligible_for_promotion": False, "promotion_target": None, "notes": ""},
+        "policy_tag":      policy_block["policy_tag"],
+        "district_id":     identity_block["district_id"],
+        "boundaries_hash": inputs_block["boundaries_hash"],
+    }
+
+# 1) Ensure schema/app/python stamps
+if "SCHEMA_VERS" in globals():
+    cert_payload.setdefault("schema_version", SCHEMA_VERS)
+elif "LAB_SCHEMA_VERSION" in globals():
+    cert_payload.setdefault("schema_version", LAB_SCHEMA_VERSION)
+else:
+    cert_payload.setdefault("schema_version", "1.0.0")
+
+cert_payload.setdefault("app_version", APP_VERSION if "APP_VERSION" in globals() else getattr(hashes, "APP_VERSION", "v0.1-core"))
+cert_payload.setdefault("python_version", PY_VERSION_STR if "PY_VERSION_STR" in globals() else f"python")
+
+# 2) Integrity content hash (only if missing)
+try:
+    cert_payload.setdefault("integrity", {})
+    if not cert_payload["integrity"].get("content_hash"):
+        # stable, minimal JSON hash
+        _stable = _json.dumps(cert_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        cert_payload["integrity"]["content_hash"] = hashlib.sha256(_stable).hexdigest()
+except Exception:
+    pass
+
+# 3) Write cert safely; support (path, hash) or path returns
 cert_path: str | None = None
 full_hash: str = ""
-
 try:
-    # Preferred API: returns (path, full_hash)
     result = export_mod.write_cert_json(cert_payload)
     if isinstance(result, (list, tuple)) and len(result) >= 2:
         cert_path, full_hash = result[0], result[1]
     else:
-        # Some older writers return just the path
         cert_path = result
-        # fall back to content_hash already embedded in payload
-        full_hash = (cert_payload.get("integrity", {}) or {}).get("content_hash", "") or ""
+        full_hash = cert_payload.get("integrity", {}).get("content_hash", "") or ""
 except Exception as e:
     st.error(f"Cert write failed: {e}")
 
-# Only touch session if we actually produced a path
+# 4) Session updates only if we actually produced a path
 if cert_path:
     st.session_state["last_cert_path"] = cert_path
-    st.session_state["cert_payload"] = cert_payload  # handy for Gallery/Witness rows
+    st.session_state["cert_payload"]   = cert_payload  # used by Gallery/Witness
     st.success(f"Cert written: `{cert_path}`" + (f" · {full_hash[:12]}…" if full_hash else ""))
 else:
     st.warning("No cert file was produced. Check the error above and try again.")
+
 
 
 # ── A/B embed (fresh only if inputs_sig matches)
