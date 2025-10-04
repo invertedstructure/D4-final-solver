@@ -1458,6 +1458,45 @@ else:
     else:
         st.warning("No cert file was produced. Fix the error above and try again.")
 
+# ---------- button: Export Inputs Bundle ----------
+if st.button("Export Inputs Bundle", key="btn_export_inputs"):
+    try:
+        ib = st.session_state.get("_inputs_block") or {}
+        di = st.session_state.get("_district_info") or {}
+        rc = st.session_state.get("run_ctx") or {}
+
+        district_id = di.get("district_id", "UNKNOWN")
+        # Prefer last cert run_id if you saved it; otherwise derive a stable-ish one
+        run_id = st.session_state.get("last_run_id")
+        if not run_id:
+            # derive from hashes + timestamp to keep unique
+            hconcat = "".join(ib.get(k,"") for k in ("boundaries_hash","C_hash","H_hash","U_hash"))
+            ts = hashes.timestamp_iso_lisbon()
+            run_id = hashes.run_id(hconcat, ts)
+
+        policy_tag = st.session_state.get("overlap_policy_label") or rc.get("policy_tag") or "strict"
+
+        bundle_path = build_inputs_bundle(
+            inputs_block=ib,
+            run_ctx=rc,
+            district_id=district_id,
+            run_id=run_id,
+            policy_tag=policy_tag,
+        )
+        st.session_state["last_inputs_bundle_path"] = bundle_path
+        st.success(f"Inputs bundle ready → {bundle_path}")
+
+        # Optional quick download
+        try:
+            with open(bundle_path, "rb") as fz:
+                st.download_button("Download Inputs Bundle", fz, file_name=os.path.basename(bundle_path), key="dl_inputs_bundle")
+        except Exception:
+            pass
+
+    except Exception as e:
+        st.error(f"Export Inputs Bundle failed: {e}")
+
+
 
     # ───────────────────────── A/B compare (strict vs active projected) ─────────────────────────
 if st.button("Run A/B compare", key="ab_run_btn"):
