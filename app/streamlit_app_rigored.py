@@ -147,37 +147,36 @@ def safe_expander(title: str, **kwargs):
 
 # --- safe_expander: never nest real expanders (robust) ---
 from contextlib import contextmanager
-from streamlit.errors import StreamlitAPIException  # <- NEW
-
-_EXP_STACK: list[str] = []
+try:
+    # Streamlit >= 1.29
+    from streamlit.errors import StreamlitAPIException  # type: ignore
+except Exception:  # pragma: no cover
+    # Fallback: define a compatible alias so the except still works
+    class StreamlitAPIException(Exception):  # type: ignore
+        pass
 
 @contextmanager
 def safe_expander(title: str, **kwargs):
     """
     Like st.expander, but never nests a real expander:
-    - If already inside any expander (ours or someone else's), fall back to a container.
-    - If Streamlit still raises, catch and fallback gracefully.
+    - If creating a real expander raises StreamlitAPIException (because we're already inside one),
+      we fall back to a plain container and keep the UI readable.
+    - Also supports safe→safe nesting without crashing.
     """
-    nested = bool(_EXP_STACK)
-    _EXP_STACK.append(title)
+    # Best-effort hint for visual structure when we fallback
+    def _container_fallback():
+        st.caption(f"⚠️ Nested section: **{title}** (container fallback)")
+        st.markdown(f"**{title}**")
+        return st.container()
+
+    # Try a real expander first
     try:
-        if nested:
-            st.caption(f"⚠️ Nested section: **{title}** (rendered as container)")
-            st.markdown(f"**{title}**")
-            with st.container():
-                yield
-        else:
-            try:
-                with st.expander(title, **kwargs):
-                    yield
-            except StreamlitAPIException:
-                # We *are* inside some expander; degrade to container
-                st.caption(f"⚠️ Nested section: **{title}** (container fallback)")
-                st.markdown(f"**{title}**")
-                with st.container():
-                    yield
-    finally:
-        _EXP_STACK.pop()
+        with st.expander(title, **kwargs):
+            yield
+    except StreamlitAPIException:
+        # Already inside an expander (maybe created elsewhere) → degrade gracefully
+        with _container_fallback():
+            yield
 
 
 
