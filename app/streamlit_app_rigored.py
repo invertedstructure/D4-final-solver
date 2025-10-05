@@ -1,11 +1,22 @@
 # ────────────────────────────── IMPORTS (top) ──────────────────────────────
 import sys, os, json, csv, hashlib, platform, zipfile, tempfile, shutil, importlib.util, types, pathlib
 from pathlib import Path
-_Path = Path
 from io import BytesIO
 from contextlib import contextmanager
 from datetime import datetime, timezone
 import streamlit as st
+
+# alias shim used by helpers (underscored names)
+import os as _os
+import json as _json
+import hashlib as _hashlib
+import csv as _csv
+import zipfile as _zipfile
+import tempfile as _tempfile
+import shutil as _shutil
+from pathlib import Path as _Path
+
+
 
 
 
