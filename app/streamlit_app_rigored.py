@@ -2242,247 +2242,228 @@ with st.expander("Projector Registry (last 5)"):
 # -------------------------------------------------------------------------------------------
 
   
-    # ------------------------ Parity import/export & sample queue ------------------------
-    PARITY_SCHEMA_VERSION = "1.0.0"
-    DEFAULT_PARITY_PATH = Path("logs") / "parity_pairs.json"
-
-    def _iso_utc_now(): return datetime.now(timezone.utc).isoformat()
-    def _ensure_parent_dir(p: Path): p.parent.mkdir(parents=True, exist_ok=True)
-
-    def _atomic_write_json(path: Path, payload: dict):
-        _ensure_parent_dir(path)
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        blob = _json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        with open(tmp, "wb") as f:
-            f.write(blob); f.flush(); os.fsync(f.fileno())
-        os.replace(tmp, path)
-
-    def _safe_parse_json(path: str) -> dict:
-        p = Path(path)
-        if not p.exists():
-            raise FileNotFoundError(f"File not found: {path}")
-        with open(p, "r", encoding="utf-8") as f:
-            return _json.load(f)
-
-    def load_fixture_from_paths(*, boundaries_path: str, cmap_path: str, H_path: str, shapes_path: str):
-        dB = _safe_parse_json(boundaries_path)
-        dC = _safe_parse_json(cmap_path)
-        dH = _safe_parse_json(H_path)
-        dU = _safe_parse_json(shapes_path)
-        return {
-            "boundaries": io.parse_boundaries(dB),
-            "cmap": io.parse_cmap(dC),
-            "H": io.parse_cmap(dH),
-            "shapes": io.parse_shapes(dU),
-        }
-
-    def add_parity_pair(*, label: str, left_fixture: dict, right_fixture: dict):
-        req_keys = ("boundaries", "cmap", "H", "shapes")
-        for side_name, fx in [("left", left_fixture), ("right", right_fixture)]:
-            if not isinstance(fx, dict) or any(k not in fx for k in req_keys):
-                raise ValueError(f"{side_name} fixture malformed; expected keys {req_keys}")
-        st.session_state.setdefault("parity_pairs", [])
-        st.session_state["parity_pairs"].append({"label": label, "left": left_fixture, "right": right_fixture})
-        return len(st.session_state["parity_pairs"])
-
-    def clear_parity_pairs():
-        st.session_state["parity_pairs"] = []
-
-    def set_parity_pairs_from_fixtures(pairs_spec: list[dict]):
-        clear_parity_pairs()
-        for row in pairs_spec:
-            label = row.get("label", "PAIR")
-            Lp = row.get("left", {})
-            Rp = row.get("right", {})
-            L = load_fixture_from_paths(
-                boundaries_path=Lp["boundaries"], cmap_path=Lp["cmap"], H_path=Lp["H"], shapes_path=Lp["shapes"]
-            )
-            R = load_fixture_from_paths(
-                boundaries_path=Rp["boundaries"], cmap_path=Rp["cmap"], H_path=Rp["H"], shapes_path=Rp["shapes"]
-            )
-            add_parity_pair(label=label, left_fixture=L, right_fixture=R)
-        return len(st.session_state.get("parity_pairs", []))
-
-    def _parity_pairs_payload(pairs: list[dict]) -> dict:
-        return {
-            "schema_version": PARITY_SCHEMA_VERSION,
-            "saved_at": _iso_utc_now(),
-            "count": len(pairs),
-            "pairs": [
-                {
-                    "label": row.get("label", "PAIR"),
-                    "left":  {k: row.get("left_path_"+k,  row.get("left", {}).get(k+"_path", ""))  for k in ("boundaries","cmap","H","shapes")},
-                    "right": {k: row.get("right_path_"+k, row.get("right", {}).get(k+"_path", "")) for k in ("boundaries","cmap","H","shapes")},
-                }
-                for row in pairs
-            ],
-        }
-
-    def _pairs_from_payload(payload: dict) -> list[dict]:
-        if not isinstance(payload, dict): return []
-        return [
-            {
-                "label": r.get("label", "PAIR"),
-                "left":  {k: r.get("left", {}).get(k, "")  for k in ("boundaries","cmap","H","shapes")},
-                "right": {k: r.get("right", {}).get(k, "") for k in ("boundaries","cmap","H","shapes")},
-            }
-            for r in payload.get("pairs", [])
-        ]
-
-    def export_parity_pairs(path: str | Path = DEFAULT_PARITY_PATH) -> str:
-        path = Path(path)
-        _ensure_parent_dir(path)
-        pairs = st.session_state.get("parity_pairs", []) or []
-        payload = _parity_pairs_payload(pairs)
-        with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as tmp:
-            _json.dump(payload, tmp, indent=2)
-            tmp.flush(); os.fsync(tmp.fileno())
-            tmp_name = tmp.name
-        os.replace(tmp_name, path)
-        return str(path)
-
-    def import_parity_pairs(path: str | Path = DEFAULT_PARITY_PATH, *, merge: bool=False) -> int:
-        path = Path(path)
-        if not path.exists():
-            raise FileNotFoundError(f"No parity pairs file at {path}")
-        with open(path, "r", encoding="utf-8") as f:
-            payload = _json.load(f)
-        ver = payload.get("schema_version", "0.0.0")
-        if ver.split(".")[0] != PARITY_SCHEMA_VERSION.split(".")[0]:
-            st.warning(f"parity_pairs schema version differs (file={ver}, app={PARITY_SCHEMA_VERSION}); best-effort load.")
-        pairs_spec = _pairs_from_payload(payload)
-        if not merge:
-            clear_parity_pairs()
-        set_parity_pairs_from_fixtures(pairs_spec)
-        return len(st.session_state.get("parity_pairs", []))
-
-    with safe_expander("Parity: queue sample D2/D3/D4 pairs (optional)"):
-        st.caption("Only queues pairs if files exist under ./inputs/.")
-        c1, c2 = st.columns(2)
-        with c1:
-            do_self = st.button("Queue SELF (current fixture vs itself)", key="pp_self_btn")
-        with c2:
-            do_examples = st.button("Queue D2↔D3, D3↔D4 examples", key="pp_examples_btn")
-
-        if do_self:
-            try:
-                fixture = {
-                    "boundaries": boundaries,
-                    "cmap": cmap,
-                    "H": st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}}),
-                    "shapes": shapes,
-                }
-                add_parity_pair(label="SELF", left_fixture=fixture, right_fixture=fixture)
-                st.success("Queued SELF parity pair.")
-            except Exception as e:
-                st.error(f"Could not queue SELF: {e}")
-
-        if do_examples:
-            spec = [
-                {
-                    "label": "D2(101)↔D3(110)",
-                    "left":  {"boundaries":"inputs/D2/boundaries.json","cmap":"inputs/D2/cmap.json","H":"inputs/D2/H.json","shapes":"inputs/D2/shapes.json"},
-                    "right": {"boundaries":"inputs/D3/boundaries.json","cmap":"inputs/D3/cmap.json","H":"inputs/D3/H.json","shapes":"inputs/D3/shapes.json"},
-                },
-                {
-                    "label": "D3(110)↔D4(101)",
-                    "left":  {"boundaries":"inputs/D3/boundaries.json","cmap":"inputs/D3/cmap.json","H":"inputs/D3/H.json","shapes":"inputs/D3/shapes.json"},
-                    "right": {"boundaries":"inputs/D4/boundaries.json","cmap":"inputs/D4/cmap.json","H":"inputs/D4/H.json","shapes":"inputs/D4/shapes.json"},
-                },
-            ]
-            flat = []
-            for r in spec:
-                L, R = r["left"], r["right"]
-                flat += [L["boundaries"], L["cmap"], L["H"], L["shapes"], R["boundaries"], R["cmap"], R["H"], R["shapes"]]
-            if not all(Path(p).exists() for p in flat):
-                st.info("Example files not found under ./inputs — skipping queuing.")
-            else:
-                try:
-                    set_parity_pairs_from_fixtures(spec)
-                    st.success("Queued D2↔D3 and D3↔D4 example pairs.")
-                except Exception as e:
-                    st.error(f"Could not queue examples: {e}")
-
-    with safe_expander("Parity pairs: import/export"):
-        colA, colB, colC = st.columns([3,3,2])
-        with colA:
-            export_path = st.text_input("Export path", value=str(DEFAULT_PARITY_PATH), key="pp_export_path")
-        with colB:
-            import_path = st.text_input("Import path", value=str(DEFAULT_PARITY_PATH), key="pp_import_path")
-        with colC:
-            merge_load = st.checkbox("Merge on import", value=False, key="pp_merge")
-
-        c1, c2 = st.columns(2)
-        with c1:
-            if st.button("Export parity_pairs.json", key="pp_do_export"):
-                try:
-                    p = export_parity_pairs(export_path)
-                    st.success(f"Saved parity pairs → {p}")
-                except Exception as e:
-                    st.error(f"Export failed: {e}")
-        with c2:
-            if st.button("Import parity_pairs.json", key="pp_do_import"):
-                try:
-                    n = import_parity_pairs(import_path, merge=merge_load)
-                    st.success(f"Loaded {n} pairs from {import_path}")
-                except Exception as e:
-                    st.error(f"Import failed: {e}")
-
-# ------------------------ Parity Runner (mirrors active policy) ------------------------
+    # ======================== Parity: import/export & queue ========================
 from pathlib import Path
-import json as _json, os, tempfile
 from datetime import datetime, timezone
+import json as _json, os, tempfile
 
 PARITY_SCHEMA_VERSION = "1.0.0"
-PARITY_OUT_PATH = Path("reports") / "parity_report.json"
-PARITY_OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+DEFAULT_PARITY_PATH = Path("logs") / "parity_pairs.json"
+PARITY_REPORT_PATH  = Path("reports") / "parity_report.json"
+PARITY_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-def _iso_utc_now(): return datetime.now(timezone.utc).isoformat()
+def _iso_utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
-def _atomic_write_json(path: Path, payload: dict):
-    path.parent.mkdir(parents=True, exist_ok=True)
+def _ensure_parent_dir(p: Path) -> None:
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    _ensure_parent_dir(path)
     with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as tmp:
         _json.dump(payload, tmp, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
         tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
     os.replace(tmp_name, path)
 
+def _safe_parse_json(path: str) -> dict:
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"File not found: {path}")
+    with open(p, "r", encoding="utf-8") as f:
+        return _json.load(f)
+
+def load_fixture_from_paths(*, boundaries_path: str, cmap_path: str, H_path: str, shapes_path: str):
+    dB = _safe_parse_json(boundaries_path)
+    dC = _safe_parse_json(cmap_path)
+    dH = _safe_parse_json(H_path)
+    dU = _safe_parse_json(shapes_path)
+    return {
+        "boundaries": io.parse_boundaries(dB),
+        "cmap":       io.parse_cmap(dC),
+        "H":          io.parse_cmap(dH),
+        "shapes":     io.parse_shapes(dU),
+    }
+
+def add_parity_pair(*, label: str, left_fixture: dict, right_fixture: dict) -> int:
+    req = ("boundaries","cmap","H","shapes")
+    for side_name, fx in (("left", left_fixture), ("right", right_fixture)):
+        if not isinstance(fx, dict) or any(k not in fx for k in req):
+            raise ValueError(f"{side_name} fixture malformed; expected keys {req}")
+    st.session_state.setdefault("parity_pairs", [])
+    st.session_state["parity_pairs"].append({"label": label, "left": left_fixture, "right": right_fixture})
+    return len(st.session_state["parity_pairs"])
+
+def clear_parity_pairs() -> None:
+    st.session_state["parity_pairs"] = []
+
+def set_parity_pairs_from_fixtures(pairs_spec: list[dict]) -> int:
+    clear_parity_pairs()
+    for row in pairs_spec:
+        label = row.get("label", "PAIR")
+        Lp, Rp = row.get("left", {}), row.get("right", {})
+        L = load_fixture_from_paths(boundaries_path=Lp["boundaries"], cmap_path=Lp["cmap"], H_path=Lp["H"], shapes_path=Lp["shapes"])
+        R = load_fixture_from_paths(boundaries_path=Rp["boundaries"], cmap_path=Rp["cmap"], H_path=Rp["H"], shapes_path=Rp["shapes"])
+        add_parity_pair(label=label, left_fixture=L, right_fixture=R)
+    return len(st.session_state.get("parity_pairs", []))
+
+def _parity_pairs_payload(pairs: list[dict]) -> dict:
+    return {
+        "schema_version": PARITY_SCHEMA_VERSION,
+        "saved_at": _iso_utc_now(),
+        "count": len(pairs),
+        "pairs": [
+            {
+                "label": row.get("label", "PAIR"),
+                "left":  {k: row.get("left_path_"+k,  row.get("left", {}).get(k+"_path", ""))  for k in ("boundaries","cmap","H","shapes")},
+                "right": {k: row.get("right_path_"+k, row.get("right", {}).get(k+"_path", "")) for k in ("boundaries","cmap","H","shapes")},
+            } for row in pairs
+        ],
+    }
+
+def _pairs_from_payload(payload: dict) -> list[dict]:
+    if not isinstance(payload, dict): return []
+    return [
+        {
+            "label": r.get("label", "PAIR"),
+            "left":  {k: r.get("left", {}).get(k, "")  for k in ("boundaries","cmap","H","shapes")},
+            "right": {k: r.get("right", {}).get(k, "") for k in ("boundaries","cmap","H","shapes")},
+        } for r in payload.get("pairs", [])
+    ]
+
+def export_parity_pairs(path: str | Path = DEFAULT_PARITY_PATH) -> str:
+    path = Path(path); _ensure_parent_dir(path)
+    pairs = st.session_state.get("parity_pairs", []) or []
+    payload = _parity_pairs_payload(pairs)
+    with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as tmp:
+        _json.dump(payload, tmp, indent=2)
+        tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
+    os.replace(tmp_name, path)
+    return str(path)
+
+def import_parity_pairs(path: str | Path = DEFAULT_PARITY_PATH, *, merge: bool = False) -> int:
+    path = Path(path)
+    if not path.exists():
+        raise FileNotFoundError(f"No parity pairs file at {path}")
+    with open(path, "r", encoding="utf-8") as f:
+        payload = _json.load(f)
+    ver = payload.get("schema_version", "0.0.0")
+    if ver.split(".")[0] != PARITY_SCHEMA_VERSION.split(".")[0]:
+        st.warning(f"parity_pairs schema version differs (file={ver}, app={PARITY_SCHEMA_VERSION}); best-effort load.")
+    pairs_spec = _pairs_from_payload(payload)
+    if not merge:
+        clear_parity_pairs()
+    set_parity_pairs_from_fixtures(pairs_spec)
+    return len(st.session_state.get("parity_pairs", []))
+
+with safe_expander("Parity: queue sample D2/D3/D4 pairs (optional)"):
+    st.caption("Only queues pairs if files exist under ./inputs/.")
+    c1, c2 = st.columns(2)
+    with c1:
+        do_self = st.button("Queue SELF (current fixture vs itself)", key="pp_self_btn")
+    with c2:
+        do_examples = st.button("Queue D2↔D3, D3↔D4 examples", key="pp_examples_btn")
+
+    if do_self:
+        try:
+            fixture = {
+                "boundaries": boundaries,
+                "cmap": cmap,
+                "H": st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}}),
+                "shapes": shapes,
+            }
+            add_parity_pair(label="SELF", left_fixture=fixture, right_fixture=fixture)
+            st.success("Queued SELF parity pair.")
+        except Exception as e:
+            st.error(f"Could not queue SELF: {e}")
+
+    if do_examples:
+        spec = [
+            {
+                "label": "D2(101)↔D3(110)",
+                "left":  {"boundaries":"inputs/D2/boundaries.json","cmap":"inputs/D2/cmap.json","H":"inputs/D2/H.json","shapes":"inputs/D2/shapes.json"},
+                "right": {"boundaries":"inputs/D3/boundaries.json","cmap":"inputs/D3/cmap.json","H":"inputs/D3/H.json","shapes":"inputs/D3/shapes.json"},
+            },
+            {
+                "label": "D3(110)↔D4(101)",
+                "left":  {"boundaries":"inputs/D3/boundaries.json","cmap":"inputs/D3/cmap.json","H":"inputs/D3/H.json","shapes":"inputs/D3/shapes.json"},
+                "right": {"boundaries":"inputs/D4/boundaries.json","cmap":"inputs/D4/cmap.json","H":"inputs/D4/H.json","shapes":"inputs/D4/shapes.json"},
+            },
+        ]
+        flat = []
+        for r in spec:
+            L, R = r["left"], r["right"]
+            flat += [L["boundaries"], L["cmap"], L["H"], L["shapes"], R["boundaries"], R["cmap"], R["H"], R["shapes"]]
+        if not all(Path(p).exists() for p in flat):
+            st.info("Example files not found under ./inputs — skipping queuing.")
+        else:
+            try:
+                set_parity_pairs_from_fixtures(spec)
+                st.success("Queued D2↔D3 and D3↔D4 example pairs.")
+            except Exception as e:
+                st.error(f"Could not queue examples: {e}")
+
+with safe_expander("Parity pairs: import/export"):
+    colA, colB, colC = st.columns([3,3,2])
+    with colA:
+        export_path = st.text_input("Export path", value=str(DEFAULT_PARITY_PATH), key="pp_export_path")
+    with colB:
+        import_path = st.text_input("Import path", value=str(DEFAULT_PARITY_PATH), key="pp_import_path")
+    with colC:
+        merge_load = st.checkbox("Merge on import", value=False, key="pp_merge")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Export parity_pairs.json", key="pp_do_export"):
+            try:
+                p = export_parity_pairs(export_path)
+                st.success(f"Saved parity pairs → {p}")
+            except Exception as e:
+                st.error(f"Export failed: {e}")
+    with c2:
+        if st.button("Import parity_pairs.json", key="pp_do_import"):
+            try:
+                n = import_parity_pairs(import_path, merge=merge_load)
+                st.success(f"Loaded {n} pairs from {import_path}")
+            except Exception as e:
+                st.error(f"Import failed: {e}")
+
+# ============================== Parity Runner ===============================
+import pandas as pd
+
 def _cfg_from_run_ctx(rc: dict) -> dict | None:
-    """
-    Mirror the policy that produced the last Run Overlap.
-    - strict       -> return None (no projected leg)
-    - projected(auto) -> cfg with source.3='auto'
-    - projected(file) -> cfg with source.3='file' and projector_files.3=rc.projector_filename
-    """
+    """Mirror the active policy from the last Overlap run."""
     mode = (rc or {}).get("mode", "strict")
     if mode == "strict":
         return None
     cfg = cfg_projected_base()
     if mode == "projected(auto)":
         cfg["source"]["3"] = "auto"
-        cfg["projector_files"]["3"] = cfg["projector_files"].get("3", "projector_D3.json")
+        cfg.setdefault("projector_files", {}).setdefault("3", "projector_D3.json")  # placeholder
         return cfg
     if mode == "projected(file)":
         cfg["source"]["3"] = "file"
-        pj = (rc or {}).get("projector_filename","")
+        pj = (rc or {}).get("projector_filename", "")
         if pj:
             cfg.setdefault("projector_files", {})["3"] = pj
         return cfg
     return None
 
-def _and_pair(left_bool: bool | None, right_bool: bool | None) -> bool | None:
-    if left_bool is None or right_bool is None:
+def _and_pair(a: bool | None, b: bool | None) -> bool | None:
+    if a is None or b is None:
         return None
-    return bool(left_bool) and bool(right_bool)
+    return bool(a) and bool(b)
 
 def _one_leg(boundaries_obj, cmap_obj, H_obj, projection_cfg: dict | None):
-    """Run overlap on one fixture; returns dict like {'2':{'eq':..}, '3':{'eq':..}}"""
+    """Run overlap on one fixture; returns {'2':{'eq':..}, '3':{'eq':..}}"""
     if projection_cfg is None:
         return overlap_gate.overlap_check(boundaries_obj, cmap_obj, H_obj)
-    # Validate FILE Π early
+    # Validate FILE Π early (shape/diag/idempotence/lane); raises on failure
     _P, _meta = projector_choose_active(projection_cfg, boundaries_obj)
     return overlap_gate.overlap_check(boundaries_obj, cmap_obj, H_obj, projection_config=projection_cfg)
 
-def _short(x): return (x or "")[:12]
+def _emoji(v):
+    if v is None: return "—"
+    return "✅" if bool(v) else "❌"
 
 with safe_expander("Parity: run suite (mirrors active policy)"):
     pairs = st.session_state.get("parity_pairs", []) or []
@@ -2497,53 +2478,44 @@ with safe_expander("Parity: run suite (mirrors active policy)"):
         cfg_proj   = _cfg_from_run_ctx(rc)  # None if strict
 
         if st.button("Run Parity Suite", key="btn_run_parity"):
-            rows_preview = []
-            report_pairs = []
-            errors = []
+            report_pairs: list[dict] = []
+            rows_preview: list[list[str]] = []
+            errors: list[str] = []
 
-            for idx, row in enumerate(pairs, start=1):
+            for row in pairs:
                 label = row.get("label","PAIR")
-                L = row.get("left",  {})
-                R = row.get("right", {})
+                L, R = row.get("left", {}), row.get("right", {})
 
                 try:
-                    # Each fixture already parsed in your queue helpers
                     bL, cL, hL = L["boundaries"], L["cmap"], L["H"]
                     bR, cR, hR = R["boundaries"], R["cmap"], R["H"]
 
                     out_L_strict = _one_leg(bL, cL, hL, None)
                     out_R_strict = _one_leg(bR, cR, hR, None)
 
-                    s_k2 = _and_pair(out_L_strict.get("2",{}).get("eq", False),
-                                     out_R_strict.get("2",{}).get("eq", False))
-                    s_k3 = _and_pair(out_L_strict.get("3",{}).get("eq", False),
-                                     out_R_strict.get("3",{}).get("eq", False))
+                    s_k2 = _and_pair(out_L_strict.get("2",{}).get("eq"), out_R_strict.get("2",{}).get("eq"))
+                    s_k3 = _and_pair(out_L_strict.get("3",{}).get("eq"), out_R_strict.get("3",{}).get("eq"))
 
                     if cfg_proj is not None:
                         try:
                             out_L_proj = _one_leg(bL, cL, hL, cfg_proj)
                             out_R_proj = _one_leg(bR, cR, hR, cfg_proj)
-                            p_k2 = _and_pair(out_L_proj.get("2",{}).get("eq", False),
-                                             out_R_proj.get("2",{}).get("eq", False))
-                            p_k3 = _and_pair(out_L_proj.get("3",{}).get("eq", False),
-                                             out_R_proj.get("3",{}).get("eq", False))
+                            p_k2 = _and_pair(out_L_proj.get("2",{}).get("eq"), out_R_proj.get("2",{}).get("eq"))
+                            p_k3 = _and_pair(out_L_proj.get("3",{}).get("eq"), out_R_proj.get("3",{}).get("eq"))
                         except ValueError as e:
-                            # FILE Π validator hit; treat projected as failure for this pair
                             p_k2, p_k3 = False, False
                             errors.append(f"{label}: {e}")
                     else:
-                        p_k2, p_k3 = None, None  # strict mode only
+                        p_k2, p_k3 = None, None
 
                     report_pairs.append({
                         "label": label,
-                        "strict":    {"k2": bool(s_k2) if s_k2 is not None else None,
-                                      "k3": bool(s_k3) if s_k3 is not None else None},
+                        "strict":    {"k2": (None if s_k2 is None else bool(s_k2)),
+                                      "k3": (None if s_k3 is None else bool(s_k3))},
                         "projected": {"k2": (None if p_k2 is None else bool(p_k2)),
                                       "k3": (None if p_k3 is None else bool(p_k3))},
                     })
-                    rows_preview.append([label,
-                                         "✅" if s_k3 else "❌",
-                                         "—" if p_k3 is None else ("✅" if p_k3 else "❌")])
+                    rows_preview.append([label, _emoji(s_k3), _emoji(p_k3)])
 
                 except Exception as e:
                     errors.append(f"{label}: {e}")
@@ -2555,7 +2527,6 @@ with safe_expander("Parity: run suite (mirrors active policy)"):
                 "policy_tag": policy_tag,
                 **({"projector_hash": pj_hash} if pj_hash else {}),
                 "pairs": report_pairs,
-                # provenance: copy hashes (SSOT)
                 "hashes": {
                     "boundaries_hash": ib.get("boundaries_hash",""),
                     "C_hash":          ib.get("C_hash",""),
@@ -2566,51 +2537,39 @@ with safe_expander("Parity: run suite (mirrors active policy)"):
             }
 
             try:
-                _atomic_write_json(PARITY_OUT_PATH, payload)
-                st.success(f"Parity report saved → {PARITY_OUT_PATH}")
-                # tiny preview table
+                _atomic_write_json(PARITY_REPORT_PATH, payload)
+                st.success(f"Parity report saved → {PARITY_REPORT_PATH}")
                 st.caption("Summary (per pair): strict_k3 / projected_k3")
                 for r in rows_preview:
                     st.write(f"• {r[0]} → strict={r[1]} · projected={r[2]}")
-                # one-click download
-                with open(PARITY_OUT_PATH, "rb") as f:
+                with open(PARITY_REPORT_PATH, "rb") as f:
                     st.download_button("Download parity_report.json", f, file_name="parity_report.json", key="dl_parity_report")
                 if errors:
                     st.warning("Some pairs had issues; details recorded in the report’s `errors` field.")
+                st.session_state["parity_last_report_pairs"] = report_pairs
             except Exception as e:
                 st.error(f"Could not write parity_report.json: {e}")
-                
-                # Build a compact preview table for the UI (no recompute)
-import pandas as pd
 
-def _emoji(v):
-    if v is None: return "—"
-    return "✅" if bool(v) else "❌"
+        # Render a compact table only after a successful run this session
+        last_pairs = st.session_state.get("parity_last_report_pairs")
+        if last_pairs:
+            df = pd.DataFrame([
+                {
+                    "Pair": p["label"],
+                    "Strict k2": _emoji(p["strict"]["k2"]),
+                    "Strict k3": _emoji(p["strict"]["k3"]),
+                    "Projected k2": _emoji(p["projected"]["k2"]),
+                    "Projected k3": _emoji(p["projected"]["k3"]),
+                } for p in last_pairs
+            ], columns=["Pair", "Strict k2", "Strict k3", "Projected k2", "Projected k3"])
+            st.caption("Parity summary")
+            st.dataframe(df, use_container_width=True)
+            try:
+                csv_bytes = df.to_csv(index=False).encode("utf-8")
+                st.download_button("Download parity_summary.csv", csv_bytes, file_name="parity_summary.csv")
+            except Exception:
+                pass
 
-# Flatten the pairs into a table
-table_rows = []
-for p in report_pairs:
-    table_rows.append({
-        "Pair": p["label"],
-        "Strict k2": _emoji(p["strict"]["k2"]),
-        "Strict k3": _emoji(p["strict"]["k3"]),
-        "Projected k2": _emoji(None if p["projected"]["k2"] is None else p["projected"]["k2"]),
-        "Projected k3": _emoji(None if p["projected"]["k3"] is None else p["projected"]["k3"]),
-    })
-
-df = pd.DataFrame(table_rows, columns=[
-    "Pair", "Strict k2", "Strict k3", "Projected k2", "Projected k3"
-])
-
-st.caption("Parity summary")
-st.dataframe(df, use_container_width=True)
-
-# Optional: offer CSV export of the preview (separate from parity_report.json)
-try:
-    csv_bytes = df.to_csv(index=False).encode("utf-8")
-    st.download_button("Download parity_summary.csv", csv_bytes, file_name="parity_summary.csv")
-except Exception:
-    pass
 
 
 
