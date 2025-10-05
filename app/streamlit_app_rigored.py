@@ -1429,76 +1429,122 @@ else:
     st.caption("A/B snapshot: —")
 
 
-    # ---------------- Schema/App/Python tags + integrity (after invariants) ----------------
-    # assert invariants *before* content_hash/write
-    _assert_cert_invariants({
-        **cert_payload,
-        # keep checks/clamps as above
-    })
+   # ---------------- Cert write (robust: resolves missing locals from session) ----------------
+# Required helpers expected elsewhere: hash_json, safe_expander, build_cert_bundle
+# Optional: _assert_cert_invariants (noop if not present)
 
-    cert_payload["schema_version"] = LAB_SCHEMA_VERSION
-    cert_payload["app_version"]    = getattr(hashes, "APP_VERSION", "v0.1-core")
-    cert_payload["python_version"] = f"python-{platform.python_version()}"
-    cert_payload.setdefault("integrity", {})
-    cert_payload["integrity"]["content_hash"] = hash_json(cert_payload)
+# Resolve inputs from locals() or session
+_cert_payload   = locals().get("cert_payload") or st.session_state.get("cert_payload_draft")
+_identity_block = locals().get("identity_block") or (_cert_payload or {}).get("identity") or {}
+_policy_now     = locals().get("policy_now") or st.session_state.get("overlap_policy_label") or "strict"
+_di             = st.session_state.get("_district_info") or {}
+_district_id    = locals().get("district_id") or _di.get("district_id") or "UNKNOWN"
+_rc             = locals().get("_rc") or st.session_state.get("run_ctx") or {}
 
-    # ---------------- Write cert (prefer package writer; fallback locally) ----------------
-    cert_path = None
-    full_hash = cert_payload["integrity"]["content_hash"]
-    try:
-        result = export_mod.write_cert_json(cert_payload)  # expected (path, full_hash) or path
-        if isinstance(result, (list, tuple)) and len(result) >= 2:
-            cert_path, full_hash = result[0], result[1]
-        else:
-            cert_path = result
-    except Exception as e:
-        # Fallback: certs/overlap__{district}__{policy}__{hash12}.json (atomic)
-        try:
-            outdir = Path("certs"); outdir.mkdir(parents=True, exist_ok=True)
-            safe_policy = policy_now.replace("/", "_").replace(" ", "_")
-            fname = f"overlap__{district_id}__{safe_policy}__{full_hash[:12]}.json"
-            p = outdir / fname
-            tmp = p.with_suffix(".json.tmp")
-            blob = _json.dumps(cert_payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-            with open(tmp, "wb") as f:
-                f.write(blob); f.flush(); os.fsync(f.fileno())
-            os.replace(tmp, p)
-            cert_path = str(p)
-        except Exception as e2:
-            st.error(f"Cert write failed: {e} / {e2}")
+# Hard guard: we need a payload to write
+if not _cert_payload or not isinstance(_cert_payload, dict):
+    st.error("Internal: cert payload is missing. Build the payload first, then write the cert.")
+    st.stop()
 
-    # ---------------- Post-write UI + bundle quick action ----------------
-    if cert_path:
-        st.session_state["last_cert_path"] = cert_path
-        st.session_state["cert_payload"]   = cert_payload
-        st.session_state["last_run_id"]    = identity_block["run_id"]
-        st.success(f"Cert written → `{cert_path}` · {full_hash[:12]}…")
+# Make sure identity_block has a run_id
+if "run_id" not in _identity_block or not _identity_block.get("run_id"):
+    fallback_run_id = st.session_state.get("last_run_id")
+    if not fallback_run_id:
+        # derive a stable run id from current SSOT hashes + timestamp (best-effort)
+        _ib = st.session_state.get("_inputs_block") or {}
+        hconcat = "".join(str(_ib.get(k, "")) for k in ("boundaries_hash","C_hash","H_hash","U_hash"))
+        ts = getattr(hashes, "timestamp_iso_lisbon", lambda: datetime.now(timezone.utc).isoformat())()
+        fallback_run_id = getattr(hashes, "run_id", lambda a,b: hashlib.sha256(f"{a}|{b}".encode()).hexdigest()[:12])(hconcat, ts)
+        st.session_state["last_run_id"] = fallback_run_id
+    _identity_block["run_id"] = fallback_run_id
 
-        with st.expander("Bundle (cert + extras)"):
-            extras = [
-                "policy.json",
-                "reports/residual.json",
-                "reports/parity_report.json",
-                "reports/coverage_sampling.csv",
-                "logs/gallery.jsonl",
-                "logs/witnesses.jsonl",
-            ]
-            if _rc.get("mode") == "projected(file)" and _rc.get("projector_filename"):
-                extras.append(_rc.get("projector_filename"))
-            if st.button("Build Cert Bundle", key="build_cert_bundle_btn"):
-                try:
-                    bundle_path = build_cert_bundle(
-                        district_id=district_id,
-                        policy_tag=policy_now,
-                        cert_path=cert_path,
-                        content_hash=full_hash,
-                        extras=extras
-                    )
-                    st.success(f"Bundle ready → {bundle_path}")
-                except Exception as e:
-                    st.error(f"Bundle build failed: {e}")
+# Stitch identity into payload
+_cert_payload.setdefault("identity", {}).update({
+    "district_id": _district_id,
+    "run_id": _identity_block.get("run_id", ""),
+    "timestamp": getattr(hashes, "timestamp_iso_lisbon", lambda: datetime.now(timezone.utc).isoformat())(),
+})
+
+# Policy tag (pretty label) in payload
+_policy_now = locals().get("policy_now") or _policy_now
+_cert_payload.setdefault("policy", {}).update({
+    "policy_tag": _policy_now,
+    # Mirror projector metadata from last run context (don’t recompute here)
+    **({"projector_hash": _rc.get("projector_hash","")} if str(_rc.get("mode","")).startswith("projected") else {}),
+    **({"projector_filename": _rc.get("projector_filename","")} if _rc.get("projector_filename") else {}),
+    **({"projector_consistent_with_d": _rc.get("projector_consistent_with_d", None)} if "projector_consistent_with_d" in _rc else {}),
+})
+
+# Schema/App/Python tags + integrity (assert invariants first if available)
+_assert_cert_invariants = locals().get("_assert_cert_invariants")
+if callable(_assert_cert_invariants):
+    _assert_cert_invariants({**_cert_payload})
+
+_cert_payload["schema_version"] = LAB_SCHEMA_VERSION
+_cert_payload["app_version"]    = getattr(hashes, "APP_VERSION", "v0.1-core")
+_cert_payload["python_version"] = f"python-{platform.python_version()}"
+_cert_payload.setdefault("integrity", {})
+_cert_payload["integrity"]["content_hash"] = hash_json(_cert_payload)
+
+# ---------------- Write cert (prefer package writer; fallback locally) ----------------
+cert_path = None
+full_hash = _cert_payload["integrity"]["content_hash"]
+
+try:
+    result = export_mod.write_cert_json(_cert_payload)  # may return (path, hash) or path
+    if isinstance(result, (list, tuple)) and len(result) >= 2:
+        cert_path, full_hash = result[0], result[1]
     else:
-        st.warning("No cert file was produced. Fix the error above and try again.")
+        cert_path = result
+except Exception as e:
+    # Fallback: certs/overlap__{district}__{policy}__{hash12}.json (atomic)
+    try:
+        outdir = Path("certs"); outdir.mkdir(parents=True, exist_ok=True)
+        safe_policy = _policy_now.replace("/", "_").replace(" ", "_")
+        fname = f"overlap__{_district_id}__{safe_policy}__{full_hash[:12]}.json"
+        p = outdir / fname
+        tmp = p.with_suffix(".json.tmp")
+        blob = _json.dumps(_cert_payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        with open(tmp, "wb") as f:
+            f.write(blob); f.flush(); os.fsync(f.fileno())
+        os.replace(tmp, p)
+        cert_path = str(p)
+    except Exception as e2:
+        st.error(f"Cert write failed: {e} / {e2}")
+
+# ---------------- Post-write UI + bundle quick action ----------------
+if cert_path:
+    st.session_state["last_cert_path"] = cert_path
+    st.session_state["cert_payload"]   = _cert_payload
+    st.session_state["last_run_id"]    = _identity_block.get("run_id")
+    st.success(f"Cert written → `{cert_path}` · {full_hash[:12]}…")
+
+    with st.expander("Bundle (cert + extras)"):
+        extras = [
+            "policy.json",
+            "reports/residual.json",
+            "reports/parity_report.json",
+            "reports/coverage_sampling.csv",
+            "logs/gallery.jsonl",
+            "logs/witnesses.jsonl",
+        ]
+        if _rc.get("mode") == "projected(file)" and _rc.get("projector_filename"):
+            extras.append(_rc.get("projector_filename"))
+        if st.button("Build Cert Bundle", key="build_cert_bundle_btn"):
+            try:
+                bundle_path = build_cert_bundle(
+                    district_id=_district_id,
+                    policy_tag=_policy_now,
+                    cert_path=cert_path,
+                    content_hash=full_hash,
+                    extras=extras
+                )
+                st.success(f"Bundle ready → {bundle_path}")
+            except Exception as e:
+                st.error(f"Bundle build failed: {e}")
+else:
+    st.warning("No cert file was produced. Fix the error above and try again.")
+
 
 
 
