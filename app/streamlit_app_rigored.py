@@ -389,23 +389,21 @@ with st.sidebar:
     )
 
     # Uploaders
-    f_shapes  = st.file_uploader("Shapes (shapes.json)", type=["json"], key="shapes")
-    f_bound   = st.file_uploader("Boundaries (boundaries.json)", type=["json"], key="bound")
-    f_cmap    = st.file_uploader("CMap / Move (Cmap_*.json)", type=["json"], key="cmap")
-    f_support = st.file_uploader("Support policy (support_ck_full.json)", type=["json"], key="support")
-    f_pair    = st.file_uploader("Pairings (pairings.json)", type=["json"], key="pair")
-    f_reps    = st.file_uploader("Reps (reps_for_Cmap_chain_pairing_ok.json)", type=["json"], key="reps")
-    f_triangle= st.file_uploader("Triangle schema (triangle_J_schema.json)", type=["json"], key="tri")
-    seed      = st.text_input("Seed", "super-seed-A")
+    f_shapes   = st.file_uploader("Shapes (shapes.json)",            type=["json"], key="shapes")
+    f_bound    = st.file_uploader("Boundaries (boundaries.json)",    type=["json"], key="bound")
+    f_cmap     = st.file_uploader("CMap / Move (Cmap_*.json)",       type=["json"], key="cmap")
+    f_support  = st.file_uploader("Support policy (optional)",       type=["json"], key="support")
+    f_triangle = st.file_uploader("Triangle schema (optional)",      type=["json"], key="tri")
+    seed       = st.text_input("Seed", "super-seed-A")
 
     # filename stamps for provenance
-    _stamp_filename("fname_shapes", f_shapes)
+    _stamp_filename("fname_shapes",     f_shapes)
     _stamp_filename("fname_boundaries", f_bound)
-    _stamp_filename("fname_cmap", f_cmap)
+    _stamp_filename("fname_cmap",       f_cmap)
 
     # Show raw-bytes hash to help populate DISTRICT_MAP
     if f_bound is not None and hasattr(f_bound, "getvalue"):
-        _raw  = f_bound.getvalue()
+        _raw   = f_bound.getvalue()
         _bhash = _sha256_hex_bytes(_raw)
         st.caption(f"boundaries raw-bytes hash: {_bhash}")
         st.code(f'DISTRICT_MAP["{_bhash}"] = "D?"  # ← set D1/D2/D3/D4', language="python")
@@ -415,17 +413,18 @@ d_shapes = read_json_file(f_shapes)
 d_bound  = read_json_file(f_bound)
 d_cmap   = read_json_file(f_cmap)
 
-# Shared inputs_block in session (used across tabs)
+# Shared inputs_block (SSOT) in session
 st.session_state.setdefault("_inputs_block", {})
-inputs_block = st.session_state["_inputs_block"]
+ib = st.session_state["_inputs_block"]
 
 if d_shapes and d_bound and d_cmap:
     try:
+        # Parse core objects
         shapes     = io.parse_shapes(d_shapes)
         boundaries = io.parse_boundaries(d_bound)
         cmap       = io.parse_cmap(d_cmap)
-        support    = io.parse_support(read_json_file(f_support))  if f_support  else None
-        triangle   = io.parse_triangle_schema(read_json_file(f_triangle)) if f_triangle else None
+        support    = io.parse_support(read_json_file(f_support))            if f_support  else None
+        triangle   = io.parse_triangle_schema(read_json_file(f_triangle))   if f_triangle else None
 
         # Prefer raw-bytes boundary hash when available
         try:
@@ -437,6 +436,7 @@ if d_shapes and d_bound and d_cmap:
         except Exception:
             boundaries_hash_fresh = _sha256_hex_obj(d_bound)
 
+        # Light district info (lane mask + signature)
         d3_block         = (boundaries.blocks.__root__.get("3") or [])
         lane_mask_k3_now = _lane_mask_from_d3(boundaries)
         d3_rows          = len(d3_block)
@@ -447,19 +447,33 @@ if d_shapes and d_bound and d_cmap:
         # Clear stale session bits if boundaries changed
         _prev_bhash = st.session_state.get("_last_boundaries_hash")
         if _prev_bhash and _prev_bhash != boundaries_hash_fresh:
-            st.session_state.pop("ab_compare", None)
-            st.session_state.pop("district_id", None)
-            st.session_state.pop("_projector_cache", None)
+            for k in ("ab_compare", "district_id", "_projector_cache"):
+                st.session_state.pop(k, None)
         st.session_state["_last_boundaries_hash"] = boundaries_hash_fresh
 
-        # Stamp filenames + authoritative hashes (for later cert/bundle)
-        inputs_block["boundaries_filename"] = st.session_state.get("fname_boundaries", "boundaries.json")
-        inputs_block["boundaries_hash"]     = boundaries_hash_fresh
-        inputs_block["shapes_filename"]     = st.session_state.get("fname_shapes", "shapes.json")
-        inputs_block["cmap_filename"]       = st.session_state.get("fname_cmap", "cmap.json")
-        inputs_block.setdefault("U_filename", "shapes.json")
+        # ── SSOT: authoritative filenames, dims, and hashes (no recompute elsewhere) ──
+        C2 = (cmap.blocks.__root__.get("2") or [])
+        C3 = (cmap.blocks.__root__.get("3") or [])
+        # H source = parsed overlap_H if present, else empty cmap shell (consistent schema)
+        H_used = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
 
-        # Mirror fresh district info for later blocks (used by overlap tab)
+        ib["filenames"] = {
+            "boundaries": st.session_state.get("fname_boundaries", "boundaries.json"),
+            "C":          st.session_state.get("fname_cmap",       "cmap.json"),
+            "H":          "H.json",   # adjust if you have an uploader for H
+            "U":          st.session_state.get("fname_shapes",     "shapes.json"),
+        }
+        ib["dims"] = {
+            "n2": len(C2),
+            "n3": (len(C3[0]) if C3 else (len(d3_block[0]) if (d3_block and d3_block[0]) else 0)),
+        }
+        ib["boundaries_hash"] = boundaries_hash_fresh
+        ib["C_hash"]          = hash_json(cmap.dict())
+        ib["H_hash"]          = hash_json(H_used.dict())
+        ib["U_hash"]          = hash_json(shapes.dict())
+        ib["shapes_hash"]     = ib["U_hash"]  # 3D alias
+
+        # Mirror fresh district info for later blocks
         st.session_state["_district_info"] = {
             "district_id":        district_id_fresh,
             "boundaries_hash":    boundaries_hash_fresh,
@@ -468,17 +482,21 @@ if d_shapes and d_bound and d_cmap:
             "d3_rows": d3_rows,
             "d3_cols": d3_cols,
         }
+        st.session_state["district_id"] = district_id_fresh
 
         # Validate schemas
         io.validate_bundle(boundaries, shapes, cmap, support)
         st.success("Core schemas validated ✅")
         st.caption(
             f"district={district_id_fresh} · bhash={boundaries_hash_fresh[:12]} · "
-            f"k3={lane_mask_k3_now} · sig={district_sig}"
+            f"k3={lane_mask_k3_now} · sig={district_sig} · dims(n2,n3)={ib['dims'].get('n2')},{ib['dims'].get('n3')}"
         )
 
         with safe_expander("Hashes / provenance"):
-            named = [("boundaries", boundaries.dict()), ("shapes", shapes.dict()), ("cmap", cmap.dict())]
+            named = [("boundaries", boundaries.dict()),
+                     ("shapes", shapes.dict()),
+                     ("cmap", cmap.dict()),
+                     ("H_used", H_used.dict())]
             if support:  named.append(("support",  support.dict()))
             if triangle: named.append(("triangle", triangle.dict()))
             ch = hashes.bundle_content_hash(named)
@@ -506,6 +524,7 @@ else:
     missing = [name for name, f in [("Shapes", d_shapes), ("Boundaries", d_bound), ("CMap", d_cmap)] if not f]
     st.info("Upload required files: " + ", ".join(missing))
     st.stop()
+
 
 # ---- Policy config helpers (define once, before Tab 2 uses them) -------------
 def cfg_strict() -> dict:
@@ -2581,14 +2600,16 @@ import os, json as _json, csv, hashlib, zipfile, tempfile, shutil, platform, sec
 from pathlib import Path
 from datetime import datetime, timezone
 
-BUNDLES_DIR   = Path("bundles");   BUNDLES_DIR.mkdir(parents=True, exist_ok=True)
-CERTS_DIR     = Path("certs")
-PROJECTORS_DIR= Path("projectors")
-LOGS_DIR      = Path("logs")
-REPORTS_DIR   = Path("reports")
+# Prefer existing DIR constants if your app defined DIRS earlier; otherwise fall back
+CERTS_DIR      = Path(globals().get("CERTS_DIR",      Path("certs")))
+PROJECTORS_DIR = Path(globals().get("PROJECTORS_DIR", Path("projectors")))
+LOGS_DIR       = Path(globals().get("LOGS_DIR",       Path("logs")))
+REPORTS_DIR    = Path(globals().get("REPORTS_DIR",    Path("reports")))
+BUNDLES_DIR    = Path(globals().get("BUNDLES_DIR",    Path("bundles")))
+for _d in (CERTS_DIR, PROJECTORS_DIR, LOGS_DIR, REPORTS_DIR, BUNDLES_DIR):
+    _d.mkdir(parents=True, exist_ok=True)
 
 def _utc_iso_z() -> str:
-    # ISO8601 UTC with trailing Z; zero-pad milliseconds removed for readability
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 def _ymd_hms_compact() -> str:
@@ -2626,8 +2647,7 @@ def build_everything_snapshot() -> str:
     """
     # 1) Collect & parse certs
     cert_files = sorted(CERTS_DIR.glob("*.json"))
-    parsed = []                # list of (path, cert_dict)
-    skipped = []               # list of {"path":..., "reason":...}
+    parsed, skipped = [], []
     for p in cert_files:
         data, err = _read_json_safely(p)
         if err or not isinstance(data, dict):
@@ -2639,62 +2659,60 @@ def build_everything_snapshot() -> str:
         st.info("Nothing to snapshot yet (no parsed certs).")
         return ""
 
-    # 2) Projector references (dedup), districts, index rows
+    # 2) Build sets / rows
     proj_refs = set()
     districts = set()
-    index_rows = []  # rows for cert_index.csv
-    manifest_files = []  # [{path, sha256, size}, ...]
+    index_rows = []
+    manifest_files = []
     for p, cert in parsed:
+        ident = cert.get("identity") or {}
+        pol   = cert.get("policy")   or {}
+        inputs = cert.get("inputs")  or {}
+
         # districts
-        did = ((cert.get("identity") or {}).get("district_id")) or "UNKNOWN"
+        did = ident.get("district_id") or "UNKNOWN"
         districts.add(str(did))
 
-        # file meta
+        # manifest file entry
         manifest_files.append({
             "path": _rel(p),
             "sha256": _sha256_file(p),
             "size": p.stat().st_size,
         })
 
-        # projector (referenced by policy only; snapshots are cert-authoritative)
-        pol = cert.get("policy") or {}
+        # projector refs (policy-only)
         pj_fname = pol.get("projector_filename", "") or ""
         if isinstance(pj_fname, str) and pj_fname.strip():
             proj_refs.add(pj_fname.strip())
 
-        # cert_index columns (robust to either flat inputs.* or inputs.hashes.*)
-        inputs = cert.get("inputs") or {}
-        hashes_flat  = {
+        # index row (tolerate flat or nested inputs.hashes)
+        hashes_flat   = {
             "boundaries_hash": inputs.get("boundaries_hash"),
             "C_hash":          inputs.get("C_hash"),
             "H_hash":          inputs.get("H_hash"),
             "U_hash":          inputs.get("U_hash"),
         }
         hashes_nested = (inputs.get("hashes") or {})
-        def _hx(k):
-            return hashes_flat.get(k) or hashes_nested.get(k) or ""
+        def _hx(k): return hashes_flat.get(k) or hashes_nested.get(k) or ""
 
-        row = [
+        index_rows.append([
             _rel(p),                                              # cert_path
-            (cert.get("integrity") or {}).get("content_hash",""), # content_hash
+            (cert.get("integrity") or {}).get("content_hash",""),# content_hash
             pol.get("policy_tag",""),                             # policy_tag
             did,                                                  # district_id
-            (cert.get("identity") or {}).get("run_id",""),        # run_id
-            (cert.get("identity") or {}).get("timestamp",""),     # written_at_utc
+            ident.get("run_id",""),                               # run_id
+            ident.get("timestamp",""),                            # written_at_utc
             _hx("boundaries_hash"), _hx("C_hash"), _hx("H_hash"), _hx("U_hash"),
             str(pol.get("projector_hash","") or ""),              # projector_hash
             str(pol.get("projector_filename","") or ""),          # projector_filename
-        ]
-        index_rows.append(row)
+        ])
 
-    # 3) Resolve projector files to include; note missing
-    projectors = []
-    missing_projectors = []
+    # 3) Resolve projectors (dedup; allow projectors/<name>.json fallback)
+    projectors, missing_projectors = [], []
     for pj in sorted(proj_refs):
         pj_path = Path(pj)
         if not pj_path.exists():
-            # Allow relative to projectors/
-            alt = PROJECTORS_DIR / Path(pj).name
+            alt = PROJECTORS_DIR / pj_path.name
             if alt.exists():
                 pj_path = alt
             else:
@@ -2711,20 +2729,18 @@ def build_everything_snapshot() -> str:
 
     # 4) Optional logs & reports
     logs_list = []
-    if _nonempty(LOGS_DIR / "gallery.jsonl"):
-        p = LOGS_DIR / "gallery.jsonl"
-        logs_list.append({"path": _rel(p), "sha256": _sha256_file(p), "size": p.stat().st_size})
-    if _nonempty(LOGS_DIR / "witnesses.jsonl"):
-        p = LOGS_DIR / "witnesses.jsonl"
-        logs_list.append({"path": _rel(p), "sha256": _sha256_file(p), "size": p.stat().st_size})
+    for name in ("gallery.jsonl", "witnesses.jsonl"):
+        p = LOGS_DIR / name
+        if _nonempty(p):
+            logs_list.append({"path": _rel(p), "sha256": _sha256_file(p), "size": p.stat().st_size})
 
     reports_list = []
-    for rp in ["parity_report.json", "coverage_sampling.csv", "perturbation_sanity.csv", "fence_stress.csv"]:
+    for rp in ("parity_report.json", "coverage_sampling.csv", "perturbation_sanity.csv", "fence_stress.csv"):
         p = REPORTS_DIR / rp
         if _nonempty(p):
             reports_list.append({"path": _rel(p), "sha256": _sha256_file(p), "size": p.stat().st_size})
 
-    # 5) Manifest
+    # 5) Manifest object
     app_ver = getattr(hashes, "APP_VERSION", "v0.1-core")
     py_ver  = f"python-{platform.python_version()}"
     manifest = {
@@ -2757,24 +2773,25 @@ def build_everything_snapshot() -> str:
         "notes": "Certs are authoritative; only projectors referenced by any cert are included."
     }
 
-    # 6) cert_index.csv (in-memory)
+    # 6) Build cert_index.csv (in-memory string)
     index_header = [
         "cert_path","content_hash","policy_tag","district_id","run_id","written_at_utc",
         "boundaries_hash","C_hash","H_hash","U_hash","projector_hash","projector_filename"
     ]
-    # CSV text with \n endings, no BOM
-    index_csv_lines = []
-    with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8", newline="") as tf:
-        w = csv.writer(tf)
-        w.writerow(index_header)
-        for r in index_rows:
-            w.writerow(r)
-        tf.flush(); os.fsync(tf.fileno()); idx_tmp = tf.name
-    with open(idx_tmp, "r", encoding="utf-8") as tf:
-        index_csv_text = tf.read()
-    os.remove(idx_tmp)
+    fd, idx_tmp = tempfile.mkstemp(prefix=".tmp_cert_index_", suffix=".csv")
+    os.close(fd)
+    try:
+        with open(idx_tmp, "w", newline="", encoding="utf-8") as tf:
+            w = csv.writer(tf)
+            w.writerow(index_header)
+            w.writerows(index_rows)
+        with open(idx_tmp, "r", encoding="utf-8") as tf:
+            index_csv_text = tf.read()
+    finally:
+        try: os.remove(idx_tmp)
+        except Exception: pass
 
-    # 7) Name & create zip (atomic)
+    # 7) Name & create ZIP (atomic write into bundles/)
     tag = next(iter(districts)) if len(districts) == 1 else "MULTI"
     zname = f"snapshot__{tag}__{_ymd_hms_compact()}.zip"
     zpath = BUNDLES_DIR / zname
@@ -2788,78 +2805,22 @@ def build_everything_snapshot() -> str:
             zf.writestr("manifest.json", _json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
             # cert_index.csv
             zf.writestr("cert_index.csv", index_csv_text)
-
-            # add certs
-            for f in manifest_files:
+            # certs, projectors, logs, reports
+            for f in manifest_files + projectors + logs_list + reports_list:
                 p = Path(f["path"])
                 if p.exists():
                     zf.write(p.as_posix(), arcname=f["path"])
-            # add projectors
-            for f in projectors:
-                p = Path(f["path"])
-                if p.exists():
-                    zf.write(p.as_posix(), arcname=f["path"])
-            # logs
-            for f in logs_list:
-                p = Path(f["path"])
-                if p.exists():
-                    zf.write(p.as_posix(), arcname=f["path"])
-            # reports
-            for f in reports_list:
-                p = Path(f["path"])
-                if p.exists():
-                    zf.write(p.as_posix(), arcname=f["path"])
-
         os.replace(tmpzip, zpath)
     finally:
         if tmpzip.exists():
             try: tmpzip.unlink()
             except Exception: pass
 
-    # quick self-check: rows == manifest cert count
+    # Self-check
     if len(index_rows) != manifest["counts"]["certs"]:
         st.warning("Index count does not match manifest cert count (investigate).")
 
     return str(zpath)
-
-# --- UI: Build Snapshot ZIP ---
-with st.expander("Snapshot: Everything (certs, referenced Π, logs, reports)"):
-    if st.button("Build Snapshot ZIP", key="btn_build_snapshot"):
-        try:
-            zp = build_everything_snapshot()
-            if zp:
-                st.success(f"Snapshot ready → {zp}")
-                try:
-                    with open(zp, "rb") as fz:
-                        st.download_button("Download snapshot ZIP", fz, file_name=os.path.basename(zp), key="dl_snapshot_zip")
-                except Exception:
-                    pass
-        except Exception as e:
-            st.error(f"Snapshot failed: {e}")
-
-# ------------------------------ Flush Workspace (drop-in replacement) ------------------------------
-import os, shutil, hashlib, secrets
-from pathlib import Path
-from datetime import datetime, timezone
-
-# Fallbacks if your DIR constants aren't defined somewhere above
-CERTS_DIR      = Path(globals().get("CERTS_DIR",      Path("certs")))
-LOGS_DIR       = Path(globals().get("LOGS_DIR",       Path("logs")))
-REPORTS_DIR    = Path(globals().get("REPORTS_DIR",    Path("reports")))
-BUNDLES_DIR    = Path(globals().get("BUNDLES_DIR",    Path("bundles")))
-PROJECTORS_DIR = Path(globals().get("PROJECTORS_DIR", Path("projectors")))
-
-def _utc_iso(): return datetime.now(timezone.utc).isoformat().replace("+00:00","Z")
-def _stamp_compact(): return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-# same key set you listed (keeps fname_* convenience strings intact)
-_FLUSH_SESSION_KEYS = {
-    "run_ctx","overlap_out","overlap_cfg","overlap_policy_label","overlap_H",
-    "residual_tags","ab_compare","ab_stale","_projector_cache","_projector_cache_ab",
-    "last_cert_path","cert_payload","last_inputs_bundle_path","_gallery_keys",
-    "last_run_id","_last_run_id","_last_boundaries_hash","_district_info",
-    "_inputs_block","parity_pairs","selftests_snapshot"
-}
 
 def _count_files(root: Path) -> int:
     if not root.exists(): return 0
@@ -2868,17 +2829,13 @@ def _count_files(root: Path) -> int:
         n += len(files)
     return n
 
-def flush_workspace(delete_projectors: bool=False) -> dict:
+def flush_workspace(*, delete_projectors: bool=False) -> dict:
     """
     Remove generated artifacts (certs/logs/reports/bundles, and optionally projectors),
-    reset session state, and recreate empty dirs for the next run.
-    Never touches inputs/.
-    Returns a summary dict and sets:
-      - st.session_state['_composite_cache_key'] (new)
-      - st.session_state['_last_flush_token']    (proof token)
+    reset session state, and recreate empty dirs for the next run. Never touches inputs/.
     """
     summary = {
-        "when": _utc_iso(),
+        "when": datetime.now(timezone.utc).isoformat().replace("+00:00","Z"),
         "deleted_dirs": [],
         "recreated_dirs": [],
         "files_removed": 0,
@@ -2886,58 +2843,69 @@ def flush_workspace(delete_projectors: bool=False) -> dict:
         "composite_cache_key_short": "",
     }
 
-    # 1) clear session state (idempotent)
-    for k in list(st.session_state.keys()):
-        if k in _FLUSH_SESSION_KEYS:
-            st.session_state.pop(k, None)
+    # Clear session state (idempotent)
+    for k in (
+        "_inputs_block","_district_info","run_ctx","overlap_out","overlap_H",
+        "residual_tags","ab_compare","last_cert_path","cert_payload",
+        "last_run_id","_gallery_keys","_last_boundaries_hash",
+        "_projector_cache","_projector_cache_ab","parity_pairs","selftests_snapshot"
+    ):
+        st.session_state.pop(k, None)
 
-    # 2) delete & recreate artifact directories (keep inputs/)
+    # Delete & recreate artifact directories
     dirs = [CERTS_DIR, LOGS_DIR, REPORTS_DIR, BUNDLES_DIR]
     if delete_projectors:
         dirs.append(PROJECTORS_DIR)
 
     removed = 0
     for d in dirs:
-        d = Path(d)
         if d.exists():
             removed += _count_files(d)
-            shutil.rmtree(d)  # raise if fails; we want a clear error
-            summary["deleted_dirs"].append(str(d))
+            shutil.rmtree(d)
         d.mkdir(parents=True, exist_ok=True)
+        summary["deleted_dirs"].append(str(d))
         summary["recreated_dirs"].append(str(d))
     summary["files_removed"] = removed
 
-    # 3) fresh composite cache key + proof token
-    ts = _stamp_compact()
-    salt = secrets.token_hex(2).upper()  # 4 hex chars
+    # Fresh composite cache key + proof token
+    ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    salt = secrets.token_hex(2).upper()
     token = f"FLUSH-{ts}-{salt}"
     ckey  = hashlib.sha256((ts+salt).encode("utf-8")).hexdigest()
-
     st.session_state["_composite_cache_key"] = ckey
     st.session_state["_last_flush_token"]    = token
-
     summary["token"] = token
     summary["composite_cache_key_short"] = ckey[:12]
     return summary
 
-with st.expander("Flush Workspace (keep fixtures)"):
-    st.warning("Deletes generated artifacts (certs, logs, reports, bundles). Your `inputs/` remain untouched.")
-    col1, col2 = st.columns([2,2])
-    with col1:
-        ok = st.checkbox("I understand this deletes generated artifacts.", value=False, key="flush_ack")
-    with col2:
-        del_pj = st.checkbox("Also delete projectors/ (advanced)", value=False, key="flush_pj")
+# --- UI: Snapshot & Flush ---
+with safe_expander("Snapshot: Everything (certs, referenced Π, logs, reports)"):
+    c1, c2 = st.columns([2,1])
+    with c1:
+        if st.button("Build Snapshot ZIP", key="btn_build_snapshot"):
+            try:
+                zp = build_everything_snapshot()
+                if zp:
+                    st.success(f"Snapshot ready → {zp}")
+                    try:
+                        with open(zp, "rb") as fz:
+                            st.download_button("Download snapshot ZIP", fz, file_name=os.path.basename(zp), key="dl_snapshot_zip")
+                    except Exception:
+                        pass
+            except Exception as e:
+                st.error(f"Snapshot failed: {e}")
+    with c2:
+        inc_pj = st.checkbox("Also remove projectors", value=False, key="flush_inc_pj")
+        if st.button("Flush Workspace", key="btn_flush_workspace"):
+            try:
+                info = flush_workspace(delete_projectors=inc_pj)
+                st.success(f"Workspace flushed · {info['token']}")
+                st.caption(f"New cache key: `{info['composite_cache_key_short']}` (first 12)")
+                with st.expander("Flush details"):
+                    st.json(info)
+            except Exception as e:
+                st.error(f"Flush failed: {e}")
 
-    if st.button("Flush Workspace", key="btn_flush_all", disabled=not ok):
-        try:
-            info = flush_workspace(delete_projectors=del_pj)
-            st.success(f"Flushed · {info['token']}")
-            st.caption(f"New cache key: `{info['composite_cache_key_short']}` (first 12)")
-            with st.expander("Flush details"):
-                st.json(info)
-        except Exception as e:
-            st.error(f"Flush failed: {e}")
-# -----------------------------------------------------------------------------------------
 
 
 
