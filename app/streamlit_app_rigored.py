@@ -1871,6 +1871,196 @@ if st.button("Run A/B compare", key="ab_run_btn"):
     except Exception as e:
         st.error(f"A/B compare failed: {e}")
 
+# ───────────────────────── Gallery helpers: dedupe + exports ─────────────────────────
+from pathlib import Path
+import json as _json
+import os
+
+LOGS_DIR = Path(globals().get("LOGS_DIR", "logs"))
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+GALLERY_PATH   = LOGS_DIR / "gallery.jsonl"
+WITNESSES_PATH = LOGS_DIR / "witnesses.jsonl"
+
+def _jsonl_read_all(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    out = []
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    out.append(_json.loads(ln))
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return out
+
+def _hx(inputs: dict, k: str) -> str:
+    # supports both flat inputs.hashes.* or inputs.* layouts inside cert
+    if not isinstance(inputs, dict):
+        return ""
+    # flat
+    v = inputs.get(k)
+    if v:
+        return str(v)
+    # nested
+    h = inputs.get("hashes") or {}
+    return str(h.get(k, ""))
+
+def _gallery_key_from_cert(cert: dict) -> tuple:
+    """
+    (district_id, policy_tag, bHash, C_hash, H_hash, U_hash[, projector_hash if projected(file)])
+    """
+    ident  = cert.get("identity", {}) or {}
+    pol    = cert.get("policy",   {}) or {}
+    inputs = cert.get("inputs",   {}) or {}
+
+    district_id = str(ident.get("district_id", "UNKNOWN"))
+    policy_tag  = str(pol.get("policy_tag", "strict"))
+
+    bH = _hx(inputs, "boundaries_hash")
+    cH = _hx(inputs, "C_hash")
+    hH = _hx(inputs, "H_hash")
+    uH = _hx(inputs, "U_hash")
+
+    # Optional projector hash only when projected(file)
+    include_p = policy_tag.endswith(",file)") or "projected(file)" in policy_tag
+    pH = str(pol.get("projector_hash","")) if include_p else None
+
+    base = (district_id, policy_tag, bH, cH, hH, uH)
+    return base + ((pH,) if include_p else ())
+
+def append_gallery_row(cert: dict, *, growth_bumps: int = 0, strictify: str = "tbd") -> bool:
+    """
+    Append once per dedupe key. Returns True if appended, False if duplicate.
+    """
+    # Compute dedupe key from the cert
+    key = _gallery_key_from_cert(cert)
+
+    # Load existing keys
+    existing = set()
+    for r in _jsonl_read_all(GALLERY_PATH):
+        try:
+            # Back-compat: recompute key from stored rows (they contain cert-ish fields)
+            if "dedupe_key" in r:
+                k = tuple(r["dedupe_key"])
+            else:
+                # Fall back to recomputing from embedded fields in row
+                ident  = r.get("identity", {})
+                pol    = r.get("policy",   {})
+                inputs = r.get("hashes",   {}) or r.get("inputs", {}).get("hashes", {}) or {}
+                district_id = str(ident.get("district_id", "UNKNOWN"))
+                policy_tag  = str(pol.get("policy_tag", "strict"))
+                bH = str(inputs.get("boundaries_hash",""))
+                cH = str(inputs.get("C_hash",""))
+                hH = str(inputs.get("H_hash",""))
+                uH = str(inputs.get("U_hash",""))
+                include_p = policy_tag.endswith(",file)") or "projected(file)" in policy_tag
+                pH = str(pol.get("projector_hash","")) if include_p else None
+                k  = (district_id, policy_tag, bH, cH, hH, uH) + ((pH,) if include_p else ())
+            existing.add(k)
+        except Exception:
+            continue
+
+    if key in existing:
+        return False  # duplicate
+
+    # Build row (copy the fields you want visible in the tail/export)
+    row = {
+        "written_at_utc": (cert.get("identity") or {}).get("timestamp", ""),
+        "district":       (cert.get("identity") or {}).get("district_id", "UNKNOWN"),
+        "policy":         (cert.get("policy")   or {}).get("policy_tag", "strict"),
+        "projector_hash": (cert.get("policy")   or {}).get("projector_hash", ""),
+        "projector_filename": (cert.get("policy") or {}).get("projector_filename", ""),
+        "hashes":         (cert.get("inputs")   or {}).get("hashes") or {
+            "boundaries_hash": _hx(cert.get("inputs",{}), "boundaries_hash"),
+            "C_hash":          _hx(cert.get("inputs",{}), "C_hash"),
+            "H_hash":          _hx(cert.get("inputs",{}), "H_hash"),
+            "U_hash":          _hx(cert.get("inputs",{}), "U_hash"),
+        },
+        "content_hash":   (cert.get("integrity") or {}).get("content_hash",""),
+        "growth_bumps":   int(growth_bumps or 0),
+        "strictify":      str(strictify),
+        "dedupe_key":     list(key),
+    }
+
+    # Append using your atomic helper if present; else plain
+    try:
+        if "atomic_append_jsonl" in globals() and callable(globals()["atomic_append_jsonl"]):
+            atomic_append_jsonl(GALLERY_PATH, row)
+        else:
+            GALLERY_PATH.parent.mkdir(parents=True, exist_ok=True)
+            with open(GALLERY_PATH, "a", encoding="utf-8") as f:
+                f.write(_json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n")
+    except Exception as e:
+        raise RuntimeError(f"Could not append Gallery row: {e}") from e
+
+    return True
+
+def append_witness_row(cert: dict, *, reason: str, residual_tag_val: str, note: str = "") -> None:
+    row = {
+        "written_at_utc": (cert.get("identity") or {}).get("timestamp", ""),
+        "district":       (cert.get("identity") or {}).get("district_id", "UNKNOWN"),
+        "policy":         (cert.get("policy")   or {}).get("policy_tag", "strict"),
+        "residual_tag":   residual_tag_val,
+        "reason":         reason,
+        "note":           note or "",
+        "content_hash":   (cert.get("integrity") or {}).get("content_hash",""),
+    }
+    if "atomic_append_jsonl" in globals() and callable(globals()["atomic_append_jsonl"]):
+        atomic_append_jsonl(WITNESSES_PATH, row)
+    else:
+        WITNESSES_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with open(WITNESSES_PATH, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n")
+
+# Optional: exports used by your buttons
+def export_gallery_csv() -> str:
+    import csv, tempfile
+    rows = _jsonl_read_all(GALLERY_PATH)
+    if not rows:
+        raise FileNotFoundError("No gallery.jsonl yet.")
+    header = ["written_at_utc","district","policy","content_hash",
+              "boundaries_hash","C_hash","H_hash","U_hash","projector_hash","projector_filename","growth_bumps","strictify"]
+    fd, tmp = tempfile.mkstemp(prefix="gallery_export_", suffix=".csv", dir=LOGS_DIR)
+    os.close(fd)
+    outp = Path(tmp)
+    with outp.open("w", newline="", encoding="utf-8") as f:
+        w = csv.writer(f)
+        w.writerow(header)
+        for r in rows:
+            h = r.get("hashes") or {}
+            w.writerow([
+                r.get("written_at_utc",""),
+                r.get("district",""),
+                r.get("policy",""),
+                r.get("content_hash",""),
+                h.get("boundaries_hash",""),
+                h.get("C_hash",""),
+                h.get("H_hash",""),
+                h.get("U_hash",""),
+                r.get("projector_hash",""),
+                r.get("projector_filename",""),
+                r.get("growth_bumps",0),
+                r.get("strictify",""),
+            ])
+    return str(outp)
+
+def export_witnesses_json() -> str:
+    import tempfile
+    rows = _jsonl_read_all(WITNESSES_PATH)
+    if not rows:
+        raise FileNotFoundError("No witnesses.jsonl yet.")
+    fd, tmp = tempfile.mkstemp(prefix="witnesses_export_", suffix=".json", dir=LOGS_DIR)
+    os.close(fd)
+    outp = Path(tmp)
+    with outp.open("w", encoding="utf-8") as f:
+        _json.dump(rows, f, ensure_ascii=False, indent=2, sort_keys=True)
+    return str(outp)
 
 
     # ───────────────────────── Gallery / Witness actions ─────────────────────────
