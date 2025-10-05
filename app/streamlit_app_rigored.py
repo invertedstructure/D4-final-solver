@@ -1373,8 +1373,9 @@ with st.expander("Bundle (cert + extras)"):
         "logs/gallery.jsonl",
         "logs/witnesses.jsonl",
     ]
-    if _rc.get("mode") == "projected(file)") and _rc.get("projector_filename"):
+    if _rc.get("mode") == "projected(file)" and _rc.get("projector_filename"):
         extras.append(_rc.get("projector_filename"))
+
     if st.button("Build Cert Bundle", key="build_cert_bundle_btn"):
         try:
             bundle_path = build_cert_bundle(
@@ -1387,6 +1388,7 @@ with st.expander("Bundle (cert + extras)"):
             st.success(f"Bundle ready → {bundle_path}")
         except Exception as e:
             st.error(f"Bundle build failed: {e}")
+
 
 
 
