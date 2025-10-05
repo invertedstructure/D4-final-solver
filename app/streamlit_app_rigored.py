@@ -990,6 +990,36 @@ if _ab:
     st.caption(f"A/B snapshot: {'🟢 fresh' if ab_fresh else '🟡 stale (will not embed)'}")
 else:
     st.caption("A/B snapshot: —")
+# --- A/B freshness pill (drop-in; place right under the run-stamp) ---
+_ss = st.session_state
+_ab = _ss.get("ab_compare") or {}
+_ib = _ss.get("_inputs_block") or {}
+
+def _hz(v):  # normalize to string for stable comparisons
+    return v if isinstance(v, str) else ""
+
+_inputs_sig_now = [
+    _hz(_ib.get("boundaries_hash", "")),
+    _hz(_ib.get("C_hash", "")),
+    _hz(_ib.get("H_hash", "")),
+    _hz(_ib.get("U_hash", "")),
+    _hz(_ib.get("shapes_hash", "")),
+]
+
+if _ab:
+    _fresh = (_ab.get("inputs_sig") == _inputs_sig_now)
+    st.caption("A/B snapshot: 🟢 fresh (will embed in next cert)" if _fresh
+               else "A/B snapshot: 🟡 stale (won’t embed)")
+    if not _fresh:
+        col_f1, col_f2 = st.columns([2, 3])
+        with col_f1:
+            if st.button("Clear stale A/B", key="btn_ab_clear"):
+                _ss.pop("ab_compare", None)
+                st.success("Cleared A/B snapshot. Re-run A/B to refresh.")
+        with col_f2:
+            st.caption("Tip: Re-run A/B after changing inputs to refresh the snapshot.")
+else:
+    st.caption("A/B snapshot: —")
 
 
 
@@ -1366,6 +1396,38 @@ if not (inputs_block_payload["dims"].get("n2") and inputs_block_payload["dims"].
     else:
         if _ab:
             st.caption("A/B snapshot is stale — not embedding into the cert (hashes changed).")
+
+    # --- A/B freshness pill (drop-in; place right under the run-stamp) ---
+_ss = st.session_state
+_ab = _ss.get("ab_compare") or {}
+_ib = _ss.get("_inputs_block") or {}
+
+def _hz(v):  # normalize to string for stable comparisons
+    return v if isinstance(v, str) else ""
+
+_inputs_sig_now = [
+    _hz(_ib.get("boundaries_hash", "")),
+    _hz(_ib.get("C_hash", "")),
+    _hz(_ib.get("H_hash", "")),
+    _hz(_ib.get("U_hash", "")),
+    _hz(_ib.get("shapes_hash", "")),
+]
+
+if _ab:
+    _fresh = (_ab.get("inputs_sig") == _inputs_sig_now)
+    st.caption("A/B snapshot: 🟢 fresh (will embed in next cert)" if _fresh
+               else "A/B snapshot: 🟡 stale (won’t embed)")
+    if not _fresh:
+        col_f1, col_f2 = st.columns([2, 3])
+        with col_f1:
+            if st.button("Clear stale A/B", key="btn_ab_clear"):
+                _ss.pop("ab_compare", None)
+                st.success("Cleared A/B snapshot. Re-run A/B to refresh.")
+        with col_f2:
+            st.caption("Tip: Re-run A/B after changing inputs to refresh the snapshot.")
+else:
+    st.caption("A/B snapshot: —")
+
 
     # ---------------- Schema/App/Python tags + integrity (after invariants) ----------------
     # assert invariants *before* content_hash/write
@@ -1870,6 +1932,38 @@ if st.button("Run A/B compare", key="ab_run_btn"):
         st.error(f"A/B projected(file) invalid: {e}")
     except Exception as e:
         st.error(f"A/B compare failed: {e}")
+# --- A/B freshness pill (drop-in; place right under the run-stamp) ---
+_ss = st.session_state
+_ab = _ss.get("ab_compare") or {}
+_ib = _ss.get("_inputs_block") or {}
+
+def _hz(v):  # normalize to string for stable comparisons
+    return v if isinstance(v, str) else ""
+
+_inputs_sig_now = [
+    _hz(_ib.get("boundaries_hash", "")),
+    _hz(_ib.get("C_hash", "")),
+    _hz(_ib.get("H_hash", "")),
+    _hz(_ib.get("U_hash", "")),
+    _hz(_ib.get("shapes_hash", "")),
+]
+
+if _ab:
+    _fresh = (_ab.get("inputs_sig") == _inputs_sig_now)
+    st.caption("A/B snapshot: 🟢 fresh (will embed in next cert)" if _fresh
+               else "A/B snapshot: 🟡 stale (won’t embed)")
+    if not _fresh:
+        col_f1, col_f2 = st.columns([2, 3])
+        with col_f1:
+            if st.button("Clear stale A/B", key="btn_ab_clear"):
+                _ss.pop("ab_compare", None)
+                st.success("Cleared A/B snapshot. Re-run A/B to refresh.")
+        with col_f2:
+            st.caption("Tip: Re-run A/B after changing inputs to refresh the snapshot.")
+else:
+    st.caption("A/B snapshot: —")
+
+
 
 # ───────────────────────── Gallery helpers: dedupe + exports ─────────────────────────
 from pathlib import Path
