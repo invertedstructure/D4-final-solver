@@ -145,6 +145,41 @@ def safe_expander(title: str, **kwargs):
     finally:
         _EXP_STACK.pop()
 
+# --- safe_expander: never nest real expanders (robust) ---
+from contextlib import contextmanager
+from streamlit.errors import StreamlitAPIException  # <- NEW
+
+_EXP_STACK: list[str] = []
+
+@contextmanager
+def safe_expander(title: str, **kwargs):
+    """
+    Like st.expander, but never nests a real expander:
+    - If already inside any expander (ours or someone else's), fall back to a container.
+    - If Streamlit still raises, catch and fallback gracefully.
+    """
+    nested = bool(_EXP_STACK)
+    _EXP_STACK.append(title)
+    try:
+        if nested:
+            st.caption(f"⚠️ Nested section: **{title}** (rendered as container)")
+            st.markdown(f"**{title}**")
+            with st.container():
+                yield
+        else:
+            try:
+                with st.expander(title, **kwargs):
+                    yield
+            except StreamlitAPIException:
+                # We *are* inside some expander; degrade to container
+                st.caption(f"⚠️ Nested section: **{title}** (container fallback)")
+                st.markdown(f"**{title}**")
+                with st.container():
+                    yield
+    finally:
+        _EXP_STACK.pop()
+
+
 
 # -- file-uploader helpers ------------------------------------------------------
 def read_json_file(upload):
@@ -1448,35 +1483,54 @@ else:
         policy_block.pop("projector_consistent_with_d", None)
 
     # ---------------- Inputs (copy from SSOT; enforce dims) ----------------
-    inputs_block_payload = {
-        "filenames": _ib.get("filenames", {
-            "boundaries": st.session_state.get("fname_boundaries","boundaries.json"),
-            "C":          st.session_state.get("fname_cmap","cmap.json"),
-            "H":          st.session_state.get("fname_h","H.json"),
-            "U":          st.session_state.get("fname_shapes","shapes.json"),
-        }),
-        "dims": _ib.get("dims", {}),
-        "boundaries_hash": _ib.get("boundaries_hash",""),
-        "C_hash": _ib.get("C_hash",""),
-        "H_hash": _ib.get("H_hash",""),
-        "U_hash": _ib.get("U_hash",""),
-        "shapes_hash": _ib.get("shapes_hash", _ib.get("U_hash","")),
-    }
-    if _rc.get("mode") == "projected(file)":
-        inputs_block_payload.setdefault("filenames", {})["projector"] = _rc.get("projector_filename","")
+inputs_block_payload = {
+    "filenames": _ib.get("filenames", {
+        "boundaries": st.session_state.get("fname_boundaries","boundaries.json"),
+        "C":          st.session_state.get("fname_cmap","cmap.json"),
+        "H":          st.session_state.get("fname_h","H.json"),
+        "U":          st.session_state.get("fname_shapes","shapes.json"),
+    }),
+    "dims": _ib.get("dims", {}),
+    "boundaries_hash": _ib.get("boundaries_hash",""),
+    "C_hash": _ib.get("C_hash",""),
+    "H_hash": _ib.get("H_hash",""),
+    "U_hash": _ib.get("U_hash",""),
+    "shapes_hash": _ib.get("shapes_hash", _ib.get("U_hash","")),
+}
+if _rc.get("mode") == "projected(file)":
+    inputs_block_payload.setdefault("filenames", {})["projector"] = _rc.get("projector_filename","")
 
-    # enforce dims present for 3D lock
-    _dims = inputs_block_payload.get("dims") or {}
-    if not (_dims.get("n2") and _dims.get("n3")):
-        raise ValueError("CERT_INVAR:inputs-dims-missing:n2-n3")
+# ---- robust dims: prefer SSOT, else gentle backfill from in-memory matrices ----
+_dims = dict(inputs_block_payload.get("dims") or {})
+# n3 candidates: C3 rows, else d3 columns
+_n3 = _dims.get("n3")
+if not _n3:
+    try: _n3 = len(C3) if C3 else (len(d3[0]) if (d3 and d3[0]) else None)
+    except Exception: _n3 = None
+# n2 candidates: C2 rows (if you track it), else d2 columns from boundaries if available
+_n2 = _dims.get("n2")
+try:
+    C2 = (cmap.blocks.__root__.get("2") or [])
+    _n2 = _n2 or (len(C2) if C2 else None)
+except Exception:
+    pass
+try:
+    d2 = (boundaries.blocks.__root__.get("2") or [])  # only if 'boundaries' object is in scope elsewhere
+    _n2 = _n2 or (len(d2[0]) if (d2 and d2[0]) else None)
+except Exception:
+    pass
 
-    # diagnostics / signatures
-    diagnostics_block = {
-        "lane_mask_k3": lane_mask,
-        "lane_vec_H2d3": lane_vec_H2d3,
-        "lane_vec_C3plusI3": lane_vec_C3plusI3,
-    }
-    signatures_block = {"d_signature": d_signature, "fixture_signature": fixture_signature}
+# commit backfilled dims (don’t lie: only set if we actually found numbers)
+_dims_out = {}
+if isinstance(_n2, int) and _n2 >= 0: _dims_out["n2"] = _n2
+if isinstance(_n3, int) and _n3 >= 0: _dims_out["n3"] = _n3
+inputs_block_payload["dims"] = {**_dims, **_dims_out}
+
+# if still missing, warn and stop THIS block (don’t crash the app)
+if not (inputs_block_payload["dims"].get("n2") and inputs_block_payload["dims"].get("n3")):
+    st.warning("Cert blocked: _inputs_block.dims missing n2/n3 (run Overlap or load a fixture to populate).")
+    st.stop()  # aborts the rest of this script run cleanly
+
 
     # ---------------- Promotion logic ----------------
     grid_ok  = bool(_out.get("grid", True))
