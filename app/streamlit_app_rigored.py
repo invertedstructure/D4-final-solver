@@ -77,6 +77,18 @@ io = otio
 # App version string used elsewhere
 APP_VERSION = getattr(hashes, "APP_VERSION", "v0.1-core")
 
+# ───────────────────── DISTRICT MAP (optional) ─────────────────────
+# Map raw-bytes sha256(boundaries.json) → human-friendly district label.
+# Fill as you discover hashes (the sidebar shows the hash to copy/paste).
+DISTRICT_MAP: dict[str, str] = {
+    "9da8b7f605c113ee059160cdaf9f93fe77e181476c72e37eadb502e7e7ef9701": "D1",
+    "4356e6b608443b315d7abc50872ed97a9e2c837ac8b85879394495e64ec71521": "D2",
+    "28f8db2a822cb765e841a35c2850a745c667f4228e782d0cfdbcb710fd4fecb9": "D3",
+    "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
+}
+
+
+
 
 
 # ---------- stable hashing (bytes + json-obj) ----------
