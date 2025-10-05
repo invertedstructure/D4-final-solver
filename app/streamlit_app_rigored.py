@@ -2283,6 +2283,195 @@ if st.button("Freeze AUTO → FILE", key="btn_freeze_auto_to_file", disabled=not
                     st.success(f"Loaded {n} pairs from {import_path}")
                 except Exception as e:
                     st.error(f"Import failed: {e}")
+
+# ------------------------ Parity Runner (mirrors active policy) ------------------------
+from pathlib import Path
+import json as _json, os, tempfile
+from datetime import datetime, timezone
+
+PARITY_SCHEMA_VERSION = "1.0.0"
+PARITY_OUT_PATH = Path("reports") / "parity_report.json"
+PARITY_OUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+def _iso_utc_now(): return datetime.now(timezone.utc).isoformat()
+
+def _atomic_write_json(path: Path, payload: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as tmp:
+        _json.dump(payload, tmp, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
+    os.replace(tmp_name, path)
+
+def _cfg_from_run_ctx(rc: dict) -> dict | None:
+    """
+    Mirror the policy that produced the last Run Overlap.
+    - strict       -> return None (no projected leg)
+    - projected(auto) -> cfg with source.3='auto'
+    - projected(file) -> cfg with source.3='file' and projector_files.3=rc.projector_filename
+    """
+    mode = (rc or {}).get("mode", "strict")
+    if mode == "strict":
+        return None
+    cfg = cfg_projected_base()
+    if mode == "projected(auto)":
+        cfg["source"]["3"] = "auto"
+        cfg["projector_files"]["3"] = cfg["projector_files"].get("3", "projector_D3.json")
+        return cfg
+    if mode == "projected(file)":
+        cfg["source"]["3"] = "file"
+        pj = (rc or {}).get("projector_filename","")
+        if pj:
+            cfg.setdefault("projector_files", {})["3"] = pj
+        return cfg
+    return None
+
+def _and_pair(left_bool: bool | None, right_bool: bool | None) -> bool | None:
+    if left_bool is None or right_bool is None:
+        return None
+    return bool(left_bool) and bool(right_bool)
+
+def _one_leg(boundaries_obj, cmap_obj, H_obj, projection_cfg: dict | None):
+    """Run overlap on one fixture; returns dict like {'2':{'eq':..}, '3':{'eq':..}}"""
+    if projection_cfg is None:
+        return overlap_gate.overlap_check(boundaries_obj, cmap_obj, H_obj)
+    # Validate FILE Π early
+    _P, _meta = projector_choose_active(projection_cfg, boundaries_obj)
+    return overlap_gate.overlap_check(boundaries_obj, cmap_obj, H_obj, projection_config=projection_cfg)
+
+def _short(x): return (x or "")[:12]
+
+with safe_expander("Parity: run suite (mirrors active policy)"):
+    pairs = st.session_state.get("parity_pairs", []) or []
+    rc    = st.session_state.get("run_ctx", {}) or {}
+    ib    = st.session_state.get("_inputs_block", {}) or {}
+
+    if not pairs:
+        st.info("No parity pairs queued. Use the import/queue controls above.")
+    else:
+        policy_tag = rc.get("policy_tag", policy_label_from_cfg(cfg_strict()))
+        pj_hash    = rc.get("projector_hash","") if rc.get("mode","").startswith("projected") else ""
+        cfg_proj   = _cfg_from_run_ctx(rc)  # None if strict
+
+        if st.button("Run Parity Suite", key="btn_run_parity"):
+            rows_preview = []
+            report_pairs = []
+            errors = []
+
+            for idx, row in enumerate(pairs, start=1):
+                label = row.get("label","PAIR")
+                L = row.get("left",  {})
+                R = row.get("right", {})
+
+                try:
+                    # Each fixture already parsed in your queue helpers
+                    bL, cL, hL = L["boundaries"], L["cmap"], L["H"]
+                    bR, cR, hR = R["boundaries"], R["cmap"], R["H"]
+
+                    out_L_strict = _one_leg(bL, cL, hL, None)
+                    out_R_strict = _one_leg(bR, cR, hR, None)
+
+                    s_k2 = _and_pair(out_L_strict.get("2",{}).get("eq", False),
+                                     out_R_strict.get("2",{}).get("eq", False))
+                    s_k3 = _and_pair(out_L_strict.get("3",{}).get("eq", False),
+                                     out_R_strict.get("3",{}).get("eq", False))
+
+                    if cfg_proj is not None:
+                        try:
+                            out_L_proj = _one_leg(bL, cL, hL, cfg_proj)
+                            out_R_proj = _one_leg(bR, cR, hR, cfg_proj)
+                            p_k2 = _and_pair(out_L_proj.get("2",{}).get("eq", False),
+                                             out_R_proj.get("2",{}).get("eq", False))
+                            p_k3 = _and_pair(out_L_proj.get("3",{}).get("eq", False),
+                                             out_R_proj.get("3",{}).get("eq", False))
+                        except ValueError as e:
+                            # FILE Π validator hit; treat projected as failure for this pair
+                            p_k2, p_k3 = False, False
+                            errors.append(f"{label}: {e}")
+                    else:
+                        p_k2, p_k3 = None, None  # strict mode only
+
+                    report_pairs.append({
+                        "label": label,
+                        "strict":    {"k2": bool(s_k2) if s_k2 is not None else None,
+                                      "k3": bool(s_k3) if s_k3 is not None else None},
+                        "projected": {"k2": (None if p_k2 is None else bool(p_k2)),
+                                      "k3": (None if p_k3 is None else bool(p_k3))},
+                    })
+                    rows_preview.append([label,
+                                         "✅" if s_k3 else "❌",
+                                         "—" if p_k3 is None else ("✅" if p_k3 else "❌")])
+
+                except Exception as e:
+                    errors.append(f"{label}: {e}")
+
+            payload = {
+                "schema_version": PARITY_SCHEMA_VERSION,
+                "written_at_utc": _iso_utc_now(),
+                "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
+                "policy_tag": policy_tag,
+                **({"projector_hash": pj_hash} if pj_hash else {}),
+                "pairs": report_pairs,
+                # provenance: copy hashes (SSOT)
+                "hashes": {
+                    "boundaries_hash": ib.get("boundaries_hash",""),
+                    "C_hash":          ib.get("C_hash",""),
+                    "H_hash":          ib.get("H_hash",""),
+                    "U_hash":          ib.get("U_hash",""),
+                },
+                **({"errors": errors} if errors else {}),
+            }
+
+            try:
+                _atomic_write_json(PARITY_OUT_PATH, payload)
+                st.success(f"Parity report saved → {PARITY_OUT_PATH}")
+                # tiny preview table
+                st.caption("Summary (per pair): strict_k3 / projected_k3")
+                for r in rows_preview:
+                    st.write(f"• {r[0]} → strict={r[1]} · projected={r[2]}")
+                # one-click download
+                with open(PARITY_OUT_PATH, "rb") as f:
+                    st.download_button("Download parity_report.json", f, file_name="parity_report.json", key="dl_parity_report")
+                if errors:
+                    st.warning("Some pairs had issues; details recorded in the report’s `errors` field.")
+            except Exception as e:
+                st.error(f"Could not write parity_report.json: {e}")
+                
+                # Build a compact preview table for the UI (no recompute)
+import pandas as pd
+
+def _emoji(v):
+    if v is None: return "—"
+    return "✅" if bool(v) else "❌"
+
+# Flatten the pairs into a table
+table_rows = []
+for p in report_pairs:
+    table_rows.append({
+        "Pair": p["label"],
+        "Strict k2": _emoji(p["strict"]["k2"]),
+        "Strict k3": _emoji(p["strict"]["k3"]),
+        "Projected k2": _emoji(None if p["projected"]["k2"] is None else p["projected"]["k2"]),
+        "Projected k3": _emoji(None if p["projected"]["k3"] is None else p["projected"]["k3"]),
+    })
+
+df = pd.DataFrame(table_rows, columns=[
+    "Pair", "Strict k2", "Strict k3", "Projected k2", "Projected k3"
+])
+
+st.caption("Parity summary")
+st.dataframe(df, use_container_width=True)
+
+# Optional: offer CSV export of the preview (separate from parity_report.json)
+try:
+    csv_bytes = df.to_csv(index=False).encode("utf-8")
+    st.download_button("Download parity_summary.csv", csv_bytes, file_name="parity_summary.csv")
+except Exception:
+    pass
+
+
+
+
+
                     
                     # ======================= Snapshot ZIP + Flush Workspace =======================
 import os, json as _json, csv, hashlib, zipfile, tempfile, shutil, platform, secrets
