@@ -1021,6 +1021,33 @@ if _ab:
 else:
     st.caption("A/B snapshot: —")
 
+# ── Debug: lane mask & projector diag (place near top of Tab 2) ───────────────
+with safe_expander("Debug · lane mask & Π diag"):
+    try:
+        d3_now = (boundaries.blocks.__root__.get("3") or [])
+        n3_now = len(d3_now[0]) if (d3_now and d3_now[0]) else 0
+
+        # lane mask from boundaries (your existing helper already does this)
+        lm_now = _lane_mask_from_d3(boundaries)
+        st.write(f"n3={n3_now} · lane_mask(d3) = {lm_now}")
+
+        # if FILE projector active, show its diag
+        cfg_now = st.session_state.get("overlap_cfg") or {}
+        if (cfg_now.get("source", {}) or {}).get("3") == "file":
+            try:
+                P_file, _meta = projector_choose_active(cfg_now, boundaries)
+                diagP = [int(P_file[i][i] & 1) for i in range(len(P_file))] if P_file else []
+                st.write(f"diag(P_file) = {diagP}")
+                if diagP != lm_now and lm_now:
+                    st.warning("diag(P) ≠ lane_mask(d3) → FILE projector will fail validation.")
+            except Exception as e:
+                st.error(f"Could not load FILE projector: {e}")
+        else:
+            st.caption("No FILE projector active (strict/AUTO).")
+    except Exception as e:
+        st.error(f"Debug probe failed: {e}")
+
+
 
 
 
@@ -2177,251 +2204,149 @@ with safe_expander("Logs: exports (optional)"):
 
 
 
-    # ------------------------ Freeze AUTO → FILE (write Π + registry + switch + re-run) ------------------------
-from pathlib import Path as _Path
-
-_rc = st.session_state.get("run_ctx", {}) or {}
-_out = st.session_state.get("overlap_out", {}) or {}
-_di  = st.session_state.get("_district_info", {}) or {}
-_ib  = st.session_state.get("_inputs_block", {}) or {}
-
-_can_freeze = (_rc.get("mode") == "projected(auto)") and bool(_out.get("3", {}).get("eq", False))
-st.caption("Freeze AUTO → FILE writes Π to ./projectors/, logs it, switches policy to file, and re-runs.")
-
-if st.button("Freeze AUTO → FILE", key="btn_freeze_auto_to_file", disabled=not _can_freeze):
-    try:
-        P = _rc.get("P_active") or []
-        if not P:
-            raise ValueError("No AUTO projector present. Run Overlap in projected(auto) first.")
-
-        n3 = int(_rc.get("n3", 0))
-        lm = list(_rc.get("lane_mask_k3", []))
-        if n3 <= 0:
-            raise ValueError("n3 not known in run context.")
-
-        # Basic shape/idempotence/diagonal checks (light sanity; full validator already ran)
-        if len(P) != n3 or any(len(r) != n3 for r in P):
-            raise ValueError("P3_SHAPE: projector is not n3×n3.")
-
-        # (Optional) quick diag vs lane check; we don't block here (AUTO came from our pipeline),
-        # but it's helpful to warn if something is off.
-        diag = [(int(P[i][i]) & 1) for i in range(n3)]
-        if lm and diag[:len(lm)] != [int(x) & 1 for x in lm]:
-            st.warning("AUTO Π diagonal does not match lane mask; freezing anyway (source=AUTO).")
-
-        # Prepare payload + paths
-        district = (_di.get("district_id") or st.session_state.get("district_id") or "UNKNOWN")
-        pj_hash  = hash_matrix_norm(P)
-        pj_name  = f"projector_{district}.json"
-        pj_path  = _Path("projectors") / pj_name
-
-        _Path("projectors").mkdir(parents=True, exist_ok=True)
-
-        pj_payload = {
-            "schema_version": "1.0.0",
-            "written_at_utc": hashes.timestamp_iso_lisbon(),
-            "app_version":    getattr(hashes, "APP_VERSION", "v0.1-core"),
-            "blocks": {"3": P},
-        }
-
-        # Atomic write of projector file
-        tmp = pj_path.with_suffix(pj_path.suffix + ".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            _json.dump(pj_payload, f, indent=2)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, pj_path)
-
-        # Append to registry (atomic JSONL)
-        reg_row = {
-            "schema_version": "1.0.0",
-            "written_at_utc": hashes.timestamp_iso_lisbon(),
-            "app_version":    getattr(hashes, "APP_VERSION", "v0.1-core"),
-            "district":       district,
-            "lane_mask_k3":   lm,
-            "filename":       str(pj_path.as_posix()),
-            "projector_hash": pj_hash,
-        }
-        try:
-            atomic_append_jsonl(_Path("projectors") / "projector_registry.jsonl", reg_row)
-        except NameError:
-            # Fallback if atomic_append_jsonl isn't in scope
-            with open(_Path("projectors") / "projector_registry.jsonl", "a", encoding="utf-8") as f:
-                f.write(_json.dumps(reg_row, separators=(",", ":"), sort_keys=True) + "\n")
-
-        # Switch UI policy to FILE + point to saved path
-        st.session_state["ov_last_pj_path"] = str(pj_path.as_posix())
-        st.session_state["ov_policy_choice"] = "projected(file)"
-
-        # Bust run caches so the next run reflects FILE mode
-        for k in ("run_ctx", "overlap_out", "residual_tags", "ab_compare"):
-            st.session_state.pop(k, None)
-
-        # Re-run Overlap immediately using FILE policy
-        run_overlap()
-
-        st.success(f"Frozen AUTO → FILE ✔︎  Π={pj_hash[:12]}…  → {pj_path}")
-        st.caption("Active policy switched to projected(file) and re-run completed.")
-
-    except Exception as e:
-        st.error(f"Freeze failed: {e}")
-
-    # ------------------------------ Projector Freezer (AUTO → FILE) ------------------------------
+   # ------------------------ Freeze AUTO → FILE (write Π + registry + switch + re-run) ------------------------
 from pathlib import Path
-import os, json, tempfile, shutil, hashlib
+import os, json as _json, hashlib, tempfile
 from datetime import datetime, timezone
 
 PROJECTORS_DIR = Path("projectors"); PROJECTORS_DIR.mkdir(parents=True, exist_ok=True)
-PJ_REG_PATH = PROJECTORS_DIR / "projector_registry.jsonl"
+PJ_REG_PATH    = PROJECTORS_DIR / "projector_registry.jsonl"
 
-def _utc_iso(): return datetime.now(timezone.utc).isoformat()
+def _utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 def _sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
-def _atomic_write_json(path: Path, payload: dict):
+def _atomic_write_json(path: Path, payload: dict) -> str:
+    """Write JSON atomically; returns sha256 of bytes written."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("wb", delete=False, dir=path.parent) as tmp:
-        blob = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        tmp.write(blob); tmp.flush(); os.fsync(tmp.fileno())
-        tmp_name = tmp.name
-    os.replace(tmp_name, path)
-    return _sha256_bytes(blob), len(blob)
+    blob = _json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=".tmp_", suffix=".json")
+    os.close(fd)
+    tmp = Path(tmp_name)
+    try:
+        with open(tmp, "wb") as f:
+            f.write(blob); f.flush(); os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try: tmp.unlink()
+            except Exception: pass
+    return _sha256_bytes(blob)
 
-def _dedupe_registry_key(row: dict) -> tuple:
-    # Prevent duplicate rows by (district, projector_hash)
-    return (row.get("district",""), row.get("projector_hash",""))
-
-def _append_registry_row(row: dict):
-    # In-memory dedupe to avoid spamming rows during same session
-    reg = st.session_state.setdefault("_pj_registry_keys", set())
-    key = _dedupe_registry_key(row)
-    if key in reg:
+def _append_registry_row(row: dict) -> bool:
+    """Dedup by (district, projector_hash) within-session; then append JSONL (atomic if helper exists)."""
+    keys = st.session_state.setdefault("_pj_registry_keys", set())
+    key  = (row.get("district",""), row.get("projector_hash",""))
+    if key in keys:
         return False
-    reg.add(key)
-    PROJECTORS_DIR.mkdir(parents=True, exist_ok=True)
-    atomic_append_jsonl(PJ_REG_PATH, row)
+    keys.add(key)
+    try:
+        # Prefer app's atomic JSONL helper if available
+        atomic_append_jsonl(PJ_REG_PATH, row)  # type: ignore
+    except Exception:
+        with open(PJ_REG_PATH, "a", encoding="utf-8") as f:
+            f.write(_json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n")
     return True
 
-def _diag_projector_from_lane_mask(lane_mask: list[int]) -> list[list[int]]:
-    n = len(lane_mask or [])
-    return [[1 if (i==j and int(lane_mask[j])==1) else 0 for j in range(n)] for i in range(n)]
+def _diag_from_lane_mask(lm: list[int]) -> list[list[int]]:
+    n = len(lm or [])
+    return [[1 if (i == j and int(lm[j]) == 1) else 0 for j in range(n)] for i in range(n)]
 
-def _freeze_projector(*, district_id: str, lane_mask_k3: list[int], filename_hint: str|None = None) -> dict:
-    """
-    Write projector file from current lane mask (k=3), return metadata.
-    """
-    if not lane_mask_k3:
-        raise ValueError("No lane mask available (run Overlap first).")
-    P3 = _diag_projector_from_lane_mask(lane_mask_k3)
-    # filename
-    base = filename_hint or f"projector_{district_id or 'UNKNOWN'}.json"
-    pj_path = PROJECTORS_DIR / base
-    payload = {
-        "schema_version": "1.0.0",
-        "written_at_utc": _utc_iso(),
-        "blocks": {"3": P3},
-    }
-    pj_hash, pj_size = _atomic_write_json(pj_path, payload)
-    return {
-        "path": str(pj_path),
-        "projector_hash": pj_hash,
-        "bytes": pj_size,
-        "lane_mask_k3": lane_mask_k3[:],
-    }
+with safe_expander("Freeze AUTO → FILE"):
+    _rc = st.session_state.get("run_ctx") or {}
+    _out = st.session_state.get("overlap_out") or {}
+    _di  = st.session_state.get("_district_info") or {}
 
-def _switch_policy_to_file_and_rerun(pj_path: str):
-    # Flip the UI radio to 'projected(file)' and stash the file path
-    st.session_state["ov_policy_choice"] = "projected(file)"
-    st.session_state["ov_last_pj_path"] = pj_path
-    # Bust caches so re-run is clean
-    for k in ("run_ctx","overlap_out","residual_tags","ab_compare","_projector_cache","_projector_cache_ab"):
-        st.session_state.pop(k, None)
-    # Re-run overlap with new policy
-    run_overlap()
+    eligible = (_rc.get("mode") == "projected(auto)") and bool(_out.get("3",{}).get("eq", False))
+    if not eligible:
+        st.caption("Requires a green k3 result in projected(auto).")
+    default_name = f"projector_{_di.get('district_id','UNKNOWN')}.json"
+    colA, colB = st.columns([3,1])
+    with colA:
+        pj_basename = st.text_input("Save as", value=default_name, help="Saved under ./projectors/")
+    with colB:
+        overwrite_ok = st.checkbox("Overwrite", value=False)
 
-def _validate_projector_file(pj_path: str) -> dict:
-    """
-    Run the same validator used during overlap for FILE Π.
-    Returns meta dict (projector_consistent_with_d, projector_hash, projector_filename, mode, d3, n3, lane_mask).
-    """
-    cfg_file = _cfg_from_policy("projected(file)", pj_path)
-    # Boundaries needed; read from current session fixture
-    boundaries_obj = boundaries
-    _, meta = projector_choose_active(cfg_file, boundaries_obj)
-    return meta
-
-# --- UI gating
-_rc  = st.session_state.get("run_ctx") or {}
-_out = st.session_state.get("overlap_out") or {}
-_di  = st.session_state.get("_district_info") or {}
-
-elig_freeze = (_rc.get("mode") == "projected(auto)") and bool(_out.get("3",{}).get("eq", False))
-district_id = _di.get("district_id", "UNKNOWN")
-
-with st.expander("Projector Freezer (AUTO → FILE)"):
-    st.caption("Freeze the current AUTO Π to a file, switch policy to file, re-run, and append to the registry.")
-    pj_basename = st.text_input(
-        "Filename",
-        value=f"projector_{district_id or 'UNKNOWN'}.json",
-        help="Saved under ./projectors/",
-        key="pj_freeze_name"
-    )
-    overwrite_ok = st.checkbox("Overwrite if exists", value=False, key="pj_overwrite_ok")
-
-    btn_disabled = not elig_freeze
-    help_txt = "Enabled when current run is projected(auto) and k3 is green."
-    if st.button("Freeze Π → switch to FILE & re-run", disabled=btn_disabled, help=help_txt, key="btn_freeze_pj"):
+    if st.button("Freeze Π → switch to FILE & re-run", key="btn_freeze_auto_file", disabled=not eligible):
         try:
-            # Pre-check overwrite
-            target = PROJECTORS_DIR / pj_basename
-            if target.exists() and not overwrite_ok:
-                st.warning("Projector file already exists. Enable 'Overwrite if exists' or choose a new name.")
+            lm = list(_rc.get("lane_mask_k3") or [])
+            n3 = int(_rc.get("n3") or 0)
+            if not lm or n3 <= 0:
+                raise ValueError("No lane mask or n3 unknown. Run Overlap (AUTO) first.")
+            if len(lm) != n3:
+                # tolerate; clamp to n3
+                lm = (lm + [0]*n3)[:n3]
+
+            # Build diagonal Π from lane mask
+            P = _diag_from_lane_mask(lm)
+
+            # Write projector file (schema with blocks.3)
+            pj_path = PROJECTORS_DIR / pj_basename
+            if pj_path.exists() and not overwrite_ok:
+                st.warning(f"`{pj_basename}` already exists — enable Overwrite or use a new name.")
                 st.stop()
 
-            # 1) Write projector file from lane mask
-            lm = list(_rc.get("lane_mask_k3") or [])
-            meta_write = _freeze_projector(district_id=district_id, lane_mask_k3=lm, filename_hint=pj_basename)
-            st.caption(f"Π saved → `{meta_write['path']}` · {meta_write['projector_hash'][:12]}…")
+            payload = {
+                "schema_version": "1.0.0",
+                "written_at_utc": _utc_iso(),
+                "blocks": {"3": P},
+            }
+            _ = _atomic_write_json(pj_path, payload)
 
-            # 2) Append to registry (dedup on (district, projector_hash))
-            reg_row = {
+            # Compute projector hash the same way the validator does
+            pj_hash = _sha256_hex_obj(P)  # uses your existing helper
+
+            # Append to registry
+            _append_registry_row({
                 "schema_version": "1.0.0",
                 "written_at_utc": _utc_iso(),
                 "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
-                "district": district_id,
+                "district": _di.get("district_id","UNKNOWN"),
                 "lane_mask_k3": lm,
-                "filename": meta_write["path"],
-                "projector_hash": meta_write["projector_hash"],
-            }
-            _append_registry_row(reg_row)
+                "filename": pj_path.as_posix(),
+                "projector_hash": pj_hash,
+            })
 
-            # 3) Switch policy → FILE and re-run Overlap
-            _switch_policy_to_file_and_rerun(meta_write["path"])
+            # Switch active policy to FILE *without* mutating widget state
+            cfg_file = cfg_projected_base()
+            cfg_file["source"]["3"] = "file"
+            cfg_file.setdefault("projector_files", {})["3"] = pj_path.as_posix()
+            # Validate once to capture meta (hash/consistency) for stamps/banners
+            _, meta = projector_choose_active(cfg_file, boundaries)
 
-            # 4) Validate FILE projector (same checks as during overlap)
-            try:
-                meta_file = _validate_projector_file(meta_write["path"])
-                ok = bool(meta_file.get("projector_consistent_with_d", False))
-                if ok:
-                    st.success(f"FILE Π validated ✔  {meta_file.get('projector_filename','')} · {meta_file.get('projector_hash','')[:12]}…")
-                else:
-                    st.warning("FILE Π saved but not consistent with current d3 (shape/idempotence/diag/lane).")
-            except ValueError as ve:
-                # Validator raises with P3_* codes on hard failures
-                st.error(f"FILE Π validation error: {ve}")
+            # Cache for the next run; do NOT touch any widget keys here
+            st.session_state["overlap_cfg"] = cfg_file
+            rc = st.session_state.get("run_ctx") or {}
+            rc.update({
+                "mode": "projected(file)",
+                "projector_filename": meta.get("projector_filename",""),
+                "projector_hash": meta.get("projector_hash",""),
+                "projector_consistent_with_d": meta.get("projector_consistent_with_d", True),
+            })
+            st.session_state["run_ctx"] = rc
 
+            # Bust outputs & A/B snapshot; then re-run overlap immediately
+            for k in ("overlap_out","residual_tags","ab_compare"):
+                st.session_state.pop(k, None)
+
+            st.success(f"Π saved → `{pj_path.name}` · {pj_hash[:12]}…  Switching policy to FILE and re-running…")
+            run_overlap()  # your existing runner
+
+        except ValueError as ve:
+            st.error(str(ve))
         except Exception as e:
             st.error(f"Freeze failed: {e}")
 
-# Optional: small tail for the registry
-with st.expander("Projector Registry (last 5)"):
+# Optional: small tail of the projector registry
+with st.expander("Projector Registry (latest)"):
     try:
         if PJ_REG_PATH.exists():
             lines = PJ_REG_PATH.read_text(encoding="utf-8").splitlines()[-5:]
             for ln in lines:
                 try:
-                    row = json.loads(ln)
+                    row = _json.loads(ln)
                     st.write(f"• {row.get('district','?')} · {Path(row.get('filename','')).name} · {row.get('projector_hash','')[:12]}… · {row.get('written_at_utc','')}")
                 except Exception:
                     continue
@@ -2429,7 +2354,8 @@ with st.expander("Projector Registry (last 5)"):
             st.caption("No registry yet.")
     except Exception as e:
         st.warning(f"Could not read registry tail: {e}")
-# -------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------------------
+
 
   
     # ======================== Parity: import/export & queue ========================
