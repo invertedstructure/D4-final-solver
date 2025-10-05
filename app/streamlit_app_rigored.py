@@ -1045,539 +1045,7 @@ with safe_expander("Debug · lane mask & Π diag"):
         else:
             st.caption("No FILE projector active (strict/AUTO).")
     except Exception as e:
-        st.error(f"Debug probe failed: {e}")
-
-
-
-
-
-# ------------------------ Cert writer (central, SSOT-only, no A/B) ------------------------
-st.divider()
-st.caption("Cert & provenance")
-
-from pathlib import Path
-import platform, os, json as _json
-from datetime import datetime, timezone
-
-# --- invariants guard (hard assertions before write) ---
-def _assert_cert_invariants(cert: dict) -> None:
-    for key in ("identity","policy","inputs","diagnostics","checks",
-                "signatures","residual_tags","promotion","artifact_hashes"):
-        if key not in cert:
-            raise ValueError(f"CERT_INVAR:key-missing:{key}")
-
-    ident   = cert["identity"] or {}
-    policy  = cert["policy"]   or {}
-    inputs  = cert["inputs"]   or {}
-    checks  = cert["checks"]   or {}
-    arts    = cert["artifact_hashes"] or {}
-
-    # identity minimal
-    for k in ("district_id","run_id","timestamp"):
-        if not str(ident.get(k,"")).strip():
-            raise ValueError(f"CERT_INVAR:identity-missing:{k}")
-
-    # inputs hashes (SSOT copy only)
-    for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"):
-        v = inputs.get(k,"")
-        if not isinstance(v,str) or v == "":
-            raise ValueError(f"CERT_INVAR:inputs-hash-missing:{k}")
-
-    # artifact hashes must mirror inputs (no recompute here)
-    for k in ("boundaries_hash","C_hash","H_hash","U_hash"):
-        if arts.get(k,"") != inputs.get(k,""):
-            raise ValueError(f"CERT_INVAR:artifact-hash-mismatch:{k}")
-
-    # dims present
-    dims = (inputs.get("dims") or {})
-    if not (isinstance(dims.get("n2"), int) and isinstance(dims.get("n3"), int)):
-        raise ValueError("CERT_INVAR:inputs-dims-missing:n2-n3")
-
-    # ker-guard discipline vs policy
-    ptag = str(policy.get("policy_tag") or policy.get("label") or "").strip()
-    if not ptag:
-        raise ValueError("CERT_INVAR:policy-tag-missing")
-
-    is_strict    = (ptag == "strict")
-    is_proj_auto = ptag.startswith("projected(columns@k=3,auto)") or ptag.startswith("projected(auto)")
-    is_proj_file = ptag.startswith("projected(columns@k=3,file)") or ptag.startswith("projected(file)")
-
-    kg = checks.get("ker_guard", "")
-    if is_strict and kg != "enforced":
-        raise ValueError("CERT_INVAR:ker-guard-should-be-enforced-for-strict")
-    if (is_proj_auto or is_proj_file) and kg != "off":
-        raise ValueError("CERT_INVAR:ker-guard-should-be-off-for-projected")
-
-    # projector fields discipline
-    pj_hash  = policy.get("projector_hash", "")
-    pj_file  = policy.get("projector_filename","") or ""
-    pj_cons  = policy.get("projector_consistent_with_d", None)
-    if is_strict and (pj_file or pj_hash or (pj_cons is True)):
-        raise ValueError("CERT_INVAR:strict-must-not-carry-projector-fields")
-    if is_proj_file:
-        if not pj_file:
-            raise ValueError("CERT_INVAR:file-mode-missing-projector_filename")
-        if pj_cons is not True:
-            raise ValueError("CERT_INVAR:file-mode-projector-not-consistent")
-        if not isinstance(pj_hash,str) or pj_hash == "":
-            raise ValueError("CERT_INVAR:file-mode-missing-projector_hash")
-    if is_proj_auto and pj_file:
-        raise ValueError("CERT_INVAR:auto-mode-should-not-carry-projector_filename")
-
-# --- SSOT reads ---
-_rc   = st.session_state.get("run_ctx") or {}
-_out  = st.session_state.get("overlap_out") or {}
-_ib   = st.session_state.get("_inputs_block") or {}
-_di   = st.session_state.get("_district_info") or {}
-_H    = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
-
-# quick guard: need a successful Overlap run first
-if not (_rc and _out and _ib):
-    st.info("Run Overlap first to enable cert writing.")
-else:
-    # ---------------- Diagnostics (lane vectors) ----------------
-    lane_mask = list(_rc.get("lane_mask_k3", []) or [])
-    d3 = _rc.get("d3", [])
-    H2 = (_H.blocks.__root__.get("2") or [])
-    C3 = (cmap.blocks.__root__.get("3") or [])
-    I3 = eye(len(C3)) if C3 else []
-
-    def _bottom_row(M): return M[-1] if (M and len(M)) else []
-    def _xor(A, B):
-        if not A: return [r[:] for r in (B or [])]
-        if not B: return [r[:] for r in (A or [])]
-        return [[(A[i][j] ^ B[i][j]) & 1 for j in range(len(A[0]))] for i in range(len(A))]
-    def _mask(vec, idx): return [vec[j] for j in idx] if (vec and idx) else []
-
-    try:
-        H2d3  = mul(H2, d3) if (H2 and d3) else []
-        C3pI3 = _xor(C3, I3) if C3 else []
-    except Exception:
-        H2d3, C3pI3 = [], []
-
-    lane_idx = [j for j, m in enumerate(lane_mask) if m]
-    lane_vec_H2d3     = _mask(_bottom_row(H2d3), lane_idx)
-    lane_vec_C3plusI3 = _mask(_bottom_row(C3pI3), lane_idx)
-
-    diagnostics_block = {
-        "lane_mask_k3": lane_mask,
-        "lane_vec_H2d3": lane_vec_H2d3,
-        "lane_vec_C3plusI3": lane_vec_C3plusI3,
-    }
-
-    # ---------------- Signatures (simple GF(2) rank on d3) ----------------
-    def _gf2_rank(M):
-        if not M or not M[0]: return 0
-        A = [row[:] for row in M]; m, n = len(A), len(A[0]); r = c = 0
-        while r < m and c < n:
-            piv = next((i for i in range(r, m) if A[i][c] & 1), None)
-            if piv is None: c += 1; continue
-            if piv != r: A[r], A[piv] = A[piv], A[r]
-            for i in range(m):
-                if i != r and (A[i][c] & 1):
-                    A[i] = [(A[i][j] ^ A[r][j]) & 1 for j in range(n)]
-            r += 1; c += 1
-        return r
-
-    rank_d3    = _gf2_rank(d3) if d3 else 0
-    ncols_d3   = len(d3[0]) if (d3 and d3[0]) else 0
-    ker_dim_d3 = max(ncols_d3 - rank_d3, 0)
-    lane_pattern = "".join("1" if int(x) else "0" for x in (lane_mask or []))
-
-    def _col_support_pattern(M, cols):
-        if not M or not cols: return ""
-        return "".join("1" if any((row[j] & 1) for row in M) else "0" for j in cols)
-
-    signatures_block = {
-        "d_signature": {"rank": rank_d3, "ker_dim": ker_dim_d3, "lane_pattern": lane_pattern},
-        "fixture_signature": {"lane": _col_support_pattern(C3pI3, lane_idx)},
-    }
-
-    # ---------------- Residual tags & checks ----------------
-    residual_tags = st.session_state.get("residual_tags", {}) or {}
-    is_strict_mode = (_rc.get("mode") == "strict")
-    # copy overlap results, inject ker_guard and n_k afterwards
-    checks_block = {
-        **_out,
-        "grid": True,    # hook real flags when wired
-        "fence": True,   # "
-        "ker_guard": ("enforced" if is_strict_mode else "off"),
-    }
-
-    # ---------------- Identity ----------------
-    district_id = _di.get("district_id", st.session_state.get("district_id", "UNKNOWN"))
-    run_ts = getattr(hashes, "timestamp_iso_lisbon", lambda: datetime.now(timezone.utc).isoformat())()
-    policy_now = _rc.get("policy_tag", policy_label_from_cfg(cfg_active))
-
-    # Prefer last_run_id, else derive
-    run_id = st.session_state.get("last_run_id")
-    if not run_id:
-        seed = "".join(str((_ib or {}).get(k,"")) for k in ("boundaries_hash","C_hash","H_hash","U_hash"))
-        run_id = getattr(hashes, "run_id", lambda a,b: hashlib.sha256(f"{a}|{b}".encode()).hexdigest()[:12])(seed, run_ts)
-        st.session_state["last_run_id"] = run_id
-
-    identity_block = {
-        "district_id": district_id,
-        "run_id": run_id,
-        "timestamp": run_ts,
-        "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
-        "python_version": f"python-{platform.python_version()}",
-    }
-
-    # ---------------- Policy (mirror RC; clamp strict) ----------------
-    policy_block = {
-        "label": policy_now,
-        "policy_tag": policy_now,
-        "enabled_layers": cfg_active.get("enabled_layers", []),
-        "modes": cfg_active.get("modes", {}),
-        "source": cfg_active.get("source", {}),
-    }
-    # projector fields from run_ctx (SSOT)
-    if _rc.get("projector_hash") is not None:
-        policy_block["projector_hash"] = _rc.get("projector_hash","")
-    if _rc.get("projector_filename"):
-        policy_block["projector_filename"] = _rc.get("projector_filename","")
-    if _rc.get("projector_consistent_with_d") is not None:
-        policy_block["projector_consistent_with_d"] = bool(_rc.get("projector_consistent_with_d"))
-
-    # strict: never leak projector/modes/source
-    if _rc.get("mode") == "strict":
-        policy_block["enabled_layers"] = []
-        policy_block.pop("modes",  None)
-        policy_block.pop("source", None)
-        policy_block.pop("projector_hash", None)
-        policy_block.pop("projector_filename", None)
-        policy_block.pop("projector_consistent_with_d", None)
-
-    # ---------------- Inputs (copy from SSOT; enforce dims) ----------------
-    inputs_block_payload = {
-        "filenames": _ib.get("filenames", {
-            "boundaries": st.session_state.get("fname_boundaries","boundaries.json"),
-            "C":          st.session_state.get("fname_cmap","cmap.json"),
-            "H":          st.session_state.get("fname_h","H.json"),
-            "U":          st.session_state.get("fname_shapes","shapes.json"),
-        }),
-        "dims": _ib.get("dims", {}),
-        "boundaries_hash": _ib.get("boundaries_hash",""),
-        "C_hash": _ib.get("C_hash",""),
-        "H_hash": _ib.get("H_hash",""),
-        "U_hash": _ib.get("U_hash",""),
-        "shapes_hash": _ib.get("shapes_hash", _ib.get("U_hash","")),
-    }
-    if _rc.get("mode") == "projected(file)":
-        inputs_block_payload.setdefault("filenames", {})["projector"] = _rc.get("projector_filename","")
-
-    # n_k fill for checks (use dims already set by your load block)
-    dims_now = inputs_block_payload.get("dims") or {}
-    for _k, _nk in (("2", dims_now.get("n2")), ("3", dims_now.get("n3"))):
-        if _k in checks_block:
-            checks_block[_k] = {**checks_block[_k], "n_k": int(_nk) if _nk is not None else 0}
-
-    # ---------------- Promotion (simple) ----------------
-    grid_ok  = bool(checks_block.get("grid", True))
-    fence_ok = bool(checks_block.get("fence", True))
-    k3_ok    = bool(checks_block.get("3", {}).get("eq", False))
-    k2_ok    = bool(checks_block.get("2", {}).get("eq", False))
-    mode_now = _rc.get("mode")
-    eligible, target = False, None
-    if mode_now == "strict" and all([grid_ok, fence_ok, k3_ok, k2_ok]) and residual_tags.get("strict","none") == "none":
-        eligible, target = True, "strict_anchor"
-    elif mode_now in ("projected(auto)", "projected(file)") and all([grid_ok, fence_ok, k3_ok]) and residual_tags.get("projected","none") == "none":
-        if mode_now == "projected(file)":
-            if bool(_rc.get("projector_consistent_with_d")):
-                eligible, target = True, "projected_exemplar"
-        else:
-            eligible, target = True, "projected_exemplar"
-
-    promotion_block = {
-        "eligible_for_promotion": eligible,
-        "promotion_target": target,
-        "notes": "",
-    }
-
-    # ---------------- Artifact hashes mirror inputs (plus optional projector file sha) ----------------
-    artifact_hashes = {
-        "boundaries_hash": inputs_block_payload["boundaries_hash"],
-        "C_hash":          inputs_block_payload["C_hash"],
-        "H_hash":          inputs_block_payload["H_hash"],
-        "U_hash":          inputs_block_payload["U_hash"],
-    }
-    if "projector_hash" in policy_block:
-        artifact_hashes["projector_hash"] = policy_block.get("projector_hash","")
-
-    # projector file sha256 when FILE mode (audit aid)
-    if _rc.get("mode") == "projected(file)":
-        pj_sha = _rc.get("projector_file_sha256")
-        if not pj_sha:
-            try:
-                import hashlib as _hl
-                _pf = _rc.get("projector_filename","")
-                if _pf and os.path.exists(_pf):
-                    with open(_pf, "rb") as _f:
-                        pj_sha = _hl.sha256(_f.read()).hexdigest()
-            except Exception:
-                pj_sha = None
-        if pj_sha:
-            policy_block["projector_file_sha256"] = pj_sha
-            artifact_hashes["projector_file_sha256"] = pj_sha
-
-    # ---------------- Assemble core cert payload ----------------
-    LAB_SCHEMA_VERSION = "1.0.0"  # keep in one place for certs
-    cert_payload = {
-        "schema_version": LAB_SCHEMA_VERSION,  # set again after invariants too
-        "identity":        identity_block,
-        "policy":          policy_block,
-        "inputs":          inputs_block_payload,
-        "diagnostics":     diagnostics_block,
-        "checks":          checks_block,
-        "signatures":      signatures_block,
-        "residual_tags":   residual_tags,
-        "promotion":       promotion_block,
-        "artifact_hashes": artifact_hashes,
-        "app_version":     getattr(hashes, "APP_VERSION", "v0.1-core"),
-        "python_version":  f"python-{platform.python_version()}",
-    }
-
-    # --- assert invariants before hashing/writing ---
-    _assert_cert_invariants(cert_payload)
-
-    # --- integrity hash (stable JSON)
-    cert_payload.setdefault("integrity", {})
-    cert_payload["integrity"]["content_hash"] = hash_json(cert_payload)
-    full_hash = cert_payload["integrity"]["content_hash"]
-
-    # ---------------- Write cert (prefer package writer; fallback locally) ----------------
-    cert_path = None
-    try:
-        result = export_mod.write_cert_json(cert_payload)  # may return (path, hash) or path
-        if isinstance(result, (list, tuple)) and len(result) >= 2:
-            cert_path, full_hash = result[0], result[1]
-        else:
-            cert_path = result
-    except Exception as e:
-        # Fallback: certs/overlap__{district}__{policy}__{hash12}.json (atomic)
-        try:
-            outdir = Path("certs"); outdir.mkdir(parents=True, exist_ok=True)
-            safe_policy = policy_now.replace("/", "_").replace(" ", "_")
-            fname = f"overlap__{district_id}__{safe_policy}__{full_hash[:12]}.json"
-            p = outdir / fname
-            tmp = p.with_suffix(".json.tmp")
-            blob = _json.dumps(cert_payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-            with open(tmp, "wb") as f:
-                f.write(blob); f.flush(); os.fsync(f.fileno())
-            os.replace(tmp, p)
-            cert_path = str(p)
-        except Exception as e2:
-            st.error(f"Cert write failed: {e} / {e2}")
-
- # ---------------- Post-write UI + bundle quick action ----------------
-# expects: cert_path, full_hash, cert_payload (or _cert_payload), identity_block (or _identity_block)
-# uses: build_cert_bundle
-
-_rc = st.session_state.get("run_ctx", {}) or {}
-
-# Try to resolve district_id and policy tag from locals, cert, or session
-district_id = (
-    locals().get("district_id")
-    or (locals().get("identity_block") or locals().get("_identity_block") or {}).get("district_id")
-    or (st.session_state.get("cert_payload") or {}).get("identity", {}).get("district_id")
-    or (st.session_state.get("_district_info") or {}).get("district_id")
-    or "UNKNOWN"
-)
-
-policy_now = (
-    locals().get("policy_now")
-    or (locals().get("cert_payload") or locals().get("_cert_payload") or {}).get("policy", {}).get("policy_tag")
-    or st.session_state.get("overlap_policy_label")
-    or _rc.get("policy_tag")
-    or "strict"
-)
-
-if cert_path:
-    # Cache for gallery/witness/etc.
-    st.session_state["last_cert_path"] = cert_path
-    st.session_state["cert_payload"]   = locals().get("cert_payload") or locals().get("_cert_payload")
-    st.session_state["last_run_id"]    = (locals().get("identity_block") or locals().get("_identity_block") or {}).get("run_id")
-
-    st.success(f"Cert written → `{cert_path}` · {full_hash[:12]}…")
-
-    with st.expander("Bundle (cert + extras)"):
-        extras = [
-            "policy.json",
-            "reports/residual.json",
-            "reports/parity_report.json",
-            "reports/coverage_sampling.csv",
-            "logs/gallery.jsonl",
-            "logs/witnesses.jsonl",
-        ]
-        # ✅ fixed paren
-        if _rc.get("mode") == "projected(file)" and _rc.get("projector_filename"):
-            extras.append(_rc.get("projector_filename"))
-
-        if st.button("Build Cert Bundle", key="build_cert_bundle_btn"):
-            try:
-                bundle_path = build_cert_bundle(
-                    district_id=district_id,
-                    policy_tag=policy_now,
-                    cert_path=cert_path,
-                    content_hash=full_hash,
-                    extras=extras,
-                )
-                st.success(f"Bundle ready → {bundle_path}")
-                try:
-                    with open(bundle_path, "rb") as fz:
-                        st.download_button(
-                            "Download cert bundle",
-                            fz,
-                            file_name=os.path.basename(bundle_path),
-                            key="dl_cert_bundle_zip",
-                        )
-                except Exception:
-                    pass
-            except Exception as e:
-                st.error(f"Bundle build failed: {e}")
-else:
-    st.warning("No cert file was produced. Fix the error above and try again.")
-
-
-
-
-
-
-
-
-        
-# ───────────────────────── Inputs Bundle (helper + button) ─────────────────────────
-from pathlib import Path
-import os, json, tempfile, zipfile, shutil, platform
-import streamlit as st
-
-def build_inputs_bundle(*, inputs_block: dict, run_ctx: dict, district_id: str, run_id: str, policy_tag: str) -> str:
-    """
-    Creates bundles/inputs__{district}__{run_id}.zip with:
-      - manifest.json (schema + hashes + policy/projector fields)
-      - original inputs files (best-effort, if paths exist)
-    """
-    # Prefer app-level constants if defined; fall back gracefully
-    APP_VERSION_LOCAL = globals().get("APP_VERSION_STR", getattr(hashes, "APP_VERSION", "v0.1-core"))
-    PY_VERSION_LOCAL  = globals().get("PY_VERSION_STR", f"python-{platform.python_version()}")
-
-    BUNDLES_DIR = Path("bundles")
-    BUNDLES_DIR.mkdir(parents=True, exist_ok=True)
-
-    # Filenames from SSOT (inputs_block) with session fallbacks
-    fns = (inputs_block.get("filenames") or {})
-    fnames = {
-        "boundaries": fns.get("boundaries", st.session_state.get("fname_boundaries", "boundaries.json")),
-        "C":          fns.get("C",          st.session_state.get("fname_cmap",      "cmap.json")),
-        "H":          fns.get("H",          st.session_state.get("fname_h",         "H.json")),
-        "U":          fns.get("U",          st.session_state.get("fname_shapes",    "shapes.json")),
-        "projector":  fns.get("projector",  run_ctx.get("projector_filename", "") or ""),
-    }
-
-    # Hashes (SSOT only; do not recompute)
-    hashes_block = {
-        "boundaries_hash": inputs_block.get("boundaries_hash",""),
-        "C_hash":          inputs_block.get("C_hash",""),
-        "H_hash":          inputs_block.get("H_hash",""),
-        "U_hash":          inputs_block.get("U_hash",""),
-        "shapes_hash":     inputs_block.get("shapes_hash",""),
-    }
-
-    manifest = {
-        "schema_version": "1.0.0",
-        "run_id": run_id,
-        "timestamp": hashes.timestamp_iso_lisbon(),
-        "app_version": APP_VERSION_LOCAL,
-        "python_version": PY_VERSION_LOCAL,
-        "policy_tag": policy_tag,
-        "hashes": hashes_block,
-        "filenames": fnames,
-        "projector": {
-            "mode": run_ctx.get("mode","strict"),
-            "filename": run_ctx.get("projector_filename",""),
-            "projector_hash": run_ctx.get("projector_hash",""),
-        },
-    }
-
-    zname = f"inputs__{district_id or 'UNKNOWN'}__{run_id}.zip"
-    zpath = BUNDLES_DIR / zname
-
-    # Write to temp zip then move (atomic-ish)
-    fd, tmp_name = tempfile.mkstemp(dir=BUNDLES_DIR, prefix=".tmp_inputs_", suffix=".zip")
-    os.close(fd)
-    tmp_path = Path(tmp_name)
-    try:
-        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            # manifest.json (no BOM, compact)
-            zf.writestr("manifest.json", json.dumps(manifest, sort_keys=True, separators=(",",":"), ensure_ascii=False))
-
-            # Include original files when present (best-effort)
-            for label, fp in fnames.items():
-                if not fp:
-                    continue
-                p = Path(fp)
-                if p.exists():
-                    try:
-                        arcname = p.resolve().relative_to(Path.cwd().resolve()).as_posix()
-                    except Exception:
-                        arcname = p.name
-                    zf.write(str(p), arcname=arcname)
-
-        try:
-            os.replace(tmp_path, zpath)
-        except OSError:
-            shutil.move(str(tmp_path), str(zpath))
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
-
-    return str(zpath)
-
-# Button: Export Inputs Bundle
-st.markdown("---")
-col_ib1, col_ib2 = st.columns([3, 2])
-
-with col_ib1:
-    if st.button("Export Inputs Bundle", key="btn_export_inputs"):
-        try:
-            ib = st.session_state.get("_inputs_block") or {}
-            di = st.session_state.get("_district_info") or {}
-            rc = st.session_state.get("run_ctx") or {}
-            cert_cached = st.session_state.get("cert_payload")
-
-            district_id = di.get("district_id", "UNKNOWN")
-
-            # Prefer cert's run_id → then last_run_id → else derive from hashes + ts
-            run_id = (cert_cached or {}).get("identity", {}).get("run_id") or st.session_state.get("last_run_id")
-            if not run_id:
-                hconcat = "".join(ib.get(k,"") for k in ("boundaries_hash","C_hash","H_hash","U_hash"))
-                ts = hashes.timestamp_iso_lisbon()
-                run_id = hashes.run_id(hconcat, ts)
-                st.session_state["last_run_id"] = run_id
-
-            policy_tag = st.session_state.get("overlap_policy_label") or rc.get("policy_tag") or "strict"
-
-            bundle_path = build_inputs_bundle(
-                inputs_block=ib,
-                run_ctx=rc,
-                district_id=district_id,
-                run_id=run_id,
-                policy_tag=policy_tag,
-            )
-            st.session_state["last_inputs_bundle_path"] = bundle_path
-            st.success(f"Inputs bundle ready → {bundle_path}")
-        except Exception as e:
-            st.error(f"Export Inputs Bundle failed: {e}")
-
-with col_ib2:
-    bp = st.session_state.get("last_inputs_bundle_path")
-    if bp and os.path.exists(bp):
-        try:
-            with open(bp, "rb") as fz:
-                st.download_button("Download Inputs Bundle", fz, file_name=os.path.basename(bp), key="dl_inputs_bundle")
-        except Exception:
-            pass
+        st.error(f"Debug probe failed: {e}")      
 
 
 # ────────────────────── Reports: Perturbation Sanity & Fence Stress ──────────────────────
@@ -2710,6 +2178,531 @@ with safe_expander("Parity: run suite (mirrors active policy)"):
                 st.download_button("Download parity_summary.csv", csv_bytes, file_name="parity_summary.csv")
             except Exception:
                 pass
+
+# ------------------------ Cert writer (central, SSOT-only, no A/B) ------------------------
+st.divider()
+st.caption("Cert & provenance")
+
+from pathlib import Path
+import platform, os, json as _json
+from datetime import datetime, timezone
+
+# --- invariants guard (hard assertions before write) ---
+def _assert_cert_invariants(cert: dict) -> None:
+    for key in ("identity","policy","inputs","diagnostics","checks",
+                "signatures","residual_tags","promotion","artifact_hashes"):
+        if key not in cert:
+            raise ValueError(f"CERT_INVAR:key-missing:{key}")
+
+    ident   = cert["identity"] or {}
+    policy  = cert["policy"]   or {}
+    inputs  = cert["inputs"]   or {}
+    checks  = cert["checks"]   or {}
+    arts    = cert["artifact_hashes"] or {}
+
+    # identity minimal
+    for k in ("district_id","run_id","timestamp"):
+        if not str(ident.get(k,"")).strip():
+            raise ValueError(f"CERT_INVAR:identity-missing:{k}")
+
+    # inputs hashes (SSOT copy only)
+    for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"):
+        v = inputs.get(k,"")
+        if not isinstance(v,str) or v == "":
+            raise ValueError(f"CERT_INVAR:inputs-hash-missing:{k}")
+
+    # artifact hashes must mirror inputs (no recompute here)
+    for k in ("boundaries_hash","C_hash","H_hash","U_hash"):
+        if arts.get(k,"") != inputs.get(k,""):
+            raise ValueError(f"CERT_INVAR:artifact-hash-mismatch:{k}")
+
+    # dims present
+    dims = (inputs.get("dims") or {})
+    if not (isinstance(dims.get("n2"), int) and isinstance(dims.get("n3"), int)):
+        raise ValueError("CERT_INVAR:inputs-dims-missing:n2-n3")
+
+    # ker-guard discipline vs policy
+    ptag = str(policy.get("policy_tag") or policy.get("label") or "").strip()
+    if not ptag:
+        raise ValueError("CERT_INVAR:policy-tag-missing")
+
+    is_strict    = (ptag == "strict")
+    is_proj_auto = ptag.startswith("projected(columns@k=3,auto)") or ptag.startswith("projected(auto)")
+    is_proj_file = ptag.startswith("projected(columns@k=3,file)") or ptag.startswith("projected(file)")
+
+    kg = checks.get("ker_guard", "")
+    if is_strict and kg != "enforced":
+        raise ValueError("CERT_INVAR:ker-guard-should-be-enforced-for-strict")
+    if (is_proj_auto or is_proj_file) and kg != "off":
+        raise ValueError("CERT_INVAR:ker-guard-should-be-off-for-projected")
+
+    # projector fields discipline
+    pj_hash  = policy.get("projector_hash", "")
+    pj_file  = policy.get("projector_filename","") or ""
+    pj_cons  = policy.get("projector_consistent_with_d", None)
+    if is_strict and (pj_file or pj_hash or (pj_cons is True)):
+        raise ValueError("CERT_INVAR:strict-must-not-carry-projector-fields")
+    if is_proj_file:
+        if not pj_file:
+            raise ValueError("CERT_INVAR:file-mode-missing-projector_filename")
+        if pj_cons is not True:
+            raise ValueError("CERT_INVAR:file-mode-projector-not-consistent")
+        if not isinstance(pj_hash,str) or pj_hash == "":
+            raise ValueError("CERT_INVAR:file-mode-missing-projector_hash")
+    if is_proj_auto and pj_file:
+        raise ValueError("CERT_INVAR:auto-mode-should-not-carry-projector_filename")
+
+# --- SSOT reads ---
+_rc   = st.session_state.get("run_ctx") or {}
+_out  = st.session_state.get("overlap_out") or {}
+_ib   = st.session_state.get("_inputs_block") or {}
+_di   = st.session_state.get("_district_info") or {}
+_H    = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
+
+# quick guard: need a successful Overlap run first
+if not (_rc and _out and _ib):
+    st.info("Run Overlap first to enable cert writing.")
+else:
+    # ---------------- Diagnostics (lane vectors) ----------------
+    lane_mask = list(_rc.get("lane_mask_k3", []) or [])
+    d3 = _rc.get("d3", [])
+    H2 = (_H.blocks.__root__.get("2") or [])
+    C3 = (cmap.blocks.__root__.get("3") or [])
+    I3 = eye(len(C3)) if C3 else []
+
+    def _bottom_row(M): return M[-1] if (M and len(M)) else []
+    def _xor(A, B):
+        if not A: return [r[:] for r in (B or [])]
+        if not B: return [r[:] for r in (A or [])]
+        return [[(A[i][j] ^ B[i][j]) & 1 for j in range(len(A[0]))] for i in range(len(A))]
+    def _mask(vec, idx): return [vec[j] for j in idx] if (vec and idx) else []
+
+    try:
+        H2d3  = mul(H2, d3) if (H2 and d3) else []
+        C3pI3 = _xor(C3, I3) if C3 else []
+    except Exception:
+        H2d3, C3pI3 = [], []
+
+    lane_idx = [j for j, m in enumerate(lane_mask) if m]
+    lane_vec_H2d3     = _mask(_bottom_row(H2d3), lane_idx)
+    lane_vec_C3plusI3 = _mask(_bottom_row(C3pI3), lane_idx)
+
+    diagnostics_block = {
+        "lane_mask_k3": lane_mask,
+        "lane_vec_H2d3": lane_vec_H2d3,
+        "lane_vec_C3plusI3": lane_vec_C3plusI3,
+    }
+
+    # ---------------- Signatures (simple GF(2) rank on d3) ----------------
+    def _gf2_rank(M):
+        if not M or not M[0]: return 0
+        A = [row[:] for row in M]; m, n = len(A), len(A[0]); r = c = 0
+        while r < m and c < n:
+            piv = next((i for i in range(r, m) if A[i][c] & 1), None)
+            if piv is None: c += 1; continue
+            if piv != r: A[r], A[piv] = A[piv], A[r]
+            for i in range(m):
+                if i != r and (A[i][c] & 1):
+                    A[i] = [(A[i][j] ^ A[r][j]) & 1 for j in range(n)]
+            r += 1; c += 1
+        return r
+
+    rank_d3    = _gf2_rank(d3) if d3 else 0
+    ncols_d3   = len(d3[0]) if (d3 and d3[0]) else 0
+    ker_dim_d3 = max(ncols_d3 - rank_d3, 0)
+    lane_pattern = "".join("1" if int(x) else "0" for x in (lane_mask or []))
+
+    def _col_support_pattern(M, cols):
+        if not M or not cols: return ""
+        return "".join("1" if any((row[j] & 1) for row in M) else "0" for j in cols)
+
+    signatures_block = {
+        "d_signature": {"rank": rank_d3, "ker_dim": ker_dim_d3, "lane_pattern": lane_pattern},
+        "fixture_signature": {"lane": _col_support_pattern(C3pI3, lane_idx)},
+    }
+
+    # ---------------- Residual tags & checks ----------------
+    residual_tags = st.session_state.get("residual_tags", {}) or {}
+    is_strict_mode = (_rc.get("mode") == "strict")
+    # copy overlap results, inject ker_guard and n_k afterwards
+    checks_block = {
+        **_out,
+        "grid": True,    # hook real flags when wired
+        "fence": True,   # "
+        "ker_guard": ("enforced" if is_strict_mode else "off"),
+    }
+
+    # ---------------- Identity ----------------
+    district_id = _di.get("district_id", st.session_state.get("district_id", "UNKNOWN"))
+    run_ts = getattr(hashes, "timestamp_iso_lisbon", lambda: datetime.now(timezone.utc).isoformat())()
+    policy_now = _rc.get("policy_tag", policy_label_from_cfg(cfg_active))
+
+    # Prefer last_run_id, else derive
+    run_id = st.session_state.get("last_run_id")
+    if not run_id:
+        seed = "".join(str((_ib or {}).get(k,"")) for k in ("boundaries_hash","C_hash","H_hash","U_hash"))
+        run_id = getattr(hashes, "run_id", lambda a,b: hashlib.sha256(f"{a}|{b}".encode()).hexdigest()[:12])(seed, run_ts)
+        st.session_state["last_run_id"] = run_id
+
+    identity_block = {
+        "district_id": district_id,
+        "run_id": run_id,
+        "timestamp": run_ts,
+        "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
+        "python_version": f"python-{platform.python_version()}",
+    }
+
+    # ---------------- Policy (mirror RC; clamp strict) ----------------
+    policy_block = {
+        "label": policy_now,
+        "policy_tag": policy_now,
+        "enabled_layers": cfg_active.get("enabled_layers", []),
+        "modes": cfg_active.get("modes", {}),
+        "source": cfg_active.get("source", {}),
+    }
+    # projector fields from run_ctx (SSOT)
+    if _rc.get("projector_hash") is not None:
+        policy_block["projector_hash"] = _rc.get("projector_hash","")
+    if _rc.get("projector_filename"):
+        policy_block["projector_filename"] = _rc.get("projector_filename","")
+    if _rc.get("projector_consistent_with_d") is not None:
+        policy_block["projector_consistent_with_d"] = bool(_rc.get("projector_consistent_with_d"))
+
+    # strict: never leak projector/modes/source
+    if _rc.get("mode") == "strict":
+        policy_block["enabled_layers"] = []
+        policy_block.pop("modes",  None)
+        policy_block.pop("source", None)
+        policy_block.pop("projector_hash", None)
+        policy_block.pop("projector_filename", None)
+        policy_block.pop("projector_consistent_with_d", None)
+
+    # ---------------- Inputs (copy from SSOT; enforce dims) ----------------
+    inputs_block_payload = {
+        "filenames": _ib.get("filenames", {
+            "boundaries": st.session_state.get("fname_boundaries","boundaries.json"),
+            "C":          st.session_state.get("fname_cmap","cmap.json"),
+            "H":          st.session_state.get("fname_h","H.json"),
+            "U":          st.session_state.get("fname_shapes","shapes.json"),
+        }),
+        "dims": _ib.get("dims", {}),
+        "boundaries_hash": _ib.get("boundaries_hash",""),
+        "C_hash": _ib.get("C_hash",""),
+        "H_hash": _ib.get("H_hash",""),
+        "U_hash": _ib.get("U_hash",""),
+        "shapes_hash": _ib.get("shapes_hash", _ib.get("U_hash","")),
+    }
+    if _rc.get("mode") == "projected(file)":
+        inputs_block_payload.setdefault("filenames", {})["projector"] = _rc.get("projector_filename","")
+
+    # n_k fill for checks (use dims already set by your load block)
+    dims_now = inputs_block_payload.get("dims") or {}
+    for _k, _nk in (("2", dims_now.get("n2")), ("3", dims_now.get("n3"))):
+        if _k in checks_block:
+            checks_block[_k] = {**checks_block[_k], "n_k": int(_nk) if _nk is not None else 0}
+
+    # ---------------- Promotion (simple) ----------------
+    grid_ok  = bool(checks_block.get("grid", True))
+    fence_ok = bool(checks_block.get("fence", True))
+    k3_ok    = bool(checks_block.get("3", {}).get("eq", False))
+    k2_ok    = bool(checks_block.get("2", {}).get("eq", False))
+    mode_now = _rc.get("mode")
+    eligible, target = False, None
+    if mode_now == "strict" and all([grid_ok, fence_ok, k3_ok, k2_ok]) and residual_tags.get("strict","none") == "none":
+        eligible, target = True, "strict_anchor"
+    elif mode_now in ("projected(auto)", "projected(file)") and all([grid_ok, fence_ok, k3_ok]) and residual_tags.get("projected","none") == "none":
+        if mode_now == "projected(file)":
+            if bool(_rc.get("projector_consistent_with_d")):
+                eligible, target = True, "projected_exemplar"
+        else:
+            eligible, target = True, "projected_exemplar"
+
+    promotion_block = {
+        "eligible_for_promotion": eligible,
+        "promotion_target": target,
+        "notes": "",
+    }
+
+    # ---------------- Artifact hashes mirror inputs (plus optional projector file sha) ----------------
+    artifact_hashes = {
+        "boundaries_hash": inputs_block_payload["boundaries_hash"],
+        "C_hash":          inputs_block_payload["C_hash"],
+        "H_hash":          inputs_block_payload["H_hash"],
+        "U_hash":          inputs_block_payload["U_hash"],
+    }
+    if "projector_hash" in policy_block:
+        artifact_hashes["projector_hash"] = policy_block.get("projector_hash","")
+
+    # projector file sha256 when FILE mode (audit aid)
+    if _rc.get("mode") == "projected(file)":
+        pj_sha = _rc.get("projector_file_sha256")
+        if not pj_sha:
+            try:
+                import hashlib as _hl
+                _pf = _rc.get("projector_filename","")
+                if _pf and os.path.exists(_pf):
+                    with open(_pf, "rb") as _f:
+                        pj_sha = _hl.sha256(_f.read()).hexdigest()
+            except Exception:
+                pj_sha = None
+        if pj_sha:
+            policy_block["projector_file_sha256"] = pj_sha
+            artifact_hashes["projector_file_sha256"] = pj_sha
+
+    # ---------------- Assemble core cert payload ----------------
+    LAB_SCHEMA_VERSION = "1.0.0"  # keep in one place for certs
+    cert_payload = {
+        "schema_version": LAB_SCHEMA_VERSION,  # set again after invariants too
+        "identity":        identity_block,
+        "policy":          policy_block,
+        "inputs":          inputs_block_payload,
+        "diagnostics":     diagnostics_block,
+        "checks":          checks_block,
+        "signatures":      signatures_block,
+        "residual_tags":   residual_tags,
+        "promotion":       promotion_block,
+        "artifact_hashes": artifact_hashes,
+        "app_version":     getattr(hashes, "APP_VERSION", "v0.1-core"),
+        "python_version":  f"python-{platform.python_version()}",
+    }
+
+    # --- assert invariants before hashing/writing ---
+    _assert_cert_invariants(cert_payload)
+
+    # --- integrity hash (stable JSON)
+    cert_payload.setdefault("integrity", {})
+    cert_payload["integrity"]["content_hash"] = hash_json(cert_payload)
+    full_hash = cert_payload["integrity"]["content_hash"]
+
+    # ---------------- Write cert (prefer package writer; fallback locally) ----------------
+    cert_path = None
+    try:
+        result = export_mod.write_cert_json(cert_payload)  # may return (path, hash) or path
+        if isinstance(result, (list, tuple)) and len(result) >= 2:
+            cert_path, full_hash = result[0], result[1]
+        else:
+            cert_path = result
+    except Exception as e:
+        # Fallback: certs/overlap__{district}__{policy}__{hash12}.json (atomic)
+        try:
+            outdir = Path("certs"); outdir.mkdir(parents=True, exist_ok=True)
+            safe_policy = policy_now.replace("/", "_").replace(" ", "_")
+            fname = f"overlap__{district_id}__{safe_policy}__{full_hash[:12]}.json"
+            p = outdir / fname
+            tmp = p.with_suffix(".json.tmp")
+            blob = _json.dumps(cert_payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+            with open(tmp, "wb") as f:
+                f.write(blob); f.flush(); os.fsync(f.fileno())
+            os.replace(tmp, p)
+            cert_path = str(p)
+        except Exception as e2:
+            st.error(f"Cert write failed: {e} / {e2}")
+
+ # ---------------- Post-write UI + bundle quick action ----------------
+# expects: cert_path, full_hash, cert_payload (or _cert_payload), identity_block (or _identity_block)
+# uses: build_cert_bundle
+
+_rc = st.session_state.get("run_ctx", {}) or {}
+
+# Try to resolve district_id and policy tag from locals, cert, or session
+district_id = (
+    locals().get("district_id")
+    or (locals().get("identity_block") or locals().get("_identity_block") or {}).get("district_id")
+    or (st.session_state.get("cert_payload") or {}).get("identity", {}).get("district_id")
+    or (st.session_state.get("_district_info") or {}).get("district_id")
+    or "UNKNOWN"
+)
+
+policy_now = (
+    locals().get("policy_now")
+    or (locals().get("cert_payload") or locals().get("_cert_payload") or {}).get("policy", {}).get("policy_tag")
+    or st.session_state.get("overlap_policy_label")
+    or _rc.get("policy_tag")
+    or "strict"
+)
+
+if cert_path:
+    # Cache for gallery/witness/etc.
+    st.session_state["last_cert_path"] = cert_path
+    st.session_state["cert_payload"]   = locals().get("cert_payload") or locals().get("_cert_payload")
+    st.session_state["last_run_id"]    = (locals().get("identity_block") or locals().get("_identity_block") or {}).get("run_id")
+
+    st.success(f"Cert written → `{cert_path}` · {full_hash[:12]}…")
+
+    with st.expander("Bundle (cert + extras)"):
+        extras = [
+            "policy.json",
+            "reports/residual.json",
+            "reports/parity_report.json",
+            "reports/coverage_sampling.csv",
+            "logs/gallery.jsonl",
+            "logs/witnesses.jsonl",
+        ]
+    
+        if _rc.get("mode") == "projected(file)" and _rc.get("projector_filename"):
+            extras.append(_rc.get("projector_filename"))
+
+        if st.button("Build Cert Bundle", key="build_cert_bundle_btn"):
+            try:
+                bundle_path = build_cert_bundle(
+                    district_id=district_id,
+                    policy_tag=policy_now,
+                    cert_path=cert_path,
+                    content_hash=full_hash,
+                    extras=extras,
+                )
+                st.success(f"Bundle ready → {bundle_path}")
+                try:
+                    with open(bundle_path, "rb") as fz:
+                        st.download_button(
+                            "Download cert bundle",
+                            fz,
+                            file_name=os.path.basename(bundle_path),
+                            key="dl_cert_bundle_zip",
+                        )
+                except Exception:
+                    pass
+            except Exception as e:
+                st.error(f"Bundle build failed: {e}")
+else:
+    st.warning("No cert file was produced. Fix the error above and try again.")
+
+# ───────────────────────── Exports: Snapshot + Inputs Bundle ─────────────────────────
+from pathlib import Path
+import os, json, tempfile, zipfile, shutil, platform
+import streamlit as st
+
+def build_inputs_bundle(*, inputs_block: dict, run_ctx: dict, district_id: str, run_id: str, policy_tag: str) -> str:
+    """
+    Creates bundles/inputs__{district}__{run_id}.zip with:
+      - manifest.json (schema + hashes + policy/projector fields)
+      - original inputs files (best-effort, if paths exist)
+    """
+    APP_VERSION_LOCAL = globals().get("APP_VERSION_STR", getattr(hashes, "APP_VERSION", "v0.1-core"))
+    PY_VERSION_LOCAL  = globals().get("PY_VERSION_STR", f"python-{platform.python_version()}")
+
+    BUNDLES_DIR = Path("bundles")
+    BUNDLES_DIR.mkdir(parents=True, exist_ok=True)
+
+    fns = (inputs_block.get("filenames") or {})
+    fnames = {
+        "boundaries": fns.get("boundaries", st.session_state.get("fname_boundaries", "boundaries.json")),
+        "C":          fns.get("C",          st.session_state.get("fname_cmap",      "cmap.json")),
+        "H":          fns.get("H",          st.session_state.get("fname_h",         "H.json")),
+        "U":          fns.get("U",          st.session_state.get("fname_shapes",    "shapes.json")),
+        "projector":  fns.get("projector",  run_ctx.get("projector_filename", "") or ""),
+    }
+
+    hashes_block = {
+        "boundaries_hash": inputs_block.get("boundaries_hash",""),
+        "C_hash":          inputs_block.get("C_hash",""),
+        "H_hash":          inputs_block.get("H_hash",""),
+        "U_hash":          inputs_block.get("U_hash",""),
+        "shapes_hash":     inputs_block.get("shapes_hash",""),
+    }
+
+    manifest = {
+        "schema_version": "1.0.0",
+        "run_id": run_id,
+        "timestamp": hashes.timestamp_iso_lisbon(),
+        "app_version": APP_VERSION_LOCAL,
+        "python_version": PY_VERSION_LOCAL,
+        "policy_tag": policy_tag,
+        "hashes": hashes_block,
+        "filenames": fnames,
+        "projector": {
+            "mode": run_ctx.get("mode","strict"),
+            "filename": run_ctx.get("projector_filename",""),
+            "projector_hash": run_ctx.get("projector_hash",""),
+        },
+    }
+
+    zname = f"inputs__{district_id or 'UNKNOWN'}__{run_id}.zip"
+    zpath = BUNDLES_DIR / zname
+
+    fd, tmp_name = tempfile.mkstemp(dir=BUNDLES_DIR, prefix=".tmp_inputs_", suffix=".zip")
+    os.close(fd)
+    tmp_path = Path(tmp_name)
+    try:
+        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("manifest.json", json.dumps(manifest, sort_keys=True, separators=(",",":"), ensure_ascii=False))
+            for label, fp in fnames.items():
+                if not fp:
+                    continue
+                p = Path(fp)
+                if p.exists():
+                    try:
+                        arcname = p.resolve().relative_to(Path.cwd().resolve()).as_posix()
+                    except Exception:
+                        arcname = p.name
+                    zf.write(str(p), arcname=arcname)
+        try:
+            os.replace(tmp_path, zpath)
+        except OSError:
+            shutil.move(str(tmp_path), str(zpath))
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
+
+    return str(zpath)
+
+# --- UI: Exports (place this BELOW the Cert Writer block) ---
+with st.expander("Exports"):
+    c1, c2 = st.columns(2)
+
+    # Snapshot (uses your existing build_everything_snapshot())
+    with c1:
+        if st.button("Build Snapshot ZIP", key="btn_build_snapshot"):
+            try:
+                zp = build_everything_snapshot()  # defined in your Snapshot section
+                if zp:
+                    st.success(f"Snapshot ready → {zp}")
+                    try:
+                        with open(zp, "rb") as fz:
+                            st.download_button("Download snapshot.zip", fz, file_name=os.path.basename(zp), key="dl_snapshot_zip")
+                    except Exception:
+                        pass
+            except Exception as e:
+                st.error(f"Snapshot failed: {e}")
+
+    # Inputs Bundle
+    with c2:
+        if st.button("Export Inputs Bundle", key="btn_export_inputs"):
+            try:
+                ib = st.session_state.get("_inputs_block") or {}
+                di = st.session_state.get("_district_info") or {}
+                rc = st.session_state.get("run_ctx") or {}
+                cert_cached = st.session_state.get("cert_payload")
+
+                district_id = di.get("district_id", "UNKNOWN")
+                # Prefer cert run_id → last_run_id → derive
+                run_id = (cert_cached or {}).get("identity", {}).get("run_id") or st.session_state.get("last_run_id")
+                if not run_id:
+                    hconcat = "".join(ib.get(k,"") for k in ("boundaries_hash","C_hash","H_hash","U_hash"))
+                    ts = hashes.timestamp_iso_lisbon()
+                    run_id = hashes.run_id(hconcat, ts)
+                    st.session_state["last_run_id"] = run_id
+
+                policy_tag = st.session_state.get("overlap_policy_label") or rc.get("policy_tag") or "strict"
+
+                bp = build_inputs_bundle(
+                    inputs_block=ib,
+                    run_ctx=rc,
+                    district_id=district_id,
+                    run_id=run_id,
+                    policy_tag=policy_tag,
+                )
+                st.session_state["last_inputs_bundle_path"] = bp
+                st.success(f"Inputs bundle ready → {bp}")
+                try:
+                    with open(bp, "rb") as fz:
+                        st.download_button("Download inputs bundle", fz, file_name=os.path.basename(bp), key="dl_inputs_bundle")
+                except Exception:
+                    pass
+            except Exception as e:
+                st.error(f"Export Inputs Bundle failed: {e}")
+
+
 
 
 
