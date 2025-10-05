@@ -1226,8 +1226,7 @@ st.divider()
 st.caption("Cert & provenance")
 
 from pathlib import Path
-import platform, os
-import json as _json
+import platform, os, json as _json
 
 # --- invariants guard (hard assertions before write) ---
 def _assert_cert_invariants(cert: dict) -> None:
@@ -1242,23 +1241,31 @@ def _assert_cert_invariants(cert: dict) -> None:
     checks  = cert["checks"]   or {}
     arts    = cert["artifact_hashes"] or {}
 
+    # identity minimal
     for k in ("district_id","run_id","timestamp"):
         if not str(ident.get(k,"")).strip():
             raise ValueError(f"CERT_INVAR:identity-missing:{k}")
 
+    # inputs hashes (SSOT copy only)
     for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"):
         v = inputs.get(k,"")
         if not isinstance(v,str) or v == "":
             raise ValueError(f"CERT_INVAR:inputs-hash-missing:{k}")
 
+    # artifact hashes must mirror inputs (no recompute)
     for k in ("boundaries_hash","C_hash","H_hash","U_hash"):
         if arts.get(k,"") != inputs.get(k,""):
             raise ValueError(f"CERT_INVAR:artifact-hash-mismatch:{k}")
 
+    # dims present (3D lock)
+    dims = (inputs.get("dims") or {})
+    if not (dims.get("n2") and dims.get("n3")):
+        raise ValueError("CERT_INVAR:inputs-dims-missing:n2-n3")
+
+    # policy tag & ker-guard
     ptag = str(policy.get("policy_tag") or policy.get("label") or "").strip()
     if not ptag:
         raise ValueError("CERT_INVAR:policy-tag-missing")
-
     is_proj_auto = ptag.startswith("projected(auto)")
     is_proj_file = ptag.startswith("projected(file)")
     is_strict    = (ptag == "strict")
@@ -1269,12 +1276,14 @@ def _assert_cert_invariants(cert: dict) -> None:
     if (is_proj_auto or is_proj_file) and kg != "off":
         raise ValueError("CERT_INVAR:ker-guard-should-be-off-for-projected")
 
+    # base checks present
     for k in ("grid","fence"):
         if k not in checks or not isinstance(checks[k], bool):
             raise ValueError(f"CERT_INVAR:check-{k}-missing-or-not-bool")
     if "2" not in checks or "3" not in checks or "eq" not in checks["2"] or "eq" not in checks["3"]:
         raise ValueError("CERT_INVAR:checks-2/3-eq-missing")
 
+    # projector fields discipline
     pj_hash  = policy.get("projector_hash", "")
     pj_file  = policy.get("projector_filename","") or ""
     pj_cons  = policy.get("projector_consistent_with_d", None)
@@ -1385,7 +1394,7 @@ else:
         "python_version": f"python-{platform.python_version()}",
     }
 
-    # ---------------- Policy (mirror RC) ----------------
+    # ---------------- Policy (mirror RC; clamp strict) ----------------
     policy_block = {
         "label": policy_now,
         "policy_tag": policy_now,
@@ -1393,6 +1402,7 @@ else:
         "modes": cfg_active.get("modes", {}),
         "source": cfg_active.get("source", {}),
     }
+    # projector fields from run_ctx (SSOT)
     if _rc.get("projector_hash") is not None:
         policy_block["projector_hash"] = _rc.get("projector_hash","")
     if _rc.get("projector_filename"):
@@ -1400,7 +1410,16 @@ else:
     if _rc.get("projector_consistent_with_d") is not None:
         policy_block["projector_consistent_with_d"] = bool(_rc.get("projector_consistent_with_d"))
 
-    # ---------------- Inputs (copy from SSOT) ----------------
+    # strict: never leak projector/modes/source
+    if _rc.get("mode") == "strict":
+        policy_block["enabled_layers"] = []
+        policy_block.pop("modes",  None)
+        policy_block.pop("source", None)
+        policy_block.pop("projector_hash", None)
+        policy_block.pop("projector_filename", None)
+        policy_block.pop("projector_consistent_with_d", None)
+
+    # ---------------- Inputs (copy from SSOT; enforce dims) ----------------
     inputs_block_payload = {
         "filenames": _ib.get("filenames", {
             "boundaries": st.session_state.get("fname_boundaries","boundaries.json"),
@@ -1418,16 +1437,18 @@ else:
     if _rc.get("mode") == "projected(file)":
         inputs_block_payload.setdefault("filenames", {})["projector"] = _rc.get("projector_filename","")
 
+    # enforce dims present for 3D lock
+    _dims = inputs_block_payload.get("dims") or {}
+    if not (_dims.get("n2") and _dims.get("n3")):
+        raise ValueError("CERT_INVAR:inputs-dims-missing:n2-n3")
+
+    # diagnostics / signatures
     diagnostics_block = {
         "lane_mask_k3": lane_mask,
         "lane_vec_H2d3": lane_vec_H2d3,
         "lane_vec_C3plusI3": lane_vec_C3plusI3,
     }
-
-    signatures_block = {
-        "d_signature": d_signature,
-        "fixture_signature": fixture_signature,
-    }
+    signatures_block = {"d_signature": d_signature, "fixture_signature": fixture_signature}
 
     # ---------------- Promotion logic ----------------
     grid_ok  = bool(_out.get("grid", True))
@@ -1451,6 +1472,7 @@ else:
         "notes": "",
     }
 
+    # ---------------- Artifact hashes mirror inputs (plus optional projector file sha) ----------------
     artifact_hashes = {
         "boundaries_hash": inputs_block_payload["boundaries_hash"],
         "C_hash":          inputs_block_payload["C_hash"],
@@ -1459,6 +1481,22 @@ else:
     }
     if "projector_hash" in policy_block:
         artifact_hashes["projector_hash"] = policy_block.get("projector_hash","")
+
+    # projector file sha256 when FILE mode (audit aid)
+    if _rc.get("mode") == "projected(file)":
+        pj_sha = _rc.get("projector_file_sha256")
+        if not pj_sha:
+            try:
+                import hashlib
+                _pf = _rc.get("projector_filename","")
+                if _pf:
+                    with open(_pf, "rb") as _f:
+                        pj_sha = hashlib.sha256(_f.read()).hexdigest()
+            except Exception:
+                pj_sha = None
+        if pj_sha:
+            policy_block["projector_file_sha256"] = pj_sha
+            artifact_hashes["projector_file_sha256"] = pj_sha
 
     # ---------------- Assemble core cert payload ----------------
     cert_payload = {
@@ -1472,6 +1510,15 @@ else:
         "promotion":       promotion_block,
         "artifact_hashes": artifact_hashes,
     }
+
+    # normalize checks: ensure n_k for k=2,3 (3D lock)
+    dims_now = inputs_block_payload.get("dims") or {}
+    for _k, _nk in (("2", dims_now.get("n2")), ("3", dims_now.get("n3"))):
+        if _k in cert_payload["checks"]:
+            cert_payload["checks"][_k] = {
+                **cert_payload["checks"][_k],
+                "n_k": int(_nk) if _nk is not None else 0
+            }
 
     # ---------------- Optional embed: A/B snapshot (fresh only) ----------------
     inputs_sig_now = [
@@ -1487,7 +1534,7 @@ else:
         projected_ctx = _ab.get("projected", {}) or {}
 
         cert_payload["policy"]["strict_snapshot"] = {
-            "policy_tag": strict_ctx.get("label", "strict"),
+            "policy_tag": "strict",
             "ker_guard":  "enforced",
             "inputs": {"filenames": inputs_block_payload["filenames"]},
             "lane_mask_k3": lane_mask,
@@ -1497,8 +1544,14 @@ else:
             "out": strict_ctx.get("out", {}),
         }
 
-        cert_payload["policy"]["projected_snapshot"] = {
-            "policy_tag": projected_ctx.get("label", policy_block.get("policy_tag", "")),
+        # mirror active projected leg exactly (AUTO vs FILE), Π fields from run_ctx
+        _proj_mode = _rc.get("mode")
+        _proj_tag  = "projected(auto)" if _proj_mode == "projected(auto)" else \
+                     "projected(file)" if _proj_mode == "projected(file)" else \
+                     policy_block.get("policy_tag","projected(auto)")
+
+        proj_snap = {
+            "policy_tag": _proj_tag,
             "ker_guard":  "off",
             "inputs": {"filenames": inputs_block_payload["filenames"]},
             "lane_mask_k3": lane_mask,
@@ -1506,12 +1559,18 @@ else:
             "lane_vec_C3plusI3": projected_ctx.get("lane_vec_C3plusI3", lane_vec_C3plusI3),
             "pass_vec": _pass_vec_from(projected_ctx.get("out", {})),
             "out": projected_ctx.get("out", {}),
-            "projector_hash": projected_ctx.get("projector_hash",""),
-            "projector_consistent_with_d": projected_ctx.get("projector_consistent_with_d", None),
-            **({"projector_filename": projected_ctx.get("projector_filename","")}
-               if projected_ctx.get("projector_filename") else {}),
+            "projector_hash": _rc.get("projector_hash", projected_ctx.get("projector_hash","")),
+            "projector_consistent_with_d": _rc.get("projector_consistent_with_d",
+                                                   projected_ctx.get("projector_consistent_with_d", None)),
         }
-        cert_payload["ab_pair_tag"] = _ab.get("pair_tag","")
+        if _proj_mode == "projected(file)":
+            if _rc.get("projector_filename"):
+                proj_snap["projector_filename"] = _rc.get("projector_filename")
+            if policy_block.get("projector_file_sha256"):
+                proj_snap["projector_file_sha256"] = policy_block["projector_file_sha256"]
+
+        cert_payload["policy"]["projected_snapshot"] = proj_snap
+        cert_payload["ab_pair_tag"] = f"strict__VS__{_proj_tag}"
     else:
         if _ab:
             st.caption("A/B snapshot is stale — not embedding into the cert (hashes changed).")
@@ -1520,7 +1579,7 @@ else:
     # assert invariants *before* content_hash/write
     _assert_cert_invariants({
         **cert_payload,
-        # ensure checks has ker_guard/grid/fence set as above
+        # keep checks/clamps as above
     })
 
     cert_payload["schema_version"] = LAB_SCHEMA_VERSION
@@ -1586,6 +1645,7 @@ else:
                     st.error(f"Bundle build failed: {e}")
     else:
         st.warning("No cert file was produced. Fix the error above and try again.")
+
 
 
         
