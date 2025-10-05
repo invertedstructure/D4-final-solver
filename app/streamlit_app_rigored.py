@@ -1466,22 +1466,24 @@ if not (inputs_block_payload["dims"].get("n2") and inputs_block_payload["dims"].
 
         
 # ───────────────────────── Inputs Bundle (helper + button) ─────────────────────────
+from pathlib import Path
+import os, json, tempfile, zipfile, shutil, platform
+import streamlit as st
+
 def build_inputs_bundle(*, inputs_block: dict, run_ctx: dict, district_id: str, run_id: str, policy_tag: str) -> str:
     """
     Creates bundles/inputs__{district}__{run_id}.zip with:
       - manifest.json (schema + hashes + policy/projector fields)
       - original inputs files (best-effort, if paths exist)
     """
-    from pathlib import Path
-    import os, json, tempfile, zipfile, shutil
-
+    # Prefer app-level constants if defined; fall back gracefully
     APP_VERSION_LOCAL = globals().get("APP_VERSION_STR", getattr(hashes, "APP_VERSION", "v0.1-core"))
     PY_VERSION_LOCAL  = globals().get("PY_VERSION_STR", f"python-{platform.python_version()}")
 
     BUNDLES_DIR = Path("bundles")
     BUNDLES_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Pull file names from SSOT (inputs_block), with careful fallbacks
+    # Filenames from SSOT (inputs_block) with session fallbacks
     fns = (inputs_block.get("filenames") or {})
     fnames = {
         "boundaries": fns.get("boundaries", st.session_state.get("fname_boundaries", "boundaries.json")),
@@ -1491,7 +1493,7 @@ def build_inputs_bundle(*, inputs_block: dict, run_ctx: dict, district_id: str, 
         "projector":  fns.get("projector",  run_ctx.get("projector_filename", "") or ""),
     }
 
-    # Hashes (SSOT only)
+    # Hashes (SSOT only; do not recompute)
     hashes_block = {
         "boundaries_hash": inputs_block.get("boundaries_hash",""),
         "C_hash":          inputs_block.get("C_hash",""),
@@ -1519,14 +1521,16 @@ def build_inputs_bundle(*, inputs_block: dict, run_ctx: dict, district_id: str, 
     zname = f"inputs__{district_id or 'UNKNOWN'}__{run_id}.zip"
     zpath = BUNDLES_DIR / zname
 
-    # Write temp zip then move (atomic-ish)
+    # Write to temp zip then move (atomic-ish)
     fd, tmp_name = tempfile.mkstemp(dir=BUNDLES_DIR, prefix=".tmp_inputs_", suffix=".zip")
     os.close(fd)
     tmp_path = Path(tmp_name)
     try:
         with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            # manifest.json (no BOM, compact)
             zf.writestr("manifest.json", json.dumps(manifest, sort_keys=True, separators=(",",":"), ensure_ascii=False))
-            # Include originals if present
+
+            # Include original files when present (best-effort)
             for label, fp in fnames.items():
                 if not fp:
                     continue
@@ -1537,6 +1541,7 @@ def build_inputs_bundle(*, inputs_block: dict, run_ctx: dict, district_id: str, 
                     except Exception:
                         arcname = p.name
                     zf.write(str(p), arcname=arcname)
+
         try:
             os.replace(tmp_path, zpath)
         except OSError:
@@ -1550,6 +1555,7 @@ def build_inputs_bundle(*, inputs_block: dict, run_ctx: dict, district_id: str, 
 # Button: Export Inputs Bundle
 st.markdown("---")
 col_ib1, col_ib2 = st.columns([3, 2])
+
 with col_ib1:
     if st.button("Export Inputs Bundle", key="btn_export_inputs"):
         try:
@@ -1590,6 +1596,7 @@ with col_ib2:
                 st.download_button("Download Inputs Bundle", fz, file_name=os.path.basename(bp), key="dl_inputs_bundle")
         except Exception:
             pass
+
 
 # ────────────────────── Reports: Perturbation Sanity & Fence Stress ──────────────────────
 import os, csv, tempfile, hashlib, json
