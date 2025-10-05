@@ -1,5 +1,15 @@
+# ────────────────────────────── IMPORTS (top) ──────────────────────────────
+import sys, os, json, csv, hashlib, platform, zipfile, tempfile, shutil, importlib.util, types, pathlib
+from pathlib import Path
+from io import BytesIO
+from datetime import datetime, timezone
+
+import streamlit as st
+
+# Page config early so Streamlit is happy
+st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
+
 # ────────────────────────────── PACKAGE LOADER ──────────────────────────────
-# Requires: sys, importlib.util, types, Path already imported in your imports block.
 HERE   = Path(__file__).resolve().parent
 OTCORE = HERE / "otcore"
 CORE   = HERE / "core"
@@ -52,20 +62,6 @@ io = otio
 
 # App version string used elsewhere
 APP_VERSION = getattr(hashes, "APP_VERSION", "v0.1-core")
-
-# === Step 1: Core helpers (config, hashing, filenames, projector selection) ===
-import streamlit as st
-import json as _json
-import io as _io
-import os as _os
-import csv as _csv
-from pathlib import Path as _Path
-from contextlib import contextmanager
-import hashlib as _hashlib
-import tempfile as _tempfile
-import shutil as _shutil
-import zipfile as _zipfile
-from datetime import datetime, timezone as _timezone
 
 
 
