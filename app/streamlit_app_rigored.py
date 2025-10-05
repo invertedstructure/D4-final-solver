@@ -1221,12 +1221,77 @@ else:
 
 
 
-  # ------------------------ Cert writer (central, SSOT-only) ------------------------
+# ------------------------ Cert writer (central, SSOT-only) ------------------------
 st.divider()
 st.caption("Cert & provenance")
 
+from pathlib import Path
+import platform, os
 import json as _json
 
+# --- invariants guard (hard assertions before write) ---
+def _assert_cert_invariants(cert: dict) -> None:
+    for key in ("identity","policy","inputs","diagnostics","checks",
+                "signatures","residual_tags","promotion","artifact_hashes"):
+        if key not in cert:
+            raise ValueError(f"CERT_INVAR:key-missing:{key}")
+
+    ident   = cert["identity"] or {}
+    policy  = cert["policy"]   or {}
+    inputs  = cert["inputs"]   or {}
+    checks  = cert["checks"]   or {}
+    arts    = cert["artifact_hashes"] or {}
+
+    for k in ("district_id","run_id","timestamp"):
+        if not str(ident.get(k,"")).strip():
+            raise ValueError(f"CERT_INVAR:identity-missing:{k}")
+
+    for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"):
+        v = inputs.get(k,"")
+        if not isinstance(v,str) or v == "":
+            raise ValueError(f"CERT_INVAR:inputs-hash-missing:{k}")
+
+    for k in ("boundaries_hash","C_hash","H_hash","U_hash"):
+        if arts.get(k,"") != inputs.get(k,""):
+            raise ValueError(f"CERT_INVAR:artifact-hash-mismatch:{k}")
+
+    ptag = str(policy.get("policy_tag") or policy.get("label") or "").strip()
+    if not ptag:
+        raise ValueError("CERT_INVAR:policy-tag-missing")
+
+    is_proj_auto = ptag.startswith("projected(auto)")
+    is_proj_file = ptag.startswith("projected(file)")
+    is_strict    = (ptag == "strict")
+
+    kg = checks.get("ker_guard", "")
+    if is_strict and kg != "enforced":
+        raise ValueError("CERT_INVAR:ker-guard-should-be-enforced-for-strict")
+    if (is_proj_auto or is_proj_file) and kg != "off":
+        raise ValueError("CERT_INVAR:ker-guard-should-be-off-for-projected")
+
+    for k in ("grid","fence"):
+        if k not in checks or not isinstance(checks[k], bool):
+            raise ValueError(f"CERT_INVAR:check-{k}-missing-or-not-bool")
+    if "2" not in checks or "3" not in checks or "eq" not in checks["2"] or "eq" not in checks["3"]:
+        raise ValueError("CERT_INVAR:checks-2/3-eq-missing")
+
+    pj_hash  = policy.get("projector_hash", "")
+    pj_file  = policy.get("projector_filename","") or ""
+    pj_cons  = policy.get("projector_consistent_with_d", None)
+
+    if is_strict and (pj_file or pj_hash or (pj_cons is True)):
+        raise ValueError("CERT_INVAR:strict-must-not-carry-projector-fields")
+    if is_proj_file:
+        if not pj_file:
+            raise ValueError("CERT_INVAR:file-mode-missing-projector_filename")
+        if pj_cons is not True:
+            raise ValueError("CERT_INVAR:file-mode-projector-not-consistent")
+        if not isinstance(pj_hash,str) or pj_hash == "":
+            raise ValueError("CERT_INVAR:file-mode-missing-projector_hash")
+    if is_proj_auto and pj_file:
+        raise ValueError("CERT_INVAR:auto-mode-should-not-carry-projector_filename")
+
+# --- SSOT reads ---
 _rc   = st.session_state.get("run_ctx") or {}
 _out  = st.session_state.get("overlap_out") or {}
 _ib   = st.session_state.get("_inputs_block") or {}
@@ -1262,7 +1327,7 @@ else:
     lane_vec_H2d3     = _mask(_bottom_row(H2d3), lane_idx)
     lane_vec_C3plusI3 = _mask(_bottom_row(C3pI3), lane_idx)
 
-    # ---------------- Signatures (simple GF(2) rank on d3) ----------------
+    # ---------------- Signatures (GF(2) rank on d3) ----------------
     def _gf2_rank(M):
         if not M or not M[0]: return 0
         A = [row[:] for row in M]; m, n = len(A), len(A[0]); r = c = 0
@@ -1276,8 +1341,8 @@ else:
             r += 1; c += 1
         return r
 
-    rank_d3   = _gf2_rank(d3) if d3 else 0
-    ncols_d3  = len(d3[0]) if (d3 and d3[0]) else 0
+    rank_d3    = _gf2_rank(d3) if d3 else 0
+    ncols_d3   = len(d3[0]) if (d3 and d3[0]) else 0
     ker_dim_d3 = max(ncols_d3 - rank_d3, 0)
     lane_pattern = "".join("1" if int(x) else "0" for x in (lane_mask or []))
 
@@ -1290,12 +1355,12 @@ else:
 
     # ---------------- Residual tags & checks ----------------
     residual_tags = st.session_state.get("residual_tags", {}) or {}
-    is_strict = (_rc.get("mode") == "strict")
+    is_strict_mode = (_rc.get("mode") == "strict")
     checks_block = {
         **_out,
-        "grid": True,   # (hook real flags when you wire them)
-        "fence": True,  # "
-        "ker_guard": ("enforced" if is_strict else "off"),
+        "grid": True,    # hook real flags when wired
+        "fence": True,   # "
+        "ker_guard": ("enforced" if is_strict_mode else "off"),
     }
 
     # ---------------- Identity (no recompute of input hashes) ----------------
@@ -1451,7 +1516,13 @@ else:
         if _ab:
             st.caption("A/B snapshot is stale — not embedding into the cert (hashes changed).")
 
-    # ---------------- Schema/App/Python tags + integrity ----------------
+    # ---------------- Schema/App/Python tags + integrity (after invariants) ----------------
+    # assert invariants *before* content_hash/write
+    _assert_cert_invariants({
+        **cert_payload,
+        # ensure checks has ker_guard/grid/fence set as above
+    })
+
     cert_payload["schema_version"] = LAB_SCHEMA_VERSION
     cert_payload["app_version"]    = getattr(hashes, "APP_VERSION", "v0.1-core")
     cert_payload["python_version"] = f"python-{platform.python_version()}"
@@ -1462,7 +1533,7 @@ else:
     cert_path = None
     full_hash = cert_payload["integrity"]["content_hash"]
     try:
-        result = export_mod.write_cert_json(cert_payload)  # expected to return (path, full_hash) or path
+        result = export_mod.write_cert_json(cert_payload)  # expected (path, full_hash) or path
         if isinstance(result, (list, tuple)) and len(result) >= 2:
             cert_path, full_hash = result[0], result[1]
         else:
@@ -1515,6 +1586,7 @@ else:
                     st.error(f"Bundle build failed: {e}")
     else:
         st.warning("No cert file was produced. Fix the error above and try again.")
+
 
         
 # ───────────────────────── Inputs Bundle (helper + button) ─────────────────────────
