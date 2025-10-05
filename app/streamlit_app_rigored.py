@@ -2283,6 +2283,315 @@ if st.button("Freeze AUTO → FILE", key="btn_freeze_auto_to_file", disabled=not
                     st.success(f"Loaded {n} pairs from {import_path}")
                 except Exception as e:
                     st.error(f"Import failed: {e}")
+                    
+                    # ======================= Snapshot ZIP + Flush Workspace =======================
+import os, json as _json, csv, hashlib, zipfile, tempfile, shutil, platform, secrets
+from pathlib import Path
+from datetime import datetime, timezone
+
+BUNDLES_DIR   = Path("bundles");   BUNDLES_DIR.mkdir(parents=True, exist_ok=True)
+CERTS_DIR     = Path("certs")
+PROJECTORS_DIR= Path("projectors")
+LOGS_DIR      = Path("logs")
+REPORTS_DIR   = Path("reports")
+
+def _utc_iso_z() -> str:
+    # ISO8601 UTC with trailing Z; zero-pad milliseconds removed for readability
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def _ymd_hms_compact() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+def _sha256_file(p: Path) -> str:
+    h = hashlib.sha256()
+    with p.open("rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def _rel(p: Path) -> str:
+    try:
+        return p.resolve().relative_to(Path.cwd().resolve()).as_posix()
+    except Exception:
+        return p.as_posix()
+
+def _read_json_safely(p: Path):
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            return _json.load(f), None
+    except Exception as e:
+        return None, str(e)
+
+def _nonempty(p: Path) -> bool:
+    return p.exists() and p.is_file() and p.stat().st_size > 0
+
+def build_everything_snapshot() -> str:
+    """
+    Build bundles/snapshot__{district_or_MULTI}__{YYYYMMDDThhmmssZ}.zip
+    Includes: manifest.json, cert_index.csv, all certs, only referenced projectors,
+              logs (gallery/witnesses), reports (parity/coverage/perturb/fence).
+    Zero recomputation: reads files already on disk + SSOT metadata.
+    """
+    # 1) Collect & parse certs
+    cert_files = sorted(CERTS_DIR.glob("*.json"))
+    parsed = []                # list of (path, cert_dict)
+    skipped = []               # list of {"path":..., "reason":...}
+    for p in cert_files:
+        data, err = _read_json_safely(p)
+        if err or not isinstance(data, dict):
+            skipped.append({"path": _rel(p), "reason": "JSON_PARSE_ERROR"})
+            continue
+        parsed.append((p, data))
+
+    if not parsed:
+        st.info("Nothing to snapshot yet (no parsed certs).")
+        return ""
+
+    # 2) Projector references (dedup), districts, index rows
+    proj_refs = set()
+    districts = set()
+    index_rows = []  # rows for cert_index.csv
+    manifest_files = []  # [{path, sha256, size}, ...]
+    for p, cert in parsed:
+        # districts
+        did = ((cert.get("identity") or {}).get("district_id")) or "UNKNOWN"
+        districts.add(str(did))
+
+        # file meta
+        manifest_files.append({
+            "path": _rel(p),
+            "sha256": _sha256_file(p),
+            "size": p.stat().st_size,
+        })
+
+        # projector (referenced by policy only; snapshots are cert-authoritative)
+        pol = cert.get("policy") or {}
+        pj_fname = pol.get("projector_filename", "") or ""
+        if isinstance(pj_fname, str) and pj_fname.strip():
+            proj_refs.add(pj_fname.strip())
+
+        # cert_index columns (robust to either flat inputs.* or inputs.hashes.*)
+        inputs = cert.get("inputs") or {}
+        hashes_flat  = {
+            "boundaries_hash": inputs.get("boundaries_hash"),
+            "C_hash":          inputs.get("C_hash"),
+            "H_hash":          inputs.get("H_hash"),
+            "U_hash":          inputs.get("U_hash"),
+        }
+        hashes_nested = (inputs.get("hashes") or {})
+        def _hx(k):
+            return hashes_flat.get(k) or hashes_nested.get(k) or ""
+
+        row = [
+            _rel(p),                                              # cert_path
+            (cert.get("integrity") or {}).get("content_hash",""), # content_hash
+            pol.get("policy_tag",""),                             # policy_tag
+            did,                                                  # district_id
+            (cert.get("identity") or {}).get("run_id",""),        # run_id
+            (cert.get("identity") or {}).get("timestamp",""),     # written_at_utc
+            _hx("boundaries_hash"), _hx("C_hash"), _hx("H_hash"), _hx("U_hash"),
+            str(pol.get("projector_hash","") or ""),              # projector_hash
+            str(pol.get("projector_filename","") or ""),          # projector_filename
+        ]
+        index_rows.append(row)
+
+    # 3) Resolve projector files to include; note missing
+    projectors = []
+    missing_projectors = []
+    for pj in sorted(proj_refs):
+        pj_path = Path(pj)
+        if not pj_path.exists():
+            # Allow relative to projectors/
+            alt = PROJECTORS_DIR / Path(pj).name
+            if alt.exists():
+                pj_path = alt
+            else:
+                missing_projectors.append({
+                    "filename": _rel(pj_path),
+                    "referenced_by": "certs/* (various)"
+                })
+                continue
+        projectors.append({
+            "path": _rel(pj_path),
+            "sha256": _sha256_file(pj_path),
+            "size": pj_path.stat().st_size,
+        })
+
+    # 4) Optional logs & reports
+    logs_list = []
+    if _nonempty(LOGS_DIR / "gallery.jsonl"):
+        p = LOGS_DIR / "gallery.jsonl"
+        logs_list.append({"path": _rel(p), "sha256": _sha256_file(p), "size": p.stat().st_size})
+    if _nonempty(LOGS_DIR / "witnesses.jsonl"):
+        p = LOGS_DIR / "witnesses.jsonl"
+        logs_list.append({"path": _rel(p), "sha256": _sha256_file(p), "size": p.stat().st_size})
+
+    reports_list = []
+    for rp in ["parity_report.json", "coverage_sampling.csv", "perturbation_sanity.csv", "fence_stress.csv"]:
+        p = REPORTS_DIR / rp
+        if _nonempty(p):
+            reports_list.append({"path": _rel(p), "sha256": _sha256_file(p), "size": p.stat().st_size})
+
+    # 5) Manifest
+    app_ver = getattr(hashes, "APP_VERSION", "v0.1-core")
+    py_ver  = f"python-{platform.python_version()}"
+    manifest = {
+        "schema_version": "1.0.0",
+        "bundle_kind": "everything-snapshot",
+        "written_at_utc": _utc_iso_z(),
+        "app_version": app_ver,
+        "python_version": py_ver,
+        "districts": sorted(districts),
+        "counts": {
+            "certs": len(manifest_files),
+            "projectors": len(projectors),
+            "logs": {
+                "gallery_jsonl": int(any(x["path"].endswith("gallery.jsonl") for x in logs_list)),
+                "witnesses_jsonl": int(any(x["path"].endswith("witnesses.jsonl") for x in logs_list)),
+            },
+            "reports": {
+                "parity":   int(any(x["path"].endswith("parity_report.json") for x in reports_list)),
+                "coverage": int(any(x["path"].endswith("coverage_sampling.csv") for x in reports_list)),
+                "perturb":  int(any(x["path"].endswith("perturbation_sanity.csv") for x in reports_list)),
+                "fence":    int(any(x["path"].endswith("fence_stress.csv") for x in reports_list)),
+            }
+        },
+        "files": manifest_files,
+        "projectors": projectors,
+        "logs": logs_list,
+        "reports": reports_list,
+        "skipped": skipped,
+        "missing_projectors": missing_projectors,
+        "notes": "Certs are authoritative; only projectors referenced by any cert are included."
+    }
+
+    # 6) cert_index.csv (in-memory)
+    index_header = [
+        "cert_path","content_hash","policy_tag","district_id","run_id","written_at_utc",
+        "boundaries_hash","C_hash","H_hash","U_hash","projector_hash","projector_filename"
+    ]
+    # CSV text with \n endings, no BOM
+    index_csv_lines = []
+    with tempfile.NamedTemporaryFile("w", delete=False, encoding="utf-8", newline="") as tf:
+        w = csv.writer(tf)
+        w.writerow(index_header)
+        for r in index_rows:
+            w.writerow(r)
+        tf.flush(); os.fsync(tf.fileno()); idx_tmp = tf.name
+    with open(idx_tmp, "r", encoding="utf-8") as tf:
+        index_csv_text = tf.read()
+    os.remove(idx_tmp)
+
+    # 7) Name & create zip (atomic)
+    tag = next(iter(districts)) if len(districts) == 1 else "MULTI"
+    zname = f"snapshot__{tag}__{_ymd_hms_compact()}.zip"
+    zpath = BUNDLES_DIR / zname
+    fd, tmpname = tempfile.mkstemp(dir=BUNDLES_DIR, prefix=".tmp_snapshot_", suffix=".zip")
+    os.close(fd)
+    tmpzip = Path(tmpname)
+
+    try:
+        with zipfile.ZipFile(tmpzip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            # manifest.json
+            zf.writestr("manifest.json", _json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+            # cert_index.csv
+            zf.writestr("cert_index.csv", index_csv_text)
+
+            # add certs
+            for f in manifest_files:
+                p = Path(f["path"])
+                if p.exists():
+                    zf.write(p.as_posix(), arcname=f["path"])
+            # add projectors
+            for f in projectors:
+                p = Path(f["path"])
+                if p.exists():
+                    zf.write(p.as_posix(), arcname=f["path"])
+            # logs
+            for f in logs_list:
+                p = Path(f["path"])
+                if p.exists():
+                    zf.write(p.as_posix(), arcname=f["path"])
+            # reports
+            for f in reports_list:
+                p = Path(f["path"])
+                if p.exists():
+                    zf.write(p.as_posix(), arcname=f["path"])
+
+        os.replace(tmpzip, zpath)
+    finally:
+        if tmpzip.exists():
+            try: tmpzip.unlink()
+            except Exception: pass
+
+    # quick self-check: rows == manifest cert count
+    if len(index_rows) != manifest["counts"]["certs"]:
+        st.warning("Index count does not match manifest cert count (investigate).")
+
+    return str(zpath)
+
+# --- UI: Build Snapshot ZIP ---
+with st.expander("Snapshot: Everything (certs, referenced Π, logs, reports)"):
+    if st.button("Build Snapshot ZIP", key="btn_build_snapshot"):
+        try:
+            zp = build_everything_snapshot()
+            if zp:
+                st.success(f"Snapshot ready → {zp}")
+                try:
+                    with open(zp, "rb") as fz:
+                        st.download_button("Download snapshot ZIP", fz, file_name=os.path.basename(zp), key="dl_snapshot_zip")
+                except Exception:
+                    pass
+        except Exception as e:
+            st.error(f"Snapshot failed: {e}")
+
+# ------------------------------ Flush Workspace ------------------------------
+def flush_workspace(delete_projectors: bool=False) -> str:
+    """
+    Remove generated artifacts and reset session state.
+    Keeps inputs/ and any files you uploaded.
+    Recreates empty dirs for next run.
+    """
+    dirs = [CERTS_DIR, LOGS_DIR, REPORTS_DIR, BUNDLES_DIR]
+    if delete_projectors:
+        dirs.append(PROJECTORS_DIR)
+
+    # Remove dirs (if exist)
+    for d in dirs:
+        if d.exists():
+            shutil.rmtree(d, ignore_errors=False)
+        d.mkdir(parents=True, exist_ok=True)
+
+    # Clear session state (keep fname_* convenience strings)
+    _to_clear = {
+        "run_ctx","overlap_out","overlap_cfg","overlap_policy_label","overlap_H",
+        "residual_tags","ab_compare","ab_stale","_projector_cache","_projector_cache_ab",
+        "last_cert_path","cert_payload","last_inputs_bundle_path","_gallery_keys",
+        "last_run_id","_last_run_id","_last_boundaries_hash","_district_info",
+        "_inputs_block","parity_pairs","selftests_snapshot"
+    }
+    for k in list(st.session_state.keys()):
+        if k in _to_clear:
+            st.session_state.pop(k, None)
+
+    token = f"FLUSH-{_ymd_hms_compact()}-{secrets.token_hex(2).upper()}"
+    st.session_state["_flush_token"] = token
+    return token
+
+with st.expander("Flush Workspace (keep fixtures)"):
+    st.warning("This deletes generated artifacts (certs, logs, reports, bundles). Your input fixtures remain.")
+    ok = st.checkbox("I understand this deletes generated artifacts.", value=False, key="flush_ack")
+    del_pj = st.checkbox("Also delete projectors/ (advanced)", value=False, key="flush_pj")
+    if st.button("Flush Workspace", key="btn_flush_all", disabled=not ok):
+        try:
+            tok = flush_workspace(delete_projectors=del_pj)
+            st.success(f"Flushed. Token: {tok}")
+        except Exception as e:
+            st.error(f"Flush failed: {e}")
+# ============================================================================ 
+
+
+
 
 
 
