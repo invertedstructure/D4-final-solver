@@ -2545,50 +2545,108 @@ with st.expander("Snapshot: Everything (certs, referenced Π, logs, reports)"):
         except Exception as e:
             st.error(f"Snapshot failed: {e}")
 
-# ------------------------------ Flush Workspace ------------------------------
-def flush_workspace(delete_projectors: bool=False) -> str:
+# ------------------------------ Flush Workspace (drop-in replacement) ------------------------------
+import os, shutil, hashlib, secrets
+from pathlib import Path
+from datetime import datetime, timezone
+
+# Fallbacks if your DIR constants aren't defined somewhere above
+CERTS_DIR      = Path(globals().get("CERTS_DIR",      Path("certs")))
+LOGS_DIR       = Path(globals().get("LOGS_DIR",       Path("logs")))
+REPORTS_DIR    = Path(globals().get("REPORTS_DIR",    Path("reports")))
+BUNDLES_DIR    = Path(globals().get("BUNDLES_DIR",    Path("bundles")))
+PROJECTORS_DIR = Path(globals().get("PROJECTORS_DIR", Path("projectors")))
+
+def _utc_iso(): return datetime.now(timezone.utc).isoformat().replace("+00:00","Z")
+def _stamp_compact(): return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+# same key set you listed (keeps fname_* convenience strings intact)
+_FLUSH_SESSION_KEYS = {
+    "run_ctx","overlap_out","overlap_cfg","overlap_policy_label","overlap_H",
+    "residual_tags","ab_compare","ab_stale","_projector_cache","_projector_cache_ab",
+    "last_cert_path","cert_payload","last_inputs_bundle_path","_gallery_keys",
+    "last_run_id","_last_run_id","_last_boundaries_hash","_district_info",
+    "_inputs_block","parity_pairs","selftests_snapshot"
+}
+
+def _count_files(root: Path) -> int:
+    if not root.exists(): return 0
+    n = 0
+    for _, _, files in os.walk(root):
+        n += len(files)
+    return n
+
+def flush_workspace(delete_projectors: bool=False) -> dict:
     """
-    Remove generated artifacts and reset session state.
-    Keeps inputs/ and any files you uploaded.
-    Recreates empty dirs for next run.
+    Remove generated artifacts (certs/logs/reports/bundles, and optionally projectors),
+    reset session state, and recreate empty dirs for the next run.
+    Never touches inputs/.
+    Returns a summary dict and sets:
+      - st.session_state['_composite_cache_key'] (new)
+      - st.session_state['_last_flush_token']    (proof token)
     """
+    summary = {
+        "when": _utc_iso(),
+        "deleted_dirs": [],
+        "recreated_dirs": [],
+        "files_removed": 0,
+        "token": "",
+        "composite_cache_key_short": "",
+    }
+
+    # 1) clear session state (idempotent)
+    for k in list(st.session_state.keys()):
+        if k in _FLUSH_SESSION_KEYS:
+            st.session_state.pop(k, None)
+
+    # 2) delete & recreate artifact directories (keep inputs/)
     dirs = [CERTS_DIR, LOGS_DIR, REPORTS_DIR, BUNDLES_DIR]
     if delete_projectors:
         dirs.append(PROJECTORS_DIR)
 
-    # Remove dirs (if exist)
+    removed = 0
     for d in dirs:
+        d = Path(d)
         if d.exists():
-            shutil.rmtree(d, ignore_errors=False)
+            removed += _count_files(d)
+            shutil.rmtree(d)  # raise if fails; we want a clear error
+            summary["deleted_dirs"].append(str(d))
         d.mkdir(parents=True, exist_ok=True)
+        summary["recreated_dirs"].append(str(d))
+    summary["files_removed"] = removed
 
-    # Clear session state (keep fname_* convenience strings)
-    _to_clear = {
-        "run_ctx","overlap_out","overlap_cfg","overlap_policy_label","overlap_H",
-        "residual_tags","ab_compare","ab_stale","_projector_cache","_projector_cache_ab",
-        "last_cert_path","cert_payload","last_inputs_bundle_path","_gallery_keys",
-        "last_run_id","_last_run_id","_last_boundaries_hash","_district_info",
-        "_inputs_block","parity_pairs","selftests_snapshot"
-    }
-    for k in list(st.session_state.keys()):
-        if k in _to_clear:
-            st.session_state.pop(k, None)
+    # 3) fresh composite cache key + proof token
+    ts = _stamp_compact()
+    salt = secrets.token_hex(2).upper()  # 4 hex chars
+    token = f"FLUSH-{ts}-{salt}"
+    ckey  = hashlib.sha256((ts+salt).encode("utf-8")).hexdigest()
 
-    token = f"FLUSH-{_ymd_hms_compact()}-{secrets.token_hex(2).upper()}"
-    st.session_state["_flush_token"] = token
-    return token
+    st.session_state["_composite_cache_key"] = ckey
+    st.session_state["_last_flush_token"]    = token
+
+    summary["token"] = token
+    summary["composite_cache_key_short"] = ckey[:12]
+    return summary
 
 with st.expander("Flush Workspace (keep fixtures)"):
-    st.warning("This deletes generated artifacts (certs, logs, reports, bundles). Your input fixtures remain.")
-    ok = st.checkbox("I understand this deletes generated artifacts.", value=False, key="flush_ack")
-    del_pj = st.checkbox("Also delete projectors/ (advanced)", value=False, key="flush_pj")
+    st.warning("Deletes generated artifacts (certs, logs, reports, bundles). Your `inputs/` remain untouched.")
+    col1, col2 = st.columns([2,2])
+    with col1:
+        ok = st.checkbox("I understand this deletes generated artifacts.", value=False, key="flush_ack")
+    with col2:
+        del_pj = st.checkbox("Also delete projectors/ (advanced)", value=False, key="flush_pj")
+
     if st.button("Flush Workspace", key="btn_flush_all", disabled=not ok):
         try:
-            tok = flush_workspace(delete_projectors=del_pj)
-            st.success(f"Flushed. Token: {tok}")
+            info = flush_workspace(delete_projectors=del_pj)
+            st.success(f"Flushed · {info['token']}")
+            st.caption(f"New cache key: `{info['composite_cache_key_short']}` (first 12)")
+            with st.expander("Flush details"):
+                st.json(info)
         except Exception as e:
             st.error(f"Flush failed: {e}")
-# ============================================================================ 
+# -----------------------------------------------------------------------------------------
+
 
 
 
