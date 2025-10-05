@@ -1,3 +1,58 @@
+# ────────────────────────────── PACKAGE LOADER ──────────────────────────────
+# Requires: sys, importlib.util, types, Path already imported in your imports block.
+HERE   = Path(__file__).resolve().parent
+OTCORE = HERE / "otcore"
+CORE   = HERE / "core"
+PKG_DIR = OTCORE if OTCORE.exists() else CORE
+PKG_NAME = "otcore" if OTCORE.exists() else "core"
+
+# Ensure pkg namespace exists (so submodules import cleanly)
+if PKG_NAME not in sys.modules:
+    pkg = types.ModuleType(PKG_NAME)
+    pkg.__path__ = [str(PKG_DIR)]
+    pkg.__file__ = str(PKG_DIR / "__init__.py")
+    sys.modules[PKG_NAME] = pkg
+
+def _load_pkg_module(fullname: str, rel_path: str):
+    path = PKG_DIR / rel_path
+    if not path.exists():
+        raise ImportError(f"Required module file not found: {path}")
+    spec = importlib.util.spec_from_file_location(fullname, str(path))
+    mod = importlib.util.module_from_spec(spec)
+    mod.__package__ = fullname.rsplit(".", 1)[0]
+    sys.modules[fullname] = mod
+    spec.loader.exec_module(mod)  # type: ignore[attr-defined]
+    return mod
+
+# Hot-reload core modules if Streamlit reruns
+for _mod in (
+    f"{PKG_NAME}.overlap_gate",
+    f"{PKG_NAME}.projector",
+    f"{PKG_NAME}.io",
+    f"{PKG_NAME}.hashes",
+    f"{PKG_NAME}.unit_gate",
+    f"{PKG_NAME}.triangle_gate",
+    f"{PKG_NAME}.towers",
+    f"{PKG_NAME}.export",
+):
+    if _mod in sys.modules:
+        del sys.modules[_mod]
+
+overlap_gate  = _load_pkg_module(f"{PKG_NAME}.overlap_gate",  "overlap_gate.py")
+projector     = _load_pkg_module(f"{PKG_NAME}.projector",     "projector.py")
+otio          = _load_pkg_module(f"{PKG_NAME}.io",            "io.py")
+hashes        = _load_pkg_module(f"{PKG_NAME}.hashes",        "hashes.py")
+unit_gate     = _load_pkg_module(f"{PKG_NAME}.unit_gate",     "unit_gate.py")
+triangle_gate = _load_pkg_module(f"{PKG_NAME}.triangle_gate", "triangle_gate.py")
+towers        = _load_pkg_module(f"{PKG_NAME}.towers",        "towers.py")
+export_mod    = _load_pkg_module(f"{PKG_NAME}.export",        "export.py")
+
+# Legacy alias so existing code can keep using io.parse_* safely
+io = otio
+
+# App version string used elsewhere
+APP_VERSION = getattr(hashes, "APP_VERSION", "v0.1-core")
+
 # === Step 1: Core helpers (config, hashing, filenames, projector selection) ===
 import streamlit as st
 import json as _json
@@ -11,6 +66,8 @@ import tempfile as _tempfile
 import shutil as _shutil
 import zipfile as _zipfile
 from datetime import datetime, timezone as _timezone
+
+
 
 # ---------- stable hashing (bytes + json-obj) ----------
 def _sha256_hex_bytes(b: bytes) -> str:
