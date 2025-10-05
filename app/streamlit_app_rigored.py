@@ -1,129 +1,32 @@
-# ────────────────────────────── IMPORTS ──────────────────────────────
-# Standard library
-import sys, os, json, csv, hashlib, platform, zipfile, tempfile, shutil
-import importlib.util, types, pathlib
-from io import BytesIO
-from datetime import datetime, timezone
-from pathlib import Path
-
-# Third-party
-import streamlit as st
-
-# ────────────────────────────── APP CONFIG ──────────────────────────────
-st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
-
-# ────────────────────────────── PACKAGE LOADER ──────────────────────────────
-HERE   = pathlib.Path(__file__).resolve().parent
-OTCORE = HERE / "otcore"
-CORE   = HERE / "core"
-PKG_DIR = OTCORE if OTCORE.exists() else CORE
-PKG_NAME = "otcore" if OTCORE.exists() else "core"
-
-if PKG_NAME not in sys.modules:
-    pkg = types.ModuleType(PKG_NAME)
-    pkg.__path__ = [str(PKG_DIR)]
-    pkg.__file__ = str(PKG_DIR / "__init__.py")
-    sys.modules[PKG_NAME] = pkg
-
-def _load_pkg_module(fullname: str, rel_path: str):
-    path = PKG_DIR / rel_path
-    if not path.exists():
-        raise ImportError(f"Required module file not found: {path}")
-    spec = importlib.util.spec_from_file_location(fullname, str(path))
-    mod = importlib.util.module_from_spec(spec)
-    mod.__package__ = fullname.rsplit('.', 1)[0]
-    sys.modules[fullname] = mod
-    spec.loader.exec_module(mod)  # type: ignore[attr-defined]
-    return mod
-
-# (Re)load core modules (single loader; avoid duplicates)
-for _mod in (
-    f"{PKG_NAME}.overlap_gate",
-    f"{PKG_NAME}.projector",
-    f"{PKG_NAME}.io",
-    f"{PKG_NAME}.hashes",
-    f"{PKG_NAME}.unit_gate",
-    f"{PKG_NAME}.triangle_gate",
-    f"{PKG_NAME}.towers",
-    f"{PKG_NAME}.export",
-):
-    if _mod in sys.modules:
-        del sys.modules[_mod]
-
-overlap_gate  = _load_pkg_module(f"{PKG_NAME}.overlap_gate",  "overlap_gate.py")
-projector     = _load_pkg_module(f"{PKG_NAME}.projector",     "projector.py")
-otio          = _load_pkg_module(f"{PKG_NAME}.io",            "io.py")
-hashes        = _load_pkg_module(f"{PKG_NAME}.hashes",        "hashes.py")
-unit_gate     = _load_pkg_module(f"{PKG_NAME}.unit_gate",     "unit_gate.py")
-triangle_gate = _load_pkg_module(f"{PKG_NAME}.triangle_gate", "triangle_gate.py")
-towers        = _load_pkg_module(f"{PKG_NAME}.towers",        "towers.py")
-export_mod    = _load_pkg_module(f"{PKG_NAME}.export",        "export.py")
-
-# legacy alias for older references
-if "io" not in globals():
-    io = otio
-
-APP_VERSION = getattr(hashes, "APP_VERSION", "v0.1-core")
-
-# ────────────────────────────── HEADER ──────────────────────────────
-st.title("Odd Tetra — Phase U (v0.1 core)")
-st.caption("Schemas + deterministic hashes + timestamped run IDs + Gates + Towers")
-st.caption(f"overlap_gate loaded from: {getattr(overlap_gate, '__file__', '<none>')}")
-st.caption(f"projector loaded from: {getattr(projector, '__file__', '<none>')}")
-
-# ────────────────────────────── CONSTANTS / DIRS ──────────────────────────────
-LAB_SCHEMA_VERSION = "1.0.0"
-APP_VERSION_STR    = str(APP_VERSION)
-PY_VERSION_STR     = f"python-{platform.python_version()}"
-
-DIRS = {
-    "inputs":      "inputs",
-    "certs":       "certs",
-    "bundles":     "bundles",
-    "projectors":  "projectors",
-    "logs":        "logs",
-    "reports":     "reports",
-    "fixtures":    "fixtures",
-    "configs":     "configs",
-}
-for _d in DIRS.values():
-    Path(_d).mkdir(parents=True, exist_ok=True)
-
-BUNDLES_DIR = Path(DIRS["bundles"]); BUNDLES_DIR.mkdir(parents=True, exist_ok=True)
-
-# ────────────────────────────── SESSION GUARDS ──────────────────────────────
-def _ensure_session_keys():
-    st.session_state.setdefault("_inputs_block", {})
-    st.session_state.setdefault("_district_info", {})
-    st.session_state.setdefault("run_ctx", {})
-    st.session_state.setdefault("overlap_out", {})
-    st.session_state.setdefault("overlap_H", None)
-    st.session_state.setdefault("residual_tags", {})
-
-_ensure_session_keys()
-
 # === Step 1: Core helpers (config, hashing, filenames, projector selection) ===
 import json as _json
 import io as _io
 import os as _os
+import csv as _csv
 from pathlib import Path as _Path
+from contextlib import contextmanager
+import hashlib as _hashlib
+import tempfile as _tempfile
+import shutil as _shutil
+import zipfile as _zipfile
+from datetime import datetime, timezone as _timezone
 
-# -- tiny hash helpers (bytes + json-obj) --------------------------------------
+# ---------- stable hashing (bytes + json-obj) ----------
 def _sha256_hex_bytes(b: bytes) -> str:
-    import hashlib as _hh
-    return _hh.sha256(b).hexdigest()
+    return _hashlib.sha256(b).hexdigest()
 
 def _sha256_hex_obj(obj) -> str:
-    import hashlib as _hh, json as _jj
-    blob = _jj.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return _hh.sha256(blob).hexdigest()
+    blob = _json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return _sha256_hex_bytes(blob)
 
+def hash_json(obj) -> str:
+    return _sha256_hex_obj(obj)
 
+def _iso_utc_now() -> str:
+    return datetime.now(_timezone.utc).isoformat()
 
-# --- safe_expander: never nest real expanders (final) ---
-from contextlib import contextmanager
+# ---------- safe expander (never nests real expanders) ----------
 try:
-    # Streamlit >= 1.29
     from streamlit.errors import StreamlitAPIException  # type: ignore
 except Exception:  # pragma: no cover
     class StreamlitAPIException(Exception):  # type: ignore
@@ -132,16 +35,16 @@ except Exception:  # pragma: no cover
 @contextmanager
 def safe_expander(title: str, **kwargs):
     """
-    Drop-in replacement for st.expander that never causes the
-    'Expanders may not be nested' crash. If a real expander fails,
-    we gracefully fall back to a normal container.
+    Drop-in replacement for st.expander that never raises the
+    'Expanders may not be nested' error. If a real expander
+    would fail (because we're inside one), we render a container
+    with a bold heading instead.
     """
     def _container_fallback():
         st.caption(f"⚠️ Nested section: **{title}** (container fallback)")
         st.markdown(f"**{title}**")
         return st.container()
 
-    # Try a real expander first; if Streamlit complains, degrade gracefully.
     try:
         with st.expander(title, **kwargs):
             yield
@@ -149,24 +52,25 @@ def safe_expander(title: str, **kwargs):
         with _container_fallback():
             yield
 
-
-
-
-# -- file-uploader helpers ------------------------------------------------------
+# ---------- file IO helpers ----------
 def read_json_file(upload):
     """
-    Accepts a Streamlit UploadedFile, a str/Path/os.PathLike, or an already-parsed dict.
-    Returns a dict or None.
+    Accepts:
+      - Streamlit UploadedFile
+      - str / os.PathLike / pathlib.Path
+      - dict (already-parsed)
+    Returns dict or None.
     """
     if upload is None:
         return None
-    if isinstance(upload, (str, os.PathLike, Path)):
-        with open(str(upload), "r", encoding="utf-8") as f:
-            return _json.load(f)
     if isinstance(upload, dict):
         return upload
+    if isinstance(upload, (str, _os.PathLike, _Path)):
+        with open(str(upload), "r", encoding="utf-8") as f:
+            return _json.load(f)
     # Streamlit UploadedFile
     try:
+        # UploadedFile.getvalue() returns bytes; .read() may also
         data = upload.getvalue() if hasattr(upload, "getvalue") else upload.read()
         return _json.loads(data.decode("utf-8"))
     except Exception:
@@ -177,72 +81,110 @@ def _stamp_filename(state_key: str, upload):
     try:
         if upload is not None and hasattr(upload, "name"):
             st.session_state[state_key] = str(upload.name)
+        elif upload is None:
+            st.session_state.pop(state_key, None)
     except Exception:
         pass
 
-# -- lane mask + signature utilities -------------------------------------------
+# ---------- atomic writers ----------
+def atomic_write_json(path: str | _Path, obj: dict, *, pretty: bool = False):
+    path = _Path(path)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.parent.mkdir(parents=True, exist_ok=True)
+    blob = _json.dumps(
+        obj,
+        sort_keys=True,
+        ensure_ascii=False,
+        indent=2 if pretty else None,
+        separators=None if pretty else (",", ":"),
+    ).encode("utf-8")
+    with open(tmp, "wb") as f:
+        f.write(blob); f.flush(); _os.fsync(f.fileno())
+    _os.replace(tmp, path)
+
+def atomic_append_jsonl(path: str | _Path, row: dict):
+    path = _Path(path); path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    line = _json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+    with open(tmp, "wb") as f:
+        f.write(line.encode("utf-8")); f.flush(); _os.fsync(f.fileno())
+    # append safely
+    with open(path, "ab") as out, open(tmp, "rb") as src:
+        data = src.read()
+        out.write(data); out.flush(); _os.fsync(out.fileno())
+    try:
+        tmp.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+def _atomic_write_csv(path: _Path, header: list[str], rows: list[list], meta_comment_lines: list[str] | None = None):
+    tmp = _Path(str(path) + ".tmp"); tmp.parent.mkdir(parents=True, exist_ok=True)
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
+        w = _csv.writer(f)
+        if meta_comment_lines:
+            for k in meta_comment_lines:
+                w.writerow([f"# {k}"])
+        w.writerow(header)
+        w.writerows(rows)
+        f.flush(); _os.fsync(f.fileno())
+    _os.replace(tmp, path)
+
+# ---------- lane mask / signatures ----------
 def _lane_mask_from_d3(boundaries) -> list[int]:
     """
-    Best-effort lane mask from d3.
-    Strategy:
-      1) If boundaries exposes lane_mask_k3, use it.
-      2) Else: use the bottom row of d3 (common convention in this app).
-      3) Else: [] (unknown).
+    Best-effort lane mask for k=3:
+      1) boundaries.lane_mask_k3 if present
+      2) boundaries.dict().get("lane_mask_k3")
+      3) bottom row of d3
+      4) [] if unknown
     """
     try:
-        # 1) attribute or dict key
         if hasattr(boundaries, "lane_mask_k3"):
             lm = getattr(boundaries, "lane_mask_k3")
             if isinstance(lm, list) and all(isinstance(x, (int, bool)) for x in lm):
                 return [int(bool(x)) for x in lm]
         bd = boundaries.dict() if hasattr(boundaries, "dict") else {}
-        lm = bd.get("lane_mask_k3")
+        lm = (bd or {}).get("lane_mask_k3")
         if isinstance(lm, list) and all(isinstance(x, (int, bool)) for x in lm):
             return [int(bool(x)) for x in lm]
     except Exception:
         pass
-
-    # 2) bottom row of d3
     try:
         d3 = (boundaries.blocks.__root__.get("3") or [])
         if d3 and d3[-1]:
-            return [int(r & 1) for r in d3[-1]]
+            return [int(x & 1) for x in d3[-1]]
     except Exception:
         pass
-
-    # 3) default: empty (unknown)
     return []
 
-def _district_signature(lane_mask: list[int], r: int, c: int) -> str:
-    pat = "".join("1" if int(x) else "0" for x in (lane_mask or []))
-    return f"{r}x{c}:{pat}"
+def _district_signature(mask: list[int], r: int, c: int) -> str:
+    payload = f"k3:{''.join(str(int(x)) for x in (mask or []))}|r{r}|c{c}".encode()
+    return _hashlib.sha256(payload).hexdigest()[:12]
 
-# -- cfg builders + label -------------------------------------------------------
+# ---------- cfg builders + labels ----------
 def cfg_strict() -> dict:
     return {
-        "enabled_layers": [],        # nothing projected
+        "enabled_layers": [],
         "modes": {},
-        "source": {},                # no source in strict
-        "projector_files": {},       # empty
+        "source": {},
+        "projector_files": {},
     }
 
 def cfg_projected_base() -> dict:
     return {
-        "enabled_layers": [3],       # we project k=3
+        "enabled_layers": [3],
         "modes": {},
-        "source": {"3": "auto"},     # default AUTO
-        "projector_files": {},       # filled only in FILE mode
+        "source": {"3": "auto"},
+        "projector_files": {},
     }
 
 def policy_label_from_cfg(cfg: dict) -> str:
     if not cfg or not cfg.get("enabled_layers"):
         return "strict"
     src = (cfg.get("source", {}) or {}).get("3", "auto")
-    if src == "file":
-        return "projected(columns@k=3,file)"
-    return "projected(columns@k=3,auto)"
+    return "projected(columns@k=3,file)" if src == "file" else "projected(columns@k=3,auto)"
 
-# -- tiny GF(2) ops (local, small + fast) --------------------------------------
+# ---------- tiny GF(2) ops ----------
 def _eye(n: int):
     return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
 
@@ -264,10 +206,8 @@ def _mul_gf2(A, B):
     return out
 
 def _is_idempotent_gf2(P):
-    # P·P == P
     try:
-        PP = _mul_gf2(P, P)
-        return PP == P
+        return _mul_gf2(P, P) == P
     except Exception:
         return False
 
@@ -285,7 +225,7 @@ def _is_diagonal(P):
 def _diag(P):
     return [int(P[i][i] & 1) for i in range(len(P))] if P and P[0] else []
 
-# -- projector chooser (strict/auto/file)  -------------------------------------
+# ---------- projector chooser (strict/auto/file) ----------
 class _P3Error(ValueError):
     def __init__(self, code: str, msg: str):
         super().__init__(f"{code}: {msg}")
@@ -330,7 +270,7 @@ def projector_choose_active(cfg_active: dict, boundaries):
     pj_hash = ""
     pj_consistent = None
 
-    # strict?
+    # strict
     if not cfg_active or not cfg_active.get("enabled_layers"):
         return P_active, {
             "d3": d3, "n3": n3, "lane_mask": lane_mask, "mode": mode,
@@ -342,11 +282,10 @@ def projector_choose_active(cfg_active: dict, boundaries):
     mode = "projected(auto)" if source == "auto" else "projected(file)"
 
     if source == "auto":
-        # AUTO = diag(lane_mask)
         diag = (lane_mask if lane_mask else [1]*n3)
         P_active = [[1 if i == j and diag[j] else 0 for j in range(n3)] for i in range(n3)]
         pj_hash = _sha256_hex_obj(P_active)
-        pj_consistent = True  # by construction it follows our lane mask
+        pj_consistent = True
         return P_active, {
             "d3": d3, "n3": n3, "lane_mask": lane_mask, "mode": mode,
             "projector_filename": "", "projector_hash": pj_hash,
@@ -359,22 +298,16 @@ def projector_choose_active(cfg_active: dict, boundaries):
         raise _P3Error("P3_SHAPE", "no projector file provided for file-mode")
 
     P = _read_projector_matrix(pj_filename)
-
-    # shape check
     m = len(P) or 0
     n = len(P[0]) if m else 0
     if n3 == 0 or m != n3 or n != n3:
         raise _P3Error("P3_SHAPE", f"expected {n3}x{n3}, got {m}x{n}")
 
-    # idempotent check
     if not _is_idempotent_gf2(P):
         raise _P3Error("P3_IDEMP", "P is not idempotent over GF(2)")
-
-    # diagonal check
     if not _is_diagonal(P):
         raise _P3Error("P3_DIAGONAL", "P has off-diagonal non-zeros")
 
-    # lane mask match (only if we could infer a mask)
     pj_diag = _diag(P)
     if lane_mask and pj_diag != [int(x) for x in lane_mask]:
         raise _P3Error("P3_LANE_MISMATCH", f"diag(P) != lane_mask(d3) → {pj_diag} vs {lane_mask}")
@@ -388,117 +321,7 @@ def projector_choose_active(cfg_active: dict, boundaries):
         "projector_consistent_with_d": pj_consistent,
     }
 
-# -- atomic JSONL append (small, safe enough for single-writer Streamlit) ------
-def atomic_append_jsonl(path: _Path, row: dict):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    line = _json.dumps(row, ensure_ascii=False, separators=(",", ":"), sort_keys=True) + "\n"
-    # Best-effort atomic-ish: write a tmp then append; if append fails we don't corrupt the main file.
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        f.write(line)
-        f.flush()
-        _os.fsync(f.fileno())
-    try:
-        with open(path, "a", encoding="utf-8") as g:
-            with open(tmp, "r", encoding="utf-8") as f:
-                g.write(f.read())
-                g.flush()
-                _os.fsync(g.fileno())
-    finally:
-        try:
-            tmp.unlink(missing_ok=True)
-        except Exception:
-            pass
-
-
-# ────────────────────────────── SMALL HELPERS ──────────────────────────────
-def _iso_utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-def hash_json(obj) -> str:
-    s = json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return hashlib.sha256(s).hexdigest()
-
-def _sha256_hex_bytes(b: bytes) -> str:
-    h = hashlib.sha256(); h.update(b); return h.hexdigest()
-
-def _sha256_hex_obj(obj) -> str:
-    s = json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()
-    return _sha256_hex_bytes(s)
-
-def _stamp_filename(state_key: str, fobj):
-    """Remember uploaded filename for later provenance."""
-    if fobj is not None:
-        st.session_state[state_key] = getattr(fobj, "name", "")
-    else:
-        st.session_state.pop(state_key, None)
-
-def read_json_file(uploaded):
-    if not uploaded:
-        return None
-    try:
-        return json.load(uploaded)
-    except Exception as e:
-        st.error(f"Failed to parse JSON: {e}")
-        return None
-
-def atomic_write_json(path: str | Path, obj: dict):
-    path = Path(path)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.parent.mkdir(parents=True, exist_ok=True)
-    with open(tmp, "wb") as f:
-        blob = json.dumps(obj, sort_keys=True, indent=2).encode()
-        f.write(blob); f.flush(); os.fsync(f.fileno())
-    os.replace(tmp, path)
-
-def atomic_append_jsonl(path: str | Path, row: dict):
-    path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".jsonl.tmp")
-    line = json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n"
-    with open(tmp, "wb") as f:
-        f.write(line.encode()); f.flush(); os.fsync(f.fileno())
-    # append safely
-    with open(path, "ab") as out:
-        with open(tmp, "rb") as src:
-            data = src.read()
-        out.write(data); out.flush(); os.fsync(out.fileno())
-    try: tmp.unlink(missing_ok=True)
-    except Exception: pass
-
-def _atomic_write_csv(path: Path, header: list[str], rows: list[list], meta_comment_lines: list[str] | None = None):
-    tmp = Path(str(path) + ".tmp"); tmp.parent.mkdir(parents=True, exist_ok=True)
-    with open(tmp, "w", newline="") as f:
-        w = csv.writer(f)
-        if meta_comment_lines:
-            w.writerow([f"# {k}" for k in meta_comment_lines])
-        w.writerow(header)
-        w.writerows(rows)
-        f.flush(); os.fsync(f.fileno())
-    os.replace(tmp, path)
-
-def _lane_mask_from_d3(boundaries) -> list[int]:
-    try:
-        d3 = boundaries.blocks.__root__.get("3")
-    except Exception:
-        d3 = None
-    if not d3 or not d3[0]:
-        return []
-    cols = len(d3[0])
-    return [1 if any((row[j] & 1) for row in d3) else 0 for j in range(cols)]
-
-def _district_signature(mask: list[int], r: int, c: int) -> str:
-    payload = f"k3:{''.join(str(int(x)) for x in (mask or []))}|r{r}|c{c}".encode()
-    return hashlib.sha256(payload).hexdigest()[:12]
-
-# In case you use it later
-DISTRICT_MAP = {
-    # raw-bytes sha256(boundaries.json) → label
-    # "…": "D1",
-    # "…": "D2",
-    # "…": "D3",
-    # "…": "D4",
-}
-
+# ---------- misc small helpers ----------
 def hash_matrix_norm(M) -> str:
     if not M:
         return hash_json([])
@@ -506,21 +329,21 @@ def hash_matrix_norm(M) -> str:
     return hash_json(norm)
 
 def _zip_arcname(abspath: str) -> str:
-    p = Path(abspath)
+    p = _Path(abspath)
     try:
-        return p.resolve().relative_to(Path.cwd().resolve()).as_posix()
+        return p.resolve().relative_to(_Path.cwd().resolve()).as_posix()
     except Exception:
         return p.name
 
 def build_cert_bundle(*, district_id: str, policy_tag: str, cert_path: str,
                       content_hash: str | None = None, extras: list[str] | None = None) -> str:
     """Cross-device safe writer for bundles/overlap_bundle__{district}__{policy}__{hash}.zip"""
-    cert_p = Path(cert_path)
+    cert_p = _Path(cert_path)
     if not cert_p.exists():
         raise FileNotFoundError(f"Cert not found: {cert_path}")
 
     with open(cert_p, "r", encoding="utf-8") as f:
-        cert = json.load(f)
+        cert = _json.load(f)
     if not content_hash:
         content_hash = ((cert.get("integrity") or {}).get("content_hash") or "")
     suffix = content_hash[:12] if content_hash else "nohash"
@@ -529,43 +352,28 @@ def build_cert_bundle(*, district_id: str, policy_tag: str, cert_path: str,
 
     files = [str(cert_p)]
     for p in (extras or []):
-        if p and os.path.exists(p):
+        if p and _os.path.exists(p):
             files.append(p)
 
-    # write zip into the target directory (same FS), then replace/move
-    fd, tmp_name = tempfile.mkstemp(dir=BUNDLES_DIR, prefix=".tmp_bundle_", suffix=".zip")
-    os.close(fd)
-    tmp_path = Path(tmp_name)
+    fd, tmp_name = _tempfile.mkstemp(dir=BUNDLES_DIR, prefix=".tmp_bundle_", suffix=".zip")
+    _os.close(fd)
+    tmp_path = _Path(tmp_name)
     try:
-        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        with _zipfile.ZipFile(tmp_path, "w", compression=_zipfile.ZIP_DEFLATED) as zf:
             for abspath in files:
-                abspath = str(Path(abspath).resolve())
+                abspath = str(_Path(abspath).resolve())
                 zf.write(abspath, arcname=_zip_arcname(abspath))
         try:
-            os.replace(tmp_path, zpath)
+            _os.replace(tmp_path, zpath)
         except OSError:
-            shutil.move(str(tmp_path), str(zpath))
+            _shutil.move(str(tmp_path), str(zpath))
     finally:
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
     return str(zpath)
 
-# ────────────────────────────── EXPANDER GUARD (optional) ──────────────────────────────
-from contextlib import contextmanager
-_EXP_STACK = []
-@contextmanager
-def safe_expander(title: str, **kwargs):
-    if _EXP_STACK:
-        st.warning(f"Nested expander detected: “{title}” inside “{_EXP_STACK[-1]}”. Consider moving it out.")
-    _EXP_STACK.append(title)
-    try:
-        with st.expander(title, **kwargs):
-            yield
-    finally:
-        _EXP_STACK.pop()
-
-# ────────────────────────────── GALLERY / WITNESS TAIL RENDERERS ──────────────────────────────
-def _read_jsonl_tail(path: Path, limit: int = 5) -> list[dict]:
+# ---------- tails (use safe_expander; no direct st.expander) ----------
+def _read_jsonl_tail(path: _Path, limit: int = 5) -> list[dict]:
     if not path.exists():
         return []
     try:
@@ -574,7 +382,7 @@ def _read_jsonl_tail(path: Path, limit: int = 5) -> list[dict]:
         out = []
         for ln in lines:
             try:
-                out.append(json.loads(ln))
+                out.append(_json.loads(ln))
             except Exception:
                 continue
         return out
@@ -582,7 +390,7 @@ def _read_jsonl_tail(path: Path, limit: int = 5) -> list[dict]:
         return []
 
 def render_gallery_tail(limit: int = 5):
-    p = Path(DIRS["logs"]) / "gallery.jsonl"
+    p = _Path(DIRS["logs"]) / "gallery.jsonl"
     rows = _read_jsonl_tail(p, limit)
     st.markdown("**Recent Gallery entries**")
     if not rows:
@@ -594,11 +402,11 @@ def render_gallery_tail(limit: int = 5):
         gh = r.get("hashes", {})
         pH = r.get("projector_hash", "")
         st.caption(f"{r.get('written_at_utc','')} · {d} · {pol} · Π={pH[:12]} · b={gh.get('boundaries_hash','')[:8]} C={gh.get('C_hash','')[:8]} H={gh.get('H_hash','')[:8]} U={gh.get('U_hash','')[:8]}")
-    with st.expander("Gallery tail (JSON)"):
-        st.code("\n".join(json.dumps(r, indent=2, sort_keys=True) for r in rows), language="json")
+    with safe_expander("Gallery tail (JSON)"):
+        st.code("\n".join(_json.dumps(r, indent=2, sort_keys=True) for r in rows), language="json")
 
 def render_witness_tail(limit: int = 5):
-    p = Path(DIRS["logs"]) / "witnesses.jsonl"
+    p = _Path(DIRS["logs"]) / "witnesses.jsonl"
     rows = _read_jsonl_tail(p, limit)
     st.markdown("**Recent Witnesses**")
     if not rows:
@@ -606,16 +414,16 @@ def render_witness_tail(limit: int = 5):
         return
     for r in reversed(rows):
         st.caption(f"{r.get('written_at_utc','')} · {r.get('district','?')} · {r.get('reason','?')} · residual={r.get('residual_tag','?')} · {r.get('policy','?')}")
-    with st.expander("Witness tail (JSON)"):
-        st.code("\n".join(json.dumps(r, indent=2, sort_keys=True) for r in rows), language="json")
+    with safe_expander("Witness tail (JSON)"):
+        st.code("\n".join(_json.dumps(r, indent=2, sort_keys=True) for r in rows), language="json")
 
-# ────────────────────────────── CERT INPUTS BLOCK BUILDER ──────────────────────────────
+# ---------- inputs block builder (SSOT) ----------
 def build_inputs_block(boundaries, cmap, H_used, shapes, filenames: dict) -> dict:
     C3 = (cmap.blocks.__root__.get("3") or [])
     d3 = (boundaries.blocks.__root__.get("3") or [])
     dims = {
         "n3": len(C3) if C3 else (len(d3[0]) if (d3 and d3[0]) else 0),
-        "n2": len(cmap.blocks.__root__.get("2") or [])
+        "n2": len(cmap.blocks.__root__.get("2") or []),
     }
     hashes_dict = {
         "boundaries_hash": hash_json(boundaries.dict() if hasattr(boundaries, "dict") else {}),
