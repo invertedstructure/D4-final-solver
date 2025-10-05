@@ -118,15 +118,43 @@ def _sha256_hex_obj(obj) -> str:
     blob = _jj.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return _hh.sha256(blob).hexdigest()
 
+# --- safe_expander: never nest real expanders ---
+from contextlib import contextmanager
+
+_EXP_STACK: list[str] = []
+
+@contextmanager
+def safe_expander(title: str, **kwargs):
+    """
+    Like st.expander, but if already inside an expander, it uses a plain container
+    (with a bold header) to avoid Streamlit's 'Expanders may not be nested' error.
+    """
+    nested = bool(_EXP_STACK)
+    _EXP_STACK.append(title)
+    try:
+        if nested:
+            # Visual hint + container fallback (no real expander)
+            st.caption(f"⚠️ Nested section: **{title}** (rendered as container)")
+            st.markdown(f"**{title}**")
+            with st.container():
+                yield
+        else:
+            # Real expander only at top level
+            with st.expander(title, **kwargs):
+                yield
+    finally:
+        _EXP_STACK.pop()
+
+
 # -- file-uploader helpers ------------------------------------------------------
 def read_json_file(upload):
     """
-    Accepts a Streamlit uploaded file, a str/Path, or already-parsed dict.
+    Accepts a Streamlit UploadedFile, a str/Path/os.PathLike, or an already-parsed dict.
     Returns a dict or None.
     """
     if upload is None:
         return None
-    if isinstance(upload, (str, _Path)):
+    if isinstance(upload, (str, os.PathLike, Path)):
         with open(str(upload), "r", encoding="utf-8") as f:
             return _json.load(f)
     if isinstance(upload, dict):
