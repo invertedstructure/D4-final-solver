@@ -1370,38 +1370,75 @@ else:
         except Exception as e2:
             st.error(f"Cert write failed: {e} / {e2}")
 
-    # ---------------- Post-write UI + bundle quick action ----------------
-    if cert_path:
-        st.session_state["last_cert_path"] = cert_path
-        st.session_state["cert_payload"]   = cert_payload
-        st.session_state["last_run_id"]    = identity_block["run_id"]
-        st.success(f"Cert written → `{cert_path}` · {full_hash[:12]}…")
+ # ---------------- Post-write UI + bundle quick action ----------------
+# expects: cert_path, full_hash, cert_payload (or _cert_payload), identity_block (or _identity_block)
+# uses: build_cert_bundle
 
-        with st.expander("Bundle (cert + extras)"):
-            extras = [
-                "policy.json",
-                "reports/residual.json",
-                "reports/parity_report.json",
-                "reports/coverage_sampling.csv",
-                "logs/gallery.jsonl",
-                "logs/witnesses.jsonl",
-            ]
-            if _rc.get("mode") == "projected(file)") and _rc.get("projector_filename"):
-                extras.append(_rc.get("projector_filename"))
-            if st.button("Build Cert Bundle", key="build_cert_bundle_btn"):
+_rc = st.session_state.get("run_ctx", {}) or {}
+
+# Try to resolve district_id and policy tag from locals, cert, or session
+district_id = (
+    locals().get("district_id")
+    or (locals().get("identity_block") or locals().get("_identity_block") or {}).get("district_id")
+    or (st.session_state.get("cert_payload") or {}).get("identity", {}).get("district_id")
+    or (st.session_state.get("_district_info") or {}).get("district_id")
+    or "UNKNOWN"
+)
+
+policy_now = (
+    locals().get("policy_now")
+    or (locals().get("cert_payload") or locals().get("_cert_payload") or {}).get("policy", {}).get("policy_tag")
+    or st.session_state.get("overlap_policy_label")
+    or _rc.get("policy_tag")
+    or "strict"
+)
+
+if cert_path:
+    # Cache for gallery/witness/etc.
+    st.session_state["last_cert_path"] = cert_path
+    st.session_state["cert_payload"]   = locals().get("cert_payload") or locals().get("_cert_payload")
+    st.session_state["last_run_id"]    = (locals().get("identity_block") or locals().get("_identity_block") or {}).get("run_id")
+
+    st.success(f"Cert written → `{cert_path}` · {full_hash[:12]}…")
+
+    with st.expander("Bundle (cert + extras)"):
+        extras = [
+            "policy.json",
+            "reports/residual.json",
+            "reports/parity_report.json",
+            "reports/coverage_sampling.csv",
+            "logs/gallery.jsonl",
+            "logs/witnesses.jsonl",
+        ]
+        # ✅ fixed paren
+        if _rc.get("mode") == "projected(file)" and _rc.get("projector_filename"):
+            extras.append(_rc.get("projector_filename"))
+
+        if st.button("Build Cert Bundle", key="build_cert_bundle_btn"):
+            try:
+                bundle_path = build_cert_bundle(
+                    district_id=district_id,
+                    policy_tag=policy_now,
+                    cert_path=cert_path,
+                    content_hash=full_hash,
+                    extras=extras,
+                )
+                st.success(f"Bundle ready → {bundle_path}")
                 try:
-                    bundle_path = build_cert_bundle(
-                        district_id=district_id,
-                        policy_tag=policy_now,
-                        cert_path=cert_path,
-                        content_hash=full_hash,
-                        extras=extras
-                    )
-                    st.success(f"Bundle ready → {bundle_path}")
-                except Exception as e:
-                    st.error(f"Bundle build failed: {e}")
-    else:
-        st.warning("No cert file was produced. Fix the error above and try again.")
+                    with open(bundle_path, "rb") as fz:
+                        st.download_button(
+                            "Download cert bundle",
+                            fz,
+                            file_name=os.path.basename(bundle_path),
+                            key="dl_cert_bundle_zip",
+                        )
+                except Exception:
+                    pass
+            except Exception as e:
+                st.error(f"Bundle build failed: {e}")
+else:
+    st.warning("No cert file was produced. Fix the error above and try again.")
+
 
 
 
