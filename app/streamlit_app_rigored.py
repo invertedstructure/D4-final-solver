@@ -1,4 +1,5 @@
 # === Step 1: Core helpers (config, hashing, filenames, projector selection) ===
+import streamlit as st
 import json as _json
 import io as _io
 import os as _os
@@ -37,8 +38,7 @@ def safe_expander(title: str, **kwargs):
     """
     Drop-in replacement for st.expander that never raises the
     'Expanders may not be nested' error. If a real expander
-    would fail (because we're inside one), we render a container
-    with a bold heading instead.
+    would fail (already inside one), we render a container.
     """
     def _container_fallback():
         st.caption(f"⚠️ Nested section: **{title}** (container fallback)")
@@ -55,11 +55,7 @@ def safe_expander(title: str, **kwargs):
 # ---------- file IO helpers ----------
 def read_json_file(upload):
     """
-    Accepts:
-      - Streamlit UploadedFile
-      - str / os.PathLike / pathlib.Path
-      - dict (already-parsed)
-    Returns dict or None.
+    Accepts UploadedFile | str | os.PathLike | Path | dict → dict|None
     """
     if upload is None:
         return None
@@ -68,9 +64,7 @@ def read_json_file(upload):
     if isinstance(upload, (str, _os.PathLike, _Path)):
         with open(str(upload), "r", encoding="utf-8") as f:
             return _json.load(f)
-    # Streamlit UploadedFile
     try:
-        # UploadedFile.getvalue() returns bytes; .read() may also
         data = upload.getvalue() if hasattr(upload, "getvalue") else upload.read()
         return _json.loads(data.decode("utf-8"))
     except Exception:
@@ -108,10 +102,8 @@ def atomic_append_jsonl(path: str | _Path, row: dict):
     line = _json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
     with open(tmp, "wb") as f:
         f.write(line.encode("utf-8")); f.flush(); _os.fsync(f.fileno())
-    # append safely
     with open(path, "ab") as out, open(tmp, "rb") as src:
-        data = src.read()
-        out.write(data); out.flush(); _os.fsync(out.fileno())
+        out.write(src.read()); out.flush(); _os.fsync(out.fileno())
     try:
         tmp.unlink(missing_ok=True)
     except Exception:
@@ -132,11 +124,7 @@ def _atomic_write_csv(path: _Path, header: list[str], rows: list[list], meta_com
 # ---------- lane mask / signatures ----------
 def _lane_mask_from_d3(boundaries) -> list[int]:
     """
-    Best-effort lane mask for k=3:
-      1) boundaries.lane_mask_k3 if present
-      2) boundaries.dict().get("lane_mask_k3")
-      3) bottom row of d3
-      4) [] if unknown
+    k=3 mask: boundaries.lane_mask_k3 → dict field → bottom-row(d3) → []
     """
     try:
         if hasattr(boundaries, "lane_mask_k3"):
@@ -163,20 +151,10 @@ def _district_signature(mask: list[int], r: int, c: int) -> str:
 
 # ---------- cfg builders + labels ----------
 def cfg_strict() -> dict:
-    return {
-        "enabled_layers": [],
-        "modes": {},
-        "source": {},
-        "projector_files": {},
-    }
+    return {"enabled_layers": [], "modes": {}, "source": {}, "projector_files": {}}
 
 def cfg_projected_base() -> dict:
-    return {
-        "enabled_layers": [3],
-        "modes": {},
-        "source": {"3": "auto"},
-        "projector_files": {},
-    }
+    return {"enabled_layers": [3], "modes": {}, "source": {"3": "auto"}, "projector_files": {}}
 
 def policy_label_from_cfg(cfg: dict) -> str:
     if not cfg or not cfg.get("enabled_layers"):
@@ -185,16 +163,12 @@ def policy_label_from_cfg(cfg: dict) -> str:
     return "projected(columns@k=3,file)" if src == "file" else "projected(columns@k=3,auto)"
 
 # ---------- tiny GF(2) ops ----------
-def _eye(n: int):
-    return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
+def _eye(n: int): return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
 
 def _mul_gf2(A, B):
-    if not A or not B or not A[0] or not B[0]:
-        return []
-    r, k = len(A), len(A[0])
-    k2, c = len(B), len(B[0])
-    if k != k2:
-        raise ValueError(f"dim mismatch for GF(2) multiply: {r}x{k} @ {k2}x{c}")
+    if not A or not B or not A[0] or not B[0]: return []
+    r, k = len(A), len(A[0]); k2, c = len(B), len(B[0])
+    if k != k2: raise ValueError(f"dim mismatch: {r}x{k} @ {k2}x{c}")
     out = [[0]*c for _ in range(r)]
     for i in range(r):
         Ai = A[i]
@@ -206,77 +180,44 @@ def _mul_gf2(A, B):
     return out
 
 def _is_idempotent_gf2(P):
-    try:
-        return _mul_gf2(P, P) == P
-    except Exception:
-        return False
+    try: return _mul_gf2(P, P) == P
+    except Exception: return False
 
 def _is_diagonal(P):
-    m = len(P) or 0
-    n = len(P[0]) if m else 0
-    if m != n:
-        return False
+    m = len(P) or 0; n = len(P[0]) if m else 0
+    if m != n: return False
     for i in range(m):
         for j in range(n):
-            if i != j and (P[i][j] & 1):
-                return False
+            if i != j and (P[i][j] & 1): return False
     return True
 
-def _diag(P):
-    return [int(P[i][i] & 1) for i in range(len(P))] if P and P[0] else []
+def _diag(P): return [int(P[i][i] & 1) for i in range(len(P))] if P and P[0] else []
 
 # ---------- projector chooser (strict/auto/file) ----------
 class _P3Error(ValueError):
     def __init__(self, code: str, msg: str):
-        super().__init__(f"{code}: {msg}")
-        self.code = code
+        super().__init__(f"{code}: {msg}"); self.code = code
 
 def _read_projector_matrix(path_str: str):
-    """
-    Accepts either:
-      {"blocks":{"3":[[...]]}}  or just  [[...]]
-    Returns the 2D list for k=3.
-    """
     p = _Path(path_str)
-    if not p.exists():
-        raise _P3Error("P3_SHAPE", f"projector file not found: {path_str}")
-    with open(p, "r", encoding="utf-8") as f:
-        d = _json.load(f)
+    if not p.exists(): raise _P3Error("P3_SHAPE", f"projector file not found: {path_str}")
+    with open(p, "r", encoding="utf-8") as f: d = _json.load(f)
     if isinstance(d, dict):
         b = (d.get("blocks", {}) or {}).get("3")
-        if isinstance(b, list):
-            return b
-    if isinstance(d, list):
-        return d
+        if isinstance(b, list): return b
+    if isinstance(d, list): return d
     raise _P3Error("P3_SHAPE", "unrecognized projector JSON structure")
 
 def projector_choose_active(cfg_active: dict, boundaries):
-    """
-    Returns (P_active, meta) where:
-      P_active: 2D list (nxn) for k=3 (or [] for strict)
-      meta: {
-        "d3", "n3", "lane_mask", "mode",
-        "projector_filename", "projector_hash",
-        "projector_consistent_with_d": True|False|None
-      }
-    Raises _P3Error on FILE validation issues (fail-fast).
-    """
     d3 = (boundaries.blocks.__root__.get("3") or [])
     n3 = len(d3[0]) if (d3 and d3[0]) else 0
     lane_mask = _lane_mask_from_d3(boundaries)
-    mode = "strict"
-    P_active = []
-    pj_filename = ""
-    pj_hash = ""
-    pj_consistent = None
+    mode = "strict"; P_active = []; pj_filename = ""; pj_hash = ""; pj_consistent = None
 
-    # strict
     if not cfg_active or not cfg_active.get("enabled_layers"):
-        return P_active, {
-            "d3": d3, "n3": n3, "lane_mask": lane_mask, "mode": mode,
-            "projector_filename": pj_filename, "projector_hash": pj_hash,
-            "projector_consistent_with_d": pj_consistent,
-        }
+        return P_active, {"d3": d3, "n3": n3, "lane_mask": lane_mask, "mode": mode,
+                          "projector_filename": pj_filename, "projector_hash": pj_hash,
+                          "projector_consistent_with_d": pj_consistent}
 
     source = (cfg_active.get("source", {}) or {}).get("3", "auto")
     mode = "projected(auto)" if source == "auto" else "projected(file)"
@@ -284,160 +225,78 @@ def projector_choose_active(cfg_active: dict, boundaries):
     if source == "auto":
         diag = (lane_mask if lane_mask else [1]*n3)
         P_active = [[1 if i == j and diag[j] else 0 for j in range(n3)] for i in range(n3)]
-        pj_hash = _sha256_hex_obj(P_active)
-        pj_consistent = True
-        return P_active, {
-            "d3": d3, "n3": n3, "lane_mask": lane_mask, "mode": mode,
-            "projector_filename": "", "projector_hash": pj_hash,
-            "projector_consistent_with_d": pj_consistent,
-        }
+        pj_hash = _sha256_hex_obj(P_active); pj_consistent = True
+        return P_active, {"d3": d3, "n3": n3, "lane_mask": lane_mask, "mode": mode,
+                          "projector_filename": "", "projector_hash": pj_hash,
+                          "projector_consistent_with_d": pj_consistent}
 
-    # FILE
     pj_filename = (cfg_active.get("projector_files", {}) or {}).get("3", "")
-    if not pj_filename:
-        raise _P3Error("P3_SHAPE", "no projector file provided for file-mode")
+    if not pj_filename: raise _P3Error("P3_SHAPE", "no projector file provided for file-mode")
 
     P = _read_projector_matrix(pj_filename)
-    m = len(P) or 0
-    n = len(P[0]) if m else 0
-    if n3 == 0 or m != n3 or n != n3:
-        raise _P3Error("P3_SHAPE", f"expected {n3}x{n3}, got {m}x{n}")
-
-    if not _is_idempotent_gf2(P):
-        raise _P3Error("P3_IDEMP", "P is not idempotent over GF(2)")
-    if not _is_diagonal(P):
-        raise _P3Error("P3_DIAGONAL", "P has off-diagonal non-zeros")
-
+    m = len(P) or 0; n = len(P[0]) if m else 0
+    if n3 == 0 or m != n3 or n != n3: raise _P3Error("P3_SHAPE", f"expected {n3}x{n3}, got {m}x{n}")
+    if not _is_idempotent_gf2(P):    raise _P3Error("P3_IDEMP", "P is not idempotent over GF(2)")
+    if not _is_diagonal(P):          raise _P3Error("P3_DIAGONAL", "P has off-diagonal non-zeros")
     pj_diag = _diag(P)
     if lane_mask and pj_diag != [int(x) for x in lane_mask]:
         raise _P3Error("P3_LANE_MISMATCH", f"diag(P) != lane_mask(d3) → {pj_diag} vs {lane_mask}")
+    pj_hash = _sha256_hex_obj(P); pj_consistent = True if lane_mask else None
 
-    pj_hash = _sha256_hex_obj(P)
-    pj_consistent = True if lane_mask else None
+    return P, {"d3": d3, "n3": n3, "lane_mask": lane_mask, "mode": mode,
+               "projector_filename": pj_filename, "projector_hash": pj_hash,
+               "projector_consistent_with_d": pj_consistent}
 
-    return P, {
-        "d3": d3, "n3": n3, "lane_mask": lane_mask, "mode": mode,
-        "projector_filename": pj_filename, "projector_hash": pj_hash,
-        "projector_consistent_with_d": pj_consistent,
-    }
-
-# ---------- misc small helpers ----------
+# ---------- misc ----------
 def hash_matrix_norm(M) -> str:
-    if not M:
-        return hash_json([])
+    if not M: return hash_json([])
     norm = [[int(x) & 1 for x in row] for row in M]
     return hash_json(norm)
 
 def _zip_arcname(abspath: str) -> str:
     p = _Path(abspath)
-    try:
-        return p.resolve().relative_to(_Path.cwd().resolve()).as_posix()
-    except Exception:
-        return p.name
+    try: return p.resolve().relative_to(_Path.cwd().resolve()).as_posix()
+    except Exception: return p.name
 
 def build_cert_bundle(*, district_id: str, policy_tag: str, cert_path: str,
                       content_hash: str | None = None, extras: list[str] | None = None) -> str:
-    """Cross-device safe writer for bundles/overlap_bundle__{district}__{policy}__{hash}.zip"""
     cert_p = _Path(cert_path)
-    if not cert_p.exists():
-        raise FileNotFoundError(f"Cert not found: {cert_path}")
-
-    with open(cert_p, "r", encoding="utf-8") as f:
-        cert = _json.load(f)
-    if not content_hash:
-        content_hash = ((cert.get("integrity") or {}).get("content_hash") or "")
+    if not cert_p.exists(): raise FileNotFoundError(f"Cert not found: {cert_path}")
+    with open(cert_p, "r", encoding="utf-8") as f: cert = _json.load(f)
+    if not content_hash: content_hash = ((cert.get("integrity") or {}).get("content_hash") or "")
     suffix = content_hash[:12] if content_hash else "nohash"
     safe_policy = (policy_tag or cert.get("policy", {}).get("policy_tag", "policy")).replace("/", "_").replace(" ", "_")
     zpath = BUNDLES_DIR / f"overlap_bundle__{district_id or 'UNKNOWN'}__{safe_policy}__{suffix}.zip"
-
     files = [str(cert_p)]
     for p in (extras or []):
-        if p and _os.path.exists(p):
-            files.append(p)
-
+        if p and _os.path.exists(p): files.append(p)
     fd, tmp_name = _tempfile.mkstemp(dir=BUNDLES_DIR, prefix=".tmp_bundle_", suffix=".zip")
-    _os.close(fd)
-    tmp_path = _Path(tmp_name)
+    _os.close(fd); tmp_path = _Path(tmp_name)
     try:
         with _zipfile.ZipFile(tmp_path, "w", compression=_zipfile.ZIP_DEFLATED) as zf:
             for abspath in files:
                 abspath = str(_Path(abspath).resolve())
                 zf.write(abspath, arcname=_zip_arcname(abspath))
-        try:
-            _os.replace(tmp_path, zpath)
-        except OSError:
-            _shutil.move(str(tmp_path), str(zpath))
+        try: _os.replace(tmp_path, zpath)
+        except OSError: _shutil.move(str(tmp_path), str(zpath))
     finally:
-        if tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
+        if tmp_path.exists(): tmp_path.unlink(missing_ok=True)
     return str(zpath)
-
-# ---------- tails (use safe_expander; no direct st.expander) ----------
-def _read_jsonl_tail(path: _Path, limit: int = 5) -> list[dict]:
-    if not path.exists():
-        return []
-    try:
-        with path.open("r", encoding="utf-8") as f:
-            lines = f.readlines()[-limit:]
-        out = []
-        for ln in lines:
-            try:
-                out.append(_json.loads(ln))
-            except Exception:
-                continue
-        return out
-    except Exception:
-        return []
-
-def render_gallery_tail(limit: int = 5):
-    p = _Path(DIRS["logs"]) / "gallery.jsonl"
-    rows = _read_jsonl_tail(p, limit)
-    st.markdown("**Recent Gallery entries**")
-    if not rows:
-        st.caption("Gallery: (empty)")
-        return
-    for r in reversed(rows):
-        d = r.get("district", "?")
-        pol = r.get("policy", "?")
-        gh = r.get("hashes", {})
-        pH = r.get("projector_hash", "")
-        st.caption(f"{r.get('written_at_utc','')} · {d} · {pol} · Π={pH[:12]} · b={gh.get('boundaries_hash','')[:8]} C={gh.get('C_hash','')[:8]} H={gh.get('H_hash','')[:8]} U={gh.get('U_hash','')[:8]}")
-    with safe_expander("Gallery tail (JSON)"):
-        st.code("\n".join(_json.dumps(r, indent=2, sort_keys=True) for r in rows), language="json")
-
-def render_witness_tail(limit: int = 5):
-    p = _Path(DIRS["logs"]) / "witnesses.jsonl"
-    rows = _read_jsonl_tail(p, limit)
-    st.markdown("**Recent Witnesses**")
-    if not rows:
-        st.caption("Witnesses: (empty)")
-        return
-    for r in reversed(rows):
-        st.caption(f"{r.get('written_at_utc','')} · {r.get('district','?')} · {r.get('reason','?')} · residual={r.get('residual_tag','?')} · {r.get('policy','?')}")
-    with safe_expander("Witness tail (JSON)"):
-        st.code("\n".join(_json.dumps(r, indent=2, sort_keys=True) for r in rows), language="json")
 
 # ---------- inputs block builder (SSOT) ----------
 def build_inputs_block(boundaries, cmap, H_used, shapes, filenames: dict) -> dict:
     C3 = (cmap.blocks.__root__.get("3") or [])
     d3 = (boundaries.blocks.__root__.get("3") or [])
-    dims = {
-        "n3": len(C3) if C3 else (len(d3[0]) if (d3 and d3[0]) else 0),
-        "n2": len(cmap.blocks.__root__.get("2") or []),
-    }
+    dims = {"n3": len(C3) if C3 else (len(d3[0]) if (d3 and d3[0]) else 0),
+            "n2": len(cmap.blocks.__root__.get("2") or [])}
     hashes_dict = {
         "boundaries_hash": hash_json(boundaries.dict() if hasattr(boundaries, "dict") else {}),
         "C_hash":          hash_json(cmap.dict() if hasattr(cmap, "dict") else {}),
         "H_hash":          hash_json(H_used.dict() if hasattr(H_used, "dict") else {}),
         "U_hash":          hash_json(shapes.dict() if hasattr(shapes, "dict") else {}),
     }
-    block = {
-        "filenames": filenames,
-        "dims": dims,
-        **hashes_dict,
-        "shapes_hash": hashes_dict["U_hash"],
-    }
-    return block
+    return {"filenames": filenames, "dims": dims, **hashes_dict, "shapes_hash": hashes_dict["U_hash"]}
+
 
 # ───────────────────────────────── SIDEBAR ───────────────────────────────────
 with st.sidebar:
@@ -539,7 +398,7 @@ if d_shapes and d_bound and d_cmap:
             f"k3={lane_mask_k3_now} · sig={district_sig}"
         )
 
-        with st.expander("Hashes / provenance"):
+        with safe_expander("Hashes / provenance"):
             named = [("boundaries", boundaries.dict()), ("shapes", shapes.dict()), ("cmap", cmap.dict())]
             if support:  named.append(("support",  support.dict()))
             if triangle: named.append(("triangle", triangle.dict()))
@@ -571,34 +430,32 @@ else:
 
 # ---- Policy config helpers (define once, before Tab 2 uses them) -------------
 def cfg_strict() -> dict:
-    # No projection in strict mode; keep projector fields empty
     return {
-        "enabled_layers": [],        # nothing enabled ⇒ strict
-        "modes": {},                 # no k=3 mode
-        "source": {},                # no projector source
-        "projector_files": {},       # no files
+        "enabled_layers": [],
+        "modes": {},
+        "source": {},
+        "projector_files": {},
     }
 
 def cfg_projected_base() -> dict:
-    # Baseline projected config: k=3 columns, AUTO by default
     return {
         "enabled_layers": [3],
         "modes": {"3": "columns"},
-        "source": {"3": "auto"},     # "auto" | "file"
-        "projector_files": {},       # if file-mode, we'll fill ["3"]
+        "source": {"3": "auto"},
+        "projector_files": {},
     }
 
 def policy_label_from_cfg(cfg: dict) -> str:
-    # Pretty label used in the UI + certs
     if not cfg or not cfg.get("enabled_layers"):
         return "strict"
     src = (cfg.get("source", {}) or {}).get("3", "auto")
     mode = (cfg.get("modes", {}) or {}).get("3", "columns")
     return f"projected({mode}@k=3,{src})"
 
-# --- FIX: ensure tabs exist even if earlier branches ran before creating them
+# --- ensure tabs exist even if earlier branches ran before creating them
 if "tab1" not in globals():
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["Unit", "Overlap", "Triangle", "Towers", "Export"])
+
 
 # ------------------------------ UNIT TAB -------------------------------------
 with tab1:
