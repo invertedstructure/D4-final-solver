@@ -2683,33 +2683,32 @@ st.caption(f"Embedded A/B → {_cert.get('ab_pair_tag','A/B')}" if _cert.get("ab
 
 
 # ---------------- Post-write UI + bundle quick action ----------------
-_rc = st.session_state.get("run_ctx", {}) or {}
+_rc = st.session_state.get("run_ctx") or {}
 
+# Resolve IDs/tags from the cert we just wrote (fallback to session if needed)
+_identity = (_cert.get("identity") or {})
+_policy   = (_cert.get("policy") or {})
 district_id_for_bundle = (
-    locals().get("district_id")
-    or (locals().get("identity_block") or {}).get("district_id")
-    or (st.session_state.get("cert_payload") or {}).get("identity", {}).get("district_id")
+    _identity.get("district_id")
     or (st.session_state.get("_district_info") or {}).get("district_id")
     or "UNKNOWN"
 )
 policy_now_for_bundle = (
-    locals().get("policy_now")
-    or (locals().get("cert_payload") or {}).get("policy", {}).get("policy_tag")
+    _policy.get("policy_tag")
     or st.session_state.get("overlap_policy_label")
     or _rc.get("policy_tag")
     or "strict"
 )
 
 if cert_path:
+    # Cache (idempotent; already set above, but harmless)
     st.session_state["last_cert_path"] = cert_path
-    st.session_state["cert_payload"]   = cert_payload
-    st.session_state["last_run_id"]    = (locals().get("identity_block") or {}).get("run_id")
+    st.session_state["cert_payload"]   = _cert
+    st.session_state["last_run_id"]    = _identity.get("run_id") or st.session_state.get("last_run_id")
 
+    # Success line + A/B badge
     st.success(f"Cert written → `{cert_path}` · {full_hash[:12]}…")
-    if cert_payload.get("ab_embedded"):
-        st.caption(f"Embedded A/B → {cert_payload.get('ab_pair_tag','A/B')}")
-    else:
-        st.caption("Embedded A/B → —")
+    st.caption(f"Embedded A/B → {_cert.get('ab_pair_tag','A/B')}" if _cert.get("ab_embedded") else "Embedded A/B → —")
 
     with st.expander("Bundle (cert + extras)"):
         extras = [
@@ -2723,7 +2722,7 @@ if cert_path:
         if _rc.get("mode") == "projected(file)" and _rc.get("projector_filename"):
             extras.append(_rc.get("projector_filename"))
 
-        if st.button("Build Cert Bundle", key="build_cert_bundle_btn"):
+        if st.button("Build Cert Bundle", key="build_cert_bundle_btn_cert"):
             try:
                 bundle_path = build_cert_bundle(
                     district_id=district_id_for_bundle,
@@ -2739,7 +2738,7 @@ if cert_path:
                             "Download cert bundle",
                             fz,
                             file_name=os.path.basename(bundle_path),
-                            key="dl_cert_bundle_zip",
+                            key="dl_cert_bundle_zip_cert",
                         )
                 except Exception:
                     pass
@@ -2747,6 +2746,7 @@ if cert_path:
                 st.error(f"Bundle build failed: {e}")
 else:
     st.caption("No cert produced in this run (nothing to bundle).")
+
 
 # ───────────────────────── Certs on disk (last 5) with A/B badge ─────────────────────────
 def _short(s, n=12):
