@@ -3003,21 +3003,7 @@ with safe_expander("Snapshot: Everything (certs, referenced Π, logs, reports) +
                         pass
             except Exception as e:
                 st.error(f"Snapshot failed: {e}")
-
-    # Flush
-    with c2:
-        inc_pj = st.checkbox("Also remove projectors", value=False, key="flush_inc_pj")
-        if st.button("Flush Workspace", key="btn_flush_workspace"):
-            try:
-                info = flush_workspace(delete_projectors=inc_pj)
-                st.success(f"Workspace flushed · {info['token']}")
-                st.caption(f"New cache key: `{info['composite_cache_key_short']}` (first 12)")
-                with st.expander("Flush details"):
-                    st.json(info)
-            except Exception as e:
-                st.error(f"Flush failed: {e}")
-
-# after: zp = build_everything_snapshot()
+                # after: zp = build_everything_snapshot()
 if zp:
     st.success(f"Snapshot ready → {zp}")
     try:
@@ -3033,6 +3019,21 @@ if zp:
         )
     except Exception:
         pass
+
+    # Flush
+    with c2:
+        inc_pj = st.checkbox("Also remove projectors", value=False, key="flush_inc_pj")
+        if st.button("Flush Workspace", key="btn_flush_workspace"):
+            try:
+                info = flush_workspace(delete_projectors=inc_pj)
+                st.success(f"Workspace flushed · {info['token']}")
+                st.caption(f"New cache key: `{info['composite_cache_key_short']}` (first 12)")
+                with st.expander("Flush details"):
+                    st.json(info)
+            except Exception as e:
+                st.error(f"Flush failed: {e}")
+
+
 
 
 
