@@ -2170,6 +2170,15 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
     _rc = _ss.get("run_ctx") or {}
     _di = _ss.get("_district_info") or {}
     district_id = _di.get("district_id", "UNKNOWN")
+    # 1) Freshness + rectifier (will stop with a clean message if stale)
+_rectify_run_ctx_mask_from_d3_or_stop()   # updates session in place
+rc = _ss.get("run_ctx") or {}             # fetch AFTER rectifier
+n3 = int(rc.get("n3") or 0)
+lm = list(rc.get("lane_mask_k3") or [])
+if n3 <= 0 or len(lm) != n3:
+    st.warning("Context invalid (n3/mask mismatch). Click Run Overlap and try again.")
+    st.stop()
+
 
     # Eligibility (non-blocking): needs AUTO mode, lane mask, d3, and k=3 green on last run
     k3_green = bool(((_ss.get("overlap_out") or {}).get("3", {}) or {}).get("eq", False))
