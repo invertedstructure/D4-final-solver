@@ -2598,7 +2598,9 @@ else:
         full_hash = cert_payload["integrity"]["content_hash"]
 
         # ---------------- Write cert (prefer package writer; fallback locally) ----------------
-
+from pathlib import Path
+import os, json as _json
+from datetime import datetime
 
 # Mark A/B in the payload (harmless if absent)
 cp = cert_payload  # assumes cert_payload already assembled above
@@ -2731,7 +2733,36 @@ with st.expander("Certs on disk (last 5)", expanded=False):
     all_certs = sorted(CERTS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     st.caption(f"Found {len(all_certs)} cert{'s' if len(all_certs) != 1 else ''} in `{CERTS_DIR.as_posix()}`.")
 
-    ab_only = st.check_
+    ab_only = st.checkbox("Show only certs with A/B embed", value=False, key="tail_ab_only")
+
+    shown = 0
+    for p in all_certs:
+        info = _safe_load_json(p)
+        if not isinstance(info, dict):
+            continue
+
+        # A/B presence
+        has_ab = bool(info.get("ab_embedded") or ("ab_pair_tag" in info) or ("ab_pair_tag" in (info.get("policy") or {})))
+        if ab_only and not has_ab:
+            continue
+
+        ident  = info.get("identity") or {}
+        policy = info.get("policy") or {}
+        integ  = info.get("integrity") or {}
+        d_id   = ident.get("district_id", "UNKNOWN")
+        policy_tag = policy.get("policy_tag") or policy.get("label") or "strict"
+        mtime  = p.stat().st_mtime
+
+        ab_flag = ""
+        if has_ab:
+            tag = info.get("ab_pair_tag") or (policy.get("ab_pair_tag") if isinstance(policy, dict) else None) or "A/B"
+            ab_flag = f" · [A/B: {tag}]"
+
+        st.write(f"• {_fmt_ts(mtime)} · {d_id} · {policy_tag} · {p.name}{ab_flag}")
+        shown += 1
+        if shown >= 5:
+            break
+
 
 
 
