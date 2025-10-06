@@ -87,6 +87,100 @@ DISTRICT_MAP: dict[str, str] = {
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
 
+# ───────────────────────── SSOT + Freshness helpers (drop-in) ─────────────────────────
+import hashlib, secrets
+import streamlit as st
+
+# 1) Ensure a session-wide fixture nonce exists
+def _ensure_fixture_nonce():
+    ss = st.session_state
+    if "_fixture_nonce" not in ss:
+        ss["_fixture_nonce"] = 1
+
+# 2) Bump nonce and clear computed session state (session-only flush core)
+def _bump_fixture_nonce():
+    ss = st.session_state
+    _ensure_fixture_nonce()
+    ss["_fixture_nonce"] = int(ss.get("_fixture_nonce", 0)) + 1
+    # Clear computed caches only (do not touch file pickers / inputs)
+    for k in (
+        "run_ctx", "overlap_out", "residual_tags",
+        "overlap_cfg", "overlap_policy_label", "overlap_H",
+        "ab_compare", "_projector_cache", "_projector_cache_ab",
+        "cert_payload", "last_cert_path",
+    ):
+        ss.pop(k, None)
+
+# 3) Safe wrapper you can call from *any* fixture-changing code paths
+def _mark_fixtures_changed():
+    _bump_fixture_nonce()
+
+# 4) Light reset right before an Overlap run (button handler should call this)
+def _soft_reset_before_overlap():
+    ss = st.session_state
+    for k in (
+        "run_ctx", "overlap_out", "residual_tags",
+        "overlap_cfg", "overlap_policy_label", "overlap_H",
+        "ab_compare", "_last_cert_write_key",
+        "_projector_cache", "_projector_cache_ab",
+        "cert_payload", "last_cert_path",
+    ):
+        ss.pop(k, None)
+
+# 5) Guard macro for actions that require fresh run_ctx
+def require_fresh_run_ctx():
+    ss = st.session_state
+    _ensure_fixture_nonce()
+    rc = ss.get("run_ctx")
+    if not rc:
+        st.warning("Run Overlap first.")
+        st.stop()
+    if int(rc.get("fixture_nonce", -1)) != int(ss.get("_fixture_nonce", -2)):
+        st.warning("Inputs changed since last run. Please click Run Overlap to refresh.")
+        st.stop()
+    # also assert mask shape is sane
+    n3 = int(rc.get("n3") or 0)
+    lm = list(rc.get("lane_mask_k3") or [])
+    if lm and n3 and len(lm) != n3:
+        st.warning("Context mask length mismatch; please click Run Overlap to refresh.")
+        st.stop()
+    return rc  # handy for callers
+
+# 6) Truth mask from a concrete d3 (GF(2) column-wise OR)
+def _truth_mask_from_d3(d3: list[list[int]]) -> list[int]:
+    if not d3 or not d3[0]:
+        return []
+    rows, cols = len(d3), len(d3[0])
+    return [1 if any(d3[i][j] & 1 for i in range(rows)) else 0 for j in range(cols)]
+
+# 7) Defensive rectifier used right before freezing Π
+def _rectify_run_ctx_mask_from_d3_or_stop():
+    ss = st.session_state
+    rc = require_fresh_run_ctx()  # ensures rc exists & fresh
+    d3 = rc.get("d3") or []
+    n3 = int(rc.get("n3") or 0)
+    if not d3 or n3 <= 0:
+        st.warning("Context is missing d3/n3. Run Overlap again.")
+        st.stop()
+    lm_truth = _truth_mask_from_d3(d3)
+    if len(lm_truth) != n3:
+        st.warning(f"rectifier: lane_mask length {len(lm_truth)} != n3 {n3}. Run Overlap again.")
+        st.stop()
+    lm_rc = list(rc.get("lane_mask_k3") or [])
+    if lm_rc != lm_truth:
+        rc["lane_mask_k3"] = lm_truth
+        ss["run_ctx"] = rc
+        st.info(f"Rectified run_ctx.lane_mask_k3 from {lm_rc} → {lm_truth} based on current d3.")
+    return rc  # rectified and fresh
+
+# 8) Unique key helper for download widgets etc.
+def unique_key(prefix: str) -> str:
+    ss = st.session_state
+    counter = ss.setdefault(f"__key_{prefix}", 0) + 1
+    ss[f"__key_{prefix}"] = counter
+    return f"{prefix}__{counter}"
+
+
 # ---------- Freshness / reset helpers ----------
 def _ensure_fixture_nonce():
     ss = st.session_state
@@ -964,7 +1058,8 @@ def run_overlap():
         st.session_state["residual_tags"] = {"strict": tag_strict}
 
     # Persist SSOT (write ONCE) — include the current fixture nonce
-    st.session_stat# ------------------------------ Run Overlap (SSOT + freshness) ------------------------------
+    st.session_stat
+    # ------------------------------ Run Overlap (SSOT + freshness) ------------------------------
 
 # --- helpers (scoped; safe to re-declare) ---
 def _ensure_fixture_nonce():
