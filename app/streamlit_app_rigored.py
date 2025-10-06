@@ -2399,35 +2399,35 @@ else:
         "fixture_signature": {"lane": _col_support_pattern(C3pI3, lane_idx)},
     }
 
-        # ---------------- Residual tags & checks ----------------
-        residual_tags = st.session_state.get("residual_tags", {}) or {}
-        is_strict_mode = (_rc.get("mode") == "strict")
-        checks_block = {
-            **_out,
-            "grid": True,    # hook real flags when wired
-            "fence": True,   # "
-            "ker_guard": ("enforced" if is_strict_mode else "off"),
-        }
+    # ---------------- Residual tags & checks ----------------
+    residual_tags = st.session_state.get("residual_tags", {}) or {}
+    is_strict_mode = (_rc.get("mode") == "strict")
+    checks_block = {
+        **_out,
+        "grid": True,    # hook real flags when wired
+        "fence": True,   # "
+        "ker_guard": ("enforced" if is_strict_mode else "off"),
+    }
 
-        # ---------------- Identity ----------------
-        district_id = _di.get("district_id", st.session_state.get("district_id", "UNKNOWN"))
-        run_ts = getattr(hashes, "timestamp_iso_lisbon", lambda: datetime.now(timezone.utc).isoformat())()
-        policy_now = _rc.get("policy_tag", policy_label_from_cfg(cfg_active))
+    # ---------------- Identity ----------------
+    district_id = _di.get("district_id", st.session_state.get("district_id", "UNKNOWN"))
+    run_ts = getattr(hashes, "timestamp_iso_lisbon", lambda: datetime.now(timezone.utc).isoformat())()
+    policy_now = _rc.get("policy_tag", policy_label_from_cfg(cfg_active))
 
-        # Prefer last_run_id, else derive
-        run_id = st.session_state.get("last_run_id")
-        if not run_id:
-            seed = "".join(str((_ib or {}).get(k,"")) for k in ("boundaries_hash","C_hash","H_hash","U_hash"))
-            run_id = getattr(hashes, "run_id", lambda a,b: hashlib.sha256(f"{a}|{b}".encode()).hexdigest()[:12])(seed, run_ts)
-            st.session_state["last_run_id"] = run_id
+    # Prefer last_run_id, else derive
+    run_id = st.session_state.get("last_run_id")
+    if not run_id:
+        seed = "".join(str((_ib or {}).get(k,"")) for k in ("boundaries_hash","C_hash","H_hash","U_hash"))
+        run_id = getattr(hashes, "run_id", lambda a,b: hashlib.sha256(f"{a}|{b}".encode()).hexdigest()[:12])(seed, run_ts)
+        st.session_state["last_run_id"] = run_id
 
-        identity_block = {
-            "district_id": district_id,
-            "run_id": run_id,
-            "timestamp": run_ts,
-            "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
-            "python_version": f"python-{platform.python_version()}",
-        }
+    identity_block = {
+        "district_id": district_id,
+        "run_id": run_id,
+        "timestamp": run_ts,
+        "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
+        "python_version": f"python-{platform.python_version()}",
+    }
 
                 # ---------------- Policy (mirror RC; clamp strict) ----------------
         # IMPORTANT: source must be a verbatim copy of run_ctx.source (no recompute, no defaults)
