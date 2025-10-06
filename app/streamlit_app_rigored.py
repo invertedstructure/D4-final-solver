@@ -762,7 +762,7 @@ with tab2:
     st.caption(f"Active policy: `{policy_label_from_cfg(cfg_active)}`")
 
 
-   # ------------------------ Run Overlap + UI (tidy, with A/B freshness) ------------------------
+  # ------------------------ Run Overlap + UI (tidy, with A/B freshness) ------------------------
 
 # Tiny helper so your A/B builder can record inputs_sig consistently
 def _current_inputs_sig() -> list[str]:
@@ -784,25 +784,30 @@ def _xor_mat(A, B):
     r, c = len(A), len(A[0])
     return [[(A[i][j] ^ B[i][j]) for j in range(c)] for i in range(r)]
 
-# H chosen for this run (k=2 is used in residual)
-H_local = _load_h_local()
-policy_label = policy_label_from_cfg(cfg_active)
-
-def _lane_mask_from_d3_local(boundaries_obj):
+# Authoritative lane mask: column-wise any over d3 (length n3)
+def _lane_mask_from_d3_strict(boundaries_obj):
     try:
-        d3 = boundaries_obj.blocks.__root__.get("3")
+        d3 = boundaries_obj.blocks.__root__.get("3") or []
     except Exception:
-        d3 = None
+        d3 = []
     if not d3 or not d3[0]:
         return []
-    cols = len(d3[0])
-    return [1 if any((row[j] & 1) for row in d3) else 0 for j in range(cols)]
+    rows, cols = len(d3), len(d3[0])
+    return [1 if any((d3[i][j] & 1) for i in range(rows)) else 0 for j in range(cols)]
+
+# Legacy local helper (kept for callers that referenced it)
+def _lane_mask_from_d3_local(boundaries_obj):
+    return _lane_mask_from_d3_strict(boundaries_obj)
 
 def _derive_mode_from_cfg(cfg: dict) -> str:
     if not cfg or not cfg.get("enabled_layers"):
         return "strict"
     src = (cfg.get("source", {}) or {}).get("3", "auto")
     return "projected(file)" if src == "file" else "projected(auto)"
+
+# H chosen for this run (k=2 is used in residual)
+H_local = _load_h_local()
+policy_label = policy_label_from_cfg(cfg_active)
 
 def run_overlap():
     # Clear previous session results
@@ -814,7 +819,7 @@ def run_overlap():
         P_active, meta = projector_choose_active(cfg_active, boundaries)
     except ValueError as e:
         st.error(str(e))
-        # Save minimal context so stamps/render don’t crash (MICRO-FIX: derive mode; no policy_choice)
+        # Minimal context so stamps/render don’t crash
         d3_now = (boundaries.blocks.__root__.get("3") or [])
         st.session_state["run_ctx"] = {
             "policy_tag": policy_label,
@@ -826,42 +831,16 @@ def run_overlap():
             "projector_filename": (cfg_active.get("projector_files", {}) or {}).get("3", ""),
             "projector_hash": "",
             "projector_consistent_with_d": False,
+            "source": (cfg_active.get("source") or {}),  # verbatim
             "errors": [str(e)],
         }
         st.stop()
 
     # Context
-    d3 = meta.get("d3") if "d3" in meta else (boundaries.blocks.__root__.get("3") or [])
-    n3 = meta.get("n3") if "n3" in meta else (len(d3[0]) if (d3 and d3[0]) else 0)
-    lane_mask = meta.get("lane_mask", _lane_mask_from_d3_local(boundaries))
+    d3  = meta.get("d3") if "d3" in meta else (boundaries.blocks.__root__.get("3") or [])
+    n3  = meta.get("n3") if "n3" in meta else (len(d3[0]) if (d3 and d3[0]) else 0)
     mode = meta.get("mode", _derive_mode_from_cfg(cfg_active))
-    # Always compute lane mask strictly from d3: column-wise any, length n3
-def _lane_mask_from_d3_strict(boundaries_obj):
-    try:
-        d3 = boundaries_obj.blocks.__root__.get("3") or []
-    except Exception:
-        d3 = []
-    if not d3 or not d3[0]:
-        return []
-    rows, cols = len(d3), len(d3[0])
-    return [1 if any((d3[i][j] & 1) for i in range(rows)) else 0 for j in range(cols)]
-
-lane_mask = _lane_mask_from_d3_strict(boundaries)  # ← authoritative lane mask
-
-# Persist in run context (SSOT)
-st.session_state["run_ctx"] = {
-    "policy_tag": policy_label,
-    "mode": mode,
-    "d3": d3, "n3": n3,
-    "lane_mask_k3": lane_mask,                # <- store mask here once
-    "P_active": P_active,
-    "projector_filename": meta.get("projector_filename",""),
-    "projector_hash": meta.get("projector_hash",""),
-    "projector_consistent_with_d": meta.get("projector_consistent_with_d", None),
-    "source": (cfg_active.get("source") or {}),   # <- also persist source for cert
-    "errors": [],
-}
-
+    lane_mask = _lane_mask_from_d3_strict(boundaries)  # authoritative mask
 
     # Compute strict residual R3 = H2@d3 XOR (C3 XOR I3)
     H2 = (H_local.blocks.__root__.get("2") or [])
@@ -904,7 +883,7 @@ st.session_state["run_ctx"] = {
         out = {"3": {"eq": bool(eq3_strict), "n_k": n3}, "2": {"eq": True}}
         st.session_state["residual_tags"] = {"strict": tag_strict}
 
-    # Persist RunContext SSOT
+    # Persist SSOT (single write)
     st.session_state["overlap_out"] = out
     st.session_state["overlap_cfg"] = cfg_active
     st.session_state["overlap_policy_label"] = policy_label
@@ -918,6 +897,7 @@ st.session_state["run_ctx"] = {
         "projector_filename": meta.get("projector_filename",""),
         "projector_hash": meta.get("projector_hash",""),
         "projector_consistent_with_d": meta.get("projector_consistent_with_d", None),
+        "source": (cfg_active.get("source") or {}),  # verbatim copy for cert
         "errors": [],
     }
 
@@ -932,6 +912,7 @@ st.session_state["run_ctx"] = {
 # Button
 if st.button("Run Overlap", key="run_overlap"):
     run_overlap()
+
 
 # -------------------- Health checks + compact, non-duplicated UI --------------------
 
