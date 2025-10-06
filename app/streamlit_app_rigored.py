@@ -1825,6 +1825,10 @@ with safe_expander("Freeze AUTO → FILE"):
             # Bust outputs & A/B snapshot; then re-run overlap immediately
             for k in ("overlap_out","residual_tags","ab_compare"):
                 st.session_state.pop(k, None)
+                # force next cert write (bypass debounce)
+            st.session_state.pop("_last_cert_write_key", None)
+            st.session_state["should_write_cert"] = True
+
 
             st.success(f"Π saved → `{pj_path.name}` · {pj_hash[:12]}…  Switching policy to FILE and re-running…")
             run_overlap()  # your existing runner
