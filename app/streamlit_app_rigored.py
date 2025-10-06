@@ -2371,33 +2371,57 @@ else:
     }
 
 
-    # ---------------- Signatures (GF(2) rank on d3) ----------------
-    def _gf2_rank(M):
-        if not M or not M[0]: return 0
-        A = [row[:] for row in M]; m, n = len(A), len(A[0]); r = c = 0
-        while r < m and c < n:
-            piv = next((i for i in range(r, m) if A[i][c] & 1), None)
-            if piv is None: c += 1; continue
-            if piv != r: A[r], A[piv] = A[piv], A[r]
-            for i in range(m):
-                if i != r and (A[i][c] & 1):
-                    A[i] = [(A[i][j] ^ A[r][j]) & 1 for j in range(n)]
-            r += 1; c += 1
-        return r
+    # ---- Support for signatures: ensure lane_idx and C3pI3 are in scope ----
+# Authoritative lane mask comes from run_ctx (written during Run Overlap)
+lane_mask = list((_rc.get("lane_mask_k3") or []))
+lane_idx  = [j for j, m in enumerate(lane_mask) if m]
 
-    rank_d3    = _gf2_rank(d3) if d3 else 0
-    ncols_d3   = len(d3[0]) if (d3 and d3[0]) else 0
-    ker_dim_d3 = max(ncols_d3 - rank_d3, 0)
-    lane_pattern = "".join("1" if int(x) else "0" for x in (lane_mask or []))
+# Make sure C3pI3 is available (C3 XOR I3). If not computed earlier in diagnostics, do it here.
+def _xor_local(A, B):
+    if not A: return [row[:] for row in (B or [])]
+    if not B: return [row[:] for row in (A or [])]
+    r, c = len(A), len(A[0])
+    return [[(A[i][j] ^ B[i][j]) & 1 for j in range(c)] for i in range(r)]
 
-    def _col_support_pattern(M, cols):
-        if not M or not cols: return ""
-        return "".join("1" if any((row[j] & 1) for row in M) else "0" for j in cols)
+try:
+    C3 = (cmap.blocks.__root__.get("3") or [])
+except Exception:
+    C3 = []
+I3 = eye(len(C3)) if C3 else []
 
-    signatures_block = {
-        "d_signature": {"rank": rank_d3, "ker_dim": ker_dim_d3, "lane_pattern": lane_pattern},
-        "fixture_signature": {"lane": _col_support_pattern(C3pI3, lane_idx)},
-    }
+if "C3pI3" not in locals() or not C3pI3:
+    C3pI3 = _xor_local(C3, I3)
+
+# ---------------- Signatures (GF(2) rank on d3) ----------------
+def _gf2_rank(M):
+    if not M or not M[0]: return 0
+    A = [row[:] for row in M]; m, n = len(A), len(A[0]); r = c = 0
+    while r < m and c < n:
+        piv = next((i for i in range(r, m) if A[i][c] & 1), None)
+        if piv is None: c += 1; continue
+        if piv != r: A[r], A[piv] = A[piv], A[r]
+        for i in range(m):
+            if i != r and (A[i][c] & 1):
+                A[i] = [(A[i][j] ^ A[r][j]) & 1 for j in range(n)]
+        r += 1; c += 1
+    return r
+
+rank_d3    = _gf2_rank(d3) if d3 else 0
+ncols_d3   = len(d3[0]) if (d3 and d3[0]) else 0
+ker_dim_d3 = max(ncols_d3 - rank_d3, 0)
+lane_pattern = "".join("1" if int(x) else "0" for x in (lane_mask or []))
+
+def _col_support_pattern(M, cols):
+    if not M: return ""
+    # if cols empty, return full-width support string (useful for diagnostics)
+    use_cols = (cols if cols else list(range(len(M[0]) if M and M[0] else 0)))
+    return "".join("1" if any((row[j] & 1) for row in M) else "0" for j in use_cols)
+
+signatures_block = {
+    "d_signature": {"rank": rank_d3, "ker_dim": ker_dim_d3, "lane_pattern": lane_pattern},
+    "fixture_signature": {"lane": _col_support_pattern(C3pI3, lane_idx)},
+}
+
 
     # ---------------- Residual tags & checks ----------------
     residual_tags = st.session_state.get("residual_tags", {}) or {}
