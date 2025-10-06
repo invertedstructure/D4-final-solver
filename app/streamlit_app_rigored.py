@@ -2535,6 +2535,80 @@ else:
                 policy_block["projector_file_sha256"] = pj_sha
                 artifact_hashes["projector_file_sha256"] = pj_sha
 
+        # --- Optional A/B embed (fresh only) ------------------------------------------
+
+_ab = st.session_state.get("ab_compare") or {}
+
+def _hz(v): return v if isinstance(v, str) else ""
+
+inputs_sig_now = [
+    _hz(inputs_block_payload.get("boundaries_hash","")),
+    _hz(inputs_block_payload.get("C_hash","")),
+    _hz(inputs_block_payload.get("H_hash","")),
+    _hz(inputs_block_payload.get("U_hash","")),
+    _hz(inputs_block_payload.get("shapes_hash","")),
+]
+
+def _pass_vec_from(out_block: dict) -> list[int]:
+    return [
+        int((out_block or {}).get("2",{}).get("eq", False)),
+        int((out_block or {}).get("3",{}).get("eq", False)),
+    ]
+
+if _ab and (_ab.get("inputs_sig") == inputs_sig_now):
+    # Strict leg snapshot
+    strict_ctx = _ab.get("strict", {}) or {}
+    cert_payload["policy"]["strict_snapshot"] = {
+        "policy_tag": "strict",
+        "ker_guard": "enforced",
+        "inputs": {"filenames": inputs_block_payload.get("filenames", {})},
+        "lane_mask_k3": diagnostics_block.get("lane_mask_k3", lane_mask),
+        "lane_vec_H2d3": strict_ctx.get("lane_vec_H2d3", lane_vec_H2d3),
+        "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3", lane_vec_C3plusI3),
+        "pass_vec": _pass_vec_from(strict_ctx.get("out", {})),
+        "out": strict_ctx.get("out", {}),
+    }
+
+    # Projected leg mirrors ACTIVE source (AUTO/FILE); never recompute here
+    projected_ctx = _ab.get("projected", {}) or {}
+    proj_mode = _rc.get("mode", "projected(auto)")
+    proj_tag  = "projected(file)" if proj_mode == "projected(file)" else "projected(auto)"
+
+    proj_snap = {
+        "policy_tag": proj_tag,
+        "ker_guard": "off",
+        "inputs": {"filenames": inputs_block_payload.get("filenames", {})},
+        "lane_mask_k3": diagnostics_block.get("lane_mask_k3", lane_mask),
+        "lane_vec_H2d3": projected_ctx.get("lane_vec_H2d3", lane_vec_H2d3),
+        "lane_vec_C3plusI3": projected_ctx.get("lane_vec_C3plusI3", lane_vec_C3plusI3),
+        "pass_vec": _pass_vec_from(projected_ctx.get("out", {})),
+        "out": projected_ctx.get("out", {}),
+        # Π metadata comes from run_ctx (SSOT) first, then A/B snapshot as fallback
+        "projector_hash": _rc.get("projector_hash", projected_ctx.get("projector_hash","")),
+        "projector_consistent_with_d": _rc.get(
+            "projector_consistent_with_d",
+            projected_ctx.get("projector_consistent_with_d", None)
+        ),
+    }
+    if proj_mode == "projected(file)":
+        if _rc.get("projector_filename"):
+            proj_snap["projector_filename"] = _rc.get("projector_filename")
+        # If your cert writer already put projector_file_sha256 under policy, mirror it here too:
+        pf_sha = cert_payload.get("policy", {}).get("projector_file_sha256")
+        if pf_sha:
+            proj_snap["projector_file_sha256"] = pf_sha
+
+    cert_payload["policy"]["projected_snapshot"] = proj_snap
+    cert_payload["ab_pair_tag"] = f"strict__VS__{proj_tag}"
+    # A/B freshness pill (optional UI)
+_ab = st.session_state.get("ab_compare") or {}
+if _ab:
+    ab_fresh = (_ab.get("inputs_sig") == inputs_sig_now)
+    st.caption("A/B snapshot: 🟢 fresh (will embed in cert)" if ab_fresh
+               else "A/B snapshot: 🟡 stale (won’t embed)")
+    
+# -------------------------------------------------------------------------------
+
         # ---------------- Assemble core cert payload ----------------
         cert_payload = {
             "schema_version": LAB_SCHEMA_VERSION,
