@@ -87,6 +87,28 @@ DISTRICT_MAP: dict[str, str] = {
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
 
+# ---------- Freshness / reset helpers ----------
+def _ensure_fixture_nonce():
+    ss = st.session_state
+    if "_fixture_nonce" not in ss:
+        ss["_fixture_nonce"] = 1
+
+def _mark_fixtures_changed():
+    ss = st.session_state
+    _ensure_fixture_nonce()
+    ss["_fixture_nonce"] += 1
+    # clear only things that depend on inputs/projector selection
+    for k in ("run_ctx","overlap_out","overlap_cfg","overlap_policy_label",
+              "overlap_H","residual_tags","ab_compare","_projector_cache",
+              "_projector_cache_ab","_last_cert_write_key"):
+        ss.pop(k, None)
+
+def _soft_reset_before_overlap():
+    """Light reset before an Overlap run; does NOT touch files on disk."""
+    ss = st.session_state
+    for k in ("run_ctx","overlap_out","overlap_cfg","overlap_policy_label",
+              "overlap_H","residual_tags","_last_cert_write_key"):
+        ss.pop(k, None)
 
 # Freshness / mutation tracking
 def _bump_fixture_nonce():
@@ -837,6 +859,20 @@ cfg_active = _cfg_from_policy(
 st.caption(f"Active policy: `{policy_label_from_cfg(cfg_active)}`")
 
 # ------------------------------ Run Overlap + UI (tidy, with A/B freshness) ------------------------------
+
+# --- helpers for freshness + soft reset (scoped, safe to re-declare) ---
+def _ensure_fixture_nonce():
+    ss = st.session_state
+    if "_fixture_nonce" not in ss:
+        ss["_fixture_nonce"] = 1
+
+def _soft_reset_before_overlap():
+    """Light reset before an Overlap run; does NOT touch files on disk."""
+    ss = st.session_state
+    for k in ("run_ctx","overlap_out","overlap_cfg","overlap_policy_label",
+              "overlap_H","residual_tags","_last_cert_write_key"):
+        ss.pop(k, None)
+
 def _current_inputs_sig() -> list[str]:
     _ib = st.session_state.get("_inputs_block") or {}
     return [
@@ -848,7 +884,10 @@ def _current_inputs_sig() -> list[str]:
     ]
 
 def run_overlap():
-    # Clear previous session results
+    # step 2: guarantee a nonce exists for this session
+    _ensure_fixture_nonce()
+
+    # Clear previous session results (kept as part of Overlap run body)
     for k in ("proj_meta", "run_ctx", "residual_tags", "overlap_out", "overlap_H", "overlap_cfg", "overlap_policy_label"):
         st.session_state.pop(k, None)
 
@@ -861,7 +900,7 @@ def run_overlap():
         st.session_state["run_ctx"] = {
             "policy_tag": policy_label_from_cfg(cfg_active),
             "mode": _derive_mode_from_cfg(cfg_active),
-            "fixture_nonce": st.session_state.get("_fixture_nonce", 0),
+            "fixture_nonce": st.session_state.get("_fixture_nonce", 0),   # <-- write nonce on error path too
             "d3": d3_now,
             "n3": len(d3_now[0]) if (d3_now and d3_now[0]) else 0,
             "lane_mask_k3": [],
@@ -924,7 +963,7 @@ def run_overlap():
         out = {"3": {"eq": bool(eq3_strict), "n_k": n3}, "2": {"eq": True}}
         st.session_state["residual_tags"] = {"strict": tag_strict}
 
-    # Persist SSOT (write ONCE)
+    # Persist SSOT (write ONCE) — include the current fixture nonce
     st.session_state["overlap_out"] = out
     st.session_state["overlap_cfg"] = cfg_active
     st.session_state["overlap_policy_label"] = policy_label_from_cfg(cfg_active)
@@ -932,8 +971,10 @@ def run_overlap():
     st.session_state["run_ctx"] = {
         "policy_tag": st.session_state["overlap_policy_label"],
         "mode": mode,
-        "fixture_nonce": st.session_state.get("_fixture_nonce", 0),
-        "d3": d3, "n3": n3, "lane_mask_k3": lane_mask,
+        "fixture_nonce": st.session_state.get("_fixture_nonce", 0),  # <-- step 2: bind nonce into run_ctx
+        "d3": d3,
+        "n3": n3,
+        "lane_mask_k3": lane_mask,
         "P_active": P_active,
         "projector_filename": meta.get("projector_filename", ""),
         "projector_hash": meta.get("projector_hash", ""),
@@ -953,9 +994,11 @@ def run_overlap():
         else:
             st.warning("Projected(file) is not consistent with current d3 (check shape/idempotence/diag/lane).")
 
-# Button (unique key)
+# Button (unique key) — step 3: soft reset before running
 if st.button("Run Overlap", key="btn_run_overlap_final"):
+    _soft_reset_before_overlap()
     run_overlap()
+
 
 
 # ── Debug: lane mask & projector diag (place near top of Tab 2) ───────────────
@@ -1907,11 +1950,23 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
     _di = _ss.get("_district_info") or {}
     district_id = _di.get("district_id", "UNKNOWN")
 
+    # Small guard to prevent false "stale" context
+    _fixture_nonce = _ss.get("_fixture_nonce")
+    fresh = bool(_rc and _rc.get("fixture_nonce") == _fixture_nonce)
+    st.caption(f"ctx freshness: {_rc.get('fixture_nonce')} vs {_fixture_nonce} → {'fresh' if fresh else 'stale'}")
+    if not fresh:
+        st.info("Context is stale. Run Overlap to refresh.")
+        # Early exit if stale
+        # (Optional: you could skip the rest of the block here if desired)
+        # return
+
     # Compute eligibility + freshness WITHOUT stopping the app
     last_out_3 = ((_ss.get("overlap_out") or {}).get("3", {}) or {})
     k3_green = bool(last_out_3.get("eq", False))
     has_mask_and_d3 = bool((_rc.get("lane_mask_k3") or [])) and bool((_rc.get("d3") or []))
     in_auto = (_rc.get("mode") == "projected(auto)")
+    # Use the fresh variable for additional certainty if needed
+    # (But since we've checked freshness above, proceed as usual)
     fresh = bool(_rc) and (_rc.get("fixture_nonce") == _ss.get("_fixture_nonce"))
 
     elig_freeze = in_auto and has_mask_and_d3 and k3_green and fresh
@@ -1937,7 +1992,8 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
         try:
             # Re-check freshness just before acting
             _rc = _ss.get("run_ctx") or {}
-            if not (_rc and (_rc.get("fixture_nonce") == _ss.get("_fixture_nonce")) and _rc.get("d3") and _rc.get("lane_mask_k3")):
+            _fixture_nonce = _ss.get("_fixture_nonce")
+            if not (_rc and _rc.get("fixture_nonce") == _fixture_nonce and _rc.get("d3") and _rc.get("lane_mask_k3")):
                 raise RuntimeError("Context changed. Run Overlap again and retry.")
 
             pj_path = PROJECTORS_DIR / pj_basename
@@ -3186,6 +3242,82 @@ with st.expander("Exports", expanded=False):
             except Exception as e:
                 st.error(f"Export Inputs Bundle failed: {e}")
 
+
+
+with st.expander("Exports & Maintenance", expanded=False):
+    c1, c2, c3 = st.columns([1,1,1])
+
+    # ---- Snapshot ZIP ----
+    with c1:
+        if st.button("Build Snapshot ZIP", key="btn_build_snapshot_final"):
+            try:
+                zp = build_everything_snapshot()
+                if zp:
+                    st.success(f"Snapshot ready → {zp}")
+                    with open(zp, "rb") as fz:
+                        st.download_button(
+                            "Download snapshot.zip", fz,
+                            file_name=os.path.basename(zp),
+                            key="dl_snapshot_zip_final"
+                        )
+            except Exception as e:
+                st.error(f"Snapshot failed: {e}")
+
+    # ---- Inputs Bundle ----
+    with c2:
+        if st.button("Export Inputs Bundle", key="btn_export_inputs_final"):
+            try:
+                ib = st.session_state.get("_inputs_block") or {}
+                di = st.session_state.get("_district_info") or {}
+                rc = st.session_state.get("run_ctx") or {}
+                cert_cached = st.session_state.get("cert_payload")
+                district_id = di.get("district_id", "UNKNOWN")
+                run_id = (cert_cached or {}).get("identity", {}).get("run_id") or st.session_state.get("last_run_id")
+
+                if not run_id:
+                    seed_str = "".join(ib.get(k, "") for k in ("boundaries_hash","C_hash","H_hash","U_hash"))
+                    ts = _utc_iso_z()
+                    run_id = hashlib.sha256(f"{seed_str}|{ts}".encode("utf-8")).hexdigest()[:12]
+                    st.session_state["last_run_id"] = run_id
+
+                policy_tag = st.session_state.get("overlap_policy_label") or rc.get("policy_tag") or "strict"
+
+                bp = build_inputs_bundle(
+                    inputs_block=ib,
+                    run_ctx=rc,
+                    district_id=district_id,
+                    run_id=run_id,
+                    policy_tag=policy_tag,
+                )
+                st.session_state["last_inputs_bundle_path"] = bp
+                st.success(f"Inputs bundle ready → {bp}")
+                with open(bp, "rb") as fz:
+                    st.download_button(
+                        "Download inputs bundle", fz,
+                        file_name=os.path.basename(bp),
+                        key="dl_inputs_bundle_final"
+                    )
+            except Exception as e:
+                st.error(f"Export Inputs Bundle failed: {e}")
+
+    # ---- Flushes ----
+    with c3:
+        st.caption("Flush / Reset")
+        if st.button("Quick Reset (session only)", key="btn_quick_reset_session"):
+            # session-only reset + bump nonce to invalidate stale run_ctx
+            _mark_fixtures_changed()
+            st.success("Session caches cleared. Run Overlap again.")
+
+        inc_pj = st.checkbox("Also remove projectors (full flush)", value=False, key="flush_inc_pj_final")
+        if st.button("Full Flush (disk + session)", key="btn_full_flush_everything"):
+            try:
+                info = flush_workspace(delete_projectors=inc_pj)
+                st.success(f"Workspace flushed · {info['token']}")
+                st.caption(f"New cache key: `{info['composite_cache_key_short']}`")
+                with st.expander("Flush details"):
+                    st.json(info)
+            except Exception as e:
+                st.error(f"Flush failed: {e}")
 
 
 
