@@ -2167,7 +2167,6 @@ def _simulate_overlap_with_cfg(cfg_forced):
 # ---------------------------- Projector Freezer (AUTO → FILE, no UI flip) ----------------------------
 with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
     _ss = st.session_state
-    _rc = _ss.get("run_ctx") or {}
     _di = _ss.get("_district_info") or {}
     district_id = _di.get("district_id", "UNKNOWN")
         # 1) Freshness + rectifier (will stop with a clean message if stale)
