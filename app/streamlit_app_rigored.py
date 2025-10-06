@@ -3017,6 +3017,23 @@ with safe_expander("Snapshot: Everything (certs, referenced Π, logs, reports) +
             except Exception as e:
                 st.error(f"Flush failed: {e}")
 
+# after: zp = build_everything_snapshot()
+if zp:
+    st.success(f"Snapshot ready → {zp}")
+    try:
+        # show a quick summary from the manifest in the zip
+        import zipfile, json
+        with zipfile.ZipFile(zp, "r") as zf:
+            manifest = json.loads(zf.read("manifest.json").decode("utf-8"))
+        st.caption(
+            f"Snapshot summary → bundle_kind={manifest.get('bundle_kind','?')} · "
+            f"districts={','.join(manifest.get('districts',[])) or '—'} · "
+            f"certs={manifest.get('counts',{}).get('certs',0)} · "
+            f"projectors={manifest.get('counts',{}).get('projectors',0)}"
+        )
+    except Exception:
+        pass
+
 
 
 
