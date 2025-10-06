@@ -835,6 +835,33 @@ def run_overlap():
     n3 = meta.get("n3") if "n3" in meta else (len(d3[0]) if (d3 and d3[0]) else 0)
     lane_mask = meta.get("lane_mask", _lane_mask_from_d3_local(boundaries))
     mode = meta.get("mode", _derive_mode_from_cfg(cfg_active))
+    # Always compute lane mask strictly from d3: column-wise any, length n3
+def _lane_mask_from_d3_strict(boundaries_obj):
+    try:
+        d3 = boundaries_obj.blocks.__root__.get("3") or []
+    except Exception:
+        d3 = []
+    if not d3 or not d3[0]:
+        return []
+    rows, cols = len(d3), len(d3[0])
+    return [1 if any((d3[i][j] & 1) for i in range(rows)) else 0 for j in range(cols)]
+
+lane_mask = _lane_mask_from_d3_strict(boundaries)  # ← authoritative lane mask
+
+# Persist in run context (SSOT)
+st.session_state["run_ctx"] = {
+    "policy_tag": policy_label,
+    "mode": mode,
+    "d3": d3, "n3": n3,
+    "lane_mask_k3": lane_mask,                # <- store mask here once
+    "P_active": P_active,
+    "projector_filename": meta.get("projector_filename",""),
+    "projector_hash": meta.get("projector_hash",""),
+    "projector_consistent_with_d": meta.get("projector_consistent_with_d", None),
+    "source": (cfg_active.get("source") or {}),   # <- also persist source for cert
+    "errors": [],
+}
+
 
     # Compute strict residual R3 = H2@d3 XOR (C3 XOR I3)
     H2 = (H_local.blocks.__root__.get("2") or [])
@@ -2321,35 +2348,47 @@ else:
     else:
         st.session_state["_last_cert_write_key"] = write_key
 
-        # ---------------- Diagnostics (lane vectors) ----------------
-        lane_mask = list(_rc.get("lane_mask_k3", []) or [])
-        d3 = _rc.get("d3", [])
-        H2 = (_H.blocks.__root__.get("2") or [])
-        C3 = (cmap.blocks.__root__.get("3") or [])
-        I3 = eye(len(C3)) if C3 else []
+            # ---------------- Diagnostics (use lane mask from run_ctx; do not recompute) ----------------
+    lane_mask = list(_rc.get("lane_mask_k3") or [])
+    d3 = _rc.get("d3", [])
+    H2 = (_H.blocks.__root__.get("2") or [])
+    C3 = (cmap.blocks.__root__.get("3") or [])
+    I3 = eye(len(C3)) if C3 else []
+    
+    def _bottom_row(M): return M[-1] if (M and len(M)) else []
+    def _xor(A, B):
+        if not A: return [r[:] for r in (B or [])]
+        if not B: return [r[:] for r in (A or [])]
+        return [[(A[i][j] ^ B[i][j]) & 1 for j in range(len(A[0]))] for i in range(len(A))]
+    def _mask_to_len(row, lm):
+        # length-n3 “lanes” version: keep lane cols, zero ker cols
+        if not row: return []
+        if not lm:  return row[:]  # if mask unknown, don't distort
+        return [int(row[j]) if int(lm[j]) else 0 for j in range(len(row))]
+    
+    try:
+        H2d3  = mul(H2, d3) if (H2 and d3) else []
+        C3pI3 = _xor(C3, I3) if C3 else []
+    except Exception:
+        H2d3, C3pI3 = [], []
+    
+    row_full_H2d3 = _bottom_row(H2d3)
+    row_full_C3I  = _bottom_row(C3pI3)
+    row_lanes_H2d3 = _mask_to_len(row_full_H2d3, lane_mask)
+    row_lanes_C3I  = _mask_to_len(row_full_C3I,  lane_mask)
+    
+    diagnostics_block = {
+        "lane_mask_k3": lane_mask,                 # authoritative mask (length n3)
+        "lane_vec_H2d3": {                         # polished shape: both forms
+            "row_full":  row_full_H2d3,
+            "row_lanes": row_lanes_H2d3,
+        },
+        "lane_vec_C3plusI3": {
+            "row_full":  row_full_C3I,
+            "row_lanes": row_lanes_C3I,
+        },
+    }
 
-        def _bottom_row(M): return M[-1] if (M and len(M)) else []
-        def _xor(A, B):
-            if not A: return [r[:] for r in (B or [])]
-            if not B: return [r[:] for r in (A or [])]
-            return [[(A[i][j] ^ B[i][j]) & 1 for j in range(len(A[0]))] for i in range(len(A))]
-        def _mask(vec, idx): return [vec[j] for j in idx] if (vec and idx) else []
-
-        try:
-            H2d3  = mul(H2, d3) if (H2 and d3) else []
-            C3pI3 = _xor(C3, I3) if C3 else []
-        except Exception:
-            H2d3, C3pI3 = [], []
-
-        lane_idx = [j for j, m in enumerate(lane_mask) if m]
-        lane_vec_H2d3     = _mask(_bottom_row(H2d3), lane_idx)
-        lane_vec_C3plusI3 = _mask(_bottom_row(C3pI3), lane_idx)
-
-        diagnostics_block = {
-            "lane_mask_k3": lane_mask,
-            "lane_vec_H2d3": lane_vec_H2d3,
-            "lane_vec_C3plusI3": lane_vec_C3plusI3,
-        }
 
         # ---------------- Signatures (GF(2) rank on d3) ----------------
         def _gf2_rank(M):
@@ -2409,22 +2448,23 @@ else:
             "python_version": f"python-{platform.python_version()}",
         }
 
-        # ---------------- Policy (mirror RC; clamp strict) ----------------
+                # ---------------- Policy (mirror RC; clamp strict) ----------------
+        # IMPORTANT: source must be a verbatim copy of run_ctx.source (no recompute, no defaults)
         policy_block = {
             "label": policy_now,
             "policy_tag": policy_now,
-            "enabled_layers": cfg_active.get("enabled_layers", []),
-            "modes": cfg_active.get("modes", {}),
-            "source": cfg_active.get("source", {}),
+            "enabled_layers": cfg_active.get("enabled_layers", []),  # ok to mirror UI here
+            "modes": cfg_active.get("modes", {}),                    # ok to mirror UI here
+            "source": (_rc.get("source") or {}),                     # <-- verbatim from run_ctx
         }
-        # Π fields from run_ctx (SSOT)
+        # projector fields from run_ctx (SSOT)
         if _rc.get("projector_hash") is not None:
             policy_block["projector_hash"] = _rc.get("projector_hash","")
         if _rc.get("projector_filename"):
             policy_block["projector_filename"] = _rc.get("projector_filename","")
         if _rc.get("projector_consistent_with_d") is not None:
             policy_block["projector_consistent_with_d"] = bool(_rc.get("projector_consistent_with_d"))
-
+        
         # strict: never leak projector/modes/source
         if _rc.get("mode") == "strict":
             policy_block["enabled_layers"] = []
