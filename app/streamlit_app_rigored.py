@@ -2597,50 +2597,90 @@ else:
         cert_payload["integrity"]["content_hash"] = hash_json(cert_payload)
         full_hash = cert_payload["integrity"]["content_hash"]
 
-        # ---------------- Write cert (prefer package writer; fallback locally) ----------------
+     # ---------------- Write cert (prefer package writer; fallback locally) ----------------
 from pathlib import Path
 import os, json as _json
 from datetime import datetime
 
-# Mark A/B in the payload (harmless if absent)
-cp = cert_payload  # assumes cert_payload already assembled above
+# 0) Resolve payload safely
+_cert = (
+    locals().get("cert_payload")
+    or st.session_state.get("cert_payload_draft")
+    or st.session_state.get("cert_payload")
+)
+
+if not _cert or not isinstance(_cert, dict):
+    st.error("Internal: cert payload is missing. Build the payload above before writing.")
+    st.stop()
+
+# 1) Ensure integrity hash present
+try:
+    _cert.setdefault("integrity", {})
+    if not _cert["integrity"].get("content_hash"):
+        _cert["integrity"]["content_hash"] = hash_json(_cert)
+except Exception:
+    # last resort hash
+    _cert.setdefault("integrity", {})
+    _cert["integrity"]["content_hash"] = hash_json(_cert)
+
+full_hash = _cert["integrity"]["content_hash"]
+
+# 2) A/B badge in-payload (harmless if no A/B)
+_inputs = (_cert.get("inputs") or {})
 inputs_sig_now = [
-    (cp.get("inputs") or {}).get("boundaries_hash",""),
-    (cp.get("inputs") or {}).get("C_hash",""),
-    (cp.get("inputs") or {}).get("H_hash",""),
-    (cp.get("inputs") or {}).get("U_hash",""),
-    (cp.get("inputs") or {}).get("shapes_hash",""),
+    _inputs.get("boundaries_hash",""),
+    _inputs.get("C_hash",""),
+    _inputs.get("H_hash",""),
+    _inputs.get("U_hash",""),
+    _inputs.get("shapes_hash",""),
 ]
 _ab = st.session_state.get("ab_compare") or {}
 ab_embedded = bool(_ab and (_ab.get("inputs_sig") == inputs_sig_now))
-cert_payload["ab_embedded"] = ab_embedded
-if ab_embedded and "ab_pair_tag" not in cert_payload:
-    cert_payload["ab_pair_tag"] = _ab.get("pair_tag") or f"strict__VS__{(cert_payload.get('policy') or {}).get('policy_tag','projected')}"
+_cert["ab_embedded"] = ab_embedded
+if ab_embedded and "ab_pair_tag" not in _cert:
+    _cert["ab_pair_tag"] = _ab.get("pair_tag") or f"strict__VS__{(_cert.get('policy') or {}).get('policy_tag','projected')}"
 
-cert_path = None  # will be set
+# 3) Useful locals for fallback naming/UI
+_identity = _cert.get("identity") or {}
+_policy   = _cert.get("policy")   or {}
+district_id = _identity.get("district_id") or locals().get("district_id") or "UNKNOWN"
+policy_now  = _policy.get("policy_tag") or locals().get("policy_now") or "strict"
+
+# 4) Write via package writer (no renaming if it succeeds)
+cert_path = None
 try:
-    # Package writer path — DO NOT rename if it succeeds
-    result = export_mod.write_cert_json(cert_payload)  # may return (path, hash) or path
+    result = export_mod.write_cert_json(_cert)  # may return (path, hash) or path
     if isinstance(result, (list, tuple)) and len(result) >= 2:
         cert_path, full_hash = result[0], result[1]
     else:
         cert_path = result
 except Exception as e:
-    # Fallback: local atomic write; suffix __ab for A/B
+    # 5) Local atomic fallback (suffix __ab for A/B here only)
     try:
         outdir = Path("certs"); outdir.mkdir(parents=True, exist_ok=True)
-        safe_policy = policy_now.replace("/", "_").replace(" ", "_")
-        suffix = "__ab" if bool(cert_payload.get("ab_embedded")) else ""
+        safe_policy = str(policy_now).replace("/", "_").replace(" ", "_")
+        suffix = "__ab" if _cert.get("ab_embedded") else ""
         fname = f"overlap__{district_id}__{safe_policy}{suffix}__{full_hash[:12]}.json"
         p = outdir / fname
         tmp = p.with_suffix(".json.tmp")
-        blob = _json.dumps(cert_payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        blob = _json.dumps(_cert, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         with open(tmp, "wb") as f:
             f.write(blob); f.flush(); os.fsync(f.fileno())
         os.replace(tmp, p)
         cert_path = str(p)
     except Exception as e2:
         st.error(f"Cert write failed: {e} / {e2}")
+        st.stop()
+
+# 6) Cache for downstream UI/actions
+st.session_state["cert_payload"] = _cert
+st.session_state["last_cert_path"] = cert_path
+st.session_state["last_run_id"] = (_identity.get("run_id") or st.session_state.get("last_run_id"))
+
+# 7) UI success + A/B badge
+st.success(f"Cert written → `{cert_path}` · {full_hash[:12]}…")
+st.caption(f"Embedded A/B → {_cert.get('ab_pair_tag','A/B')}" if _cert.get("ab_embedded") else "Embedded A/B → —")
+
 
 # ---------------- Post-write UI + bundle quick action ----------------
 _rc = st.session_state.get("run_ctx", {}) or {}
