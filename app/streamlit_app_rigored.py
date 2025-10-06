@@ -1399,38 +1399,38 @@ st.caption(
 )
   
 
-    def _is_zero(M):
-        return (not M) or all(all((x & 1) == 0 for x in row) for row in M)
+def _is_zero(M):
+    return (not M) or all(all((x & 1) == 0 for x in row) for row in M)
 
-    def _residual_tag(R, lm):
-        if not R or not lm: return "none"
-        rows, cols = len(R), len(R[0])
-        lanes_idx = [j for j, m in enumerate(lm) if m]
-        ker_idx   = [j for j, m in enumerate(lm) if not m]
-        def _col_nonzero(j): return any(R[i][j] & 1 for i in range(rows))
-        lanes_resid = any(_col_nonzero(j) for j in lanes_idx) if lanes_idx else False
-        ker_resid   = any(_col_nonzero(j) for j in ker_idx)   if ker_idx   else False
-        if not lanes_resid and not ker_resid: return "none"
-        if lanes_resid and not ker_resid:     return "lanes"
-        if ker_resid and not lanes_resid:     return "ker"
-        return "mixed"
+def _residual_tag(R, lm):
+    if not R or not lm: return "none"
+    rows, cols = len(R), len(R[0])
+    lanes_idx = [j for j, m in enumerate(lm) if m]
+    ker_idx   = [j for j, m in enumerate(lm) if not m]
+    def _col_nonzero(j): return any(R[i][j] & 1 for i in range(rows))
+    lanes_resid = any(_col_nonzero(j) for j in lanes_idx) if lanes_idx else False
+    ker_resid   = any(_col_nonzero(j) for j in ker_idx)   if ker_idx   else False
+    if not lanes_resid and not ker_resid: return "none"
+    if lanes_resid and not ker_resid:     return "lanes"
+    if ker_resid and not lanes_resid:     return "ker"
+    return "mixed"
 
-    tag_strict = _residual_tag(R3_strict, lane_mask)
-    eq3_strict = _is_zero(R3_strict)
+tag_strict = _residual_tag(R3_strict, lane_mask)
+eq3_strict = _is_zero(R3_strict)
 
-    # Projected leg (if enabled)
-    if cfg_active.get("enabled_layers"):
-        R3_proj  = mul(R3_strict, P_active) if (R3_strict and P_active) else []
-        eq3_proj = _is_zero(R3_proj)
-        tag_proj = _residual_tag(R3_proj, lane_mask)
-        out = {"3": {"eq": bool(eq3_proj), "n_k": n3}, "2": {"eq": True}}
-        st.session_state["residual_tags"] = {"strict": tag_strict, "projected": tag_proj}
-    else:
-        out = {"3": {"eq": bool(eq3_strict), "n_k": n3}, "2": {"eq": True}}
-        st.session_state["residual_tags"] = {"strict": tag_strict}
+# Projected leg (if enabled)
+if cfg_active.get("enabled_layers"):
+    R3_proj  = mul(R3_strict, P_active) if (R3_strict and P_active) else []
+    eq3_proj = _is_zero(R3_proj)
+    tag_proj = _residual_tag(R3_proj, lane_mask)
+    out = {"3": {"eq": bool(eq3_proj), "n_k": n3}, "2": {"eq": True}}
+    st.session_state["residual_tags"] = {"strict": tag_strict, "projected": tag_proj}
+else:
+    out = {"3": {"eq": bool(eq3_strict), "n_k": n3}, "2": {"eq": True}}
+    st.session_state["residual_tags"] = {"strict": tag_strict}
 
-    # Persist SSOT (write ONCE) — include the current fixture nonce
-    st.session_stat
+# Persist SSOT (write ONCE) — include the current fixture nonce
+st.session_stat
     # ------------------------------ Run Overlap (SSOT + freshness) ------------------------------
 
 # --- helpers (scoped; safe to re-declare) ---
