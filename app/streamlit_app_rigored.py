@@ -1667,29 +1667,36 @@ with safe_expander("Logs: exports (optional)"):
 
 
 
-  # ------------------------------ Projector Freezer (AUTO → FILE) — widget-safe ------------------------------
-from pathlib import Path
+  from pathlib import Path
 import os, json, tempfile, shutil, hashlib
 from datetime import datetime, timezone
 
-PROJECTORS_DIR = Path("projectors"); PROJECTORS_DIR.mkdir(parents=True, exist_ok=True)
-PJ_REG_PATH    = PROJECTORS_DIR / "projector_registry.jsonl"
+# Directory setup
+PROJECTORS_DIR = Path("projectors")
+PROJECTORS_DIR.mkdir(parents=True, exist_ok=True)
+PJ_REG_PATH = PROJECTORS_DIR / "projector_registry.jsonl"
 
-def _utc_iso(): return datetime.now(timezone.utc).isoformat()
-def _sha256_bytes(b: bytes) -> str: return hashlib.sha256(b).hexdigest()
+# Utility functions
+def _utc_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+def _sha256_bytes(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()
 
 def _atomic_write_json(path: Path, payload: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.NamedTemporaryFile("wb", delete=False, dir=path.parent) as tmp:
         blob = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        tmp.write(blob); tmp.flush(); os.fsync(tmp.fileno())
+        tmp.write(blob)
+        tmp.flush()
+        os.fsync(tmp.fileno())
         tmp_name = tmp.name
     os.replace(tmp_name, path)
     return _sha256_bytes(blob), len(blob)
 
 def _append_registry_row(row: dict):
-    # in-session dedupe on (district, projector_hash)
-    key = (row.get("district",""), row.get("projector_hash",""))
+    # in-session deduplication based on (district, projector_hash)
+    key = (row.get("district", ""), row.get("projector_hash", ""))
     seen = st.session_state.setdefault("_pj_registry_keys", set())
     if key in seen:
         return False
@@ -1698,7 +1705,8 @@ def _append_registry_row(row: dict):
     # atomic append jsonl
     with tempfile.NamedTemporaryFile("w", delete=False, dir=PROJECTORS_DIR, encoding="utf-8") as tmp:
         tmp.write(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n")
-        tmp.flush(); os.fsync(tmp.fileno())
+        tmp.flush()
+        os.fsync(tmp.fileno())
         tmp_name = tmp.name
     with open(PJ_REG_PATH, "a", encoding="utf-8") as final:
         with open(tmp_name, "r", encoding="utf-8") as src:
@@ -1708,15 +1716,19 @@ def _append_registry_row(row: dict):
 
 def _diag_projector_from_lane_mask(lm: list[int]) -> list[list[int]]:
     n = len(lm or [])
-    return [[1 if (i==j and int(lm[j])==1) else 0 for j in range(n)] for i in range(n)]
+    return [[1 if (i == j and int(lm[j]) == 1) else 0 for j in range(n)] for i in range(n)]
 
-def _freeze_projector(*, district_id: str, lane_mask_k3: list[int], filename_hint: str|None=None) -> dict:
+def _freeze_projector(*, district_id: str, lane_mask_k3: list[int], filename_hint: str | None = None) -> dict:
     if not lane_mask_k3:
         raise ValueError("No lane mask available (run Overlap first).")
     P3 = _diag_projector_from_lane_mask(lane_mask_k3)
     name = filename_hint or f"projector_{district_id or 'UNKNOWN'}.json"
     pj_path = PROJECTORS_DIR / name
-    payload = {"schema_version": "1.0.0", "written_at_utc": _utc_iso(), "blocks": {"3": P3}}
+    payload = {
+        "schema_version": "1.0.0",
+        "written_at_utc": _utc_iso(),
+        "blocks": {"3": P3}
+    }
     pj_hash, pj_size = _atomic_write_json(pj_path, payload)
     return {"path": str(pj_path), "projector_hash": pj_hash, "bytes": pj_size, "lane_mask_k3": lane_mask_k3[:]}
 
@@ -1745,30 +1757,39 @@ def _simulate_overlap_with_cfg(cfg_forced):
     H2 = (H_used.blocks.__root__.get("2") or [])
     C3 = (cmap.blocks.__root__.get("3") or [])
     I3 = eye(len(C3)) if C3 else []
+
     def _xor(A, B):
-        if not A: return [r[:] for r in (B or [])]
-        if not B: return [r[:] for r in (A or [])]
+        if not A:
+            return [r[:] for r in (B or [])]
+        if not B:
+            return [r[:] for r in (A or [])]
         return [[(A[i][j] ^ B[i][j]) & 1 for j in range(len(A[0]))] for i in range(len(A))]
-    def _is_zero(M): return (not M) or all(all((x & 1)==0 for x in row) for row in M)
+
+    def _is_zero(M):
+        return (not M) or all(all((x & 1) == 0 for x in row) for row in M)
 
     R3_strict = _xor(mul(H2, d3), _xor(C3, I3)) if (H2 and d3 and C3) else []
-    R3_proj   = mul(R3_strict, P_active) if (R3_strict and P_active) else []
+    R3_proj = mul(R3_strict, P_active) if (R3_strict and P_active) else []
 
     def _residual_tag(R, lm):
-        if not R or not lm: return "none"
+        if not R or not lm:
+            return "none"
         rows, cols = len(R), len(R[0])
         lanes_idx = [j for j, m in enumerate(lm) if m]
-        ker_idx   = [j for j, m in enumerate(lm) if not m]
+        ker_idx = [j for j, m in enumerate(lm) if not m]
         def _col_nonzero(j): return any(R[i][j] & 1 for i in range(rows))
         lanes_resid = any(_col_nonzero(j) for j in lanes_idx) if lanes_idx else False
-        ker_resid   = any(_col_nonzero(j) for j in ker_idx)   if ker_idx   else False
-        if not lanes_resid and not ker_resid: return "none"
-        if lanes_resid and not ker_resid:     return "lanes"
-        if ker_resid and not lanes_resid:     return "ker"
+        ker_resid = any(_col_nonzero(j) for j in ker_idx) if ker_idx else False
+        if not lanes_resid and not ker_resid:
+            return "none"
+        if lanes_resid and not ker_resid:
+            return "lanes"
+        if ker_resid and not lanes_resid:
+            return "ker"
         return "mixed"
 
     tag_strict = _residual_tag(R3_strict, lane_mask)
-    tag_proj   = _residual_tag(R3_proj,   lane_mask)
+    tag_proj = _residual_tag(R3_proj, lane_mask)
 
     out = {"3": {"eq": bool(_is_zero(R3_proj)), "n_k": n3}, "2": {"eq": True}}
     # Persist exactly like run_overlap
@@ -1779,29 +1800,176 @@ def _simulate_overlap_with_cfg(cfg_forced):
     st.session_state["run_ctx"] = {
         "policy_tag": policy_label_from_cfg(cfg_forced),
         "mode": mode,
-        "d3": d3, "n3": n3,
+        "d3": d3,
+        "n3": n3,
         "lane_mask_k3": lane_mask,
         "P_active": P_active,
-        "projector_filename": meta.get("projector_filename",""),
-        "projector_hash": meta.get("projector_hash",""),
+        "projector_filename": meta.get("projector_filename", ""),
+        "projector_hash": meta.get("projector_hash", ""),
         "projector_consistent_with_d": meta.get("projector_consistent_with_d", None),
         "errors": [],
     }
 
-# --- UI gating
-_rc  = st.session_state.get("run_ctx") or {}
-_out = st.session_state.get("overlap_out") or {}
-_di  = st.session_state.get("_district_info") or {}
+# ---------------------------- Main Block: "Projector Freezer (AUTO → FILE)"-------------------------#
+from pathlib import Path
+import os, json as _json, tempfile, shutil, hashlib
 
-elig_freeze = (_rc.get("mode") == "projected(auto)") and bool((_out.get("3") or {}).get("eq", False))
-district_id = _di.get("district_id", "UNKNOWN")
+# Ensure directories exist (only once)
+PROJECTORS_DIR = Path("projectors")
+PROJECTORS_DIR.mkdir(parents=True, exist_ok=True)
+PJ_REG_PATH = PROJECTORS_DIR / "registry.jsonl"
 
-with st.expander("Projector Freezer (AUTO → FILE)"):
+# Utility functions
+def _utc_iso():
+    return datetime.now(timezone.utc).isoformat()
+
+def _sha256_bytes(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()
+
+def _atomic_write_json(path: Path, payload: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("wb", delete=False, dir=path.parent) as tmp:
+        blob = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        tmp.write(blob)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp_name = tmp.name
+    os.replace(tmp_name, path)
+    return _sha256_bytes(blob), len(blob)
+
+def _append_registry_row(row: dict):
+    # in-session deduplication based on (district, projector_hash)
+    key = (row.get("district", ""), row.get("projector_hash", ""))
+    seen = st.session_state.setdefault("_pj_registry_keys", set())
+    if key in seen:
+        return False
+    seen.add(key)
+    PROJECTORS_DIR.mkdir(parents=True, exist_ok=True)
+    # atomic append jsonl
+    with tempfile.NamedTemporaryFile("w", delete=False, dir=PROJECTORS_DIR, encoding="utf-8") as tmp:
+        tmp.write(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n")
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp_name = tmp.name
+    with open(PJ_REG_PATH, "a", encoding="utf-8") as final:
+        with open(tmp_name, "r", encoding="utf-8") as src:
+            shutil.copyfileobj(src, final)
+    os.remove(tmp_name)
+    return True
+
+def _diag_projector_from_lane_mask(lm: list[int]) -> list[list[int]]:
+    n = len(lm or [])
+    return [[1 if (i == j and int(lm[j]) == 1) else 0 for j in range(n)] for i in range(n)]
+
+def _freeze_projector(*, district_id: str, lane_mask_k3: list[int], filename_hint: str | None = None) -> dict:
+    if not lane_mask_k3:
+        raise ValueError("No lane mask available (run Overlap first).")
+    P3 = _diag_projector_from_lane_mask(lane_mask_k3)
+    name = filename_hint or f"projector_{district_id or 'UNKNOWN'}.json"
+    pj_path = PROJECTORS_DIR / name
+    payload = {
+        "schema_version": "1.0.0",
+        "written_at_utc": _utc_iso(),
+        "blocks": {"3": P3}
+    }
+    pj_hash, pj_size = _atomic_write_json(pj_path, payload)
+    return {"path": str(pj_path), "projector_hash": pj_hash, "bytes": pj_size, "lane_mask_k3": lane_mask_k3[:]}
+
+def _validate_projector_file(pj_path: str) -> dict:
+    # Use same validator used by overlap (raises ValueError on fail)
+    cfg_file = _cfg_from_policy("projected(file)", pj_path)
+    _, meta = projector_choose_active(cfg_file, boundaries)
+    return meta
+
+def _simulate_overlap_with_cfg(cfg_forced):
+    """
+    Run a FILE overlap without touching the policy widget. Populates:
+      run_ctx, overlap_out, residual_tags, overlap_policy_label
+    """
+    # Bind projector (fail-fast)
+    P_active, meta = projector_choose_active(cfg_forced, boundaries)
+
+    # Context
+    d3 = meta.get("d3") if "d3" in meta else (boundaries.blocks.__root__.get("3") or [])
+    n3 = meta.get("n3") if "n3" in meta else (len(d3[0]) if (d3 and d3[0]) else 0)
+    lane_mask = meta.get("lane_mask", [])
+    mode = meta.get("mode", "projected(file)")
+
+    # Compute strict residual R3 = H2@d3 XOR (C3 XOR I3)
+    H_used = st.session_state.get("overlap_H") or _load_h_local()
+    H2 = (H_used.blocks.__root__.get("2") or [])
+    C3 = (cmap.blocks.__root__.get("3") or [])
+    I3 = eye(len(C3)) if C3 else []
+
+    def _xor(A, B):
+        if not A:
+            return [r[:] for r in (B or [])]
+        if not B:
+            return [r[:] for r in (A or [])]
+        return [[(A[i][j] ^ B[i][j]) & 1 for j in range(len(A[0]))] for i in range(len(A))]
+
+    def _is_zero(M):
+        return (not M) or all(all((x & 1) == 0 for x in row) for row in M)
+
+    R3_strict = _xor(mul(H2, d3), _xor(C3, I3)) if (H2 and d3 and C3) else []
+    R3_proj = mul(R3_strict, P_active) if (R3_strict and P_active) else []
+
+    def _residual_tag(R, lm):
+        if not R or not lm:
+            return "none"
+        rows, cols = len(R), len(R[0])
+        lanes_idx = [j for j, m in enumerate(lm) if m]
+        ker_idx = [j for j, m in enumerate(lm) if not m]
+        def _col_nonzero(j): return any(R[i][j] & 1 for i in range(rows))
+        lanes_resid = any(_col_nonzero(j) for j in lanes_idx) if lanes_idx else False
+        ker_resid = any(_col_nonzero(j) for j in ker_idx) if ker_idx else False
+        if not lanes_resid and not ker_resid:
+            return "none"
+        if lanes_resid and not ker_resid:
+            return "lanes"
+        if ker_resid and not lanes_resid:
+            return "ker"
+        return "mixed"
+
+    tag_strict = _residual_tag(R3_strict, lane_mask)
+    tag_proj = _residual_tag(R3_proj, lane_mask)
+
+    out = {"3": {"eq": bool(_is_zero(R3_proj)), "n_k": n3}, "2": {"eq": True}}
+    # Persist exactly like run_overlap
+    st.session_state["overlap_out"] = out
+    st.session_state["residual_tags"] = {"strict": tag_strict, "projected": tag_proj}
+    st.session_state["overlap_cfg"] = cfg_forced
+    st.session_state["overlap_policy_label"] = policy_label_from_cfg(cfg_forced)
+    st.session_state["run_ctx"] = {
+        "policy_tag": policy_label_from_cfg(cfg_forced),
+        "mode": mode,
+        "d3": d3,
+        "n3": n3,
+        "lane_mask_k3": lane_mask,
+        "P_active": P_active,
+        "projector_filename": meta.get("projector_filename", ""),
+        "projector_hash": meta.get("projector_hash", ""),
+        "projector_consistent_with_d": meta.get("projector_consistent_with_d", None),
+        "errors": [],
+    }
+
+# --- Main Block: Merged & Organized
+with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
+    _rc = st.session_state.get("run_ctx") or {}
+    _di = st.session_state.get("_district_info") or {}
+    # Eligibility: check for mode, lane_mask, d3, and if previous overlap confirms eq
+    elig_freeze = (
+        _rc.get("mode") == "projected(auto)"
+        and bool((_rc.get("lane_mask_k3") or []))
+        and bool((_rc.get("d3") or []))
+        and bool((_session.get("overlap_out") or {}).get("3", {}).get("eq", False))
+    )
+    district_id = _di.get("district_id", "UNKNOWN")
+
     st.caption("Freeze current AUTO Π → file, run FILE overlap (no UI flip), force-write cert, append registry.")
-    pj_basename  = st.text_input("Filename", value=f"projector_{district_id or 'UNKNOWN'}.json",
-                                 help="Saved under ./projectors/", key="pj_freeze_name")
+    pj_basename = st.text_input("Filename", value=f"projector_{district_id or 'UNKNOWN'}.json", key="pj_freeze_name")
     overwrite_ok = st.checkbox("Overwrite if exists", value=False, key="pj_overwrite_ok")
-    help_txt     = "Enabled when current run is projected(auto) and k3 is green."
+    help_txt = "Enabled when current run is projected(auto) and k3 is green."
 
     if st.button("Freeze Π → FILE & re-run (no UI flip)", key="btn_freeze_pj", disabled=not elig_freeze, help=help_txt):
         try:
@@ -1830,7 +1998,7 @@ with st.expander("Projector Freezer (AUTO → FILE)"):
             # 3) Run a FILE overlap without mutating the policy widget
             cfg_forced = _cfg_from_policy("projected(file)", meta_write["path"])
             # clear caches that may fight with us
-            for k in ("ab_compare","_projector_cache","_projector_cache_ab"):
+            for k in ("ab_compare", "_projector_cache", "_projector_cache_ab"):
                 st.session_state.pop(k, None)
             _simulate_overlap_with_cfg(cfg_forced)
 
@@ -1838,29 +2006,28 @@ with st.expander("Projector Freezer (AUTO → FILE)"):
             try:
                 meta_file = _validate_projector_file(meta_write["path"])
                 if bool(meta_file.get("projector_consistent_with_d", False)):
-                    st.success(f"FILE Π validated ✔  {Path(meta_file.get('projector_filename','')).name} · {meta_file.get('projector_hash','')[:12]}…")
+                    st.success(f"FILE Π validated ✔  {Path(meta_file.get('projector_filename', '')).name} · {meta_file.get('projector_hash', '')[:12]}…")
                 else:
                     st.warning("FILE Π saved but not consistent with current d3 (shape/idempotence/diag/lane).")
             except ValueError as ve:
                 st.error(f"FILE Π validation error: {ve}")
 
-            # 5) Force cert writer this run
+            # 5) Force cert writer this run (bypass debounce)
             st.session_state["should_write_cert"] = True
-            st.session_state.pop("_last_cert_write_key", None)  # bypass debounce
-
+            st.session_state.pop("_last_cert_write_key", None)
             st.caption("FILE overlap populated; cert writer will emit a new cert this run.")
 
         except Exception as e:
             st.error(f"Freeze failed: {e}")
 
-# Optional: small tail for the registry
+# Registry tail: use _json instead of json, ensure Path
 with st.expander("Projector Registry (last 5)"):
     try:
         if PJ_REG_PATH.exists():
             lines = PJ_REG_PATH.read_text(encoding="utf-8").splitlines()[-5:]
             for ln in lines:
                 try:
-                    row = json.loads(ln)
+                    row = _json.loads(ln)
                     st.write(f"• {row.get('district','?')} · {Path(row.get('filename','')).name} · {row.get('projector_hash','')[:12]}… · {row.get('written_at_utc','')}")
                 except Exception:
                     continue
@@ -1868,8 +2035,56 @@ with st.expander("Projector Registry (last 5)"):
             st.caption("No registry yet.")
     except Exception as e:
         st.warning(f"Could not read registry tail: {e}")
-# ----------------------------------------------------------------------------------------------------------
 
+# --- Second approach: "switch UI" (renamed for clarity)
+with st.expander("Projector Freezer (AUTO → FILE, switch UI)"):
+    _rc = st.session_state.get("run_ctx") or {}
+    _di = st.session_state.get("_district_info") or {}
+    # Eligibility: check for mode, lane_mask, d3, and previous overlap eq
+    elig = (
+        _rc.get("mode") == "projected(auto)"
+        and bool((_rc.get("lane_mask_k3") or []))
+        and bool((_rc.get("d3") or []))
+        and bool((_session.get("overlap_out") or {}).get("3", {}).get("eq", False))
+    )
+    st.caption("Freeze AUTO Π as a diagonal of lane_mask(d3), switch to FILE, then re-run.")
+    pj_name = st.text_input("Filename", value=f"projector_{_di.get('district_id', 'UNKNOWN')}.json", key="pj_freeze_name_final")
+    overwrite_ok = st.checkbox("Overwrite if exists", value=False, key="pj_freeze_overwrite_final")
+
+    if st.button("Freeze Π → FILE & Re-run", key="btn_freeze_final", disabled=not elig):
+        try:
+            lm = list(_rc.get("lane_mask_k3") or [])
+            n3 = int(_rc.get("n3") or 0)
+            if n3 <= 0 or len(lm) != n3:
+                raise ValueError("Freeze: invalid lane_mask/n3")
+            # Build diag Π
+            P_freeze = [[1 if (i == j and lm[j]) else 0 for j in range(n3)] for i in range(n3)]
+            payload = {"schema_version": "1.0.0", "blocks": {"3": P_freeze}}
+            pj_path = PROJECTORS_DIR / pj_name
+
+            if pj_path.exists() and not overwrite_ok:
+                st.warning("File exists. Enable overwrite or pick a new name.")
+                st.stop()
+
+            pj_hash, _ = _atomic_write_json(pj_path, payload)
+
+            # Switch cfg source to FILE for k=3 and re-run
+            cfg_active.setdefault("source", {})["3"] = "file"
+            cfg_active.setdefault("projector_files", {})["3"] = pj_path.as_posix()
+
+            # Bust caches that depend on Π selection
+            for k in ("overlap_out", "residual_tags", "overlap_cfg", "overlap_policy_label"):
+                st.session_state.pop(k, None)
+
+            # Re-run Overlap (this will set run_ctx with source=file)
+            run_overlap()
+
+            # Force cert write on the same pass (debounce bypass)
+            st.session_state["should_write_cert"] = True
+            st.session_state.pop("_last_cert_write_key", None)
+            st.success(f"Π saved → {pj_path.name} · {pj_hash[:12]}… and switched to FILE.")
+        except Exception as e:
+            st.error(f"Freeze failed: {e}")
 
 
   
@@ -2209,96 +2424,89 @@ st.divider()
 st.caption("Cert & provenance")
 
 from pathlib import Path
-import os, json as _json, platform, hashlib
+import platform, os, json as _json
 from datetime import datetime, timezone
+import hashlib  # Added import for fallback run_id hash
 
-LAB_SCHEMA_VERSION = "1.0.0"  # single source for cert schema version
+# Ensure bundles directory exists
+try:
+    BUNDLES_DIR  # noqa
+except NameError:
+    BUNDLES_DIR = Path("bundles")
+    BUNDLES_DIR.mkdir(parents=True, exist_ok=True)
 
-# ---------- invariants guard ----------
+LAB_SCHEMA_VERSION = "1.0.0"
+
+# --- Helper functions ---
 def _assert_cert_invariants(cert: dict) -> None:
-    for key in ("identity","policy","inputs","diagnostics","checks",
-                "signatures","residual_tags","promotion","artifact_hashes"):
+    for key in ("identity","policy","inputs","diagnostics","checks","signatures","residual_tags","promotion","artifact_hashes"):
         if key not in cert:
             raise ValueError(f"CERT_INVAR:key-missing:{key}")
-
-    ident   = cert["identity"] or {}
-    policy  = cert["policy"]   or {}
-    inputs  = cert["inputs"]   or {}
-    checks  = cert["checks"]   or {}
-    arts    = cert["artifact_hashes"] or {}
-
-    # identity minimal
+    ident = cert["identity"] or {}; policy = cert["policy"] or {}; inputs = cert["inputs"] or {}
+    checks = cert["checks"] or {}; arts = cert["artifact_hashes"] or {}
+    # identity
     for k in ("district_id","run_id","timestamp"):
         if not str(ident.get(k,"")).strip():
             raise ValueError(f"CERT_INVAR:identity-missing:{k}")
-
-    # inputs hashes (SSOT copy only)
+    # inputs hashes exist
     for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"):
-        v = inputs.get(k,"")
-        if not isinstance(v,str) or v == "":
+        if not isinstance(inputs.get(k,""), str) or inputs.get(k,"")=="":
             raise ValueError(f"CERT_INVAR:inputs-hash-missing:{k}")
-
-    # artifact hashes must mirror inputs (no recompute here)
+    # mirror artifact hashes
     for k in ("boundaries_hash","C_hash","H_hash","U_hash"):
         if arts.get(k,"") != inputs.get(k,""):
             raise ValueError(f"CERT_INVAR:artifact-hash-mismatch:{k}")
-
-    # dims present
-    dims = (inputs.get("dims") or {})
+    # dims
+    dims = inputs.get("dims") or {}
     if not (isinstance(dims.get("n2"), int) and isinstance(dims.get("n3"), int)):
         raise ValueError("CERT_INVAR:inputs-dims-missing:n2-n3")
-
-    # ker-guard discipline vs policy
+    # policy tag + ker_guard discipline
     ptag = str(policy.get("policy_tag") or policy.get("label") or "").strip()
     if not ptag:
         raise ValueError("CERT_INVAR:policy-tag-missing")
-
     is_strict    = (ptag == "strict")
-    is_proj_auto = ptag.startswith("projected(auto)") or ptag.startswith("projected(columns@k=3,auto)")
-    is_proj_file = ptag.startswith("projected(file)") or ptag.startswith("projected(columns@k=3,file)")
-
+    is_file      = ptag.startswith("projected(file)") or ptag.startswith("projected(columns@k=3,file)")
+    is_auto      = ptag.startswith("projected(auto)") or ptag.startswith("projected(columns@k=3,auto)")
     kg = checks.get("ker_guard", "")
     if is_strict and kg != "enforced":
         raise ValueError("CERT_INVAR:ker-guard-should-be-enforced-for-strict")
-    if (is_proj_auto or is_proj_file) and kg != "off":
+    if (is_file or is_auto) and kg != "off":
         raise ValueError("CERT_INVAR:ker-guard-should-be-off-for-projected")
-
-    # projector fields discipline
-    pj_hash  = policy.get("projector_hash", "")
-    pj_file  = policy.get("projector_filename","") or ""
-    pj_cons  = policy.get("projector_consistent_with_d", None)
+    # projector fields
+    pj_hash = policy.get("projector_hash", "")
+    pj_file = policy.get("projector_filename", "") or ""
+    pj_cons = policy.get("projector_consistent_with_d", None)
     if is_strict and (pj_file or pj_hash or (pj_cons is True)):
         raise ValueError("CERT_INVAR:strict-must-not-carry-projector-fields")
-    if is_proj_file:
+    if is_file:
         if not pj_file:
             raise ValueError("CERT_INVAR:file-mode-missing-projector_filename")
         if pj_cons is not True:
             raise ValueError("CERT_INVAR:file-mode-projector-not-consistent")
-        if not isinstance(pj_hash,str) or pj_hash == "":
+        if not isinstance(pj_hash, str) or pj_hash == "":
             raise ValueError("CERT_INVAR:file-mode-missing-projector_hash")
-    if is_proj_auto and pj_file:
+    if is_auto and pj_file:
         raise ValueError("CERT_INVAR:auto-mode-should-not-carry-projector_filename")
 
-# ---------- SSOT reads ----------
-_rc   = st.session_state.get("run_ctx") or {}
-_out  = st.session_state.get("overlap_out") or {}
-_ib   = st.session_state.get("_inputs_block") or {}
-_di   = st.session_state.get("_district_info") or {}
-_H    = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
+# --- SSOT reads ---
+_rc  = st.session_state.get("run_ctx") or {}
+_out = st.session_state.get("overlap_out") or {}
+_ib  = st.session_state.get("_inputs_block") or {}
+_di  = st.session_state.get("_district_info") or {}
+_H   = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
 
-# honor force flag from freezer / other flows
+# --- Debounce (allow freezer to force) ---
 if st.session_state.pop("should_write_cert", False):
     st.session_state.pop("_last_cert_write_key", None)
 
-# guard: need a successful Overlap run + inputs SSOT
+# --- Guard: run context + inputs SSOT ---
 if not (_rc and _out and _ib):
     st.info("Run Overlap first to enable cert writing.")
 else:
-    # ---------- debounce ----------
+    # --- Write-key ---
     def _hz(s): return s if isinstance(s, str) else ""
-    policy_tag_now = _rc.get("policy_tag", "strict")
     write_key = (
-        policy_tag_now,
+        _rc.get("policy_tag","strict"),
         _hz(_ib.get("boundaries_hash","")),
         _hz(_ib.get("C_hash","")),
         _hz(_ib.get("H_hash","")),
@@ -2310,406 +2518,322 @@ else:
     )
     if st.session_state.get("_last_cert_write_key") == write_key:
         st.caption("Cert unchanged — skipping rewrite.")
-        st.stop()
-    st.session_state["_last_cert_write_key"] = write_key
-
-    # ---------- diagnostics (use lane mask from run_ctx; do not recompute) ----------
-    lane_mask = list(_rc.get("lane_mask_k3") or [])
-    d3 = _rc.get("d3", [])
-    H2 = (_H.blocks.__root__.get("2") or [])
-    C3 = (cmap.blocks.__root__.get("3") or [])
-    I3 = eye(len(C3)) if C3 else []
-
-    def _bottom_row(M): return M[-1] if (M and len(M)) else []
-    def _xor(A, B):
-        if not A: return [r[:] for r in (B or [])]
-        if not B: return [r[:] for r in (A or [])]
-        return [[(A[i][j] ^ B[i][j]) & 1 for j in range(len(A[0]))] for i in range(len(A))]
-
-    try:
-        H2d3  = mul(H2, d3) if (H2 and d3) else []
-        C3pI3 = _xor(C3, I3) if C3 else []
-    except Exception:
-        H2d3, C3pI3 = [], []
-
-    row_full_H2d3 = _bottom_row(H2d3)
-    row_full_C3I  = _bottom_row(C3pI3)
-    def _mask_to_len(row, lm):
-        if not row: return []
-        if not lm:  return row[:]
-        return [int(row[j]) if int(lm[j]) else 0 for j in range(len(row))]
-
-    row_lanes_H2d3 = _mask_to_len(row_full_H2d3, lane_mask)
-    row_lanes_C3I  = _mask_to_len(row_full_C3I,  lane_mask)
-
-    diagnostics_block = {
-        "lane_mask_k3": lane_mask,  # authoritative, length n3
-        "lane_vec_H2d3": {"row_full": row_full_H2d3, "row_lanes": row_lanes_H2d3},
-        "lane_vec_C3plusI3": {"row_full": row_full_C3I, "row_lanes": row_lanes_C3I},
-    }
-
-    # ---------- signatures ----------
-    def _gf2_rank(M):
-        if not M or not M[0]: return 0
-        A = [row[:] for row in M]; m, n = len(A), len(A[0]); r = c = 0
-        while r < m and c < n:
-            piv = next((i for i in range(r, m) if A[i][c] & 1), None)
-            if piv is None: c += 1; continue
-            if piv != r: A[r], A[piv] = A[piv], A[r]
-            for i in range(m):
-                if i != r and (A[i][c] & 1):
-                    A[i] = [(A[i][j] ^ A[r][j]) & 1 for j in range(n)]
-            r += 1; c += 1
-        return r
-
-    rank_d3    = _gf2_rank(d3) if d3 else 0
-    ncols_d3   = len(d3[0]) if (d3 and d3[0]) else 0
-    ker_dim_d3 = max(ncols_d3 - rank_d3, 0)
-    lane_pattern = "".join("1" if int(x) else "0" for x in (lane_mask or []))
-
-    lane_idx = [j for j, m in enumerate(lane_mask) if m]
-    def _col_support_pattern(M, cols):
-        if not M: return ""
-        use_cols = (cols if cols else list(range(len(M[0]) if M and M[0] else 0)))
-        return "".join("1" if any((row[j] & 1) for row in M) else "0" for j in use_cols)
-
-    signatures_block = {
-        "d_signature": {"rank": rank_d3, "ker_dim": ker_dim_d3, "lane_pattern": lane_pattern},
-        "fixture_signature": {"lane": _col_support_pattern(C3pI3, lane_idx)},
-    }
-
-    # ---------- identity ----------
-    district_id = _di.get("district_id", st.session_state.get("district_id", "UNKNOWN"))
-    run_ts = getattr(hashes, "timestamp_iso_lisbon", lambda: datetime.now(timezone.utc).isoformat())()
-    policy_now = _rc.get("policy_tag", policy_label_from_cfg(cfg_active))
-
-    run_id = st.session_state.get("last_run_id")
-    if not run_id:
-        seed = "".join(str((_ib or {}).get(k,"")) for k in ("boundaries_hash","C_hash","H_hash","U_hash"))
-        run_id = getattr(hashes, "run_id", lambda a,b: hashlib.sha256(f"{a}|{b}".encode()).hexdigest()[:12])(seed, run_ts)
-        st.session_state["last_run_id"] = run_id
-
-    identity_block = {
-        "district_id": district_id,
-        "run_id": run_id,
-        "timestamp": run_ts,
-        "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
-        "python_version": f"python-{platform.python_version()}",
-    }
-
-    # ---------- policy (verbatim source from run_ctx; clamp strict) ----------
-    policy_block = {
-        "label": policy_now,
-        "policy_tag": policy_now,
-        "enabled_layers": cfg_active.get("enabled_layers", []),
-        "modes": cfg_active.get("modes", {}),
-        "source": (_rc.get("source") or {}),   # <-- exact copy from run_ctx
-    }
-    if _rc.get("projector_hash") is not None:
-        policy_block["projector_hash"] = _rc.get("projector_hash","")
-    if _rc.get("projector_filename"):
-        policy_block["projector_filename"] = _rc.get("projector_filename","")
-    if _rc.get("projector_consistent_with_d") is not None:
-        policy_block["projector_consistent_with_d"] = bool(_rc.get("projector_consistent_with_d"))
-
-    if _rc.get("mode") == "strict":
-        policy_block["enabled_layers"] = []
-        policy_block.pop("modes",  None)
-        policy_block.pop("source", None)
-        policy_block.pop("projector_hash", None)
-        policy_block.pop("projector_filename", None)
-        policy_block.pop("projector_consistent_with_d", None)
-
-    # ---------- residual tags & checks ----------
-    residual_tags  = st.session_state.get("residual_tags", {}) or {}
-    is_strict_mode = (_rc.get("mode") == "strict")
-    checks_block = {
-        **(_out or {}),
-        "grid":  bool((_out or {}).get("grid",  True)),
-        "fence": bool((_out or {}).get("fence", True)),
-        "ker_guard": ("enforced" if is_strict_mode else "off"),
-    }
-
-    # ---------- inputs (SSOT copy; enforce dims) ----------
-    inputs_block_payload = {
-        "filenames": _ib.get("filenames", {
-            "boundaries": st.session_state.get("fname_boundaries","boundaries.json"),
-            "C":          st.session_state.get("fname_cmap","cmap.json"),
-            "H":          st.session_state.get("fname_h","H.json"),
-            "U":          st.session_state.get("fname_shapes","shapes.json"),
-        }),
-        "dims": _ib.get("dims", {}),
-        "boundaries_hash": _ib.get("boundaries_hash",""),
-        "C_hash": _ib.get("C_hash",""),
-        "H_hash": _ib.get("H_hash",""),
-        "U_hash": _ib.get("U_hash",""),
-        "shapes_hash": _ib.get("shapes_hash", _ib.get("U_hash","")),
-    }
-    if _rc.get("mode") == "projected(file)":
-        inputs_block_payload.setdefault("filenames", {})["projector"] = _rc.get("projector_filename","")
-
-    # n_k fill for checks (use dims already set by your load block)
-    dims_now = inputs_block_payload.get("dims") or {}
-    for _k, _nk in (("2", dims_now.get("n2")), ("3", dims_now.get("n3"))):
-        if _k in checks_block:
-            checks_block[_k] = {**checks_block[_k], "n_k": int(_nk) if _nk is not None else 0}
-
-    # ---------- promotion ----------
-    grid_ok  = bool(checks_block.get("grid", True))
-    fence_ok = bool(checks_block.get("fence", True))
-    k3_ok    = bool(checks_block.get("3", {}).get("eq", False))
-    k2_ok    = bool(checks_block.get("2", {}).get("eq", False))
-    mode_now = _rc.get("mode")
-    eligible, target = False, None
-    if mode_now == "strict" and all([grid_ok, fence_ok, k3_ok, k2_ok]) and residual_tags.get("strict","none") == "none":
-        eligible, target = True, "strict_anchor"
-    elif mode_now in ("projected(auto)", "projected(file)") and all([grid_ok, fence_ok, k3_ok]) and residual_tags.get("projected","none") == "none":
-        if mode_now == "projected(file)":
-            if bool(_rc.get("projector_consistent_with_d")):
-                eligible, target = True, "projected_exemplar"
-        else:
-            eligible, target = True, "projected_exemplar"
-
-    promotion_block = {
-        "eligible_for_promotion": eligible,
-        "promotion_target": target,
-        "notes": "",
-    }
-
-    # ---------- artifact hashes (mirror inputs + optional pj file sha) ----------
-    artifact_hashes = {
-        "boundaries_hash": inputs_block_payload["boundaries_hash"],
-        "C_hash":          inputs_block_payload["C_hash"],
-        "H_hash":          inputs_block_payload["H_hash"],
-        "U_hash":          inputs_block_payload["U_hash"],
-    }
-    if "projector_hash" in policy_block:
-        artifact_hashes["projector_hash"] = policy_block.get("projector_hash","")
-
-    if _rc.get("mode") == "projected(file)":
-        pj_sha = _rc.get("projector_file_sha256")
-        if not pj_sha:
-            try:
-                _pf = _rc.get("projector_filename","")
-                if _pf and os.path.exists(_pf):
-                    with open(_pf, "rb") as _f:
-                        pj_sha = hashlib.sha256(_f.read()).hexdigest()
-            except Exception:
-                pj_sha = None
-        if pj_sha:
-            policy_block["projector_file_sha256"] = pj_sha
-            artifact_hashes["projector_file_sha256"] = pj_sha
-
-    # ---------- assemble cert ----------
-    cert_payload = {
-        "schema_version": LAB_SCHEMA_VERSION,
-        "identity":        identity_block,
-        "policy":          policy_block,
-        "inputs":          inputs_block_payload,
-        "diagnostics":     diagnostics_block,
-        "checks":          checks_block,
-        "signatures":      signatures_block,
-        "residual_tags":   residual_tags,
-        "promotion":       promotion_block,
-        "artifact_hashes": artifact_hashes,
-        "app_version":     getattr(hashes, "APP_VERSION", "v0.1-core"),
-        "python_version":  f"python-{platform.python_version()}",
-    }
-
-    # ---------- optional A/B embed (fresh only) ----------
-    _ab = st.session_state.get("ab_compare") or {}
-    inputs_sig_now = [
-        str(inputs_block_payload.get("boundaries_hash","")),
-        str(inputs_block_payload.get("C_hash","")),
-        str(inputs_block_payload.get("H_hash","")),
-        str(inputs_block_payload.get("U_hash","")),
-        str(inputs_block_payload.get("shapes_hash","")),
-    ]
-    def _pass_vec_from(out_block: dict) -> list[int]:
-        return [
-            int((out_block or {}).get("2",{}).get("eq", False)),
-            int((out_block or {}).get("3",{}).get("eq", False)),
-        ]
-
-    if _ab and (_ab.get("inputs_sig") == inputs_sig_now):
-        strict_ctx   = _ab.get("strict", {}) or {}
-        projected_ctx = _ab.get("projected", {}) or {}
-        proj_mode = _rc.get("mode", "projected(auto)")
-        proj_tag  = "projected(file)" if proj_mode == "projected(file)" else "projected(auto)"
-
-        # safe pulls from diagnostics for shapes
-        dv = diagnostics_block
-        lane_mask_safe     = dv.get("lane_mask_k3", lane_mask)
-        lane_vec_H2d3_safe = strict_ctx.get("lane_vec_H2d3", dv.get("lane_vec_H2d3", {}))
-        lane_vec_C3I_safe  = strict_ctx.get("lane_vec_C3plusI3", dv.get("lane_vec_C3plusI3", {}))
-
-        cert_payload["policy"]["strict_snapshot"] = {
-            "policy_tag": "strict",
-            "ker_guard":  "enforced",
-            "inputs": {"filenames": inputs_block_payload.get("filenames", {})},
-            "lane_mask_k3": lane_mask_safe,
-            "lane_vec_H2d3": lane_vec_H2d3_safe,
-            "lane_vec_C3plusI3": lane_vec_C3I_safe,
-            "pass_vec": _pass_vec_from(strict_ctx.get("out", {})),
-            "out": strict_ctx.get("out", {}),
-        }
-
-        proj_snap = {
-            "policy_tag": proj_tag,
-            "ker_guard":  "off",
-            "inputs": {"filenames": inputs_block_payload.get("filenames", {})},
-            "lane_mask_k3": lane_mask_safe,
-            "lane_vec_H2d3": projected_ctx.get("lane_vec_H2d3", dv.get("lane_vec_H2d3", {})),
-            "lane_vec_C3plusI3": projected_ctx.get("lane_vec_C3plusI3", dv.get("lane_vec_C3plusI3", {})),
-            "pass_vec": _pass_vec_from(projected_ctx.get("out", {})),
-            "out": projected_ctx.get("out", {}),
-            "projector_hash": _rc.get("projector_hash", projected_ctx.get("projector_hash","")),
-            "projector_consistent_with_d": _rc.get("projector_consistent_with_d", projected_ctx.get("projector_consistent_with_d", None)),
-        }
-        if proj_mode == "projected(file)":
-            if _rc.get("projector_filename"):
-                proj_snap["projector_filename"] = _rc.get("projector_filename")
-            pf_sha = cert_payload.get("policy", {}).get("projector_file_sha256")
-            if pf_sha:
-                proj_snap["projector_file_sha256"] = pf_sha
-
-        cert_payload["policy"]["projected_snapshot"] = proj_snap
-        cert_payload["ab_pair_tag"] = f"strict__VS__{proj_tag}"
-        cert_payload["ab_embedded"] = True
     else:
-        cert_payload["ab_embedded"] = False
+        st.session_state["_last_cert_write_key"] = write_key
 
-    # ---------- invariants + integrity ----------
-    _assert_cert_invariants(cert_payload)
-    cert_payload.setdefault("integrity", {})
-    cert_payload["integrity"]["content_hash"] = hash_json(cert_payload)
-    full_hash = cert_payload["integrity"]["content_hash"]
+        # --- Diagnostics ---
+        lane_mask = list(_rc.get("lane_mask_k3") or [])
+        d3 = _rc.get("d3", [])
+        H2 = (_H.blocks.__root__.get("2") or [])
+        C3 = (cmap.blocks.__root__.get("3") or [])
+        I3 = eye(len(C3)) if C3 else []
 
-    # ensure bundles dir exists for later
-    try:
-        _ = BUNDLES_DIR
-    except NameError:
-        BUNDLES_DIR = Path("bundles"); BUNDLES_DIR.mkdir(parents=True, exist_ok=True)
+        def _bottom_row(M): return M[-1] if (M and len(M)) else []
+        def _xor(A,B):
+            if not A: return [r[:] for r in (B or [])]
+            if not B: return [r[:] for r in (A or [])]
+            return [[(A[i][j]^B[i][j])&1 for j in range(len(A[0]))] for i in range(len(A))]
+        def _mask_row(row, lm): 
+            if not row: return []
+            if not lm:  return row[:]
+            return [int(row[j]) if int(lm[j]) else 0 for j in range(len(row))]
 
-    # ---------- write cert (prefer package writer; fallback local) ----------
-    cert_path = None
-    try:
-        result = export_mod.write_cert_json(cert_payload)  # may return (path, hash) or path
-        if isinstance(result, (list, tuple)) and len(result) >= 2:
-            cert_path, full_hash = result[0], result[1]
-        else:
-            cert_path = result
-    except Exception as e:
         try:
-            outdir = Path("certs"); outdir.mkdir(parents=True, exist_ok=True)
-            safe_policy = str(policy_now).replace("/", "_").replace(" ", "_")
+            H2d3  = mul(H2, d3) if (H2 and d3) else []
+            C3pI3 = _xor(C3, I3) if C3 else []
+        except Exception:
+            H2d3, C3pI3 = [], []
+
+        lane_idx = [j for j,m in enumerate(lane_mask) if m]
+        row_full_H2d3 = _bottom_row(H2d3)
+        row_full_C3I  = _bottom_row(C3pI3)
+
+        diagnostics_block = {
+            "lane_mask_k3": lane_mask,
+            "lane_vec_H2d3": {"row_full": row_full_H2d3, "row_lanes": _mask_row(row_full_H2d3, lane_mask)},
+            "lane_vec_C3plusI3": {"row_full": row_full_C3I, "row_lanes": _mask_row(row_full_C3I, lane_mask)},
+        }
+
+        # --- Signatures ---
+        def _gf2_rank(M):
+            if not M or not M[0]: return 0
+            A = [row[:] for row in M]; m, n = len(A), len(A[0]); r = c = 0
+            while r<m and c<n:
+                piv = next((i for i in range(r,m) if A[i][c]&1), None)
+                if piv is None: c+=1; continue
+                if piv!=r: A[r],A[piv]=A[piv],A[r]
+                for i in range(m):
+                    if i!=r and (A[i][c]&1):
+                        A[i]=[(A[i][j]^A[r][j])&1 for j in range(n)]
+                r+=1; c+=1
+            return r
+        rank_d3  = _gf2_rank(d3) if d3 else 0
+        ncols_d3 = len(d3[0]) if (d3 and d3[0]) else 0
+        ker_dim  = max(ncols_d3 - rank_d3, 0)
+        lane_pattern = "".join("1" if int(x) else "0" for x in (lane_mask or []))
+
+        def _col_support(M, cols):
+            if not M: return ""
+            use = cols if cols else list(range(len(M[0]) if (M and M[0]) else 0))
+            return "".join("1" if any((row[j]&1) for row in M) else "0" for j in use)
+
+        signatures_block = {
+            "d_signature": {"rank": rank_d3, "ker_dim": ker_dim, "lane_pattern": lane_pattern},
+            "fixture_signature": {"lane": _col_support(C3pI3, lane_idx)},
+        }
+
+        # --- Identity ---
+        district_id = _di.get("district_id", st.session_state.get("district_id","UNKNOWN"))
+        run_ts = getattr(hashes, "timestamp_iso_lisbon", lambda: datetime.now(timezone.utc).isoformat())()
+        policy_now = _rc.get("policy_tag", policy_label_from_cfg(cfg_active))
+
+        run_id = st.session_state.get("last_run_id")
+        if not run_id:
+            seed = "".join(str((_ib or {}).get(k,"")) for k in ("boundaries_hash","C_hash","H_hash","U_hash"))
+            run_id = getattr(hashes,"run_id",lambda a,b: hashlib.sha256(f"{a}|{b}".encode()).hexdigest()[:12])(seed, run_ts)
+            st.session_state["last_run_id"] = run_id
+
+        identity_block = {
+            "district_id": district_id, "run_id": run_id, "timestamp": run_ts,
+            "app_version": getattr(hashes,"APP_VERSION","v0.1-core"),
+            "python_version": f"python-{platform.python_version()}",
+        }
+
+        # --- Policy (mirror RC; strict clamps) ---
+        policy_block = {
+            "label": policy_now,
+            "policy_tag": policy_now,
+            "enabled_layers": cfg_active.get("enabled_layers", []),
+            "modes": cfg_active.get("modes", {}),
+            "source": (_rc.get("source") or {}),  # verbatim copy
+        }
+        if _rc.get("projector_hash") is not None:
+            policy_block["projector_hash"] = _rc.get("projector_hash","")
+        if _rc.get("projector_filename"):
+            policy_block["projector_filename"] = _rc.get("projector_filename","")
+        if _rc.get("projector_consistent_with_d") is not None:
+            policy_block["projector_consistent_with_d"] = bool(_rc.get("projector_consistent_with_d"))
+
+        if _rc.get("mode") == "strict":
+            policy_block["enabled_layers"] = []
+            for k in ("modes","source","projector_hash","projector_filename","projector_consistent_with_d"):
+                policy_block.pop(k, None)
+
+        # Checks (from SSOT), then n_k fill
+        residual_tags = st.session_state.get("residual_tags", {}) or {}
+        is_strict_mode = (_rc.get("mode") == "strict")
+        checks_block = {
+            **(_out or {}),
+            "grid":  bool((_out or {}).get("grid", True)),
+            "fence": bool((_out or {}).get("fence", True)),
+            "ker_guard": ("enforced" if is_strict_mode else "off"),
+        }
+
+        # --- Inputs ---
+        inputs_block_payload = {
+            "filenames": _ib.get("filenames", {
+                "boundaries": st.session_state.get("fname_boundaries","boundaries.json"),
+                "C":          st.session_state.get("fname_cmap","cmap.json"),
+                "H":          st.session_state.get("fname_h","H.json"),
+                "U":          st.session_state.get("fname_shapes","shapes.json"),
+            }),
+            "dims": _ib.get("dims", {}),
+            "boundaries_hash": _ib.get("boundaries_hash",""),
+            "C_hash": _ib.get("C_hash",""),
+            "H_hash": _ib.get("H_hash",""),
+            "U_hash": _ib.get("U_hash",""),
+            "shapes_hash": _ib.get("shapes_hash", _ib.get("U_hash","")),
+        }
+        if _rc.get("mode") == "projected(file)":
+            inputs_block_payload.setdefault("filenames", {})["projector"] = _rc.get("projector_filename","")
+
+        dims_now = inputs_block_payload.get("dims") or {}
+        for _k, _nk in (("2", dims_now.get("n2")), ("3", dims_now.get("n3"))):
+            if _k in checks_block:
+                checks_block[_k] = {**checks_block.get(_k, {}), "n_k": int(_nk) if _nk is not None else 0}
+
+        # Promotion (simple)
+        grid_ok  = bool(checks_block.get("grid", True))
+        fence_ok = bool(checks_block.get("fence", True))
+        k3_ok    = bool(checks_block.get("3", {}).get("eq", False))
+        k2_ok    = bool(checks_block.get("2", {}).get("eq", False))
+        mode_now = _rc.get("mode")
+        eligible, target = False, None
+        if mode_now == "strict" and all([grid_ok,fence_ok,k3_ok,k2_ok]) and residual_tags.get("strict","none")=="none":
+            eligible, target = True, "strict_anchor"
+        elif mode_now in ("projected(auto)","projected(file)") and all([grid_ok,fence_ok,k3_ok]) and residual_tags.get("projected","none")=="none":
+            if mode_now == "projected(file)":
+                if bool(_rc.get("projector_consistent_with_d")): eligible, target = True, "projected_exemplar"
+            else:
+                eligible, target = True, "projected_exemplar"
+
+        promotion_block = {"eligible_for_promotion": eligible, "promotion_target": target, "notes": ""}
+
+        # Artifacts mirror inputs (+ optional projector file sha)
+        artifact_hashes = {
+            "boundaries_hash": inputs_block_payload["boundaries_hash"],
+            "C_hash":          inputs_block_payload["C_hash"],
+            "H_hash":          inputs_block_payload["H_hash"],
+            "U_hash":          inputs_block_payload["U_hash"],
+        }
+        if "projector_hash" in policy_block:
+            artifact_hashes["projector_hash"] = policy_block.get("projector_hash","")
+
+        if _rc.get("mode") == "projected(file)":
+            pj_sha = _rc.get("projector_file_sha256")
+            if not pj_sha:
+                try:
+                    import hashlib as _hl
+                    pf = _rc.get("projector_filename","")
+                    if pf and os.path.exists(pf):
+                        with open(pf,"rb") as f: pj_sha = _hl.sha256(f.read()).hexdigest()
+                except Exception:
+                    pj_sha = None
+            if pj_sha:
+                policy_block["projector_file_sha256"] = pj_sha
+                artifact_hashes["projector_file_sha256"] = pj_sha
+
+        # Assemble
+        cert_payload = {
+            "schema_version": LAB_SCHEMA_VERSION,
+            "identity": identity_block,
+            "policy": policy_block,
+            "inputs": inputs_block_payload,
+            "diagnostics": diagnostics_block,
+            "checks": checks_block,
+            "signatures": signatures_block,
+            "residual_tags": residual_tags,
+            "promotion": promotion_block,
+            "artifact_hashes": artifact_hashes,
+            "app_version": getattr(hashes,"APP_VERSION","v0.1-core"),
+            "python_version": f"python-{platform.python_version()}",
+        }
+
+        # Optional A/B embed (fresh only)
+        _ab = st.session_state.get("ab_compare") or {}
+        def _sig_now(_ibp): 
+            return [str(_ibp.get("boundaries_hash","")), str(_ibp.get("C_hash","")), str(_ibp.get("H_hash","")),
+                    str(_ibp.get("U_hash","")), str(_ibp.get("shapes_hash",""))]
+        if _ab and (_ab.get("inputs_sig") == _sig_now(inputs_block_payload)):
+            strict_ctx = _ab.get("strict", {}) or {}
+            proj_ctx   = _ab.get("projected", {}) or {}
+            proj_mode  = _rc.get("mode","projected(auto)")
+            proj_tag   = "projected(file)" if proj_mode=="projected(file)" else "projected(auto)"
+
+            def _pv(out_block): 
+                return [int((out_block or {}).get("2",{}).get("eq",False)),
+                        int((out_block or {}).get("3",{}).get("eq",False))]
+
+            cert_payload["policy"]["strict_snapshot"] = {
+                "policy_tag":"strict", "ker_guard":"enforced",
+                "inputs":{"filenames": inputs_block_payload.get("filenames", {})},
+                "lane_mask_k3": lane_mask,
+                "lane_vec_H2d3": strict_ctx.get("lane_vec_H2d3"),
+                "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3"),
+                "pass_vec": _pv(strict_ctx.get("out", {})),
+                "out": strict_ctx.get("out", {}),
+            }
+            proj_snap = {
+                "policy_tag": proj_tag, "ker_guard":"off",
+                "inputs":{"filenames": inputs_block_payload.get("filenames", {})},
+                "lane_mask_k3": lane_mask,
+                "lane_vec_H2d3": proj_ctx.get("lane_vec_H2d3"),
+                "lane_vec_C3plusI3": proj_ctx.get("lane_vec_C3plusI3"),
+                "pass_vec": _pv(proj_ctx.get("out", {})),
+                "out": proj_ctx.get("out", {}),
+                "projector_hash": _rc.get("projector_hash", proj_ctx.get("projector_hash","")),
+                "projector_consistent_with_d": _rc.get("projector_consistent_with_d", proj_ctx.get("projector_consistent_with_d")),
+            }
+            if proj_mode == "projected(file)" and _rc.get("projector_filename"):
+                proj_snap["projector_filename"] = _rc.get("projector_filename")
+                pf_sha = cert_payload["policy"].get("projector_file_sha256")
+                if pf_sha: proj_snap["projector_file_sha256"] = pf_sha
+            cert_payload["policy"]["projected_snapshot"] = proj_snap
+            cert_payload["ab_pair_tag"] = f"strict__VS__{proj_tag}"
+            cert_payload["ab_embedded"] = True
+        else:
+            cert_payload["ab_embedded"] = False
+
+        # Invariants + hash
+        _assert_cert_invariants(cert_payload)
+        cert_payload.setdefault("integrity", {})
+        cert_payload["integrity"]["content_hash"] = hash_json(cert_payload)
+        full_hash = cert_payload["integrity"]["content_hash"]
+
+        # Write (prefer package)
+        cert_path = None
+        try:
+            result = export_mod.write_cert_json(cert_payload)
+            cert_path, full_hash = (result if isinstance(result,(list,tuple)) and len(result)>=2 else (result, full_hash))
+        except Exception:
+            outdir = Path("certs")
+            outdir.mkdir(parents=True, exist_ok=True)
+            safe_policy = str(policy_now).replace("/","_").replace(" ","_")
             suffix = "__ab" if cert_payload.get("ab_embedded") else ""
             fname = f"overlap__{district_id}__{safe_policy}{suffix}__{full_hash[:12]}.json"
             p = outdir / fname
             tmp = p.with_suffix(".json.tmp")
-            blob = _json.dumps(cert_payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-            with open(tmp, "wb") as f:
-                f.write(blob); f.flush(); os.fsync(f.fileno())
-            os.replace(tmp, p)
-            cert_path = str(p)
-        except Exception as e2:
-            st.error(f"Cert write failed: {e} / {e2}")
-            st.stop()
+            blob = _json.dumps(cert_payload, sort_keys=True, ensure_ascii=False, separators=(",",":")).encode("utf-8")
+            with open(tmp,"wb") as f: f.write(blob); f.flush(); os.fsync(f.fileno())
+            os.replace(tmp, p); cert_path = str(p)
 
-    # ---------- cache + UI ----------
-    st.session_state["cert_payload"] = cert_payload
-    st.session_state["last_cert_path"] = cert_path
-    st.session_state["last_run_id"] = identity_block.get("run_id") or st.session_state.get("last_run_id")
+        # Cache + UI
+        st.session_state["cert_payload"] = cert_payload
+        st.session_state["last_cert_path"] = cert_path
+        st.session_state["last_run_id"] = identity_block["run_id"]
+        st.success(f"Cert written → `{cert_path}` · {full_hash[:12]}…")
+        st.caption(f"Embedded A/B → {cert_payload.get('ab_pair_tag','A/B')}" if cert_payload.get("ab_embedded") else "Embedded A/B → —")
 
-    st.success(f"Cert written → `{cert_path}` · {full_hash[:12]}…")
-    st.caption(f"Embedded A/B → {cert_payload.get('ab_pair_tag','A/B')}" if cert_payload.get("ab_embedded") else "Embedded A/B → —")
-
-    # --- Bundle quick action (unique keys) ---
-    with st.expander("Bundle (cert + extras)"):
-        extras = [
-            "policy.json",
-            "reports/residual.json",
-            "reports/parity_report.json",
-            "reports/coverage_sampling.csv",
-            "logs/gallery.jsonl",
-            "logs/witnesses.jsonl",
-        ]
-        if _rc.get("mode") == "projected(file)" and _rc.get("projector_filename"):
-            extras.append(_rc.get("projector_filename"))
-
-        if st.button("Build Cert Bundle", key="build_cert_bundle_btn_cert"):
-            try:
-                bundle_path = build_cert_bundle(
-                    district_id=district_id,
-                    policy_tag=policy_now,
-                    cert_path=cert_path,
-                    content_hash=full_hash,
-                    extras=extras,
-                )
-                st.success(f"Bundle ready → {bundle_path}")
+        # --- Bundle (cert + extras) ---
+        with st.expander("Bundle (cert + extras)"):
+            extras = ["policy.json",
+                      "reports/residual.json","reports/parity_report.json","reports/coverage_sampling.csv",
+                      "logs/gallery.jsonl","logs/witnesses.jsonl"]
+            if _rc.get("mode")=="projected(file)" and _rc.get("projector_filename"):
+                extras.append(_rc.get("projector_filename"))
+            if st.button("Build Cert Bundle", key="build_cert_bundle_btn_final"):
                 try:
-                    with open(bundle_path, "rb") as fz:
-                        st.download_button("Download cert bundle", fz, file_name=os.path.basename(bundle_path), key="dl_cert_bundle_zip_cert")
-                except Exception:
-                    pass
-            except Exception as e:
-                st.error(f"Bundle build failed: {e}")
+                    bp = build_cert_bundle(
+                        district_id=district_id, policy_tag=policy_now,
+                        cert_path=cert_path, content_hash=full_hash, extras=extras
+                    )
+                    st.success(f"Bundle ready → {bp}")
+                    try:
+                        with open(bp,"rb") as fz:
+                            st.download_button("Download cert bundle", fz, file_name=os.path.basename(bp),
+                                               key="dl_cert_bundle_zip_final")
+                    except Exception: pass
+                except Exception as e:
+                    st.error(f"Bundle build failed: {e}")
 
+# ───────────────────────── Certs on disk (tail) with A/B badge ─────────────────────────
+def _fmt_ts(ts): 
+    try: return datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%SZ")
+    except: return ""
 
-# ───────────────────────── Certs on disk (last 5) with A/B badge ─────────────────────────
-def _short(s, n=12):
-    s = str(s or "")
-    return s[:n] + ("…" if len(s) > n else "")
+# (Already imported: from datetime import datetime)
 
-def _safe_load_json(p: Path):
-    try:
-        with p.open("r", encoding="utf-8") as f:
-            return _json.load(f)
-    except Exception:
-        return {}
-
-def _fmt_ts(ts_float: float) -> str:
-    try:
-        return datetime.utcfromtimestamp(ts_float).strftime("%Y-%m-%d %H:%M:%SZ")
-    except Exception:
-        return ""
-
-CERTS_DIR = Path(globals().get("CERTS_DIR", "certs"))
+CERTS_DIR = Path(globals().get("CERTS_DIR","certs"))
 CERTS_DIR.mkdir(parents=True, exist_ok=True)
 
 with st.expander("Certs on disk (last 5)", expanded=False):
     all_certs = sorted(CERTS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-    st.caption(f"Found {len(all_certs)} cert{'s' if len(all_certs) != 1 else ''} in `{CERTS_DIR.as_posix()}`.")
+    st.caption(f"Found {len(all_certs)} certs in `{CERTS_DIR.as_posix()}`.")
+    ab_only = st.checkbox("Show only certs with A/B embed", value=False, key="tail_ab_only_final")
 
-    ab_only = st.checkbox("Show only certs with A/B embed", value=False, key="tail_ab_only")
-
-    shown = 0
-    for p in all_certs:
-        info = _safe_load_json(p)
-        if not isinstance(info, dict):
+    for p in all_certs[:5]:
+        try:
+            info = _json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
             continue
-
-        # A/B presence
-        has_ab = bool(info.get("ab_embedded") or ("ab_pair_tag" in info) or ("ab_pair_tag" in (info.get("policy") or {})))
-        if ab_only and not has_ab:
-            continue
-
         ident  = info.get("identity") or {}
         policy = info.get("policy") or {}
-        integ  = info.get("integrity") or {}
-        d_id   = ident.get("district_id", "UNKNOWN")
-        policy_tag = policy.get("policy_tag") or policy.get("label") or "strict"
-        mtime  = p.stat().st_mtime
+        tag    = policy.get("policy_tag") or "strict"
+        has_ab = bool(info.get("ab_embedded") or ("ab_pair_tag" in info) or ("ab_pair_tag" in policy))
+        if ab_only and not has_ab: continue
+        ab_label = f" · [A/B: {info.get('ab_pair_tag') or policy.get('ab_pair_tag') or 'A/B'}]" if has_ab else ""
+        st.write(f"• {_fmt_ts(p.stat().st_mtime)} · {ident.get('district_id','UNKNOWN')} · {tag} · {p.name}{ab_label}")
 
-        ab_flag = ""
-        if has_ab:
-            tag = info.get("ab_pair_tag") or (policy.get("ab_pair_tag") if isinstance(policy, dict) else None) or "A/B"
-            ab_flag = f" · [A/B: {tag}]"
-
-        st.write(f"• {_fmt_ts(mtime)} · {d_id} · {policy_tag} · {p.name}{ab_flag}")
-        shown += 1
-        if shown >= 5:
-            break
 
 
 
