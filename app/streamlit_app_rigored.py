@@ -1351,8 +1351,8 @@ def run_overlap():
     lane_mask = [1 if any(d3[i][j] & 1 for i in range(len(d3))) else 0 for j in range(n3)]
     assert len(lane_mask) == n3, "lane_mask_k3 length mismatch with n3"
     # --- NEW: generate a per-run id and keep it in session
-run_id = str(uuid4())
-st.session_state["last_run_id"] = run_id  # optional convenience
+    run_id = str(uuid4())
+    st.session_state["last_run_id"] = run_id  # optional convenience
 
     # Compute residuals (strict)
     H_local = _load_h_local()
