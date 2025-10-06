@@ -2587,11 +2587,59 @@ else:
     st.caption("No cert produced in this run (nothing to bundle).")
 
 
-# ───────────────────────── Exports: Snapshot + Inputs Bundle ─────────────────────────
+# ───────────────────────── Exports / Snapshot / Flush (consolidated) ─────────────────────────
 from pathlib import Path
-import os, json, tempfile, zipfile, shutil, platform
+import os, json, tempfile, zipfile, shutil, platform, csv, hashlib, secrets
 import streamlit as st
+from datetime import datetime, timezone
 
+# ---- Directory constants (respect existing globals if present)
+CERTS_DIR      = Path(globals().get("CERTS_DIR",      Path("certs")))
+PROJECTORS_DIR = Path(globals().get("PROJECTORS_DIR", Path("projectors")))
+LOGS_DIR       = Path(globals().get("LOGS_DIR",       Path("logs")))
+REPORTS_DIR    = Path(globals().get("REPORTS_DIR",    Path("reports")))
+BUNDLES_DIR    = Path(globals().get("BUNDLES_DIR",    Path("bundles")))
+for _d in (CERTS_DIR, PROJECTORS_DIR, LOGS_DIR, REPORTS_DIR, BUNDLES_DIR):
+    _d.mkdir(parents=True, exist_ok=True)
+
+# ---- Small utils
+def _utc_iso_z() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def _ymd_hms_compact() -> str:
+    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+
+def _sha256_file(p: Path) -> str:
+    h = hashlib.sha256()
+    with p.open("rb") as f:
+        for chunk in iter(lambda: f.read(65536), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+def _rel(p: Path) -> str:
+    try:
+        return p.resolve().relative_to(Path.cwd().resolve()).as_posix()
+    except Exception:
+        return p.as_posix()
+
+def _read_json_safely(p: Path):
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            return json.load(f), None
+    except Exception as e:
+        return None, str(e)
+
+def _nonempty(p: Path) -> bool:
+    return p.exists() and p.is_file() and p.stat().st_size > 0
+
+def _count_files(root: Path) -> int:
+    if not root.exists(): return 0
+    n = 0
+    for _, _, files in os.walk(root):
+        n += len(files)
+    return n
+
+# ---- Inputs Bundle
 def build_inputs_bundle(*, inputs_block: dict, run_ctx: dict, district_id: str, run_id: str, policy_tag: str) -> str:
     """
     Creates bundles/inputs__{district}__{run_id}.zip with:
@@ -2601,7 +2649,6 @@ def build_inputs_bundle(*, inputs_block: dict, run_ctx: dict, district_id: str, 
     APP_VERSION_LOCAL = globals().get("APP_VERSION_STR", getattr(hashes, "APP_VERSION", "v0.1-core"))
     PY_VERSION_LOCAL  = globals().get("PY_VERSION_STR", f"python-{platform.python_version()}")
 
-    BUNDLES_DIR = Path("bundles")
     BUNDLES_DIR.mkdir(parents=True, exist_ok=True)
 
     fns = (inputs_block.get("filenames") or {})
@@ -2666,113 +2713,7 @@ def build_inputs_bundle(*, inputs_block: dict, run_ctx: dict, district_id: str, 
 
     return str(zpath)
 
-# --- UI: Exports (place this BELOW the Cert Writer block) ---
-with st.expander("Exports"):
-    c1, c2 = st.columns(2)
-
-    # Snapshot (uses your existing build_everything_snapshot())
-    with c1:
-        if st.button("Build Snapshot ZIP", key="btn_build_snapshot"):
-            try:
-                zp = build_everything_snapshot()  # defined in your Snapshot section
-                if zp:
-                    st.success(f"Snapshot ready → {zp}")
-                    try:
-                        with open(zp, "rb") as fz:
-                            st.download_button("Download snapshot.zip", fz, file_name=os.path.basename(zp), key="dl_snapshot_zip")
-                    except Exception:
-                        pass
-            except Exception as e:
-                st.error(f"Snapshot failed: {e}")
-
-    # Inputs Bundle
-    with c2:
-        if st.button("Export Inputs Bundle", key="btn_export_inputs"):
-            try:
-                ib = st.session_state.get("_inputs_block") or {}
-                di = st.session_state.get("_district_info") or {}
-                rc = st.session_state.get("run_ctx") or {}
-                cert_cached = st.session_state.get("cert_payload")
-
-                district_id = di.get("district_id", "UNKNOWN")
-                # Prefer cert run_id → last_run_id → derive
-                run_id = (cert_cached or {}).get("identity", {}).get("run_id") or st.session_state.get("last_run_id")
-                if not run_id:
-                    hconcat = "".join(ib.get(k,"") for k in ("boundaries_hash","C_hash","H_hash","U_hash"))
-                    ts = hashes.timestamp_iso_lisbon()
-                    run_id = hashes.run_id(hconcat, ts)
-                    st.session_state["last_run_id"] = run_id
-
-                policy_tag = st.session_state.get("overlap_policy_label") or rc.get("policy_tag") or "strict"
-
-                bp = build_inputs_bundle(
-                    inputs_block=ib,
-                    run_ctx=rc,
-                    district_id=district_id,
-                    run_id=run_id,
-                    policy_tag=policy_tag,
-                )
-                st.session_state["last_inputs_bundle_path"] = bp
-                st.success(f"Inputs bundle ready → {bp}")
-                try:
-                    with open(bp, "rb") as fz:
-                        st.download_button("Download inputs bundle", fz, file_name=os.path.basename(bp), key="dl_inputs_bundle")
-                except Exception:
-                    pass
-            except Exception as e:
-                st.error(f"Export Inputs Bundle failed: {e}")
-
-
-
-
-
-
-
-
-                    
-                    # ======================= Snapshot ZIP + Flush Workspace =======================
-import os, json as _json, csv, hashlib, zipfile, tempfile, shutil, platform, secrets
-from pathlib import Path
-from datetime import datetime, timezone
-
-# Prefer existing DIR constants if your app defined DIRS earlier; otherwise fall back
-CERTS_DIR      = Path(globals().get("CERTS_DIR",      Path("certs")))
-PROJECTORS_DIR = Path(globals().get("PROJECTORS_DIR", Path("projectors")))
-LOGS_DIR       = Path(globals().get("LOGS_DIR",       Path("logs")))
-REPORTS_DIR    = Path(globals().get("REPORTS_DIR",    Path("reports")))
-BUNDLES_DIR    = Path(globals().get("BUNDLES_DIR",    Path("bundles")))
-for _d in (CERTS_DIR, PROJECTORS_DIR, LOGS_DIR, REPORTS_DIR, BUNDLES_DIR):
-    _d.mkdir(parents=True, exist_ok=True)
-
-def _utc_iso_z() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-def _ymd_hms_compact() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-def _sha256_file(p: Path) -> str:
-    h = hashlib.sha256()
-    with p.open("rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-def _rel(p: Path) -> str:
-    try:
-        return p.resolve().relative_to(Path.cwd().resolve()).as_posix()
-    except Exception:
-        return p.as_posix()
-
-def _read_json_safely(p: Path):
-    try:
-        with p.open("r", encoding="utf-8") as f:
-            return _json.load(f), None
-    except Exception as e:
-        return None, str(e)
-
-def _nonempty(p: Path) -> bool:
-    return p.exists() and p.is_file() and p.stat().st_size > 0
-
+# ---- Everything Snapshot
 def build_everything_snapshot() -> str:
     """
     Build bundles/snapshot__{district_or_MULTI}__{YYYYMMDDThhmmssZ}.zip
@@ -2804,23 +2745,19 @@ def build_everything_snapshot() -> str:
         pol   = cert.get("policy")   or {}
         inputs = cert.get("inputs")  or {}
 
-        # districts
         did = ident.get("district_id") or "UNKNOWN"
         districts.add(str(did))
 
-        # manifest file entry
         manifest_files.append({
             "path": _rel(p),
             "sha256": _sha256_file(p),
             "size": p.stat().st_size,
         })
 
-        # projector refs (policy-only)
         pj_fname = pol.get("projector_filename", "") or ""
         if isinstance(pj_fname, str) and pj_fname.strip():
             proj_refs.add(pj_fname.strip())
 
-        # index row (tolerate flat or nested inputs.hashes)
         hashes_flat   = {
             "boundaries_hash": inputs.get("boundaries_hash"),
             "C_hash":          inputs.get("C_hash"),
@@ -2831,18 +2768,18 @@ def build_everything_snapshot() -> str:
         def _hx(k): return hashes_flat.get(k) or hashes_nested.get(k) or ""
 
         index_rows.append([
-            _rel(p),                                              # cert_path
-            (cert.get("integrity") or {}).get("content_hash",""),# content_hash
-            pol.get("policy_tag",""),                             # policy_tag
-            did,                                                  # district_id
-            ident.get("run_id",""),                               # run_id
-            ident.get("timestamp",""),                            # written_at_utc
+            _rel(p),
+            (cert.get("integrity") or {}).get("content_hash",""),
+            pol.get("policy_tag",""),
+            did,
+            ident.get("run_id",""),
+            ident.get("timestamp",""),
             _hx("boundaries_hash"), _hx("C_hash"), _hx("H_hash"), _hx("U_hash"),
-            str(pol.get("projector_hash","") or ""),              # projector_hash
-            str(pol.get("projector_filename","") or ""),          # projector_filename
+            str(pol.get("projector_hash","") or ""),
+            str(pol.get("projector_filename","") or ""),
         ])
 
-    # 3) Resolve projectors (dedup; allow projectors/<name>.json fallback)
+    # 3) Resolve projectors
     projectors, missing_projectors = [], []
     for pj in sorted(proj_refs):
         pj_path = Path(pj)
@@ -2875,7 +2812,7 @@ def build_everything_snapshot() -> str:
         if _nonempty(p):
             reports_list.append({"path": _rel(p), "sha256": _sha256_file(p), "size": p.stat().st_size})
 
-    # 5) Manifest object
+    # 5) Manifest
     app_ver = getattr(hashes, "APP_VERSION", "v0.1-core")
     py_ver  = f"python-{platform.python_version()}"
     manifest = {
@@ -2908,7 +2845,7 @@ def build_everything_snapshot() -> str:
         "notes": "Certs are authoritative; only projectors referenced by any cert are included."
     }
 
-    # 6) Build cert_index.csv (in-memory string)
+    # 6) cert_index.csv (in-memory)
     index_header = [
         "cert_path","content_hash","policy_tag","district_id","run_id","written_at_utc",
         "boundaries_hash","C_hash","H_hash","U_hash","projector_hash","projector_filename"
@@ -2926,7 +2863,7 @@ def build_everything_snapshot() -> str:
         try: os.remove(idx_tmp)
         except Exception: pass
 
-    # 7) Name & create ZIP (atomic write into bundles/)
+    # 7) Create ZIP (atomic)
     tag = next(iter(districts)) if len(districts) == 1 else "MULTI"
     zname = f"snapshot__{tag}__{_ymd_hms_compact()}.zip"
     zpath = BUNDLES_DIR / zname
@@ -2936,11 +2873,8 @@ def build_everything_snapshot() -> str:
 
     try:
         with zipfile.ZipFile(tmpzip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            # manifest.json
-            zf.writestr("manifest.json", _json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
-            # cert_index.csv
+            zf.writestr("manifest.json", json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
             zf.writestr("cert_index.csv", index_csv_text)
-            # certs, projectors, logs, reports
             for f in manifest_files + projectors + logs_list + reports_list:
                 p = Path(f["path"])
                 if p.exists():
@@ -2951,19 +2885,12 @@ def build_everything_snapshot() -> str:
             try: tmpzip.unlink()
             except Exception: pass
 
-    # Self-check
     if len(index_rows) != manifest["counts"]["certs"]:
         st.warning("Index count does not match manifest cert count (investigate).")
 
     return str(zpath)
 
-def _count_files(root: Path) -> int:
-    if not root.exists(): return 0
-    n = 0
-    for _, _, files in os.walk(root):
-        n += len(files)
-    return n
-
+# ---- Flush Workspace
 def flush_workspace(*, delete_projectors: bool=False) -> dict:
     """
     Remove generated artifacts (certs/logs/reports/bundles, and optionally projectors),
@@ -3013,22 +2940,62 @@ def flush_workspace(*, delete_projectors: bool=False) -> dict:
     summary["composite_cache_key_short"] = ckey[:12]
     return summary
 
-# --- UI: Snapshot & Flush ---
-with safe_expander("Snapshot: Everything (certs, referenced Π, logs, reports)"):
+# ───────────────────────── UI (place BELOW the Cert Writer) ─────────────────────────
+with st.expander("Exports"):
+    # Inputs Bundle only (Snapshot lives with Flush below)
+    if st.button("Export Inputs Bundle", key="btn_export_inputs"):
+        try:
+            ib = st.session_state.get("_inputs_block") or {}
+            di = st.session_state.get("_district_info") or {}
+            rc = st.session_state.get("run_ctx") or {}
+            cert_cached = st.session_state.get("cert_payload")
+
+            district_id = di.get("district_id", "UNKNOWN")
+            run_id = (cert_cached or {}).get("identity", {}).get("run_id") or st.session_state.get("last_run_id")
+            if not run_id:
+                hconcat = "".join(ib.get(k,"") for k in ("boundaries_hash","C_hash","H_hash","U_hash"))
+                ts = hashes.timestamp_iso_lisbon()
+                run_id = hashes.run_id(hconcat, ts)
+                st.session_state["last_run_id"] = run_id
+
+            policy_tag = st.session_state.get("overlap_policy_label") or rc.get("policy_tag") or "strict"
+
+            bp = build_inputs_bundle(
+                inputs_block=ib,
+                run_ctx=rc,
+                district_id=district_id,
+                run_id=run_id,
+                policy_tag=policy_tag,
+            )
+            st.session_state["last_inputs_bundle_path"] = bp
+            st.success(f"Inputs bundle ready → {bp}")
+            try:
+                with open(bp, "rb") as fz:
+                    st.download_button("Download inputs bundle", fz, file_name=os.path.basename(bp), key="dl_inputs_bundle")
+            except Exception:
+                pass
+        except Exception as e:
+            st.error(f"Export Inputs Bundle failed: {e}")
+
+with safe_expander("Snapshot: Everything (certs, referenced Π, logs, reports) + Flush"):
     c1, c2 = st.columns([2,1])
+
+    # Snapshot — unique key here
     with c1:
-        if st.button("Build Snapshot ZIP", key="btn_build_snapshot"):
+        if st.button("Build Snapshot ZIP", key="btn_build_snapshot_main"):
             try:
                 zp = build_everything_snapshot()
                 if zp:
                     st.success(f"Snapshot ready → {zp}")
                     try:
                         with open(zp, "rb") as fz:
-                            st.download_button("Download snapshot ZIP", fz, file_name=os.path.basename(zp), key="dl_snapshot_zip")
+                            st.download_button("Download snapshot ZIP", fz, file_name=os.path.basename(zp), key="dl_snapshot_zip_main")
                     except Exception:
                         pass
             except Exception as e:
                 st.error(f"Snapshot failed: {e}")
+
+    # Flush
     with c2:
         inc_pj = st.checkbox("Also remove projectors", value=False, key="flush_inc_pj")
         if st.button("Flush Workspace", key="btn_flush_workspace"):
