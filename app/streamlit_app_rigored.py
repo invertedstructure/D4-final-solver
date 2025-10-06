@@ -87,6 +87,193 @@ DISTRICT_MAP: dict[str, str] = {
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
 
+# =========================[ STEP 1 · Core helpers + guards ]=========================
+
+from pathlib import Path
+import os, json, tempfile, shutil, hashlib
+from uuid import uuid4
+from datetime import datetime, timezone
+
+# ---- Constants (single source)
+SCHEMA_VERSION = globals().get("SCHEMA_VERSION", "1.0.0")
+APP_VERSION    = globals().get("APP_VERSION",    "v0.1-core")
+FIELD          = globals().get("FIELD",          "GF(2)")
+
+# ---- Directories (be tolerant if not pre-defined)
+LOGS_DIR = Path(globals().get("LOGS_DIR", "logs")); LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+# ---- Tiny time/uuid utils
+def _utc_iso_z() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def new_run_id() -> str:
+    return str(uuid4())
+
+# ---- Fixture nonce: single source of "freshness"
+def _ensure_fixture_nonce():
+    ss = st.session_state
+    if "fixture_nonce" not in ss:
+        # prefer "fixture_nonce" (public) over legacy "_fixture_nonce"
+        ss["fixture_nonce"] = int(ss.get("_fixture_nonce", 0)) or 1
+        ss["_fixture_nonce"] = ss["fixture_nonce"]  # keep legacy mirror for old code paths
+
+def _bump_fixture_nonce():
+    ss = st.session_state
+    cur = int(ss.get("fixture_nonce", 0))
+    ss["fixture_nonce"] = cur + 1
+    ss["_fixture_nonce"] = ss["fixture_nonce"]  # keep legacy mirror
+
+# ---- Freshness guard (use at start of every action)
+def require_fresh_run_ctx():
+    _ensure_fixture_nonce()
+    ss = st.session_state
+    rc = ss.get("run_ctx")
+    if not rc:
+        st.warning("STALE_RUN_CTX: Run Overlap first.")
+        st.stop()
+    if int(rc.get("fixture_nonce", -1)) != int(ss.get("fixture_nonce", -2)):
+        st.warning("STALE_RUN_CTX: Inputs changed; please click Run Overlap to refresh.")
+        st.stop()
+    return rc  # allow callers to grab it
+
+# ---- Truth mask from a stored d3 (GF(2) column-wise OR)
+def _truth_mask_from_d3(d3: list[list[int]]) -> list[int]:
+    if not d3 or not d3[0]:
+        return []
+    rows, cols = len(d3), len(d3[0])
+    return [1 if any(int(d3[i][j]) & 1 for i in range(rows)) else 0 for j in range(cols)]
+
+# ---- Rectifier: overwrite stale lane_mask_k3 from run_ctx.d3 (no external reads)
+def rectify_run_ctx_mask_from_d3():
+    ss = st.session_state
+    rc = require_fresh_run_ctx()  # also ensures presence
+    d3 = rc.get("d3") or []
+    n3 = int(rc.get("n3") or 0)
+    if not d3 or n3 <= 0:
+        st.warning("STALE_RUN_CTX: d3/n3 unavailable. Run Overlap.")
+        st.stop()
+    lm_truth = _truth_mask_from_d3(d3)
+    if len(lm_truth) != n3:
+        st.warning(f"STALE_RUN_CTX: lane mask length {len(lm_truth)} != n3 {n3}. Run Overlap.")
+        st.stop()
+    lm_rc = list(rc.get("lane_mask_k3") or [])
+    if lm_rc != lm_truth:
+        rc["lane_mask_k3"] = lm_truth
+        ss["run_ctx"] = rc
+        st.info(f"Rectified run_ctx.lane_mask_k3 from {lm_rc or '[]'} → {lm_truth} based on stored d3.")
+    return ss["run_ctx"]
+
+# ---- Soft reset: clears per-run caches (call at top of Run Overlap)
+def soft_reset_before_overlap():
+    ss = st.session_state
+    for k in (
+        "run_ctx", "overlap_out", "overlap_cfg", "overlap_policy_label",
+        "overlap_H", "residual_tags", "proj_meta", "ab_compare",
+        "cert_payload", "last_cert_path", "_last_cert_write_key",
+        "_projector_cache", "_projector_cache_ab",
+    ):
+        ss.pop(k, None)
+
+# ---- JSONL helpers (atomic append + fast tail)
+def _atomic_append_jsonl(path: Path, row: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    blob = json.dumps(row, separators=(",", ":"), sort_keys=True, ensure_ascii=False) + "\n"
+    with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as tmp:
+        tmp.write(blob); tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
+    with open(path, "a", encoding="utf-8") as final, open(tmp_name, "r", encoding="utf-8") as src:
+        shutil.copyfileobj(src, final)
+    os.remove(tmp_name)
+
+def _read_jsonl_tail(path: Path, N: int = 200) -> list[dict]:
+    if not path.exists():
+        return []
+    # Simple tail: read whole if tiny; otherwise seek from end
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, os.SEEK_END)
+            size = f.tell()
+            chunk = 64 * 1024
+            data = b""
+            while len(data.splitlines()) <= N + 1 and f.tell() > 0:
+                step = min(chunk, f.tell())
+                f.seek(-step, os.SEEK_CUR)
+                data = f.read(step) + data
+                f.seek(-step, os.SEEK_CUR)
+            lines = data.splitlines()[-N:]
+        return [json.loads(l.decode("utf-8")) for l in lines if l.strip()]
+    except Exception:
+        # fallback: full read
+        with open(path, "r", encoding="utf-8") as f:
+            lines = f.readlines()[-N:]
+        out = []
+        for ln in lines:
+            try: out.append(json.loads(ln))
+            except Exception: continue
+        return out
+
+# ---- Predicates used across UI
+def is_projected_green(run_ctx: dict | None, overlap_out: dict | None) -> bool:
+    if not run_ctx or not overlap_out: return False
+    mode = str(run_ctx.get("mode") or "")
+    return mode.startswith("projected") and bool(((overlap_out.get("3") or {}).get("eq", False)))
+
+def is_strict_red_lanes(run_ctx: dict | None, overlap_out: dict | None, residual_tags: dict | None) -> bool:
+    if not run_ctx or not overlap_out: return False
+    if str(run_ctx.get("mode") or "") != "strict": return False
+    if bool(((overlap_out.get("3") or {}).get("eq", True))): return False
+    tag = ((residual_tags or {}).get("strict") or "")
+    return tag == "lanes"
+
+# ---- Hash key builders for dedupe
+def gallery_key(row: dict) -> tuple:
+    pol = row.get("policy") or {}
+    h   = row.get("hashes") or {}
+    return (
+        row.get("district",""),
+        pol.get("policy_tag",""),
+        h.get("boundaries_hash",""),
+        h.get("C_hash",""),
+        h.get("H_hash",""),
+        h.get("U_hash",""),
+    )
+
+def witness_key(row: dict) -> tuple:
+    pol = row.get("policy") or {}
+    h   = row.get("hashes") or {}
+    return (
+        row.get("district",""),
+        row.get("reason",""),
+        row.get("residual_tag",""),
+        pol.get("policy_tag",""),
+        h.get("boundaries_hash",""),
+        h.get("C_hash",""),
+        h.get("H_hash",""),
+        h.get("U_hash",""),
+    )
+
+# ---- Session-level dedupe caches (init once)
+if "_gallery_keys" not in st.session_state:
+    st.session_state["_gallery_keys"] = set()
+if "_witness_keys" not in st.session_state:
+    st.session_state["_witness_keys"] = set()
+
+# ---- Run stamp helper (nice to print in UI)
+def run_stamp_line() -> str:
+    ss = st.session_state
+    rc = ss.get("run_ctx") or {}
+    ib = ss.get("_inputs_block") or {}
+    pol = rc.get("policy_tag","?")
+    n3 = int(rc.get("n3") or 0)
+    hB = (ib.get("boundaries_hash","") or "")[:8]
+    hC = (ib.get("C_hash","") or "")[:8]
+    hH = (ib.get("H_hash","") or "")[:8]
+    hU = (ib.get("U_hash","") or "")[:8]
+    pH = (rc.get("projector_hash","") or "")[:8]
+    rid = (rc.get("run_id","") or "")[:8]
+    return f"{pol} | n3={n3} | B {hB} · C {hC} · H {hH} · U {hU} | P {pH} | run {rid}"
+# ====================================================================================
+
+
 # ───────────────────────── SSOT + Freshness helpers (drop-in) ─────────────────────────
 import hashlib, secrets
 import streamlit as st
