@@ -675,116 +675,33 @@ except Exception:
 
 
 # ------------------------------ OVERLAP TAB -----------------------------------
-with tab2:
-    st.subheader("Overlap gate")
+import json as _json
+import os
+import hashlib  # <-- added this import
 
-    # ------------------------ Imports & small utils local to Tab 2 ------------------------
-    import json as _json
-    from pathlib import Path
-    import os, tempfile, csv, hashlib  # add hashlib for _stable_hash
-
-    # reuse global GF(2) helpers: mul, add, eye
-    def _xor_mat(A, B):  # uses integers (0/1), XOR per entry
-        if not A:
-            return [r[:] for r in (B or [])]
-        if not B:
-            return [r[:] for r in (A or [])]
-        m, n = len(A), len(A[0])
-        return [[(A[i][j] ^ B[i][j]) & 1 for j in range(n)] for i in range(m)]
-
-    def _bottom_row(M):
-        return M[-1] if (M and len(M)) else []
-
-    def _stable_hash(obj):
-        return hashlib.sha256(_json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
-    # ------------------------ UI: policy + H + projector ------------------------
-    colA, colB = st.columns([2, 2])
-    with colA:
-        policy_choice = st.radio(
-            "Policy",
-            ["strict", "projected(auto)", "projected(file)"],
-            index=0,
-            horizontal=True,
-            key="ov_policy_choice",
-        )
-    with colB:
-        f_H = st.file_uploader("Homotopy H (optional)", type=["json"], key="H_up")
-
-    proj_upload = st.file_uploader(
-        "Projector Π (k=3) file (only for projected(file))",
-        type=["json"],
-        key="pj_up",
-    )
-
-    # load H (or empty cmap)
-    def _load_h_local():
-        try:
-            if f_H is None:
-                return io.parse_cmap({"blocks": {}})
-            return io.parse_cmap(read_json_file(f_H))
-        except Exception:
-            # last resort: empty structure to keep downstream shape guards alive
-            return io.parse_cmap({"blocks": {}})
-
-    # active config builder (defensive)
-    def _cfg_from_policy(policy_choice_str: str, pj_path: str | None) -> dict:
-        if policy_choice_str == "strict":
-            return cfg_strict()
-        cfg = cfg_projected_base()
-        if policy_choice_str.endswith("(auto)"):
-            cfg.setdefault("source", {})["3"] = "auto"
-            # leave projector_files empty in AUTO
-            cfg.setdefault("projector_files", {})
-        else:  # projected(file)
-            cfg.setdefault("source", {})["3"] = "file"
-            if pj_path:
-                cfg.setdefault("projector_files", {})["3"] = pj_path
-        return cfg
-
-    # handle projector upload (if provided)
-    pj_saved_path = ""
-    if proj_upload is not None:
-        os.makedirs("projectors", exist_ok=True)
-        pj_saved_path = os.path.join("projectors", proj_upload.name)
-        with open(pj_saved_path, "wb") as _pf:
-            _pf.write(proj_upload.getvalue())
-        st.caption(f"Saved projector: `{pj_saved_path}`")
-        st.session_state["ov_last_pj_path"] = pj_saved_path
-
-    # compute active cfg
-    cfg_active = _cfg_from_policy(
-        policy_choice,
-        st.session_state.get("ov_last_pj_path") or pj_saved_path or "",
-    )
-
-    # display active policy pill
-    st.caption(f"Active policy: `{policy_label_from_cfg(cfg_active)}`")
-
-
-  # ------------------------ Run Overlap + UI (tidy, with A/B freshness) ------------------------
-
-# Tiny helper so your A/B builder can record inputs_sig consistently
-def _current_inputs_sig() -> list[str]:
-    _ib = st.session_state.get("_inputs_block") or {}
-    return [
-        str(_ib.get("boundaries_hash", "")),
-        str(_ib.get("C_hash", "")),
-        str(_ib.get("H_hash", "")),
-        str(_ib.get("U_hash", "")),
-        str(_ib.get("shapes_hash", "")),
-    ]
-
-# Local XOR alias (GF(2)); fall back to a simple elementwise XOR if 'add' isn't globally available
+# Utility functions (shared)
 def _xor_mat(A, B):
     if "add" in globals() and callable(globals()["add"]):
         return globals()["add"](A, B)
-    if not A or not B:
-        return A or B or []
+    if not A: return [r[:] for r in (B or [])]
+    if not B: return [r[:] for r in (A or [])]
     r, c = len(A), len(A[0])
-    return [[(A[i][j] ^ B[i][j]) for j in range(c)] for i in range(r)]
+    return [[(A[i][j] ^ B[i][j]) & 1 for j in range(c)] for i in range(r)]
 
-# Authoritative lane mask: column-wise any over d3 (length n3)
+def _bottom_row(M):
+    return M[-1] if M and len(M) else []
+
+def _stable_hash(obj):
+    return hashlib.sha256(_json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+def _load_h_local():
+    try:
+        if f_H is None:
+            return io.parse_cmap({"blocks": {}})
+        return io.parse_cmap(read_json_file(f_H))
+    except Exception:
+        return io.parse_cmap({"blocks": {}})
+
 def _lane_mask_from_d3_strict(boundaries_obj):
     try:
         d3 = boundaries_obj.blocks.__root__.get("3") or []
@@ -795,7 +712,6 @@ def _lane_mask_from_d3_strict(boundaries_obj):
     rows, cols = len(d3), len(d3[0])
     return [1 if any((d3[i][j] & 1) for i in range(rows)) else 0 for j in range(cols)]
 
-# Legacy local helper (kept for callers that referenced it)
 def _lane_mask_from_d3_local(boundaries_obj):
     return _lane_mask_from_d3_strict(boundaries_obj)
 
@@ -805,13 +721,82 @@ def _derive_mode_from_cfg(cfg: dict) -> str:
     src = (cfg.get("source", {}) or {}).get("3", "auto")
     return "projected(file)" if src == "file" else "projected(auto)"
 
-# H chosen for this run (k=2 is used in residual)
-H_local = _load_h_local()
-policy_label = policy_label_from_cfg(cfg_active)
+# ------------------------------ UI: policy + H + projector ------------------------------
+colA, colB = st.columns([2, 2])
+with colA:
+    policy_choice = st.radio(
+        "Policy",
+        ["strict", "projected(auto)", "projected(file)"],
+        index=0,
+        horizontal=True,
+        key="ov_policy_choice",
+    )
+with colB:
+    f_H = st.file_uploader("Homotopy H (optional)", type=["json"], key="H_up")
 
+proj_upload = st.file_uploader(
+    "Projector Π (k=3) file (only for projected(file))",
+    type=["json"],
+    key="pj_up",
+)
+
+# Load H (or empty cmap)
+def _load_h_local():
+    try:
+        if f_H is None:
+            return io.parse_cmap({"blocks": {}})
+        return io.parse_cmap(read_json_file(f_H))
+    except Exception:
+        return io.parse_cmap({"blocks": {}})
+
+# Active configuration builder
+def _cfg_from_policy(policy_choice_str: str, pj_path: str | None) -> dict:
+    if policy_choice_str == "strict":
+        return cfg_strict()
+    cfg = cfg_projected_base()
+    if policy_choice_str.endswith("(auto)"):
+        cfg.setdefault("source", {})["3"] = "auto"
+        cfg.setdefault("projector_files", {})
+    else:
+        cfg.setdefault("source", {})["3"] = "file"
+        if pj_path:
+            cfg.setdefault("projector_files", {})["3"] = pj_path
+    return cfg
+
+# Handle projector upload
+pj_saved_path = ""
+if proj_upload is not None:
+    os.makedirs("projectors", exist_ok=True)
+    pj_saved_path = os.path.join("projectors", proj_upload.name)
+    with open(pj_saved_path, "wb") as _pf:
+        _pf.write(proj_upload.getvalue())
+    st.caption(f"Saved projector: `{pj_saved_path}`")
+    st.session_state["ov_last_pj_path"] = pj_saved_path
+
+# Compute active config
+cfg_active = _cfg_from_policy(
+    policy_choice,
+    st.session_state.get("ov_last_pj_path") or pj_saved_path or "",
+)
+
+# Display active policy label
+st.caption(f"Active policy: `{policy_label_from_cfg(cfg_active)}`")
+
+# ------------------------------ Run Overlap + UI (tidy, with A/B freshness) ------------------------------
+def _current_inputs_sig() -> list[str]:
+    _ib = st.session_state.get("_inputs_block") or {}
+    return [
+        str(_ib.get("boundaries_hash", "")),
+        str(_ib.get("C_hash", "")),
+        str(_ib.get("H_hash", "")),
+        str(_ib.get("U_hash", "")),
+        str(_ib.get("shapes_hash", "")),
+    ]
+
+# Main overlap function
 def run_overlap():
     # Clear previous session results
-    for k in ("proj_meta", "run_ctx", "residual_tags", "overlap_out", "overlap_H"):
+    for k in ("proj_meta", "run_ctx", "residual_tags", "overlap_out", "overlap_H", "overlap_cfg", "overlap_policy_label"):
         st.session_state.pop(k, None)
 
     # Bind projector (fail-fast on FILE)
@@ -819,19 +804,18 @@ def run_overlap():
         P_active, meta = projector_choose_active(cfg_active, boundaries)
     except ValueError as e:
         st.error(str(e))
-        # Minimal context so stamps/render don’t crash
         d3_now = (boundaries.blocks.__root__.get("3") or [])
         st.session_state["run_ctx"] = {
-            "policy_tag": policy_label,
+            "policy_tag": policy_label_from_cfg(cfg_active),
             "mode": _derive_mode_from_cfg(cfg_active),
             "d3": d3_now,
-            "n3": len(d3_now[0]) if d3_now and d3_now[0] else 0,
+            "n3": len(d3_now[0]) if (d3_now and d3_now[0]) else 0,
             "lane_mask_k3": [],
             "P_active": [],
             "projector_filename": (cfg_active.get("projector_files", {}) or {}).get("3", ""),
             "projector_hash": "",
             "projector_consistent_with_d": False,
-            "source": (cfg_active.get("source") or {}),  # verbatim
+            "source": (cfg_active.get("source") or {}),
             "errors": [str(e)],
         }
         st.stop()
@@ -840,9 +824,10 @@ def run_overlap():
     d3  = meta.get("d3") if "d3" in meta else (boundaries.blocks.__root__.get("3") or [])
     n3  = meta.get("n3") if "n3" in meta else (len(d3[0]) if (d3 and d3[0]) else 0)
     mode = meta.get("mode", _derive_mode_from_cfg(cfg_active))
-    lane_mask = _lane_mask_from_d3_strict(boundaries)  # authoritative mask
+    lane_mask = _lane_mask_from_d3_strict(boundaries)
 
-    # Compute strict residual R3 = H2@d3 XOR (C3 XOR I3)
+    # Compute residuals (strict)
+    H_local = _load_h_local()
     H2 = (H_local.blocks.__root__.get("2") or [])
     C3 = (cmap.blocks.__root__.get("3") or [])
     I3 = eye(len(C3)) if C3 else []
@@ -860,13 +845,16 @@ def run_overlap():
             return "none"
         rows, cols = len(R), len(R[0])
         lanes_idx = [j for j, m in enumerate(lm) if m]
-        ker_idx   = [j for j, m in enumerate(lm) if not m]
+        ker_idx = [j for j, m in enumerate(lm) if not m]
         def _col_nonzero(j): return any(R[i][j] & 1 for i in range(rows))
         lanes_resid = any(_col_nonzero(j) for j in lanes_idx) if lanes_idx else False
-        ker_resid   = any(_col_nonzero(j) for j in ker_idx)   if ker_idx   else False
-        if not lanes_resid and not ker_resid: return "none"
-        if lanes_resid and not ker_resid:     return "lanes"
-        if ker_resid and not lanes_resid:     return "ker"
+        ker_resid = any(_col_nonzero(j) for j in ker_idx) if ker_idx else False
+        if not lanes_resid and not ker_resid:
+            return "none"
+        if lanes_resid and not ker_resid:
+            return "lanes"
+        if ker_resid and not lanes_resid:
+            return "ker"
         return "mixed"
 
     tag_strict = _residual_tag(R3_strict, lane_mask)
@@ -874,7 +862,7 @@ def run_overlap():
 
     # Projected leg (if enabled)
     if cfg_active.get("enabled_layers"):
-        R3_proj  = mul(R3_strict, P_active) if (R3_strict and P_active) else []
+        R3_proj = mul(R3_strict, P_active) if (R3_strict and P_active) else []
         eq3_proj = _is_zero(R3_proj)
         tag_proj = _residual_tag(R3_proj, lane_mask)
         out = {"3": {"eq": bool(eq3_proj), "n_k": n3}, "2": {"eq": True}}
@@ -883,25 +871,26 @@ def run_overlap():
         out = {"3": {"eq": bool(eq3_strict), "n_k": n3}, "2": {"eq": True}}
         st.session_state["residual_tags"] = {"strict": tag_strict}
 
-    # Persist SSOT (single write)
+    # Persist SSOT
     st.session_state["overlap_out"] = out
     st.session_state["overlap_cfg"] = cfg_active
-    st.session_state["overlap_policy_label"] = policy_label
+    st.session_state["overlap_policy_label"] = policy_label_from_cfg(cfg_active)
     st.session_state["overlap_H"] = H_local
     st.session_state["run_ctx"] = {
-        "policy_tag": policy_label,
+        "policy_tag": st.session_state["overlap_policy_label"],
         "mode": mode,
-        "d3": d3, "n3": n3,
+        "d3": d3,
+        "n3": n3,
         "lane_mask_k3": lane_mask,
         "P_active": P_active,
-        "projector_filename": meta.get("projector_filename",""),
-        "projector_hash": meta.get("projector_hash",""),
+        "projector_filename": meta.get("projector_filename", ""),
+        "projector_hash": meta.get("projector_hash", ""),
         "projector_consistent_with_d": meta.get("projector_consistent_with_d", None),
-        "source": (cfg_active.get("source") or {}),  # verbatim copy for cert
+        "source": (cfg_active.get("source") or {}),
         "errors": [],
     }
 
-    # UI result + banner
+    # UI Result + Banner
     st.json(out)
     if mode == "projected(file)":
         if meta.get("projector_consistent_with_d", False):
@@ -910,7 +899,7 @@ def run_overlap():
             st.warning("Projected(file) is not consistent with current d3 (check shape/idempotence/diag/lane).")
 
 # Button
-if st.button("Run Overlap", key="run_overlap"):
+if st.button("Run Overlap", key="btn_run_overlap_final"):  # <-- updated button key
     run_overlap()
 
 
