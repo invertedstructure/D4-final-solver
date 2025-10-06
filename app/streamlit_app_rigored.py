@@ -87,6 +87,69 @@ DISTRICT_MAP: dict[str, str] = {
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
 
+# ======================= App constants & helpers =======================
+from uuid import uuid4
+import platform
+from datetime import datetime, timezone
+
+SCHEMA_VERSION = "1.0.0"
+APP_VERSION    = "v0.1-core"
+FIELD          = "GF(2)"  # displayed only; math stays the same
+
+def _utc_iso_z() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def _py_version_str() -> str:
+    return f"python-{platform.python_version()}"
+
+def _short(h: str, n: int = 8) -> str:
+    return (h or "")[:n]
+
+def _std_meta(*, include_python: bool = False, run_id: str | None = None) -> dict:
+    meta = {
+        "schema_version": SCHEMA_VERSION,
+        "written_at_utc": _utc_iso_z(),
+        "app_version": APP_VERSION,
+    }
+    if include_python:
+        meta["python_version"] = _py_version_str()
+    if run_id:
+        meta["run_id"] = run_id
+    return meta
+
+
+# ====================== Policy label symmetry (full tag) ======================
+def policy_label_from_cfg_full(cfg: dict) -> str:
+    """
+    Returns a canonical, full policy tag:
+      - "strict"
+      - "projected(columns@k=3,auto)"
+      - "projected(columns@k=3,file)"
+    """
+    if not cfg or not cfg.get("enabled_layers"):
+        return "strict"
+    src3 = (cfg.get("source") or {}).get("3", "auto")
+    if src3 == "file":
+        return "projected(columns@k=3,file)"
+    return "projected(columns@k=3,auto)"
+
+def policy_label_from_state(rc: dict, cfg_active: dict) -> str:
+    """
+    Mirrors the active policy tag using run_ctx when available; falls back to cfg.
+    """
+    mode = (rc or {}).get("mode", "")
+    if mode == "strict":
+        return "strict"
+    if mode == "projected(file)":
+        return "projected(columns@k=3,file)"
+    if mode == "projected(auto)":
+        return "projected(columns@k=3,auto)"
+    # fallback
+    return policy_label_from_cfg_full(cfg_active or {})
+# ============================================================================
+
+
+
 # =========================[ STEP 1 · Core helpers + guards ]=========================
 
 from pathlib import Path
@@ -956,6 +1019,17 @@ def policy_label_from_cfg(cfg: dict) -> str:
     mode = (cfg.get("modes", {}) or {}).get("3", "columns")
     return f"projected({mode}@k=3,{src})"
 
+# ===================== Projected(FILE) validation banner & guard =====================
+# Always clear previous error at the start of a new Overlap
+# (Do this inside run_overlap() right before/after calling projector_choose_active)
+#   st.session_state.pop("_file_mode_error", None)
+
+def file_validation_failed() -> bool:
+    """Convenience predicate: returns True if last attempt to use FILE Π failed validation."""
+    return bool(st.session_state.get("_file_mode_error"))
+
+
+
 # --- ensure tabs exist even if earlier branches ran before creating them
 if "tab1" not in globals():
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["Unit", "Overlap", "Triangle", "Towers", "Export"])
@@ -1127,6 +1201,31 @@ def _derive_mode_from_cfg(cfg: dict) -> str:
     src = (cfg.get("source", {}) or {}).get("3", "auto")
     return "projected(file)" if src == "file" else "projected(auto)"
 
+# ===================== Projected(FILE) validation banner & guard =====================
+# Always clear previous error at the start of a new Overlap
+# (Do this inside run_overlap() right before/after calling projector_choose_active)
+#   st.session_state.pop("_file_mode_error", None)
+
+def file_validation_failed() -> bool:
+    """Convenience predicate: returns True if last attempt to use FILE Π failed validation."""
+    return bool(st.session_state.get("_file_mode_error"))
+
+# Place this UI banner somewhere high in the page (before action buttons).
+_file_err = st.session_state.get("_file_mode_error")
+if _file_err:
+    code = str(_file_err.get("code", "P3_ERROR"))
+    msg  = str(_file_err.get("message", "Projected(FILE) validation failed."))
+    pj   = _file_err.get("projector_filename", "")
+    st.error(
+        f"Projected(FILE) validation failed [{code}]. {msg}"
+        + (f" · file: {pj}" if pj else "")
+        + " — Freeze from AUTO or open the projector registry to fix.",
+        icon="🚫"
+    )
+# ================================================================================
+
+
+
 # ------------------------------ UI: policy + H + projector ------------------------------
 colA, colB = st.columns([2, 2])
 with colA:
@@ -1251,6 +1350,9 @@ def run_overlap():
     # --- Authoritative lane mask from THIS d3 (no re-read of boundaries) ---
     lane_mask = [1 if any(d3[i][j] & 1 for i in range(len(d3))) else 0 for j in range(n3)]
     assert len(lane_mask) == n3, "lane_mask_k3 length mismatch with n3"
+    # --- NEW: generate a per-run id and keep it in session
+run_id = str(uuid4())
+st.session_state["last_run_id"] = run_id  # optional convenience
 
     # Compute residuals (strict)
     H_local = _load_h_local()
@@ -1262,6 +1364,40 @@ def run_overlap():
     except Exception as e:
         st.error(f"Shape guard failed at k=3: {e}")
         st.stop()
+
+# 6) Persist SSOT (write ONCE)
+_policy_label = (policy_label_from_state({"mode": mode}, cfg_active)
+                 if "policy_label_from_state" in globals()
+                 else policy_label_from_cfg(cfg_active))
+
+st.session_state["overlap_out"] = out
+st.session_state["overlap_cfg"] = cfg_active
+st.session_state["overlap_policy_label"] = _policy_label
+st.session_state["overlap_H"] = H_local
+st.session_state["run_ctx"] = {
+    "policy_tag": _policy_label,
+    "mode": mode,
+    "fixture_nonce": st.session_state.get("_fixture_nonce", 0),
+    "d3": d3, "n3": n3, "lane_mask_k3": lm_truth,
+    "P_active": P_active,
+    "projector_filename": meta.get("projector_filename", ""),
+    "projector_hash": meta.get("projector_hash", ""),
+    "projector_consistent_with_d": meta.get("projector_consistent_with_d", None),
+    "source": (cfg_active.get("source") or {}),
+    "run_id": run_id,                         # NEW
+    "errors": [],
+}
+
+# 7) Debug line + run-stamp banner  —— NEW
+ib = st.session_state.get("_inputs_block") or {}
+B = ib.get("boundaries_hash",""); C = ib.get("C_hash",""); Hh = ib.get("H_hash",""); U = ib.get("U_hash","")
+P_hash = meta.get("projector_hash","") if mode.startswith("projected") else ""
+st.caption(
+    f"run ⟂ { _policy_label } | n3={n3} | "
+    f"B:{_short(B)} C:{_short(C)} H:{_short(Hh)} U:{_short(U)} | "
+    f"P:{_short(P_hash)} | id:{_short(run_id)}"
+)
+  
 
     def _is_zero(M):
         return (not M) or all(all((x & 1) == 0 for x in row) for row in M)
@@ -1319,7 +1455,7 @@ def _truth_mask_from_d3(d3: list[list[int]]) -> list[int]:
     return [1 if any(d3[i][j] & 1 for i in range(rows)) else 0 for j in range(n3)]
 
 def _rectify_run_ctx_mask_from_d3_or_stop():
-    """Defensive guard for Freezer and other callers; aligns run_ctx.lane_mask_k3 to run_ctx.d3."""
+    """Defensive guard for freezer and callers; aligns run_ctx.lane_mask_k3 to run_ctx.d3."""
     rc = st.session_state.get("run_ctx") or {}
     if not rc or not rc.get("d3"):
         st.warning("Context is stale. Run Overlap to refresh.")
@@ -1343,29 +1479,47 @@ def _current_inputs_sig() -> list[str]:
             str(ib.get("shapes_hash",""))]
 
 def run_overlap():
-    # step 2: guarantee a fixture nonce exists for this session
+    # Ensure a fixture nonce exists
     _ensure_fixture_nonce()
 
-    # Clear previous per-run artifacts
+    # Clear previous artifacts
     for k in ("proj_meta","run_ctx","residual_tags","overlap_out",
               "overlap_H","overlap_cfg","overlap_policy_label"):
         st.session_state.pop(k, None)
 
-    # 1) Bind projector (fail-fast if FILE invalid)
+    # --- Bind projector (fail-fast on FILE) ---
     try:
+        # clear any previous FILE error before attempting to resolve Π
+        st.session_state.pop("_file_mode_error", None)
         P_active, meta = projector_choose_active(cfg_active, boundaries)
+
     except ValueError as e:
+        code = getattr(e, "code", None) or "P3_ERROR"
+        pjfn = (cfg_active.get("projector_files", {}) or {}).get("3", "")
+
+        st.session_state["_file_mode_error"] = {
+            "code": code,
+            "message": str(e),
+            "projector_filename": pjfn,
+        }
+
         st.error(str(e))
         d3_now = (boundaries.blocks.__root__.get("3") or [])
+
+        # choose label helper safely
+        _policy_label = (policy_label_from_state({"mode": "projected(file)"}, cfg_active)
+                         if "policy_label_from_state" in globals()
+                         else policy_label_from_cfg(cfg_active))
+
         st.session_state["run_ctx"] = {
-            "policy_tag": policy_label_from_cfg(cfg_active),
-            "mode": _derive_mode_from_cfg(cfg_active),
-            "fixture_nonce": st.session_state.get("_fixture_nonce", 0),  # nonce on error path too
+            "policy_tag": _policy_label,
+            "mode": "projected(file)",
+            "fixture_nonce": st.session_state.get("_fixture_nonce", 0),
             "d3": d3_now,
             "n3": len(d3_now[0]) if (d3_now and d3_now[0]) else 0,
             "lane_mask_k3": [],
             "P_active": [],
-            "projector_filename": (cfg_active.get("projector_files", {}) or {}).get("3", ""),
+            "projector_filename": pjfn,
             "projector_hash": "",
             "projector_consistent_with_d": False,
             "source": (cfg_active.get("source") or {}),
@@ -1373,16 +1527,16 @@ def run_overlap():
         }
         st.stop()
 
-    # 2) Context from projector resolver (authoritative d3/n3/mode)
+    # Context from projector resolver (authoritative d3/n3/mode)
     d3   = meta.get("d3") if "d3" in meta else (boundaries.blocks.__root__.get("3") or [])
     n3   = meta.get("n3") if "n3" in meta else (len(d3[0]) if (d3 and d3[0]) else 0)
     mode = meta.get("mode", _derive_mode_from_cfg(cfg_active))
 
-    # 3) SSOT lane mask from THIS d3 (no other sources!)
+    # SSOT lane mask from THIS d3
     lm_truth = _truth_mask_from_d3(d3)
     assert len(lm_truth) == n3, f"lane_mask_k3 length {len(lm_truth)} != n3 {n3}"
 
-    # 4) Strict residuals
+    # Strict residuals
     H_local = _load_h_local()
     H2 = (H_local.blocks.__root__.get("2") or [])
     C3 = (cmap.blocks.__root__.get("3") or [])
@@ -1393,7 +1547,7 @@ def run_overlap():
         st.error(f"Shape guard failed at k=3: {e}")
         st.stop()
 
-    def _is_zero(M): 
+    def _is_zero(M):
         return (not M) or all(all((x & 1) == 0 for x in row) for row in M)
 
     def _residual_tag(R, lm):
@@ -1412,7 +1566,7 @@ def run_overlap():
     tag_strict = _residual_tag(R3_strict, lm_truth)
     eq3_strict = _is_zero(R3_strict)
 
-    # 5) Projected leg (when enabled)
+    # Projected leg (when enabled)
     if cfg_active.get("enabled_layers"):
         R3_proj  = mul(R3_strict, P_active) if (R3_strict and P_active) else []
         eq3_proj = _is_zero(R3_proj)
@@ -1423,13 +1577,17 @@ def run_overlap():
         out = {"3": {"eq": bool(eq3_strict), "n_k": n3}, "2": {"eq": True}}
         st.session_state["residual_tags"] = {"strict": tag_strict}
 
-    # 6) Persist SSOT (write ONCE) — include the current fixture nonce
+    # Persist SSOT (write ONCE)
+    _policy_label = (policy_label_from_state({"mode": mode}, cfg_active)
+                     if "policy_label_from_state" in globals()
+                     else policy_label_from_cfg(cfg_active))
+
     st.session_state["overlap_out"] = out
     st.session_state["overlap_cfg"] = cfg_active
-    st.session_state["overlap_policy_label"] = policy_label_from_cfg(cfg_active)
+    st.session_state["overlap_policy_label"] = _policy_label
     st.session_state["overlap_H"] = H_local
     st.session_state["run_ctx"] = {
-        "policy_tag": st.session_state["overlap_policy_label"],
+        "policy_tag": _policy_label,
         "mode": mode,
         "fixture_nonce": st.session_state.get("_fixture_nonce", 0),
         "d3": d3, "n3": n3, "lane_mask_k3": lm_truth,
@@ -1441,10 +1599,8 @@ def run_overlap():
         "errors": [],
     }
 
-    # 7) Debug line: instantly reveals axis/perm mistakes
+    # Debug line + UI
     st.caption(f"d3: rows={len(d3)} cols={n3} · lane_mask={lm_truth} (pattern '{''.join(map(str,lm_truth))}')")
-
-    # 8) UI
     st.json(out)
     if mode == "projected(file)":
         if meta.get("projector_consistent_with_d", False):
@@ -1452,10 +1608,11 @@ def run_overlap():
         else:
             st.warning("Projected(file) is not consistent with current d3 (check shape/idempotence/diag/lane).")
 
-# ---- Single canonical button (ensure you don't render any other 'Run Overlap' buttons) ----
+# ---- Single canonical button ----
 if st.button("Run Overlap", key="btn_run_overlap_main"):
-    _soft_reset_before_overlap()  # step 3: clear prior run artifacts
+    _soft_reset_before_overlap()
     run_overlap()
+
 
 # (optional) minimal debug expander; safe to remove
 with st.expander("Debug · d3 & lane mask"):
@@ -2461,6 +2618,189 @@ with st.expander("Witness logger"):
     except Exception as e:
         st.warning(f"Could not render witnesses tail: {e}")
 # ======================================================================================
+# ========================= JSONL → CSV Exports (Gallery & Witness) =========================
+from pathlib import Path
+import json, csv, os, tempfile
+from datetime import datetime, timezone
+import streamlit as st
+
+# --- constants (reuse your globals if already defined) ---
+SCHEMA_VERSION = globals().get("SCHEMA_VERSION", "1.0.0")
+APP_VERSION    = globals().get("APP_VERSION", "v0.1-core")
+LOGS_DIR       = Path(globals().get("LOGS_DIR", "logs"))
+REPORTS_DIR    = Path(globals().get("REPORTS_DIR", "reports"))
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+GALLERY_JSONL   = LOGS_DIR / "gallery.jsonl"
+WITNESSES_JSONL = LOGS_DIR / "witnesses.jsonl"
+GALLERY_CSV_OUT = REPORTS_DIR / "gallery_export.csv"
+WITNESS_CSV_OUT = REPORTS_DIR / "witnesses_export.csv"
+
+def _utc_iso_z():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def _atomic_write_csv(path: Path, header: list[str], rows: list[list], comments: list[str] | None = None):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8", newline="") as tmp:
+        if comments:
+            for line in comments:
+                tmp.write(f"# {line}\n")
+        w = csv.writer(tmp)
+        w.writerow(header)
+        for r in rows:
+            w.writerow(r)
+        tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
+    os.replace(tmp_name, path)
+
+def _jsonl_read_all(path: Path) -> list[dict]:
+    if not path.exists(): return []
+    out = []
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln: continue
+                try:
+                    out.append(json.loads(ln))
+                except Exception:
+                    continue
+    except Exception:
+        pass
+    return out
+
+# ---------- flatteners ----------
+def _flatten_gallery_row(r: dict) -> list:
+    h = (r.get("hashes") or {})
+    pol = (r.get("policy") or {})
+    return [
+        r.get("written_at_utc", ""),
+        r.get("district", "UNKNOWN"),
+        pol.get("policy_tag", ""),
+        pol.get("projector_hash", ""),
+        h.get("boundaries_hash", ""),
+        h.get("C_hash", ""),
+        h.get("H_hash", ""),
+        h.get("U_hash", ""),
+        h.get("shapes_hash", ""),
+        int(r.get("growth_bumps", 0) or 0),
+        str(r.get("strictify", "")),
+        r.get("tag", ""),
+        r.get("cert_content_hash", ""),
+    ]
+
+def _flatten_witness_row(r: dict) -> list:
+    h = (r.get("hashes") or {})
+    pol = (r.get("policy") or {})
+    return [
+        r.get("written_at_utc", ""),
+        r.get("district", "UNKNOWN"),
+        r.get("reason", ""),
+        r.get("residual_tag", ""),
+        pol.get("policy_tag", ""),
+        pol.get("projector_hash", ""),
+        h.get("boundaries_hash", ""),
+        h.get("C_hash", ""),
+        h.get("H_hash", ""),
+        h.get("U_hash", ""),
+        h.get("shapes_hash", ""),
+        r.get("cert_content_hash", ""),
+        r.get("run_id", ""),
+        r.get("note", ""),
+    ]
+
+# ---------- UI ----------
+with st.expander("Exports · Gallery & Witness (CSV)"):
+    # keep unique keys via nonces
+    ss = st.session_state
+    ss["_gal_csv_nonce"] = int(ss.get("_gal_csv_nonce", 0))
+    ss["_wit_csv_nonce"] = int(ss.get("_wit_csv_nonce", 0))
+
+    c1, c2 = st.columns(2)
+
+    # --- Gallery → CSV ---
+    with c1:
+        st.caption("Gallery → CSV")
+        if not GALLERY_JSONL.exists():
+            st.info("No gallery.jsonl yet.")
+        else:
+            if st.button("Export Gallery CSV", key="btn_export_gallery_csv"):
+                rows_json = _jsonl_read_all(GALLERY_JSONL)
+                header = [
+                    "written_at_utc","district","policy_tag","projector_hash",
+                    "boundaries_hash","C_hash","H_hash","U_hash","shapes_hash",
+                    "growth_bumps","strictify","tag","cert_content_hash"
+                ]
+                rows_csv = [_flatten_gallery_row(r) for r in rows_json]
+                meta = [
+                    f"schema_version={SCHEMA_VERSION}",
+                    f"written_at_utc={_utc_iso_z()}",
+                    f"app_version={APP_VERSION}",
+                    f"source={GALLERY_JSONL.as_posix()}",
+                    f"rows={len(rows_csv)}",
+                ]
+                try:
+                    _atomic_write_csv(GALLERY_CSV_OUT, header, rows_csv, meta)
+                    st.success(f"Gallery CSV saved → {GALLERY_CSV_OUT}")
+                    ss["_gal_csv_nonce"] += 1
+                except Exception as e:
+                    st.error(f"Failed to write Gallery CSV: {e}")
+
+            # download (only if exists)
+            if GALLERY_CSV_OUT.exists():
+                try:
+                    with open(GALLERY_CSV_OUT, "rb") as f:
+                        st.download_button(
+                            "Download gallery_export.csv",
+                            f,
+                            file_name="gallery_export.csv",
+                            key=f"dl_gallery_csv_{ss['_gal_csv_nonce']}"
+                        )
+                except Exception:
+                    pass
+
+    # --- Witness → CSV ---
+    with c2:
+        st.caption("Witness → CSV")
+        if not WITNESSES_JSONL.exists():
+            st.info("No witnesses.jsonl yet.")
+        else:
+            if st.button("Export Witness CSV", key="btn_export_witness_csv"):
+                rows_json = _jsonl_read_all(WITNESSES_JSONL)
+                header = [
+                    "written_at_utc","district","reason","residual_tag",
+                    "policy_tag","projector_hash",
+                    "boundaries_hash","C_hash","H_hash","U_hash","shapes_hash",
+                    "cert_content_hash","run_id","note"
+                ]
+                rows_csv = [_flatten_witness_row(r) for r in rows_json]
+                meta = [
+                    f"schema_version={SCHEMA_VERSION}",
+                    f"written_at_utc={_utc_iso_z()}",
+                    f"app_version={APP_VERSION}",
+                    f"source={WITNESSES_JSONL.as_posix()}",
+                    f"rows={len(rows_csv)}",
+                ]
+                try:
+                    _atomic_write_csv(WITNESS_CSV_OUT, header, rows_csv, meta)
+                    st.success(f"Witness CSV saved → {WITNESS_CSV_OUT}")
+                    ss["_wit_csv_nonce"] += 1
+                except Exception as e:
+                    st.error(f"Failed to write Witness CSV: {e}")
+
+            # download (only if exists)
+            if WITNESS_CSV_OUT.exists():
+                try:
+                    with open(WITNESS_CSV_OUT, "rb") as f:
+                        st.download_button(
+                            "Download witnesses_export.csv",
+                            f,
+                            file_name="witnesses_export.csv",
+                            key=f"dl_witness_csv_{ss['_wit_csv_nonce']}"
+                        )
+                except Exception:
+                    pass
+# ======================= /end JSONL → CSV Exports (Gallery & Witness) ======================
+
 
 
 
