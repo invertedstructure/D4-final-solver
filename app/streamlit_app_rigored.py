@@ -3207,7 +3207,7 @@ def _fmt_ts(ts_float: float) -> str:
 EXPORTS_NS = "exports_v2"  # change once if you ever need to re-namespace
 
 with st.expander("Exports", expanded=False):
-    c1, c2 = st.columns(2)
+    c1, c2, c3 = st.columns(3)
 
     # ---- Snapshot ZIP ----
     with c1:
