@@ -2371,33 +2371,33 @@ else:
     }
 
 
-        # ---------------- Signatures (GF(2) rank on d3) ----------------
-        def _gf2_rank(M):
-            if not M or not M[0]: return 0
-            A = [row[:] for row in M]; m, n = len(A), len(A[0]); r = c = 0
-            while r < m and c < n:
-                piv = next((i for i in range(r, m) if A[i][c] & 1), None)
-                if piv is None: c += 1; continue
-                if piv != r: A[r], A[piv] = A[piv], A[r]
-                for i in range(m):
-                    if i != r and (A[i][c] & 1):
-                        A[i] = [(A[i][j] ^ A[r][j]) & 1 for j in range(n)]
-                r += 1; c += 1
-            return r
+    # ---------------- Signatures (GF(2) rank on d3) ----------------
+    def _gf2_rank(M):
+        if not M or not M[0]: return 0
+        A = [row[:] for row in M]; m, n = len(A), len(A[0]); r = c = 0
+        while r < m and c < n:
+            piv = next((i for i in range(r, m) if A[i][c] & 1), None)
+            if piv is None: c += 1; continue
+            if piv != r: A[r], A[piv] = A[piv], A[r]
+            for i in range(m):
+                if i != r and (A[i][c] & 1):
+                    A[i] = [(A[i][j] ^ A[r][j]) & 1 for j in range(n)]
+            r += 1; c += 1
+        return r
 
-        rank_d3    = _gf2_rank(d3) if d3 else 0
-        ncols_d3   = len(d3[0]) if (d3 and d3[0]) else 0
-        ker_dim_d3 = max(ncols_d3 - rank_d3, 0)
-        lane_pattern = "".join("1" if int(x) else "0" for x in (lane_mask or []))
+    rank_d3    = _gf2_rank(d3) if d3 else 0
+    ncols_d3   = len(d3[0]) if (d3 and d3[0]) else 0
+    ker_dim_d3 = max(ncols_d3 - rank_d3, 0)
+    lane_pattern = "".join("1" if int(x) else "0" for x in (lane_mask or []))
 
-        def _col_support_pattern(M, cols):
-            if not M or not cols: return ""
-            return "".join("1" if any((row[j] & 1) for row in M) else "0" for j in cols)
+    def _col_support_pattern(M, cols):
+        if not M or not cols: return ""
+        return "".join("1" if any((row[j] & 1) for row in M) else "0" for j in cols)
 
-        signatures_block = {
-            "d_signature": {"rank": rank_d3, "ker_dim": ker_dim_d3, "lane_pattern": lane_pattern},
-            "fixture_signature": {"lane": _col_support_pattern(C3pI3, lane_idx)},
-        }
+    signatures_block = {
+        "d_signature": {"rank": rank_d3, "ker_dim": ker_dim_d3, "lane_pattern": lane_pattern},
+        "fixture_signature": {"lane": _col_support_pattern(C3pI3, lane_idx)},
+    }
 
         # ---------------- Residual tags & checks ----------------
         residual_tags = st.session_state.get("residual_tags", {}) or {}
