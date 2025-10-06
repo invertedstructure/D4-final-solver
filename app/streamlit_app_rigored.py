@@ -2646,6 +2646,86 @@ if cert_path:
 else:
     st.caption("No cert produced in this run (nothing to bundle).")
 
+# ───────────────────────── Certs on disk (tail) ─────────────────────────
+from pathlib import Path
+import os, json as _json
+from datetime import datetime
+
+def _short(s, n=12):
+    s = str(s or "")
+    return s[:n] + ("…" if len(s) > n else "")
+
+def _safe_load_json(p: Path):
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            return _json.load(f)
+    except Exception:
+        return {}
+
+def _fmt_ts(ts_float: float) -> str:
+    try:
+        return datetime.utcfromtimestamp(ts_float).strftime("%Y-%m-%d %H:%M:%SZ")
+    except Exception:
+        return ""
+
+CERTS_DIR = Path(globals().get("CERTS_DIR", "certs"))
+CERTS_DIR.mkdir(parents=True, exist_ok=True)
+
+with st.expander("Certs on disk (last 5)", expanded=False):
+    all_certs = sorted(CERTS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    count = len(all_certs)
+    st.caption(f"Found {count} cert{'s' if count!=1 else ''} in `{CERTS_DIR.as_posix()}`.")
+
+    rows = []
+    for p in all_certs[:5]:
+        info = _safe_load_json(p)
+        ident  = info.get("identity") or {}
+        policy = info.get("policy") or {}
+        integ  = info.get("integrity") or {}
+
+        policy_tag  = policy.get("policy_tag") or policy.get("label") or "strict"
+        mode        = ("file" if policy.get("projector_filename") else
+                       "auto" if policy.get("projector_hash") and not policy.get("projector_filename") else
+                       "strict")
+        projector   = policy.get("projector_filename") or ""
+        d_id        = ident.get("district_id","UNKNOWN")
+        run_id      = ident.get("run_id","")
+        c_hash      = integ.get("content_hash","")
+        mtime       = p.stat().st_mtime
+
+        rows.append({
+            "when (mtime UTC)": _fmt_ts(mtime),
+            "policy": policy_tag,
+            "mode": mode,
+            "district": d_id,
+            "run_id": _short(run_id, 10),
+            "content_hash": _short(c_hash, 12),
+            "file": p.name,
+            "Π file": _short(Path(projector).name, 24) if projector else "",
+        })
+
+    if rows:
+        # nice compact display; if you prefer a dataframe, swap to st.dataframe(rows, use_container_width=True)
+        st.table(rows)
+
+        # quick download for newest cert
+        newest = all_certs[0]
+        try:
+            with newest.open("rb") as f:
+                st.download_button(
+                    "Download newest cert",
+                    f,
+                    file_name=newest.name,
+                    key="dl_newest_cert_tail",
+                    help="Download the most recent cert on disk"
+                )
+        except Exception:
+            pass
+    else:
+        st.info("No certs yet — run Overlap and write a cert first.")
+# ───────────────────────────────────────────────────────────────────────
+
+
 
 # ───────────────────────── Exports / Snapshot / Flush (consolidated) ─────────────────────────
 from pathlib import Path
