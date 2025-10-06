@@ -2272,6 +2272,7 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
 
 
 
+
   
     # ======================== Parity: import/export & queue ========================
 from pathlib import Path
