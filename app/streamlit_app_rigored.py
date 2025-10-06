@@ -2270,12 +2270,15 @@ _H    = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
 # predefine to avoid NameError later
 cert_path: str | None = None
 full_hash: str = ""
+# honor force flag from freezer / other flows
+if st.session_state.pop("should_write_cert", False):
+    st.session_state.pop("_last_cert_write_key", None)
 
 # Guard: need a successful Overlap run + inputs SSOT
 if not (_rc and _out and _ib):
     st.info("Run Overlap first to enable cert writing.")
 else:
-    # ---- Debounce: skip identical rewrites (policy, hashes, results, projector_hash) ----
+    # ---- Debounce key ----
     def _hz(s): return s if isinstance(s, str) else ""
     policy_tag = _rc.get("policy_tag", "strict")
     write_key = (
@@ -2284,15 +2287,17 @@ else:
         _hz(_ib.get("C_hash","")),
         _hz(_ib.get("H_hash","")),
         _hz(_ib.get("U_hash","")),
+        # include shapes_hash if it can differ from U_hash in your pipeline:
+        _hz(_ib.get("shapes_hash","")),
         (_hz(_rc.get("projector_hash","")) if str(_rc.get("mode","")).startswith("projected") else ""),
         bool((_out.get("2",{}) or {}).get("eq", False)),
         bool((_out.get("3",{}) or {}).get("eq", False)),
     )
+
     if st.session_state.get("_last_cert_write_key") == write_key:
         st.caption("Cert unchanged — skipping rewrite.")
     else:
         st.session_state["_last_cert_write_key"] = write_key
-
         # ---------------- Diagnostics (lane vectors) ----------------
         lane_mask = list(_rc.get("lane_mask_k3", []) or [])
         d3 = _rc.get("d3", [])
