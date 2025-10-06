@@ -105,6 +105,51 @@ def hash_json(obj) -> str:
 def _iso_utc_now() -> str:
     return datetime.now(_timezone.utc).isoformat()
 
+# ====================== Π FILE Validator (strict) ======================
+def _mul_gf2(A, B):
+    # Use app's mul if present; otherwise a safe GF(2) fallback
+    if "mul" in globals() and callable(globals()["mul"]):
+        return mul(A, B)
+    if not A or not B: return []
+    m, k, n = len(A), len(A[0]), len(B[0])
+    # assume B is k x n
+    out = [[0]*n for _ in range(m)]
+    for i in range(m):
+        for t in range(k):
+            if A[i][t] & 1:
+                # xor-add row of B
+                bt = B[t]
+                for j in range(n):
+                    out[i][j] ^= (bt[j] & 1)
+    return out
+
+def validate_projector_file_strict(P, *, n3: int, lane_mask: list[int]) -> None:
+    # shape
+    if not (isinstance(P, list) and all(isinstance(r, list) for r in P)):
+        raise ValueError("P3_SHAPE: projector is not a 2D list")
+    if len(P) != n3 or any(len(r) != n3 for r in P):
+        got_r = len(P) if isinstance(P, list) else 0
+        got_c = len(P[0]) if (isinstance(P, list) and P and isinstance(P[0], list)) else 0
+        raise ValueError(f"P3_SHAPE: expected {n3}x{n3}, got {got_r}x{got_c}")
+
+    # idempotence over GF(2)
+    PP = _mul_gf2(P, P)
+    if PP != P:
+        raise ValueError("P3_IDEMP: P@P != P (GF2)")
+
+    # diagonal-only
+    for i in range(n3):
+        for j in range(n3):
+            if i != j and (P[i][j] & 1):
+                raise ValueError("P3_DIAGONAL: off-diagonal element is 1")
+
+    # lane diag match
+    diag = [int(P[i][i]) & 1 for i in range(n3)]
+    lm   = [int(x) & 1 for x in (lane_mask or [])]
+    if diag != lm:
+        raise ValueError(f"P3_LANE_MISMATCH: diag(P)={diag} vs lane_mask(d3)={lm}")
+
+
 # ---------- safe expander (never nests real expanders) ----------
 try:
     from streamlit.errors import StreamlitAPIException  # type: ignore
