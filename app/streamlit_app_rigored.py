@@ -2164,108 +2164,91 @@ def _simulate_overlap_with_cfg(cfg_forced):
 
 
 
-# ---------------------------- Projector Freezer (AUTO → FILE) ----------------------------
+# ---------------------------- Projector Freezer (AUTO → FILE, no UI flip) ----------------------------
 with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
     _ss = st.session_state
     _rc = _ss.get("run_ctx") or {}
     _di = _ss.get("_district_info") or {}
     district_id = _di.get("district_id", "UNKNOWN")
 
-    # Small guard to prevent false "stale" context
-    _fixture_nonce = _ss.get("_fixture_nonce")
-    fresh = bool(_rc and _rc.get("fixture_nonce") == _fixture_nonce)
-    st.caption(f"ctx freshness: {_rc.get('fixture_nonce')} vs {_fixture_nonce} → {'fresh' if fresh else 'stale'}")
-    if not fresh:
-        st.info("Context is stale. Run Overlap to refresh.")
-        # Early exit if stale
-        # (Optional: you could skip the rest of the block here if desired)
-        # return
+    # Eligibility (non-blocking): needs AUTO mode, lane mask, d3, and k=3 green on last run
+    k3_green = bool(((_ss.get("overlap_out") or {}).get("3", {}) or {}).get("eq", False))
+    elig_freeze = (
+        _rc.get("mode") == "projected(auto)"
+        and bool(_rc.get("d3"))
+        and bool(_rc.get("lane_mask_k3"))
+        and k3_green
+    )
 
-    # Compute eligibility + freshness WITHOUT stopping the app
-    last_out_3 = ((_ss.get("overlap_out") or {}).get("3", {}) or {})
-    k3_green = bool(last_out_3.get("eq", False))
-    has_mask_and_d3 = bool((_rc.get("lane_mask_k3") or [])) and bool((_rc.get("d3") or []))
-    in_auto = (_rc.get("mode") == "projected(auto)")
-    # Use the fresh variable for additional certainty if needed
-    # (But since we've checked freshness above, proceed as usual)
-    fresh = bool(_rc) and (_rc.get("fixture_nonce") == _ss.get("_fixture_nonce"))
+    st.caption("Freeze current AUTO Π → file, switch to FILE, re-run Overlap, and force a cert write.")
 
-    elig_freeze = in_auto and has_mask_and_d3 and k3_green and fresh
-
-    if not fresh:
-        st.info("Context is stale. Run Overlap to refresh.")
-    elif not in_auto:
-        st.info("Freezer only applies in projected(auto) mode.")
-    elif not has_mask_and_d3:
-        st.info("Missing d3 and/or lane_mask_k3 in run context. Run Overlap.")
-    elif not k3_green:
-        st.info("k=3 is not green (eq==False). Run Overlap until k=3 passes.")
-
+    # Unique widget keys to avoid collisions elsewhere
     pj_basename = st.text_input(
         "Filename",
-        value=f"projector_{district_id}.json",
-        key="pj_freeze_name_main",
+        value=f"projector_{district_id or 'UNKNOWN'}.json",
+        key="pj_freeze_name_final2",
     )
-    overwrite_ok = st.checkbox("Overwrite if exists", value=False, key="pj_overwrite_ok_main")
+    overwrite_ok = st.checkbox("Overwrite if exists", value=False, key="pj_freeze_overwrite_final2")
 
-    # Button is simply disabled if not eligible; no st.stop() in render path
-    if st.button("Freeze Π → FILE & re-run", key="btn_freeze_pj_main", disabled=not elig_freeze):
+    if st.button("Freeze Π → FILE & re-run", key="btn_freeze_final2", disabled=not elig_freeze, help="Enabled when current run is projected(auto) and k=3 is green."):
         try:
-            # Re-check freshness just before acting
-            _rc = _ss.get("run_ctx") or {}
-            _fixture_nonce = _ss.get("_fixture_nonce")
-            if not (_rc and _rc.get("fixture_nonce") == _fixture_nonce and _rc.get("d3") and _rc.get("lane_mask_k3")):
-                raise RuntimeError("Context changed. Run Overlap again and retry.")
+            # 1) Freshness + rectifier (will stop with a clean message if stale)
+            rc = _rectify_run_ctx_mask_from_d3_or_stop()   # uses require_fresh_run_ctx() internally
+            n3 = int(rc.get("n3") or 0)
+            lm = list(rc.get("lane_mask_k3") or [])
+            if n3 <= 0 or len(lm) != n3:
+                st.warning("Context invalid (n3/mask mismatch). Click Run Overlap and try again.")
+                st.stop()
 
+            # 2) Build Π from SSOT lane mask
+            P_freeze = [[1 if (i == j and lm[j]) else 0 for j in range(n3)] for i in range(n3)]
+
+            # 3) Validate strictly (shape, idempotence, diagonal, lane match)
+            validate_projector_file_strict(P_freeze, n3=n3, lane_mask=lm)
+
+            # 4) Save projector (atomic)
             pj_path = PROJECTORS_DIR / pj_basename
             if pj_path.exists() and not overwrite_ok:
-                raise RuntimeError("Projector file already exists. Enable overwrite or choose a new name.")
-
-            # Truth lane mask from SSOT d3
-            d3_snap = _rc.get("d3") or []
-            n3 = int(_rc.get("n3") or 0)
-            if n3 != len(_rc.get("lane_mask_k3") or []):
-                # defensive (do not stop the page)
-                n3 = len(d3_snap[0]) if d3_snap else 0
-            lm_truth = [1 if any(d3_snap[i][j] & 1 for i in range(len(d3_snap))) else 0 for j in range(n3)]
-            if len(lm_truth) != n3:
-                raise RuntimeError(f"lane_mask length {len(lm_truth)} != n3 {n3}")
-
-            # Keep run_ctx authoritative
-            if lm_truth != (_rc.get("lane_mask_k3") or []):
-                _rc["lane_mask_k3"] = lm_truth
-                _ss["run_ctx"] = _rc
-
-            # Build diagonal Π and validate
-            P_freeze = [[1 if (i == j and lm_truth[j]) else 0 for j in range(n3)] for i in range(n3)]
-            validate_projector_file_strict(P_freeze, n3=n3, lane_mask=lm_truth)
-
-            # Save projector (atomic) and hash
+                st.warning("Projector file already exists. Enable 'Overwrite if exists' or choose a new name.")
+                st.stop()
             payload = {"schema_version": "1.0.0", "blocks": {"3": P_freeze}}
             pj_hash, _ = _atomic_write_json(pj_path, payload)
 
-            # Flip to FILE
+            # 5) Switch policy to FILE (k=3) and mark fixtures changed (nonce bump)
             cfg_active.setdefault("source", {})["3"] = "file"
             cfg_active.setdefault("projector_files", {})["3"] = pj_path.as_posix()
-
-            # Bump fixtures / clear caches (no st.stop)
             if "_mark_fixtures_changed" in globals():
                 _mark_fixtures_changed()
             else:
-                _ss["_fixture_nonce"] = int(_ss.get("_fixture_nonce", 0)) + 1
-                for k in ("overlap_out", "residual_tags", "overlap_cfg", "overlap_policy_label"):
-                    _ss.pop(k, None)
+                _bump_fixture_nonce()
 
-            # Re-run overlap (now FILE)
+            # Optional: append registry row if you have the helper
+            if "_append_registry_row" in globals():
+                try:
+                    _append_registry_row({
+                        "schema_version": "1.0.0",
+                        "written_at_utc": datetime.now(timezone.utc).isoformat(),
+                        "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
+                        "district": district_id,
+                        "lane_mask_k3": lm,
+                        "filename": pj_path.as_posix(),
+                        "projector_hash": pj_hash,
+                    })
+                except Exception:
+                    pass
+
+            # 6) Re-run Overlap immediately (fresh FILE mode)
+            _soft_reset_before_overlap()
             run_overlap()
 
-            # Force cert write
+            # 7) Force cert write this pass (bypass debounce)
             _ss["should_write_cert"] = True
             _ss.pop("_last_cert_write_key", None)
 
             st.success(f"Π saved → {pj_path.name} · {pj_hash[:12]}… and switched to FILE.")
         except Exception as e:
             st.error(f"Freeze failed: {e}")
+
 
 
 
