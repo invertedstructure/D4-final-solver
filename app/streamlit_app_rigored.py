@@ -1113,7 +1113,24 @@ if st.button("Run A/B compare", key="ab_run_btn_final"):
         label_strict = get_policy_label(cfg_strict())
 
         # --- projected leg (mirrors ACTIVE; validates FILE inside projector_choose_active)
-        _, meta_ab = projector_choose_active(cfg_for_ab, bnd)
+        # Check if 'source' is 'file' in the active config
+        src3 = (cfg_for_ab.get("source") or {}).get("3")
+        if src3 == "file":
+            # Grab and validate the projector when source is FILE
+            try:
+                P_ab, meta_ab = projector_choose_active(cfg_for_ab, bnd)
+                validate_projector_file_strict(
+                    P_ab,
+                    n3=int(rc.get("n3") or 0),
+                    lane_mask=list(rc.get("lane_mask_k3") or [])
+                )
+            except ValueError as ve:
+                st.error(f"A/B FILE Π invalid: {ve}")
+                st.stop()
+        else:
+            # If not FILE, just select the active projector normally
+            P_ab, meta_ab = projector_choose_active(cfg_for_ab, bnd)
+
         out_proj = perform_overlap_check(bnd, cmap_obj, H_used, cfg_for_ab)
         label_proj = get_policy_label(cfg_for_ab)
 
@@ -1208,7 +1225,6 @@ if _ab:
         st.success("Cleared A/B snapshot. Re-run A/B to refresh.")
 else:
     st.caption("A/B snapshot: —")
-
 
 
 
@@ -1873,16 +1889,17 @@ def _simulate_overlap_with_cfg(cfg_forced):
         "errors": [],
     }
 
-# ---------------------------- Main Block: "Projector Freezer (AUTO → FILE)"-------------------------#
+# ---------------------------- Main Block: "Projector Freezer (AUTO → FILE)" -------------------------
 from pathlib import Path
 import os, json as _json, tempfile, shutil, hashlib
+from datetime import datetime, timezone
 
 # Ensure directories exist (only once)
 PROJECTORS_DIR = Path("projectors")
 PROJECTORS_DIR.mkdir(parents=True, exist_ok=True)
 PJ_REG_PATH = PROJECTORS_DIR / "registry.jsonl"
 
-# Utility functions
+# Utility functions (unchanged)
 def _utc_iso():
     return datetime.now(timezone.utc).isoformat()
 
@@ -2016,7 +2033,8 @@ def _simulate_overlap_with_cfg(cfg_forced):
         "errors": [],
     }
 
-# --- Main Block: Merged & Organized
+# --------------------------- Main "Freeze Π → FILE" with validation -----------------------------
+
 with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
     _rc = st.session_state.get("run_ctx") or {}
     _di = st.session_state.get("_district_info") or {}
@@ -2045,7 +2063,23 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
             # 1) Write Π from current lane mask
             lm = list(_rc.get("lane_mask_k3") or [])
             meta_write = _freeze_projector(district_id=district_id, lane_mask_k3=lm, filename_hint=pj_basename)
-            st.caption(f"Π saved → `{meta_write['path']}` · {meta_write['projector_hash'][:12]}…")
+            pj_path = Path(meta_write["path"])
+
+            # ------------------ Validation block after writing FILE ------------------
+            try:
+                # Read back the JSON
+                data = read_json_file(pj_path) if 'read_json_file' in globals() else json.loads(Path(pj_path).read_text())
+                P_file = (data.get("blocks") or {}).get("3") or []
+                rc = st.session_state.get("run_ctx") or {}
+                validate_projector_file_strict(
+                    P_file,
+                    n3=int(rc.get("n3") or 0),
+                    lane_mask=list(rc.get("lane_mask_k3") or [])
+                )
+                st.success("FILE Π validated ✔ (shape/idempotence/diagonal/lane match)")
+            except ValueError as ve:
+                st.error(f"FILE Π validation error: {ve}")
+                st.stop()  # do not switch/run in FILE if invalid
 
             # 2) Registry append
             _append_registry_row({
@@ -2083,7 +2117,7 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
         except Exception as e:
             st.error(f"Freeze failed: {e}")
 
-# Registry tail: use _json instead of json, ensure Path
+# ---------------------------- Registry tail: last 5 entries ------------------------------
 with st.expander("Projector Registry (last 5)"):
     try:
         if PJ_REG_PATH.exists():
@@ -2099,7 +2133,7 @@ with st.expander("Projector Registry (last 5)"):
     except Exception as e:
         st.warning(f"Could not read registry tail: {e}")
 
-# --- Second approach: "switch UI" (renamed for clarity)
+# ---------------------------- Second approach: "switch UI" -----------------------------
 with st.expander("Projector Freezer (AUTO → FILE, switch UI)"):
     _rc = st.session_state.get("run_ctx") or {}
     _di = st.session_state.get("_district_info") or {}
@@ -2130,6 +2164,22 @@ with st.expander("Projector Freezer (AUTO → FILE, switch UI)"):
                 st.stop()
 
             pj_hash, _ = _atomic_write_json(pj_path, payload)
+
+            # ------------------ Validation block after writing FILE ------------------
+            try:
+                # Read back the JSON
+                data = read_json_file(pj_path) if 'read_json_file' in globals() else json.loads(Path(pj_path).read_text())
+                P_file = (data.get("blocks") or {}).get("3") or []
+                rc = st.session_state.get("run_ctx") or {}
+                validate_projector_file_strict(
+                    P_file,
+                    n3=int(rc.get("n3") or 0),
+                    lane_mask=list(rc.get("lane_mask_k3") or [])
+                )
+                st.success("FILE Π validated ✔ (shape/idempotence/diagonal/lane match)")
+            except ValueError as ve:
+                st.error(f"FILE Π validation error: {ve}")
+                st.stop()  # do not switch/run in FILE if invalid
 
             # Switch cfg source to FILE for k=3 and re-run
             cfg_active.setdefault("source", {})["3"] = "file"
