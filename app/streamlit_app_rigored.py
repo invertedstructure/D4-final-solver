@@ -976,52 +976,53 @@ else:
         st.info("Notes:")
         for w in _warn: st.write(f"- {w}")
 
-# Residual chips (strict/proj) if we have a result
+# ── Residual chips + single A/B freshness pill (place under run-stamp) ─────────
+_rc = st.session_state.get("run_ctx") or {}
+
+# Residual chips
 _rtags = st.session_state.get("residual_tags") or {}
 if _rtags:
-    s_tag = _rtags.get("strict","—")
-    p_tag = _rtags.get("projected","—") if str(_rc.get("mode","")).startswith("projected") else "—"
+    s_tag = _rtags.get("strict", "—")
+    p_tag = _rtags.get("projected", "—") if str(_rc.get("mode","")).startswith("projected") else "—"
     st.caption(f"Residuals → strict: `{s_tag}` · projected: `{p_tag}`")
 
-# A/B freshness badge (uses the recorded inputs_sig from the time the A/B snapshot was built)
+# Single A/B freshness pill (uses helper from A/B section)
 _ab = st.session_state.get("ab_compare") or {}
 if _ab:
-    ab_fresh = (_ab.get("inputs_sig") == _current_inputs_sig())
-    st.caption(f"A/B snapshot: {'🟢 fresh' if ab_fresh else '🟡 stale (will not embed)'}")
-else:
-    st.caption("A/B snapshot: —")
-# --- A/B freshness pill (drop-in; place right under the run-stamp) ---
-_ss = st.session_state
-_ab = _ss.get("ab_compare") or {}
-_ib = _ss.get("_inputs_block") or {}
-
-def _hz(v):  # normalize to string for stable comparisons
-    return v if isinstance(v, str) else ""
-
-_inputs_sig_now = [
-    _hz(_ib.get("boundaries_hash", "")),
-    _hz(_ib.get("C_hash", "")),
-    _hz(_ib.get("H_hash", "")),
-    _hz(_ib.get("U_hash", "")),
-    _hz(_ib.get("shapes_hash", "")),
-]
-
-if _ab:
-    _fresh = (_ab.get("inputs_sig") == _inputs_sig_now)
-    st.caption("A/B snapshot: 🟢 fresh (will embed in next cert)" if _fresh
-               else "A/B snapshot: 🟡 stale (won’t embed)")
-    if not _fresh:
-        col_f1, col_f2 = st.columns([2, 3])
-        with col_f1:
+    fresh = (_ab.get("inputs_sig") == _current_inputs_sig())
+    st.caption("A/B snapshot: " + ("🟢 fresh (will embed in cert)" if fresh else "🟡 stale (won’t embed)"))
+    if not fresh:
+        c1, c2 = st.columns([2,3])
+        with c1:
             if st.button("Clear stale A/B", key="btn_ab_clear"):
-                _ss.pop("ab_compare", None)
+                st.session_state.pop("ab_compare", None)
                 st.success("Cleared A/B snapshot. Re-run A/B to refresh.")
-        with col_f2:
-            st.caption("Tip: Re-run A/B after changing inputs to refresh the snapshot.")
+        with c2:
+            st.caption("Tip: re-run A/B after changing inputs to refresh the snapshot.")
 else:
     st.caption("A/B snapshot: —")
 
-# ───────────────────────── A/B compare (strict vs active projected) ─────────────────────────
+
+# ───────────────────────── A/B compare (strict vs active projected) — CLEAN ─────────────────────────
+
+# Single source of truth for inputs signature (5 hashes)
+def _current_inputs_sig():
+    ib = st.session_state.get("_inputs_block") or {}
+    _hz = lambda v: v if isinstance(v, str) else ""
+    return [
+        _hz(ib.get("boundaries_hash","")),
+        _hz(ib.get("C_hash","")),
+        _hz(ib.get("H_hash","")),
+        _hz(ib.get("U_hash","")),
+        _hz(ib.get("shapes_hash","")),
+    ]
+
+# One small, non-duplicated freshness chip
+_ab_now = st.session_state.get("ab_compare") or {}
+_ab_fresh = bool(_ab_now) and (_ab_now.get("inputs_sig") == _current_inputs_sig())
+st.caption("A/B snapshot: " + ("🟢 fresh (will embed in cert)" if _ab_fresh else ("🟡 stale (won’t embed)" if _ab_now else "—")))
+
+# Action
 if st.button("Run A/B compare", key="ab_run_btn"):
     try:
         _ss = st.session_state
@@ -1029,59 +1030,50 @@ if st.button("Run A/B compare", key="ab_run_btn"):
         ib  = _ss.get("_inputs_block") or {}
         H_used = _ss.get("overlap_H") or _load_h_local()
 
-        # Prefer the exact projected config used by the last Run Overlap; else mirror current UI cfg
+        # Use the exact cfg that produced the last Run Overlap (preferred), else current UI
         cfg_for_ab = _ss.get("overlap_cfg") or cfg_active
 
-        # Tiny XOR + I helpers (robust to missing globals)
+        # Helpers (robust to naming in your app)
+        _eye = eye if "eye" in globals() else (lambda n: [[1 if i==j else 0 for j in range(n)] for i in range(n)])
+        _mul = globals().get("_mul_gf2") or globals().get("mul")
+        if not callable(_mul):
+            raise RuntimeError("No GF(2) multiply found (expected _mul_gf2 or mul).")
+
         def _xor(A, B):
             if "_xor_mat" in globals() and callable(globals()["_xor_mat"]):
                 return globals()["_xor_mat"](A, B)
-            if not A or not B:
-                return A or B or []
+            if not A: return [r[:] for r in (B or [])]
+            if not B: return [r[:] for r in (A or [])]
             r, c = len(A), len(A[0])
-            return [[(A[i][j] ^ B[i][j]) for j in range(c)] for i in range(r)]
-
-        _eye_n = eye if "eye" in globals() else (_eye if "_eye" in globals() else (lambda n: [[1 if i==j else 0 for j in range(n)] for i in range(n)]))
+            return [[(A[i][j] ^ B[i][j]) & 1 for j in range(c)] for i in range(r)]
 
         # --- strict leg
         out_strict   = overlap_gate.overlap_check(boundaries, cmap, H_used)
         label_strict = policy_label_from_cfg(cfg_strict())
 
         # --- projected leg mirrors ACTIVE (auto/file) and VALIDATES if FILE
-        _P_ab, _meta_ab = projector_choose_active(cfg_for_ab, boundaries)  # fail-fast on FILE Π
+        _P_ab, _meta_ab = projector_choose_active(cfg_for_ab, boundaries)  # raises on invalid FILE Π
         out_proj   = overlap_gate.overlap_check(boundaries, cmap, H_used, projection_config=cfg_for_ab)
         label_proj = policy_label_from_cfg(cfg_for_ab)
 
-        # --- lane vectors & provenance (use run_ctx if available; else derive)
+        # --- lane vectors (use run_ctx if present; else derive)
         d3 = rc.get("d3") or (boundaries.blocks.__root__.get("3") or [])
-        lane_mask = rc.get("lane_mask_k3", []) or _lane_mask_from_d3(boundaries)
+        lane_mask = list(rc.get("lane_mask_k3", []) or _lane_mask_from_d3(boundaries))
         H2 = (H_used.blocks.__root__.get("2") or [])
         C3 = (cmap.blocks.__root__.get("3") or [])
-        I3 = _eye_n(len(C3)) if C3 else []
+        I3 = _eye(len(C3)) if C3 else []
 
         def _bottom_row(M): return M[-1] if (M and len(M)) else []
         def _mask(vec, idx): return [vec[j] for j in idx] if (vec and idx) else []
 
         lane_idx = [j for j, m in enumerate(lane_mask) if m]
-        H2d3     = _mul_gf2(H2, d3) if (H2 and d3) else []
+        H2d3     = _mul(H2, d3) if (H2 and d3) else []
         C3pI3    = _xor(C3, I3) if C3 else []
         lane_vec_H2d3 = _mask(_bottom_row(H2d3), lane_idx)
         lane_vec_C3I  = _mask(_bottom_row(C3pI3), lane_idx)
 
-        # --- freshness sig (embed only when hashes match)
-        if "_current_inputs_sig" in globals() and callable(globals()["_current_inputs_sig"]):
-            inputs_sig = _current_inputs_sig()
-        else:
-            def _hz(v): return v if isinstance(v, str) else ""
-            inputs_sig = [
-                _hz(ib.get("boundaries_hash","")),
-                _hz(ib.get("C_hash","")),
-                _hz(ib.get("H_hash","")),
-                _hz(ib.get("U_hash","")),
-                _hz(ib.get("shapes_hash","")),
-            ]
-
-        # --- persist snapshot
+        # --- snapshot payload (freshness keyed to *current* inputs hashes)
+        inputs_sig = _current_inputs_sig()
         ab_payload = {
             "pair_tag": f"{label_strict}__VS__{label_proj}",
             "inputs_sig": inputs_sig,
@@ -1111,49 +1103,28 @@ if st.button("Run A/B compare", key="ab_run_btn"):
                 "projector_consistent_with_d": _meta_ab.get("projector_consistent_with_d", None),
             },
         }
-        _ss["ab_compare"] = ab_payload
+        st.session_state["ab_compare"] = ab_payload
 
-        # quick status line
+        # Force the cert writer below to run this pass and embed the A/B snapshot
+        st.session_state["should_write_cert"] = True
+        st.session_state.pop("_last_cert_write_key", None)
+
+        # concise status
         s_ok = bool(out_strict.get("3",{}).get("eq", False))
         p_ok = bool(out_proj.get("3",{}).get("eq", False))
         st.success(f"A/B updated → strict={'✅' if s_ok else '❌'} · projected={'✅' if p_ok else '❌'} · {ab_payload['pair_tag']}")
-        st.caption("A/B will embed in the next cert only if inputs are unchanged (fresh).")
+        st.caption("A/B will embed into the cert when inputs hashes are unchanged (fresh).")
+
+        # Optional quick peek
+        with st.expander("A/B snapshot (details)"):
+            st.json(ab_payload)
 
     except ValueError as e:
         # FILE Π validator errors (P3_SHAPE / P3_IDEMP / P3_DIAGONAL / P3_LANE_MISMATCH)
         st.error(f"A/B projected(file) invalid: {e}")
     except Exception as e:
         st.error(f"A/B compare failed: {e}")
-# --- A/B freshness pill (drop-in; place right under the run-stamp) ---
-_ss = st.session_state
-_ab = _ss.get("ab_compare") or {}
-_ib = _ss.get("_inputs_block") or {}
 
-def _hz(v):  # normalize to string for stable comparisons
-    return v if isinstance(v, str) else ""
-
-_inputs_sig_now = [
-    _hz(_ib.get("boundaries_hash", "")),
-    _hz(_ib.get("C_hash", "")),
-    _hz(_ib.get("H_hash", "")),
-    _hz(_ib.get("U_hash", "")),
-    _hz(_ib.get("shapes_hash", "")),
-]
-
-if _ab:
-    _fresh = (_ab.get("inputs_sig") == _inputs_sig_now)
-    st.caption("A/B snapshot: 🟢 fresh (will embed in next cert)" if _fresh
-               else "A/B snapshot: 🟡 stale (won’t embed)")
-    if not _fresh:
-        col_f1, col_f2 = st.columns([2, 3])
-        with col_f1:
-            if st.button("Clear stale A/B", key="btn_ab_clear"):
-                _ss.pop("ab_compare", None)
-                st.success("Cleared A/B snapshot. Re-run A/B to refresh.")
-        with col_f2:
-            st.caption("Tip: Re-run A/B after changing inputs to refresh the snapshot.")
-else:
-    st.caption("A/B snapshot: —")
 
 # ── Debug: lane mask & projector diag (place near top of Tab 2) ───────────────
 with safe_expander("Debug · lane mask & Π diag"):
