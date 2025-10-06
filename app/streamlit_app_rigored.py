@@ -2597,6 +2597,15 @@ else:
         cert_payload["integrity"]["content_hash"] = hash_json(cert_payload)
         full_hash = cert_payload["integrity"]["content_hash"]
 
+# --- Ensure BUNDLES_DIR exists for bundle writer ---
+try:
+    _ = BUNDLES_DIR  # noqa: F401
+except NameError:
+    from pathlib import Path as _Path
+    BUNDLES_DIR = _Path("bundles")
+    BUNDLES_DIR.mkdir(parents=True, exist_ok=True)
+
+
      # ---------------- Write cert (prefer package writer; fallback locally) ----------------
 from pathlib import Path
 import os, json as _json
