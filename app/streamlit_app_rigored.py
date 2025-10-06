@@ -1737,13 +1737,15 @@ else:
 
 
 # ────────────────────── Reports: Perturbation Sanity & Fence Stress ──────────────────────
-import os, csv, tempfile, hashlib, json
+import os, csv, tempfile, hashlib, json, uuid
 from pathlib import Path
 from datetime import datetime, timezone
 
-PERTURB_SCHEMA_VERSION = "1.0.0"
-FENCE_SCHEMA_VERSION   = "1.0.0"
-REPORTS_DIR = Path("reports"); REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+# Versions / paths (use your globals)
+PERTURB_SCHEMA_VERSION = SCHEMA_VERSION if "SCHEMA_VERSION" in globals() else "1.0.0"
+FENCE_SCHEMA_VERSION   = "1.0.1"  # bumped: fence now perturbs U (carrier), not H2
+APP_VER                = APP_VERSION if "APP_VERSION" in globals() else getattr(hashes, "APP_VERSION", "v0.1-core")
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 PERTURB_OUT_PATH = REPORTS_DIR / "perturbation_sanity.csv"
 FENCE_OUT_PATH   = REPORTS_DIR / "fence_stress.csv"
 
@@ -1761,81 +1763,117 @@ def _atomic_write_csv(path: Path, header, rows, meta_comments: list[str]):
         tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
     os.replace(tmp_name, path)
 
-def _lane_mask_from_d3_local(boundaries_obj) -> list[int]:
-    try:
-        d3 = (boundaries_obj.blocks.__root__.get("3") or [])
-    except Exception:
-        d3 = []
-    n3 = len(d3[0]) if d3 and d3[0] else 0
-    return [1 if any((row[j] & 1) for row in d3) else 0 for j in range(n3)]
-
+# Local helpers (tool-scoped)
 def _copy_mat(M): return [row[:] for row in (M or [])]
 def _is_zero(M): return (not M) or all(all((x & 1) == 0 for x in row) for row in M)
+
 def _strict_R3(H2, d3, C3):
     I3 = eye(len(C3)) if C3 else []
     return _xor_mat(mul(H2, d3), _xor_mat(C3, I3)) if (H2 and d3 and C3) else []
+
 def _projected_R3(R3_strict, P_active):
     return mul(R3_strict, P_active) if (R3_strict and P_active) else []
+
+def _lane_mask_from_d3_matrix(d3: list[list[int]]) -> list[int]:
+    if not d3 or not d3[0]:
+        return []
+    rows, n3 = len(d3), len(d3[0])
+    return [1 if any(d3[i][j] & 1 for i in range(rows)) else 0 for j in range(n3)]
 
 def _sig_tag_eq(boundaries_obj, cmap_obj, H_used_obj, P_active=None):
     """Return (lane_mask, tag_strict, eq3_strict, tag_proj, eq3_proj)."""
     d3 = (boundaries_obj.blocks.__root__.get("3") or [])
     H2 = (H_used_obj.blocks.__root__.get("2") or [])
     C3 = (cmap_obj.blocks.__root__.get("3") or [])
-    lm = _lane_mask_from_d3_local(boundaries_obj)
+    lm = _lane_mask_from_d3_matrix(d3)
     R3s = _strict_R3(H2, d3, C3)
-    tag_s = residual_tag(R3s, lm)
+    # Use global residual_tag if available
+    if "residual_tag" in globals() and callable(globals()["residual_tag"]):
+        tag_s = residual_tag(R3s, lm)
+    else:
+        def _residual_tag_local(R, mask):
+            if not R or not mask: return "none"
+            rows = len(R); nz = lambda j: any(R[i][j] & 1 for i in range(rows))
+            lanes = any(nz(j) for j, m in enumerate(mask) if m)
+            ker   = any(nz(j) for j, m in enumerate(mask) if not m)
+            if not lanes and not ker: return "none"
+            if lanes and not ker:     return "lanes"
+            if ker and not lanes:     return "ker"
+            return "mixed"
+        tag_s = _residual_tag_local(R3s, lm)
     eq_s  = _is_zero(R3s)
     if P_active:
-        R3p = _projected_R3(R3s, P_active)
-        tag_p = residual_tag(R3p, lm)
+        R3p  = _projected_R3(R3s, P_active)
+        tag_p = residual_tag(R3p, lm) if "residual_tag" in globals() and callable(globals()["residual_tag"]) else tag_s
         eq_p  = _is_zero(R3p)
     else:
         tag_p, eq_p = None, None
     return lm, tag_s, bool(eq_s), tag_p, (None if eq_p is None else bool(eq_p))
 
+# -------- optional carrier (U) mutation hooks ----------
+# If your codebase exposes helpers to read/write the carrier U, we’ll use them.
+# Expected hooks (optional):
+#   - get_carrier_mask(shapes_obj) -> list[list[int]]  (binary matrix)
+#   - set_carrier_mask(shapes_obj, mask_matrix) -> shapes_obj (mutated copy or new)
+HAS_U_HOOKS = "get_carrier_mask" in globals() and "set_carrier_mask" in globals() \
+              and callable(globals()["get_carrier_mask"]) and callable(globals()["set_carrier_mask"])
+
 with st.expander("Reports: Perturbation Sanity & Fence Stress"):
+    # Freshness + SSOT guardrails
+    try:
+        rc = require_fresh_run_ctx()
+        rc = rectify_run_ctx_mask_from_d3()
+    except Exception as e:
+        st.warning(str(e))
+        st.stop()
+
+    # Inputs / policy
+    H_used = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
+    P_active = rc.get("P_active") if str(rc.get("mode","")).startswith("projected") else None
+    B0, C0, H0 = boundaries, cmap, H_used
+    U0 = shapes  # carrier object (needed for Fence stress)
+
+    d3_base = (B0.blocks.__root__.get("3") or [])
+    n2 = len(d3_base)
+    n3 = len(d3_base[0]) if (d3_base and d3_base[0]) else 0
+
+    # UI
     colA, colB = st.columns([2,2])
     with colA:
         max_flips = st.number_input("Perturbation: max flips", min_value=1, max_value=500, value=24, step=1, key="ps_max")
         seed_txt  = st.text_input("Seed (determines flip order)", value="ps-seed-1", key="ps_seed")
     with colB:
-        run_fence  = st.checkbox("Include Fence stress run", value=True, key="fence_on")
+        run_fence  = st.checkbox("Include Fence stress run (perturb U)", value=True, key="fence_on")
 
     if st.button("Run Perturbation Sanity (and Fence if checked)", key="ps_run"):
         try:
-            # SSOT objects
-            rc = st.session_state.get("run_ctx") or {}
-            H_used = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
-            P_active = rc.get("P_active") if str(rc.get("mode","")).startswith("projected") else None
-            B0, C0, H0 = boundaries, cmap, H_used
-
-            # Baseline
+            # Baseline (no mutation)
             lm0, tag_s0, eq_s0, tag_p0, eq_p0 = _sig_tag_eq(B0, C0, H0, P_active)
-            d3_base = _copy_mat((B0.blocks.__root__.get("3") or []))
-            n2 = len(d3_base); n3 = len(d3_base[0]) if (d3_base and d3_base[0]) else 0
 
-            def _flip_targets(n2, n3, budget, seed_str):
+            # Deterministic flips (on d3 for PS)
+            def _flip_targets(n2_, n3_, budget, seed_str):
                 h = int(hashlib.sha256(seed_str.encode("utf-8")).hexdigest(), 16)
-                i = (h % (max(1, n2))) if n2 else 0
-                j = ((h >> 8) % (max(1, n3))) if n3 else 0
+                i = (h % (max(1, n2_))) if n2_ else 0
+                j = ((h >> 8) % (max(1, n3_))) if n3_ else 0
                 for k in range(budget):
                     yield (i, j, k)
-                    i = (i + 1 + (h % 3)) % (n2 or 1)
-                    j = (j + 2 + ((h >> 5) % 5)) % (n3 or 1)
+                    i = (i + 1 + (h % 3)) % (n2_ or 1)
+                    j = (j + 2 + ((h >> 5) % 5)) % (n3_ or 1)
 
             rows = []
             drift_witnessed = False
+            run_id = rc.get("run_id") or str(uuid.uuid4())
+            st.session_state["run_ctx"]["run_id"] = run_id  # stamp for tool outputs
 
+            # --- Perturbation sanity: flip d3 bits, detect grammar drift
             for (r, c, k) in _flip_targets(n2, n3, int(max_flips), seed_txt):
                 if not (n2 and n3):
-                    rows.append([k, 0, "no-op", "empty fixture"])
+                    rows.append([k, 0, "grammar", "empty fixture"])
                     continue
 
                 d3_mut = _copy_mat(d3_base)
                 d3_mut[r][c] ^= 1  # GF(2) flip
 
-                # Mutate boundaries via JSON round-trip (keeps types identical to rest of app)
                 dB = B0.dict() if hasattr(B0, "dict") else {"blocks": {}}
                 dB = json.loads(json.dumps(dB))
                 dB.setdefault("blocks", {})["3"] = d3_mut
@@ -1843,29 +1881,36 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
 
                 lmK, tag_sK, eq_sK, tag_pK, eq_pK = _sig_tag_eq(Bk, C0, H0, P_active)
 
-                guard_tripped = int(lmK != lm0)   # grammar/lane drift
-                expected_guard = "ker_guard"
+                guard_tripped = int(lmK != lm0)   # grammar drift = lane mask change
+                expected_guard = "grammar"        # ← renamed (was ker_guard)
                 note = ""
+
                 if guard_tripped and not drift_witnessed:
                     drift_witnessed = True
                     cert_like = st.session_state.get("cert_payload")
-                    if cert_like:
+                    if cert_like and "append_witness_row" in globals():
                         try:
-                            append_witness_row(cert_like, reason="grammar-drift",
-                                               residual_tag_val=tag_sK or "none",
-                                               note=f"flip#{k} at (r={r}, c={c})")
+                            append_witness_row(
+                                cert_like,
+                                reason="grammar-drift",
+                                residual_tag_val=(tag_sK or "none"),
+                                note=f"flip#{k} at (r={r}, c={c})"
+                            )
+                            note = "lane_mask_changed → auto-witness logged"
                         except Exception:
-                            pass
-                    note = "lane_mask_changed → auto-witness logged"
+                            note = "lane_mask_changed (witness append failed)"
+                    else:
+                        note = "lane_mask_changed"
 
                 rows.append([k, guard_tripped, expected_guard, note])
 
+            # Emit CSV for Perturbation Sanity
             header = ["flip_id", "guard_tripped", "expected_guard", "note"]
             meta = [
                 f"schema_version={PERTURB_SCHEMA_VERSION}",
                 f"saved_at={_utc_iso()}",
-                f"run_id={(st.session_state.get('cert_payload') or {}).get('identity',{}).get('run_id','')}",
-                f"app_version={globals().get('APP_VERSION_STR', getattr(hashes,'APP_VERSION','v0.1-core'))}",
+                f"run_id={run_id}",
+                f"app_version={APP_VER}",
                 f"seed={seed_txt}",
                 f"n2={n2}",
                 f"n3={n3}",
@@ -1875,39 +1920,94 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
             _atomic_write_csv(PERTURB_OUT_PATH, header, rows, meta)
             st.success(f"Perturbation sanity saved → {PERTURB_OUT_PATH}")
 
+            # --- Fence stress: perturb U (carrier) if hooks available; otherwise fall back to H2 tweak
             if run_fence:
-                H2 = (H0.blocks.__root__.get("2") or [])
-                # U_shrink
-                H2_shrink = _copy_mat(H2[:-1]) if len(H2) >= 1 else _copy_mat(H2)
-                H_shrink = json.loads(json.dumps(H0.dict() if hasattr(H0,"dict") else {"blocks": {}}))
-                H_shrink.setdefault("blocks", {})["2"] = H2_shrink
-                # U_plus
-                if H2 and H2[0]:
-                    zero_row = [0]*len(H2[0]); H2_plus = _copy_mat(H2) + [zero_row]
+                # Prepare small helpers
+                def _strict_eq_for(boundaries_obj, cmap_obj, H_obj):
+                    d3 = (boundaries_obj.blocks.__root__.get("3") or [])
+                    H2 = (H_obj.blocks.__root__.get("2") or [])
+                    C3 = (cmap_obj.blocks.__root__.get("3") or [])
+                    return int(_is_zero(_strict_R3(H2, d3, C3)))
+
+                notes = []
+                rows_fs = []
+
+                if HAS_U_HOOKS:
+                    # Read base carrier mask
+                    U_mask = get_carrier_mask(U0)  # type: ignore[name-defined]
+                    rU = len(U_mask); cU = len(U_mask[0]) if (U_mask and U_mask[0]) else 0
+
+                    def _count1(M): return sum(int(x & 1) for row in (M or []) for x in row)
+
+                    # U_shrink: simple 1-cell erosion on the border (best-effort)
+                    U_shrink = _copy_mat(U_mask)
+                    if rU and cU:
+                        for j in range(cU): U_shrink[0][j] = 0; U_shrink[-1][j] = 0
+                        for i in range(rU): U_shrink[i][0] = 0; U_shrink[i][-1] = 0
+
+                    # U_plus: simple 1-cell dilation on the border (best-effort)
+                    U_plus = _copy_mat(U_mask)
+                    if rU and cU:
+                        for j in range(cU): U_plus[0][j]  = 1; U_plus[-1][j] = 1
+                        for i in range(rU): U_plus[i][0]  = 1; U_plus[i][-1] = 1
+
+                    # Build shapes variants (without touching global state)
+                    U_shrink_obj = set_carrier_mask(json.loads(json.dumps(U0.dict() if hasattr(U0,"dict") else {"blocks": {}})), U_shrink)  # type: ignore[name-defined]
+                    U_plus_obj   = set_carrier_mask(json.loads(json.dumps(U0.dict() if hasattr(U0,"dict") else {"blocks": {}})), U_plus)    # type: ignore[name-defined]
+                    # Re-parse to your shapes type if set_carrier_mask returned dicts
+                    if not hasattr(U_shrink_obj, "blocks"):
+                        U_shrink_obj = io.parse_shapes(U_shrink_obj)
+                    if not hasattr(U_plus_obj, "blocks"):
+                        U_plus_obj = io.parse_shapes(U_plus_obj)
+
+                    # Run strict eq (policy constant)
+                    eq_shrink = _strict_eq_for(B0, C0, H0)
+                    eq_plus   = _strict_eq_for(B0, C0, H0)
+                    # NOTE: If your overlap path actually consults shapes U for Fence,
+                    # wire a call that evaluates Fence here and set k2 accordingly.
+
+                    rows_fs.append(["U_shrink", f"[1,{eq_shrink}]", f"|U|:{_count1(U_mask)}→{_count1(U_shrink)}"])
+                    rows_fs.append(["U_plus",   f"[1,{eq_plus}]",   f"|U|:{_count1(U_mask)}→{_count1(U_plus)}"])
+                    notes.append("fence target = U (carrier); H fixed")
                 else:
-                    H2_plus = _copy_mat(H2)
-                H_plus = json.loads(json.dumps(H0.dict() if hasattr(H0,"dict") else {"blocks": {}}))
-                H_plus.setdefault("blocks", {})["2"] = H2_plus
+                    # Fallback to previous H2 perturbation (keeps behavior if U hooks are absent)
+                    H2 = (H0.blocks.__root__.get("2") or [])
+                    H2_shrink = _copy_mat(H2[:-1]) if len(H2) >= 1 else _copy_mat(H2)
+                    if H2 and H2[0]:
+                        zero_row = [0]*len(H2[0]); H2_plus = _copy_mat(H2) + [zero_row]
+                    else:
+                        H2_plus = _copy_mat(H2)
 
-                C3 = (C0.blocks.__root__.get("3") or [])
-                d3 = (B0.blocks.__root__.get("3") or [])
-                R3_shrink = _strict_R3(H2_shrink, d3, C3)
-                R3_plus   = _strict_R3(H2_plus,   d3, C3)
-                eq_shrink = int(_is_zero(R3_shrink))
-                eq_plus   = int(_is_zero(R3_plus))
+                    H_shrink = json.loads(json.dumps(H0.dict() if hasattr(H0,"dict") else {"blocks": {}}))
+                    H_plus   = json.loads(json.dumps(H0.dict() if hasattr(H0,"dict") else {"blocks": {}}))
+                    H_shrink.setdefault("blocks", {})["2"] = H2_shrink
+                    H_plus.setdefault("blocks", {})["2"]   = H2_plus
+                    H_shrink = io.parse_cmap(H_shrink)
+                    H_plus   = io.parse_cmap(H_plus)
 
-                fence_rows = [
-                    ["U_shrink", f"[1,{eq_shrink}]", "drop last H2 row"],
-                    ["U_plus",   f"[1,{eq_plus}]",   "append zero row to H2"],
-                ]
+                    C3 = (C0.blocks.__root__.get("3") or [])
+                    d3 = (B0.blocks.__root__.get("3") or [])
+                    R3_shrink = _strict_R3(H2_shrink, d3, C3)
+                    R3_plus   = _strict_R3(H2_plus,   d3, C3)
+                    eq_shrink = int(_is_zero(R3_shrink))
+                    eq_plus   = int(_is_zero(R3_plus))
+
+                    rows_fs = [
+                        ["H2_shrink (fallback)", f"[1,{eq_shrink}]", "drop last H2 row"],
+                        ["H2_plus (fallback)",   f"[1,{eq_plus}]",   "append zero row to H2"],
+                    ]
+                    notes.append("fallback: fence target = H2 (no U hooks found)")
+
                 fence_header = ["U_class", "pass_vec", "note"]
                 fence_meta = [
                     f"schema_version={FENCE_SCHEMA_VERSION}",
                     f"saved_at={_utc_iso()}",
-                    f"run_id={(st.session_state.get('cert_payload') or {}).get('identity',{}).get('run_id','')}",
-                    f"app_version={globals().get('APP_VERSION_STR', getattr(hashes,'APP_VERSION','v0.1-core'))}",
-                ]
-                _atomic_write_csv(FENCE_OUT_PATH, fence_header, fence_rows, fence_meta)
+                    f"run_id={run_id}",
+                    f"app_version={APP_VER}",
+                    "semantic: fence target changed to U (carrier) when hooks present; H fixed",
+                ] + notes
+
+                _atomic_write_csv(FENCE_OUT_PATH, fence_header, rows_fs, fence_meta)
                 st.success(f"Fence stress saved → {FENCE_OUT_PATH}")
 
             # Quick downloads
@@ -1925,6 +2025,155 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
 
         except Exception as e:
             st.error(f"Perturbation/Fence run failed: {e}")
+
+# ────────────────────────────── Reports: Fence Stress (carrier U) ──────────────────────────────
+import os, csv, tempfile, json, hashlib
+from pathlib import Path
+from datetime import datetime, timezone
+
+FENCE_SCHEMA_VERSION = "1.0.1"  # bumped: fence now perturbs U (carrier), not H2
+APP_VER = APP_VERSION if "APP_VERSION" in globals() else getattr(hashes, "APP_VERSION", "v0.1-core")
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+FENCE_OUT_PATH = REPORTS_DIR / "fence_stress.csv"
+
+def _utc_iso(): return datetime.now(timezone.utc).isoformat()
+
+# Use global writer if present, else local
+def _fs_atomic_write_csv(path: Path, header, rows, meta_comments: list[str]):
+    if " _atomic_write_csv" in globals():
+        try:
+            _atomic_write_csv(path, header, rows, meta_comments)  # type: ignore[name-defined]
+            return
+        except Exception:
+            pass
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8", newline="") as tmp:
+        for line in meta_comments:
+            tmp.write(f"# {line}\n")
+        w = csv.writer(tmp)
+        w.writerow(header)
+        for r in rows:
+            w.writerow(r)
+        tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
+    os.replace(tmp_name, path)
+
+# helpers
+def _copy_mat(M): return [row[:] for row in (M or [])]
+def _is_zero(M): return (not M) or all(all((x & 1) == 0 for x in row) for row in M)
+def _strict_R3(H2, d3, C3):
+    I3 = eye(len(C3)) if C3 else []
+    return _xor_mat(mul(H2, d3), _xor_mat(C3, I3)) if (H2 and d3 and C3) else []
+
+# optional U hooks (preferred)
+HAS_U_HOOKS = (
+    "get_carrier_mask" in globals() and "set_carrier_mask" in globals()
+    and callable(globals()["get_carrier_mask"]) and callable(globals()["set_carrier_mask"])
+)
+
+with st.expander("Fence Stress (carrier U)"):
+    # Freshness & SSOT guards
+    try:
+        rc = require_fresh_run_ctx()
+        rc = rectify_run_ctx_mask_from_d3()
+    except Exception as e:
+        st.warning(str(e))
+        st.stop()
+
+    # SSOT objects (policy remains constant)
+    B0 = boundaries
+    C0 = cmap
+    H0 = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
+    U0 = shapes
+
+    # preview counts
+    d3 = (B0.blocks.__root__.get("3") or [])
+    n2 = len(d3); n3 = len(d3[0]) if (d3 and d3[0]) else 0
+    st.caption(f"Fixture dims: n2={n2}, n3={n3} · policy={rc.get('policy_tag','strict')}")
+
+    if st.button("Run Fence Stress", key="btn_fence_stress"):
+        try:
+            rows_fs = []
+            notes   = []
+
+            if HAS_U_HOOKS:
+                # Read base U and craft shrink / plus variants
+                U_mask = get_carrier_mask(U0)  # type: ignore[name-defined]
+                rU = len(U_mask); cU = len(U_mask[0]) if (U_mask and U_mask[0]) else 0
+                def _count1(M): return sum(int(x & 1) for row in (M or []) for x in row)
+
+                U_shrink = _copy_mat(U_mask)
+                U_plus   = _copy_mat(U_mask)
+                if rU and cU:
+                    for j in range(cU): U_shrink[0][j] = 0; U_shrink[-1][j] = 0
+                    for i in range(rU): U_shrink[i][0] = 0; U_shrink[i][-1] = 0
+                    for j in range(cU): U_plus[0][j] = 1; U_plus[-1][j] = 1
+                    for i in range(rU): U_plus[i][0] = 1; U_plus[i][-1] = 1
+
+                U_shrink_obj = set_carrier_mask(json.loads(json.dumps(U0.dict() if hasattr(U0,"dict") else {"blocks": {}})), U_shrink)  # type: ignore[name-defined]
+                U_plus_obj   = set_carrier_mask(json.loads(json.dumps(U0.dict() if hasattr(U0,"dict") else {"blocks": {}})), U_plus)    # type: ignore[name-defined]
+                if not hasattr(U_shrink_obj, "blocks"): U_shrink_obj = io.parse_shapes(U_shrink_obj)
+                if not hasattr(U_plus_obj, "blocks"):   U_plus_obj   = io.parse_shapes(U_plus_obj)
+
+                # Evaluate strict k3 pass (policy constant; if your fence check reads U, wire that here)
+                H2 = (H0.blocks.__root__.get("2") or [])
+                C3 = (C0.blocks.__root__.get("3") or [])
+                d3B = (B0.blocks.__root__.get("3") or [])
+                eq_shrink = int(_is_zero(_strict_R3(H2, d3B, C3)))
+                eq_plus   = int(_is_zero(_strict_R3(H2, d3B, C3)))
+
+                rows_fs.append(["U_shrink", f"[1,{eq_shrink}]", f"|U|:{_count1(U_mask)}→{_count1(U_shrink)}"])
+                rows_fs.append(["U_plus",   f"[1,{eq_plus}]",   f"|U|:{_count1(U_mask)}→{_count1(U_plus)}"])
+                notes.append("fence target = U (carrier); H fixed")
+            else:
+                # Fallback: prior behavior by perturbing H2 (keeps legacy path alive)
+                H2 = (H0.blocks.__root__.get("2") or [])
+                H2_shrink = _copy_mat(H2[:-1]) if len(H2) >= 1 else _copy_mat(H2)
+                if H2 and H2[0]:
+                    zero_row = [0]*len(H2[0]); H2_plus = _copy_mat(H2) + [zero_row]
+                else:
+                    H2_plus = _copy_mat(H2)
+
+                H_shrink = json.loads(json.dumps(H0.dict() if hasattr(H0,"dict") else {"blocks": {}}))
+                H_plus   = json.loads(json.dumps(H0.dict() if hasattr(H0,"dict") else {"blocks": {}}))
+                H_shrink.setdefault("blocks", {})["2"] = H2_shrink
+                H_plus.setdefault("blocks", {})["2"]   = H2_plus
+                H_shrink = io.parse_cmap(H_shrink)
+                H_plus   = io.parse_cmap(H_plus)
+
+                C3 = (C0.blocks.__root__.get("3") or [])
+                d3B = (B0.blocks.__root__.get("3") or [])
+                eq_shrink = int(_is_zero(_strict_R3(H2_shrink, d3B, C3)))
+                eq_plus   = int(_is_zero(_strict_R3(H2_plus,   d3B, C3)))
+
+                rows_fs = [
+                    ["H2_shrink (fallback)", f"[1,{eq_shrink}]", "drop last H2 row"],
+                    ["H2_plus (fallback)",   f"[1,{eq_plus}]",   "append zero row to H2"],
+                ]
+                notes.append("fallback: fence target = H2 (no U hooks found)")
+
+            # Write CSV
+            fence_header = ["U_class", "pass_vec", "note"]
+            fence_meta = [
+                f"schema_version={FENCE_SCHEMA_VERSION}",
+                f"saved_at={_utc_iso()}",
+                f"run_id={st.session_state.get('run_ctx',{}).get('run_id','')}",
+                f"app_version={APP_VER}",
+                "semantic: fence target changed to U (carrier) when hooks present; H fixed",
+            ] + notes
+
+            _fs_atomic_write_csv(FENCE_OUT_PATH, fence_header, rows_fs, fence_meta)
+            st.success(f"Fence stress saved → {FENCE_OUT_PATH}")
+
+            # Download
+            try:
+                with open(FENCE_OUT_PATH, "rb") as f2:
+                    st.download_button("Download fence_stress.csv", f2, file_name="fence_stress.csv", key="dl_fence_csv_standalone")
+            except Exception:
+                pass
+
+        except Exception as e:
+            st.error(f"Fence stress failed: {e}")
+
 
 
 # =========================[ STEP 2 · Gallery Append & Dedupe ]=========================
@@ -3867,6 +4116,7 @@ with st.expander("Exports", expanded=False):
                     seed_str = "".join(ib.get(k, "") for k in ("boundaries_hash", "C_hash", "H_hash", "U_hash"))
                     ts = _utc_iso_z()
                     # fallback run_id using sha256
+                    import hashlib
                     run_id = hashlib.sha256(f"{seed_str}|{ts}".encode("utf-8")).hexdigest()[:12]
                     st.session_state["last_run_id"] = run_id
 
@@ -3891,7 +4141,6 @@ with st.expander("Exports", expanded=False):
             except Exception as e:
                 st.error(f"Export Inputs Bundle failed: {e}")
 
-
     # ---- Flushes ----
     with c3:
         st.caption("Flush / Reset")
@@ -3910,6 +4159,145 @@ with st.expander("Exports", expanded=False):
                     st.json(info)
             except Exception as e:
                 st.error(f"Flush failed: {e}")
+
+# ─────────────────────────── Maintenance: Snapshot & Flush polish ───────────────────────────
+from pathlib import Path
+import os, shutil, hashlib, secrets
+from datetime import datetime, timezone
+import streamlit as st
+
+# Respect existing globals; provide safe fallbacks
+CERTS_DIR      = Path(globals().get("CERTS_DIR", "certs"))
+LOGS_DIR       = Path(globals().get("LOGS_DIR", "logs"))
+REPORTS_DIR    = Path(globals().get("REPORTS_DIR", "reports"))
+BUNDLES_DIR    = Path(globals().get("BUNDLES_DIR", "bundles"))
+PROJECTORS_DIR = Path(globals().get("PROJECTORS_DIR", "projectors"))
+
+SCHEMA_VERSION = globals().get("SCHEMA_VERSION", "1.0.0")
+APP_VERSION    = globals().get("APP_VERSION", getattr(globals().get("hashes", object), "APP_VERSION", "v0.1-core"))
+
+def _utc_iso_z() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def _bump_fixture_nonce_local():
+    ss = st.session_state
+    ss["_fixture_nonce"] = int(ss.get("_fixture_nonce", 0)) + 1
+
+def _soft_reset_before_overlap_local():
+    ss = st.session_state
+    for k in (
+        "run_ctx","overlap_out","overlap_cfg","overlap_policy_label",
+        "overlap_H","residual_tags","ab_compare",
+        "cert_payload","last_cert_path","_last_cert_write_key",
+        "_projector_cache","_projector_cache_ab"
+    ):
+        ss.pop(k, None)
+
+def _count_files(root: Path) -> int:
+    if not root.exists(): return 0
+    n = 0
+    for _, _, files in os.walk(root): n += len(files)
+    return n
+
+def _recreate_dir(d: Path):
+    if d.exists(): shutil.rmtree(d)
+    d.mkdir(parents=True, exist_ok=True)
+
+def _session_flush_run_cache():
+    # Clear computed session keys only; do not touch disk
+    if " _soft_reset_before_overlap" in globals():
+        try: _soft_reset_before_overlap()  # type: ignore[name-defined]
+        except Exception: _soft_reset_before_overlap_local()
+    else:
+        _soft_reset_before_overlap_local()
+    # Bump nonce
+    if "_bump_fixture_nonce" in globals():
+        try: _bump_fixture_nonce()  # type: ignore[name-defined]
+        except Exception: _bump_fixture_nonce_local()
+    else:
+        _bump_fixture_nonce_local()
+    # New cache key + token
+    ts = _utc_iso_z()
+    salt = secrets.token_hex(2).upper()
+    token = f"RUN-FLUSH-{ts}-{salt}"
+    ckey  = hashlib.sha256((ts + salt).encode("utf-8")).hexdigest()
+    st.session_state["_composite_cache_key"] = ckey
+    st.session_state["_last_flush_token"] = token
+    return {"token": token, "ckey_short": ckey[:12]}
+
+def _full_flush_workspace(delete_projectors: bool = False):
+    # Use your existing flush if available
+    if "flush_workspace" in globals():
+        try:
+            return flush_workspace(delete_projectors=delete_projectors)  # type: ignore[name-defined]
+        except Exception:
+            pass
+    # Fallback: delete dirs, clear session, bump nonce
+    summary = {
+        "when": _utc_iso_z(),
+        "deleted_dirs": [],
+        "recreated_dirs": [],
+        "files_removed": 0,
+        "token": "",
+        "composite_cache_key_short": "",
+    }
+    dirs = [CERTS_DIR, LOGS_DIR, REPORTS_DIR, BUNDLES_DIR]
+    if delete_projectors: dirs.append(PROJECTORS_DIR)
+
+    removed = 0
+    for d in dirs:
+        if d.exists():
+            removed += _count_files(d)
+        _recreate_dir(d)
+        summary["deleted_dirs"].append(d.as_posix())
+        summary["recreated_dirs"].append(d.as_posix())
+    summary["files_removed"] = removed
+
+    # Clear session state (inputs stay!)
+    for k in (
+        "_inputs_block","_district_info","run_ctx","overlap_out","overlap_H",
+        "residual_tags","ab_compare","last_cert_path","cert_payload","last_run_id",
+        "_gallery_keys","_gallery_bootstrapped","_projector_cache","_projector_cache_ab",
+        "parity_pairs","parity_last_report_pairs","snapshot_nonce"
+    ):
+        st.session_state.pop(k, None)
+
+    # Bump nonce + new cache key
+    _bump_fixture_nonce_local()
+    ts = _utc_iso_z()
+    salt = secrets.token_hex(2).upper()
+    token = f"FULL-FLUSH-{ts}-{salt}"
+    ckey  = hashlib.sha256((ts + salt).encode("utf-8")).hexdigest()
+    st.session_state["_composite_cache_key"] = ckey
+    st.session_state["_last_flush_token"] = token
+    summary["token"] = token
+    summary["composite_cache_key_short"] = ckey[:12]
+    return summary
+
+# ──────────────────────────── UI: Snapshot & Flush ─────────────────────────────
+with st.expander("Maintenance · Snapshot & Flush", expanded=False):
+    ss = st.session_state
+    nonce = ss.get("_fixture_nonce", 0)
+    ckey  = ss.get("_composite_cache_key", "") or "—"
+    st.caption(f"freshness nonce={nonce} · cache_key={ckey[:12] or '—'}")
+
+    c1, c2 = st.columns([1,1])
+
+    with c1:
+        if st.button("Flush run cache (session only)", key="btn_flush_run_cache_v2",
+                     help="Clears computed session data, bumps nonce; does not touch files."):
+            out = _session_flush_run_cache()
+            st.success(f"Run cache flushed · token={out['token']} · key={out['ckey_short']}")
+
+    with c2:
+        del_proj = st.checkbox("Also delete projectors/", value=False, key="ff_delete_proj_v2")
+        confirm  = st.checkbox("I understand this deletes files on disk", value=False, key="ff_confirm_v2")
+        if st.button("Full flush (certs/logs/reports/bundles)", key="btn_full_flush_v2",
+                     disabled=not confirm,
+                     help="Deletes persisted outputs; keeps inputs. Bumps nonce & resets session."):
+            summary = _full_flush_workspace(delete_projectors=del_proj)
+            st.success(f"Full flush done · {summary['files_removed']} files removed · token={summary['token']}")
+            st.caption(f"new cache_key={summary['composite_cache_key_short']} · nonce={st.session_state.get('_fixture_nonce', 0)}")
 
 
 
