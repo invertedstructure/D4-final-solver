@@ -2034,16 +2034,17 @@ def _simulate_overlap_with_cfg(cfg_forced):
     }
 
 # --------------------------- Main "Freeze Π → FILE" with validation -----------------------------
-
 with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
     _rc = st.session_state.get("run_ctx") or {}
     _di = st.session_state.get("_district_info") or {}
-    # Eligibility: check for mode, lane_mask, d3, and if previous overlap confirms eq
+    _out = st.session_state.get("overlap_out") or {}
+
+    # Eligibility: current mode is AUTO, we have lanes & d3, and last k=3 eq was True
     elig_freeze = (
         _rc.get("mode") == "projected(auto)"
         and bool((_rc.get("lane_mask_k3") or []))
         and bool((_rc.get("d3") or []))
-        and bool((_session.get("overlap_out") or {}).get("3", {}).get("eq", False))
+        and bool((_out.get("3", {}) or {}).get("eq", False))
     )
     district_id = _di.get("district_id", "UNKNOWN")
 
@@ -2065,10 +2066,9 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
             meta_write = _freeze_projector(district_id=district_id, lane_mask_k3=lm, filename_hint=pj_basename)
             pj_path = Path(meta_write["path"])
 
-            # ------------------ Validation block after writing FILE ------------------
+            # 2) Validate freshly written Π (shape/idempotence/diagonal/lane)
             try:
-                # Read back the JSON
-                data = read_json_file(pj_path) if 'read_json_file' in globals() else json.loads(Path(pj_path).read_text())
+                data = read_json_file(pj_path) if 'read_json_file' in globals() else _json.loads(Path(pj_path).read_text())
                 P_file = (data.get("blocks") or {}).get("3") or []
                 rc = st.session_state.get("run_ctx") or {}
                 validate_projector_file_strict(
@@ -2081,10 +2081,10 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
                 st.error(f"FILE Π validation error: {ve}")
                 st.stop()  # do not switch/run in FILE if invalid
 
-            # 2) Registry append
+            # 3) Registry append
             _append_registry_row({
                 "schema_version": "1.0.0",
-                "written_at_utc": _utc_iso(),
+                "written_at_utc": _utc_iso(),  # or hashes.timestamp_iso_lisbon()
                 "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
                 "district": district_id,
                 "lane_mask_k3": lm,
@@ -2092,14 +2092,13 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
                 "projector_hash": meta_write["projector_hash"],
             })
 
-            # 3) Run a FILE overlap without mutating the policy widget
+            # 4) Run a FILE overlap without mutating the policy widget
             cfg_forced = _cfg_from_policy("projected(file)", meta_write["path"])
-            # clear caches that may fight with us
             for k in ("ab_compare", "_projector_cache", "_projector_cache_ab"):
                 st.session_state.pop(k, None)
             _simulate_overlap_with_cfg(cfg_forced)
 
-            # 4) Validate FILE Π (same checks as overlap) and show verdict
+            # 5) Validate again via your loader’s meta (optional)
             try:
                 meta_file = _validate_projector_file(meta_write["path"])
                 if bool(meta_file.get("projector_consistent_with_d", False)):
@@ -2109,7 +2108,7 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
             except ValueError as ve:
                 st.error(f"FILE Π validation error: {ve}")
 
-            # 5) Force cert writer this run (bypass debounce)
+            # 6) Force cert writer this run (bypass debounce)
             st.session_state["should_write_cert"] = True
             st.session_state.pop("_last_cert_write_key", None)
             st.caption("FILE overlap populated; cert writer will emit a new cert this run.")
@@ -2137,13 +2136,15 @@ with st.expander("Projector Registry (last 5)"):
 with st.expander("Projector Freezer (AUTO → FILE, switch UI)"):
     _rc = st.session_state.get("run_ctx") or {}
     _di = st.session_state.get("_district_info") or {}
-    # Eligibility: check for mode, lane_mask, d3, and previous overlap eq
+    _out = st.session_state.get("overlap_out") or {}
+
     elig = (
         _rc.get("mode") == "projected(auto)"
         and bool((_rc.get("lane_mask_k3") or []))
         and bool((_rc.get("d3") or []))
-        and bool((_session.get("overlap_out") or {}).get("3", {}).get("eq", False))
+        and bool((_out.get("3", {}) or {}).get("eq", False))
     )
+
     st.caption("Freeze AUTO Π as a diagonal of lane_mask(d3), switch to FILE, then re-run.")
     pj_name = st.text_input("Filename", value=f"projector_{_di.get('district_id', 'UNKNOWN')}.json", key="pj_freeze_name_final")
     overwrite_ok = st.checkbox("Overwrite if exists", value=False, key="pj_freeze_overwrite_final")
@@ -2154,6 +2155,7 @@ with st.expander("Projector Freezer (AUTO → FILE, switch UI)"):
             n3 = int(_rc.get("n3") or 0)
             if n3 <= 0 or len(lm) != n3:
                 raise ValueError("Freeze: invalid lane_mask/n3")
+
             # Build diag Π
             P_freeze = [[1 if (i == j and lm[j]) else 0 for j in range(n3)] for i in range(n3)]
             payload = {"schema_version": "1.0.0", "blocks": {"3": P_freeze}}
@@ -2165,10 +2167,9 @@ with st.expander("Projector Freezer (AUTO → FILE, switch UI)"):
 
             pj_hash, _ = _atomic_write_json(pj_path, payload)
 
-            # ------------------ Validation block after writing FILE ------------------
+            # Validate the file we just wrote
             try:
-                # Read back the JSON
-                data = read_json_file(pj_path) if 'read_json_file' in globals() else json.loads(Path(pj_path).read_text())
+                data = read_json_file(pj_path) if 'read_json_file' in globals() else _json.loads(Path(pj_path).read_text())
                 P_file = (data.get("blocks") or {}).get("3") or []
                 rc = st.session_state.get("run_ctx") or {}
                 validate_projector_file_strict(
@@ -2179,25 +2180,23 @@ with st.expander("Projector Freezer (AUTO → FILE, switch UI)"):
                 st.success("FILE Π validated ✔ (shape/idempotence/diagonal/lane match)")
             except ValueError as ve:
                 st.error(f"FILE Π validation error: {ve}")
-                st.stop()  # do not switch/run in FILE if invalid
+                st.stop()
 
             # Switch cfg source to FILE for k=3 and re-run
             cfg_active.setdefault("source", {})["3"] = "file"
             cfg_active.setdefault("projector_files", {})["3"] = pj_path.as_posix()
 
-            # Bust caches that depend on Π selection
             for k in ("overlap_out", "residual_tags", "overlap_cfg", "overlap_policy_label"):
                 st.session_state.pop(k, None)
 
-            # Re-run Overlap (this will set run_ctx with source=file)
             run_overlap()
 
-            # Force cert write on the same pass (debounce bypass)
             st.session_state["should_write_cert"] = True
             st.session_state.pop("_last_cert_write_key", None)
             st.success(f"Π saved → {pj_path.name} · {pj_hash[:12]}… and switched to FILE.")
         except Exception as e:
             st.error(f"Freeze failed: {e}")
+
 
 
   
