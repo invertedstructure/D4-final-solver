@@ -2598,27 +2598,43 @@ else:
         full_hash = cert_payload["integrity"]["content_hash"]
 
         # ---------------- Write cert (prefer package writer; fallback locally) ----------------
-        try:
-            result = export_mod.write_cert_json(cert_payload)  # may return (path, hash) or path
-            if isinstance(result, (list, tuple)) and len(result) >= 2:
-                cert_path, full_hash = result[0], result[1]
-            else:
-                cert_path = result
-        except Exception as e:
-            # Fallback: certs/overlap__{district}__{policy}__{hash12}.json (atomic)
-            try:
-                outdir = Path("certs"); outdir.mkdir(parents=True, exist_ok=True)
-                safe_policy = policy_now.replace("/", "_").replace(" ", "_")
-                fname = f"overlap__{district_id}__{safe_policy}__{full_hash[:12]}.json"
-                p = outdir / fname
-                tmp = p.with_suffix(".json.tmp")
-                blob = _json.dumps(cert_payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-                with open(tmp, "wb") as f:
-                    f.write(blob); f.flush(); os.fsync(f.fileno())
-                os.replace(tmp, p)
-                cert_path = str(p)
-            except Exception as e2:
-                st.error(f"Cert write failed: {e} / {e2}")
+try:
+    # Determine A/B embedding before writing
+    cp = cert_payload  # assuming cert_payload is already defined
+    has_ab = False
+    if cp.get("ab_embedded") or ("ab_pair_tag" in (cp.get("policy") or {})):
+        has_ab = True
+
+    # Proceed with writing cert JSON
+    result = export_mod.write_cert_json(cert_payload)  # may return (path, hash) or path
+    if isinstance(result, (list, tuple)) and len(result) >= 2:
+        cert_path, full_hash = result[0], result[1]
+    else:
+        cert_path = result
+
+    # Modify filename to add __ab suffix if embedded
+    if has_ab:
+        p = Path(cert_path)
+        # Insert __ab before the extension
+        cert_path = str(p.with_name(p.stem + "__ab" + p.suffix))
+        # update cert_path accordingly if needed later
+
+except Exception as e:
+    # Fallback: certs/overlap__{district}__{policy}__{hash12}.json (atomic)
+    try:
+        outdir = Path("certs")
+        outdir.mkdir(parents=True, exist_ok=True)
+        safe_policy = policy_now.replace("/", "_").replace(" ", "_")
+        fname = f"overlap__{district_id}__{safe_policy}__{full_hash[:12]}.json"
+        p = outdir / fname
+        tmp = p.with_suffix(".json.tmp")
+        blob = _json.dumps(cert_payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        with open(tmp, "wb") as f:
+            f.write(blob); f.flush(); os.fsync(f.fileno())
+        os.replace(tmp, p)
+        cert_path = str(p)
+    except Exception as e2:
+        st.error(f"Cert write failed: {e} / {e2}")
 
 # ---------------- Post-write UI + bundle quick action ----------------
 _rc = st.session_state.get("run_ctx", {}) or {}
@@ -2643,8 +2659,18 @@ if cert_path:
     st.session_state["cert_payload"]   = locals().get("cert_payload")
     st.session_state["last_run_id"]    = (locals().get("identity_block") or {}).get("run_id")
 
+    # Show success message
     st.success(f"Cert written → `{cert_path}` · {full_hash[:12]}…")
-
+    
+    # Display A/B badge if present
+    cert_payload = st.session_state.get("cert_payload") or {}
+    if cert_payload.get("ab_embedded"):
+        tag = cert_payload.get("ab_pair_tag") or (cert_payload.get("policy") or {}).get("ab_pair_tag") or "A/B"
+        st.caption(f"Embedded A/B → {tag}")
+    else:
+        # Optionally, you can add a line indicating no A/B embedding
+        st.caption("Embedded A/B → —")
+    
     with st.expander("Bundle (cert + extras)"):
         extras = [
             "policy.json",
@@ -2683,7 +2709,7 @@ else:
     st.caption("No cert produced in this run (nothing to bundle).")
 
 
-# ───────────────────────── Certs on disk (tail) ─────────────────────────
+# ───────────────────────── Certs on disk (tail) with A/B badge ─────────────────────────
 from pathlib import Path
 import os, json as _json
 from datetime import datetime
@@ -2711,9 +2737,11 @@ CERTS_DIR.mkdir(parents=True, exist_ok=True)
 with st.expander("Certs on disk (last 5)", expanded=False):
     all_certs = sorted(CERTS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
     count = len(all_certs)
-    st.caption(f"Found {count} cert{'s' if count!=1 else ''} in `{CERTS_DIR.as_posix()}`.")
+    st.caption(f"Found {count} cert{'s' if count != 1 else ''} in `{CERTS_DIR.as_posix()}`.")
 
-    rows = []
+    # Optional A/B filter checkbox
+    ab_only = st.checkbox("Show only certs with A/B embed", value=False, key="tail_ab_only")
+    
     for p in all_certs[:5]:
         info = _safe_load_json(p)
         ident  = info.get("identity") or {}
@@ -2725,42 +2753,26 @@ with st.expander("Certs on disk (last 5)", expanded=False):
                        "auto" if policy.get("projector_hash") and not policy.get("projector_filename") else
                        "strict")
         projector   = policy.get("projector_filename") or ""
-        d_id        = ident.get("district_id","UNKNOWN")
-        run_id      = ident.get("run_id","")
-        c_hash      = integ.get("content_hash","")
+        d_id        = ident.get("district_id", "UNKNOWN")
+        run_id      = ident.get("run_id", "")
+        c_hash      = integ.get("content_hash", "")
         mtime       = p.stat().st_mtime
 
-        rows.append({
-            "when (mtime UTC)": _fmt_ts(mtime),
-            "policy": policy_tag,
-            "mode": mode,
-            "district": d_id,
-            "run_id": _short(run_id, 10),
-            "content_hash": _short(c_hash, 12),
-            "file": p.name,
-            "Π file": _short(Path(projector).name, 24) if projector else "",
-        })
+        # Determine if cert has A/B embedding
+        cp = info  # using info as the cert dict
+        has_ab = False
+        if cp.get("ab_embedded") or ("ab_pair_tag" in (cp.get("policy") or {}) or "ab_pair_tag" in cp):
+            has_ab = True
+        if ab_only and not has_ab:
+            continue  # Skip certs without A/B if filter is active
 
-    if rows:
-        # nice compact display; if you prefer a dataframe, swap to st.dataframe(rows, use_container_width=True)
-        st.table(rows)
+        # Prepare A/B badge info
+        ab_flag = ""
+        if has_ab:
+            tag = cp.get("ab_pair_tag") or (cp.get("policy") or {}).get("ab_pair_tag") or "A/B"
+            ab_flag = f" · [A/B: {tag}]"
 
-        # quick download for newest cert
-        newest = all_certs[0]
-        try:
-            with newest.open("rb") as f:
-                st.download_button(
-                    "Download newest cert",
-                    f,
-                    file_name=newest.name,
-                    key="dl_newest_cert_tail",
-                    help="Download the most recent cert on disk"
-                )
-        except Exception:
-            pass
-    else:
-        st.info("No certs yet — run Overlap and write a cert first.")
-# ───────────────────────────────────────────────────────────────────────
+        st.write(f"• {_fmt_ts(mtime)} · {d_id} · {policy_tag} · {Path(p).name}{ab_flag}")
 
 
 
