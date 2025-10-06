@@ -1927,331 +1927,295 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
             st.error(f"Perturbation/Fence run failed: {e}")
 
 
+# =========================[ STEP 2 · Gallery Append & Dedupe ]=========================
+# Assumes these helpers/constants already exist from Step 1:
+# - require_fresh_run_ctx(), rectify_run_ctx_mask_from_d3()
+# - is_projected_green(rc, overlap_out)
+# - gallery_key(row)   # must compute (district, policy_tag, B,C,H,U) from a *row*
+# - _read_jsonl_tail(path, N)
+# - _atomic_append_jsonl(path, row)
+# - SCHEMA_VERSION, APP_VERSION, LOGS_DIR, _utc_iso_z
 
-
-   
-
-
-
-# ───────────────────────── Gallery helpers: dedupe + exports ─────────────────────────
 from pathlib import Path
-import json as _json
-import os
+import json
+import streamlit as st
 
-LOGS_DIR = Path(globals().get("LOGS_DIR", "logs"))
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
-GALLERY_PATH   = LOGS_DIR / "gallery.jsonl"
-WITNESSES_PATH = LOGS_DIR / "witnesses.jsonl"
+GALLERY_PATH = (LOGS_DIR / "gallery.jsonl")
+GALLERY_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-def _jsonl_read_all(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
-    out = []
+ss = st.session_state
+# session dedupe cache
+if "_gallery_keys" not in ss: ss["_gallery_keys"] = set()
+if "_gallery_bootstrapped" not in ss: ss["_gallery_bootstrapped"] = False
+
+with st.expander("Gallery"):
+    # 1) Freshness + SSOT guard
     try:
-        with path.open("r", encoding="utf-8") as f:
-            for ln in f:
-                ln = ln.strip()
-                if not ln:
-                    continue
-                try:
-                    out.append(_json.loads(ln))
-                except Exception:
-                    continue
+        rc  = require_fresh_run_ctx()
+        rc  = rectify_run_ctx_mask_from_d3()
     except Exception:
-        pass
-    return out
+        st.stop()
 
-def _hx(inputs: dict, k: str) -> str:
-    # supports both flat inputs.hashes.* or inputs.* layouts inside cert
-    if not isinstance(inputs, dict):
-        return ""
-    # flat
-    v = inputs.get(k)
-    if v:
-        return str(v)
-    # nested
-    h = inputs.get("hashes") or {}
-    return str(h.get(k, ""))
+    out = ss.get("overlap_out") or {}
+    eligible = is_projected_green(rc, out)
 
-def _gallery_key_from_cert(cert: dict) -> tuple:
-    """
-    (district_id, policy_tag, bHash, C_hash, H_hash, U_hash[, projector_hash if projected(file)])
-    """
-    ident  = cert.get("identity", {}) or {}
-    pol    = cert.get("policy",   {}) or {}
-    inputs = cert.get("inputs",   {}) or {}
+    cert = ss.get("cert_payload")
+    if not cert:
+        st.info("No cert in memory yet. Run Overlap (let cert writer emit) before adding to gallery.")
+        st.stop()
 
-    district_id = str(ident.get("district_id", "UNKNOWN"))
-    policy_tag  = str(pol.get("policy_tag", "strict"))
+    # 2) Extract canonical fields from the *cert* (read-only)
+    identity = cert.get("identity", {}) or {}
+    policy   = cert.get("policy",   {}) or {}
+    inputs   = cert.get("inputs",   {}) or {}
+    hashes   = inputs.get("hashes", {}) or {
+        "boundaries_hash": inputs.get("boundaries_hash", ""),
+        "C_hash":          inputs.get("C_hash", ""),
+        "H_hash":          inputs.get("H_hash", ""),
+        "U_hash":          inputs.get("U_hash", ""),
+        "shapes_hash":     inputs.get("shapes_hash", ""),
+    }
 
-    bH = _hx(inputs, "boundaries_hash")
-    cH = _hx(inputs, "C_hash")
-    hH = _hx(inputs, "H_hash")
-    uH = _hx(inputs, "U_hash")
+    district_id    = identity.get("district_id", "UNKNOWN")
+    policy_tag     = policy.get("policy_tag", "")
+    projector_hash = policy.get("projector_hash", "") or ""
+    cert_hash      = (cert.get("integrity") or {}).get("content_hash", "") or ""
 
-    # Optional projector hash only when projected(file)
-    include_p = policy_tag.endswith(",file)") or "projected(file)" in policy_tag
-    pH = str(pol.get("projector_hash","")) if include_p else None
+    # 3) Optional UI fields
+    c1, c2, c3 = st.columns([1,1,2])
+    with c1:
+        growth_bumps = st.number_input("growth_bumps", min_value=0, value=0, step=1, key="gal_growth_bumps")
+    with c2:
+        strictify = st.selectbox("strictify", options=["tbd","no","yes"], index=0, key="gal_strictify")
+    with c3:
+        tag = st.text_input("tag (optional)", value="", key="gal_tag")
 
-    base = (district_id, policy_tag, bH, cH, hH, uH)
-    return base + ((pH,) if include_p else ())
-
-def append_gallery_row(cert: dict, *, growth_bumps: int = 0, strictify: str = "tbd") -> bool:
-    """
-    Append once per dedupe key. Returns True if appended, False if duplicate.
-    """
-    # Compute dedupe key from the cert
-    key = _gallery_key_from_cert(cert)
-
-    # Load existing keys
-    existing = set()
-    for r in _jsonl_read_all(GALLERY_PATH):
-        try:
-            # Back-compat: recompute key from stored rows (they contain cert-ish fields)
-            if "dedupe_key" in r:
-                k = tuple(r["dedupe_key"])
-            else:
-                # Fall back to recomputing from embedded fields in row
-                ident  = r.get("identity", {})
-                pol    = r.get("policy",   {})
-                inputs = r.get("hashes",   {}) or r.get("inputs", {}).get("hashes", {}) or {}
-                district_id = str(ident.get("district_id", "UNKNOWN"))
-                policy_tag  = str(pol.get("policy_tag", "strict"))
-                bH = str(inputs.get("boundaries_hash",""))
-                cH = str(inputs.get("C_hash",""))
-                hH = str(inputs.get("H_hash",""))
-                uH = str(inputs.get("U_hash",""))
-                include_p = policy_tag.endswith(",file)") or "projected(file)" in policy_tag
-                pH = str(pol.get("projector_hash","")) if include_p else None
-                k  = (district_id, policy_tag, bH, cH, hH, uH) + ((pH,) if include_p else ())
-            existing.add(k)
-        except Exception:
-            continue
-
-    if key in existing:
-        return False  # duplicate
-
-    # Build row (copy the fields you want visible in the tail/export)
+    # 4) Build row per spec (this structure is what gallery_key(row) expects)
     row = {
-        "written_at_utc": (cert.get("identity") or {}).get("timestamp", ""),
-        "district":       (cert.get("identity") or {}).get("district_id", "UNKNOWN"),
-        "policy":         (cert.get("policy")   or {}).get("policy_tag", "strict"),
-        "projector_hash": (cert.get("policy")   or {}).get("projector_hash", ""),
-        "projector_filename": (cert.get("policy") or {}).get("projector_filename", ""),
-        "hashes":         (cert.get("inputs")   or {}).get("hashes") or {
-            "boundaries_hash": _hx(cert.get("inputs",{}), "boundaries_hash"),
-            "C_hash":          _hx(cert.get("inputs",{}), "C_hash"),
-            "H_hash":          _hx(cert.get("inputs",{}), "H_hash"),
-            "U_hash":          _hx(cert.get("inputs",{}), "U_hash"),
+        "schema_version": SCHEMA_VERSION,
+        "written_at_utc": _utc_iso_z(),
+        "app_version":    APP_VERSION,
+        "district":       district_id,
+        "policy": {
+            "policy_tag":    policy_tag,
+            "projector_hash": projector_hash,
         },
-        "content_hash":   (cert.get("integrity") or {}).get("content_hash",""),
-        "growth_bumps":   int(growth_bumps or 0),
-        "strictify":      str(strictify),
-        "dedupe_key":     list(key),
+        "hashes": {
+            "boundaries_hash": hashes.get("boundaries_hash",""),
+            "C_hash":          hashes.get("C_hash",""),
+            "H_hash":          hashes.get("H_hash",""),
+            "U_hash":          hashes.get("U_hash",""),
+            "shapes_hash":     hashes.get("shapes_hash",""),
+        },
+        "growth_bumps":     int(growth_bumps),
+        "strictify":        str(strictify),
+        "tag":              tag or "",
+        "cert_content_hash": cert_hash,
     }
 
-    # Append using your atomic helper if present; else plain
-    try:
-        if "atomic_append_jsonl" in globals() and callable(globals()["atomic_append_jsonl"]):
-            atomic_append_jsonl(GALLERY_PATH, row)
-        else:
-            GALLERY_PATH.parent.mkdir(parents=True, exist_ok=True)
-            with open(GALLERY_PATH, "a", encoding="utf-8") as f:
-                f.write(_json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n")
-    except Exception as e:
-        raise RuntimeError(f"Could not append Gallery row: {e}") from e
+    # 5) One dedupe key (6-tuple); use the same function for BOTH new row & tail rows
+    key = gallery_key(row)
 
-    return True
+    # Bootstrap session cache from tail once
+    if not ss["_gallery_bootstrapped"]:
+        for tail_row in _read_jsonl_tail(GALLERY_PATH, N=200):
+            try:
+                ss["_gallery_keys"].add(gallery_key(tail_row))
+            except Exception:
+                continue
+        ss["_gallery_bootstrapped"] = True
 
-def append_witness_row(cert: dict, *, reason: str, residual_tag_val: str, note: str = "") -> None:
-    row = {
-        "written_at_utc": (cert.get("identity") or {}).get("timestamp", ""),
-        "district":       (cert.get("identity") or {}).get("district_id", "UNKNOWN"),
-        "policy":         (cert.get("policy")   or {}).get("policy_tag", "strict"),
-        "residual_tag":   residual_tag_val,
-        "reason":         reason,
-        "note":           note or "",
-        "content_hash":   (cert.get("integrity") or {}).get("content_hash",""),
-    }
-    if "atomic_append_jsonl" in globals() and callable(globals()["atomic_append_jsonl"]):
-        atomic_append_jsonl(WITNESSES_PATH, row)
-    else:
-        WITNESSES_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(WITNESSES_PATH, "a", encoding="utf-8") as f:
-            f.write(_json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n")
-
-# Optional: exports used by your buttons
-def export_gallery_csv() -> str:
-    import csv, tempfile
-    rows = _jsonl_read_all(GALLERY_PATH)
-    if not rows:
-        raise FileNotFoundError("No gallery.jsonl yet.")
-    header = ["written_at_utc","district","policy","content_hash",
-              "boundaries_hash","C_hash","H_hash","U_hash","projector_hash","projector_filename","growth_bumps","strictify"]
-    fd, tmp = tempfile.mkstemp(prefix="gallery_export_", suffix=".csv", dir=LOGS_DIR)
-    os.close(fd)
-    outp = Path(tmp)
-    with outp.open("w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f)
-        w.writerow(header)
-        for r in rows:
-            h = r.get("hashes") or {}
-            w.writerow([
-                r.get("written_at_utc",""),
-                r.get("district",""),
-                r.get("policy",""),
-                r.get("content_hash",""),
-                h.get("boundaries_hash",""),
-                h.get("C_hash",""),
-                h.get("H_hash",""),
-                h.get("U_hash",""),
-                r.get("projector_hash",""),
-                r.get("projector_filename",""),
-                r.get("growth_bumps",0),
-                r.get("strictify",""),
-            ])
-    return str(outp)
-
-def export_witnesses_json() -> str:
-    import tempfile
-    rows = _jsonl_read_all(WITNESSES_PATH)
-    if not rows:
-        raise FileNotFoundError("No witnesses.jsonl yet.")
-    fd, tmp = tempfile.mkstemp(prefix="witnesses_export_", suffix=".json", dir=LOGS_DIR)
-    os.close(fd)
-    outp = Path(tmp)
-    with outp.open("w", encoding="utf-8") as f:
-        _json.dump(rows, f, ensure_ascii=False, indent=2, sort_keys=True)
-    return str(outp)
-
-
-    # ───────────────────────── Gallery / Witness actions ─────────────────────────
-st.divider()
-st.caption("Gallery & Witness")
-
-# -- SSOT pulls
-_ss         = st.session_state
-run_ctx     = _ss.get("run_ctx") or {}
-overlap_out = _ss.get("overlap_out") or {}
-res_tags    = _ss.get("residual_tags", {}) or {}
-last_cert   = _ss.get("last_cert_path", "")
-cert_cached = _ss.get("cert_payload")  # in-memory cert set by cert writer
-
-# -- tiny helper: load the cert dict (prefer in-memory; fallback to disk)
-def _load_cert_dict():
-    if cert_cached:
-        return cert_cached
-    lp = last_cert
-    if lp and os.path.exists(lp):
+    # 6) Append button
+    disabled_reason = None if eligible else "Enabled only when projected is green (k=3 eq = True)."
+    if st.button("Add to Gallery", key="btn_gallery_append",
+                 disabled=not eligible, help=disabled_reason):
         try:
-            with open(lp, "r", encoding="utf-8") as f:
-                return _json.load(f)
-        except Exception:
-            pass
-    return None
+            if key in ss["_gallery_keys"]:
+                st.info("Duplicate skipped (same district/policy/hashes).")
+            else:
+                _atomic_append_jsonl(GALLERY_PATH, row)
+                ss["_gallery_keys"].add(key)
+                st.success("Gallery row appended.")
+        except Exception as e:
+            st.error(f"Gallery append failed: {e}")
 
-# -- predicates
-mode_now     = str(run_ctx.get("mode", "strict"))
-is_projected = mode_now.startswith("projected")
-k3_ok        = bool(overlap_out.get("3", {}).get("eq", False))
-k2_ok        = bool(overlap_out.get("2", {}).get("eq", False))
-grid_ok      = bool(overlap_out.get("grid", True))
-fence_ok     = bool(overlap_out.get("fence", True))
-
-can_gallery  = (is_projected and k3_ok and bool(last_cert))
-can_witness  = (grid_ok and fence_ok and (not k3_ok) and bool(last_cert))
-
-# -- UI: side-by-side actions
-colG, colW = st.columns(2)
-
-with colG:
-    st.caption("Gallery")
-    growth_bumps = st.number_input(
-        "Growth bumps", min_value=0, max_value=9, value=0, step=1, key="gal_gb"
-    )
-    if st.button("Add to Gallery", key="btn_gallery_add", disabled=not can_gallery,
-                 help="Enabled when a cert exists, policy is projected(auto/file), and k3 is ✓."):
-        cert = _load_cert_dict()
-        if not cert:
-            st.error("No cert available. Run Overlap and write a cert first.")
-        else:
-            try:
-                appended = append_gallery_row(cert, growth_bumps=growth_bumps, strictify="tbd")
-                if appended:
-                    st.success("Gallery row appended.")
-                else:
-                    st.info("Skipped — duplicate (dedupe key matched).")
-            except Exception as e:
-                st.error(f"Gallery append failed: {e}")
-    if not can_gallery:
-        st.caption("↳ Requires: projected mode + k3=✓ + a written cert.")
-
-with colW:
-    st.caption("Witness")
-    reason = st.selectbox(
-        "Reason",
-        ["lanes-persist", "policy-mismatch", "needs-new-R", "grammar-drift", "other"],
-        index=0,
-        key="wit_reason",
-        help="Pick the closest why-not-green reason."
-    )
-    note = st.text_input("Note (optional)", value="", key="wit_note")
-
-    if st.button("Log Witness", key="btn_witness_add", disabled=not can_witness,
-                 help="Enabled when a cert exists, grid/fence are ✓, and k3 is ✗ (stubborn red)."):
-        cert = _load_cert_dict()
-        if not cert:
-            st.error("No cert available. Run Overlap and write a cert first.")
-        else:
-            try:
-                tag_val = res_tags.get("projected" if is_projected else "strict", "none")
-                append_witness_row(cert, reason=reason, residual_tag_val=tag_val, note=note)
-                st.success(f"Witness logged (residual={tag_val}).")
-            except Exception as e:
-                st.error(f"Witness log failed: {e}")
-    if not can_witness:
-        st.caption("↳ Requires: grid=✓, fence=✓, k3=✗, and a written cert.")
-
-# -- Recent tails (optional, lightweight)
-with st.expander("Recent logs (tails)"):
+    # 7) Tail view (last 8)
     try:
-        render_gallery_tail(limit=5)
+        tail = _read_jsonl_tail(GALLERY_PATH, N=8)
+        if tail:
+            import pandas as pd
+            view = []
+            for r in tail:
+                view.append({
+                    "when":      r.get("written_at_utc",""),
+                    "district":  r.get("district",""),
+                    "policy_tag": (r.get("policy") or {}).get("policy_tag",""),
+                    "proj[:12]": ((r.get("policy") or {}).get("projector_hash","") or "")[:12],
+                    "B[:8]":     (r.get("hashes") or {}).get("boundaries_hash","")[:8],
+                    "C[:8]":     (r.get("hashes") or {}).get("C_hash","")[:8],
+                    "H[:8]":     (r.get("hashes") or {}).get("H_hash","")[:8],
+                    "U[:8]":     (r.get("hashes") or {}).get("U_hash","")[:8],
+                    "strictify": r.get("strictify",""),
+                    "tag":       r.get("tag",""),
+                })
+            st.dataframe(pd.DataFrame(view), use_container_width=True, hide_index=True)
+        else:
+            st.caption("Gallery is empty.")
     except Exception as e:
-        st.warning(f"Could not render Gallery tail: {e}")
+        st.warning(f"Could not render gallery tail: {e}")
+# ======================================================================================
+# =========================[ STEP 3 · Witness on Stubborn RED ]=========================
+from pathlib import Path
+import json, uuid
+import streamlit as st
+
+WITNESS_PATH = (LOGS_DIR / "witnesses.jsonl")
+WITNESS_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+ss = st.session_state
+if "_witness_keys" not in ss: ss["_witness_keys"] = set()
+if "_witness_bootstrapped" not in ss: ss["_witness_bootstrapped"] = False
+
+def witness_key(row: dict):
+    """8-tuple dedupe: (district, reason, residual_tag, policy_tag, B, C, H, U)."""
+    h = row.get("hashes") or {}
+    return (
+        str(row.get("district","UNKNOWN")),
+        str(row.get("reason","")),
+        str(row.get("residual_tag","")),
+        str((row.get("policy") or {}).get("policy_tag","")),
+        str(h.get("boundaries_hash","")),
+        str(h.get("C_hash","")),
+        str(h.get("H_hash","")),
+        str(h.get("U_hash","")),
+    )
+
+with st.expander("Witness logger"):
+    # --- Freshness + SSOT guards
     try:
-        render_witness_tail(limit=5)
+        rc  = require_fresh_run_ctx()
+        rc  = rectify_run_ctx_mask_from_d3()
+    except Exception:
+        st.stop()
+
+    out = ss.get("overlap_out") or {}
+    eq3 = bool(((out.get("3") or {}).get("eq", False)))
+    # Eligible only when stubborn RED (k=3 fail)
+    eligible = (eq3 is False)
+
+    # Pick the correct residual tag (strict vs projected)
+    tags = ss.get("residual_tags") or {}
+    mode = str(rc.get("mode","strict"))
+    residual_tag = tags.get("projected" if mode.startswith("projected") else "strict", "none")
+
+    # Pull cert payload if present (for content hash); optional
+    cert = ss.get("cert_payload") or {}
+    cert_hash = (cert.get("integrity") or {}).get("content_hash","") or ""
+
+    # Canonical hashes (prefer inputs.hashes inside cert; fall back to inputs flat)
+    inputs = cert.get("inputs", {}) or {}
+    hashes = inputs.get("hashes") or {
+        "boundaries_hash": inputs.get("boundaries_hash",""),
+        "C_hash":          inputs.get("C_hash",""),
+        "H_hash":          inputs.get("H_hash",""),
+        "U_hash":          inputs.get("U_hash",""),
+        "shapes_hash":     inputs.get("shapes_hash",""),
+    }
+
+    identity = cert.get("identity", {}) or {}
+    district_id = identity.get("district_id", "UNKNOWN")
+
+    policy = cert.get("policy", {}) or {}
+    policy_tag = policy.get("policy_tag", rc.get("policy_tag",""))
+    projector_hash = policy.get("projector_hash","") or (rc.get("projector_hash","") or "")
+
+    # UI controls
+    c1, c2 = st.columns([1,3])
+    with c1:
+        reason = st.selectbox(
+            "reason",
+            options=["lanes-persist","policy-mismatch","needs-new-R","grammar-drift","other"],
+            index=0,
+            key="w_reason",
+        )
+    with c2:
+        note = st.text_input("note (optional)", value="", key="w_note")
+
+    # Build row per spec
+    row = {
+        "schema_version": SCHEMA_VERSION,
+        "written_at_utc": _utc_iso_z(),
+        "app_version":    APP_VERSION,
+        "district":       district_id,
+        "reason":         reason,
+        "residual_tag":   residual_tag,
+        "policy": {
+            "policy_tag":     policy_tag,
+            "projector_hash": projector_hash,
+        },
+        "hashes": {
+            "boundaries_hash": hashes.get("boundaries_hash",""),
+            "C_hash":          hashes.get("C_hash",""),
+            "H_hash":          hashes.get("H_hash",""),
+            "U_hash":          hashes.get("U_hash",""),
+            "shapes_hash":     hashes.get("shapes_hash",""),
+        },
+        "cert_content_hash": cert_hash,
+        "run_id":            (rc.get("run_id") or str(uuid.uuid4())),
+        "note":              note or "",
+    }
+
+    # Bootstrap dedupe cache from tail once
+    if not ss["_witness_bootstrapped"]:
+        for tail_row in _read_jsonl_tail(WITNESS_PATH, N=200):
+            try:
+                ss["_witness_keys"].add(witness_key(tail_row))
+            except Exception:
+                continue
+        ss["_witness_bootstrapped"] = True
+
+    k = witness_key(row)
+    help_txt = None if eligible else "Enabled only when k=3 is RED (eq=False)."
+    if st.button("Log Witness", key="btn_witness_append", disabled=not eligible, help=help_txt):
+        try:
+            if k in ss["_witness_keys"]:
+                st.info("Duplicate skipped (same district/reason/tag/policy/hashes).")
+            else:
+                _atomic_append_jsonl(WITNESS_PATH, row)
+                ss["_witness_keys"].add(k)
+                st.success("Witness logged.")
+        except Exception as e:
+            st.error(f"Witness append failed: {e}")
+
+    # Tail view
+    try:
+        tail = _read_jsonl_tail(WITNESS_PATH, N=8)
+        if tail:
+            import pandas as pd
+            view = []
+            for r in tail:
+                view.append({
+                    "when":       r.get("written_at_utc",""),
+                    "district":   r.get("district",""),
+                    "reason":     r.get("reason",""),
+                    "tag":        r.get("residual_tag",""),
+                    "policy_tag": (r.get("policy") or {}).get("policy_tag",""),
+                    "proj[:12]":  ((r.get("policy") or {}).get("projector_hash","") or "")[:12],
+                    "B[:8]":      (r.get("hashes") or {}).get("boundaries_hash","")[:8],
+                    "C[:8]":      (r.get("hashes") or {}).get("C_hash","")[:8],
+                    "H[:8]":      (r.get("hashes") or {}).get("H_hash","")[:8],
+                    "U[:8]":      (r.get("hashes") or {}).get("U_hash","")[:8],
+                })
+            st.dataframe(pd.DataFrame(view), use_container_width=True, hide_index=True)
+        else:
+            st.caption("No witnesses logged yet.")
     except Exception as e:
-        st.warning(f"Could not render Witness tail: {e}")
-
-# ───────────────────────── Logs: exports (optional) ──────────────────────────
-with safe_expander("Logs: exports (optional)"):
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("Export Gallery → CSV", key="export_gallery_csv_btn"):
-            try:
-                p = export_gallery_csv()
-                st.success(f"Gallery CSV saved → {p}")
-                try:
-                    with open(p, "rb") as f:
-                        st.download_button("Download gallery_export.csv", f, file_name="gallery_export.csv")
-                except Exception:
-                    pass
-            except Exception as e:
-                st.error(f"Gallery export failed: {e}")
-    with col2:
-        if st.button("Export Witnesses → JSON", key="export_witnesses_json_btn"):
-            try:
-                p = export_witnesses_json()
-                st.success(f"Witnesses JSON saved → {p}")
-                try:
-                    with open(p, "rb") as f:
-                        st.download_button("Download witnesses_export.json", f, file_name="witnesses_export.json")
-                except Exception:
-                    pass
-            except Exception as e:
-                st.error(f"Witnesses export failed: {e}")
+        st.warning(f"Could not render witnesses tail: {e}")
+# ======================================================================================
 
 
+
+#--------------------------FREEZER HELPERS-------------------------------------------#
 
 from pathlib import Path
 import os, json, tempfile, shutil, hashlib
@@ -2509,6 +2473,8 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
 
 
 
+
+
   
     # ======================== Parity: import/export & queue ========================
 from pathlib import Path
@@ -2733,113 +2699,312 @@ def _emoji(v):
     if v is None: return "—"
     return "✅" if bool(v) else "❌"
 
-with safe_expander("Parity: run suite (mirrors active policy)"):
-    pairs = st.session_state.get("parity_pairs", []) or []
-    rc    = st.session_state.get("run_ctx", {}) or {}
-    ib    = st.session_state.get("_inputs_block", {}) or {}
+with st.expander("Parity: run suite (mirrors active policy)"):
+    # --- Guards: SSOT freshness + lane-mask rectifier
+    try:
+        rc = require_fresh_run_ctx()          # nonce check
+        rc = rectify_run_ctx_mask_from_d3()   # overwrite stale mask from stored d3
+    except Exception as e:
+        st.warning(str(e))
+        st.stop()
 
+    pairs = st.session_state.get("parity_pairs", []) or []
     if not pairs:
         st.info("No parity pairs queued. Use the import/queue controls above.")
-    else:
-        policy_tag = rc.get("policy_tag", policy_label_from_cfg(cfg_strict()))
-        pj_hash    = rc.get("projector_hash","") if rc.get("mode","").startswith("projected") else ""
-        cfg_proj   = _cfg_from_run_ctx(rc)  # None if strict
+        st.stop()
 
-        if st.button("Run Parity Suite", key="btn_run_parity"):
-            report_pairs: list[dict] = []
-            rows_preview: list[list[str]] = []
-            errors: list[str] = []
+    # Mirror the active policy from the last Overlap run (no placeholders)
+    def _cfg_from_run_ctx_clean(rc_: dict) -> dict | None:
+        mode = (rc_ or {}).get("mode", "strict")
+        if mode == "strict":
+            return None
+        cfg = cfg_projected_base()
+        if mode == "projected(auto)":
+            cfg["source"]["3"] = "auto"
+            return cfg
+        if mode == "projected(file)":
+            cfg["source"]["3"] = "file"
+            pj = (rc_ or {}).get("projector_filename", "")
+            if pj:
+                cfg.setdefault("projector_files", {})["3"] = pj
+            return cfg
+        return None
 
-            for row in pairs:
-                label = row.get("label","PAIR")
-                L, R = row.get("left", {}), row.get("right", {})
+    rc    = st.session_state.get("run_ctx", {}) or {}
+    ib    = st.session_state.get("_inputs_block", {}) or {}
+    policy_tag = rc.get("policy_tag", policy_label_from_cfg(cfg_strict()))
+    pj_hash    = rc.get("projector_hash","") if rc.get("mode","").startswith("projected") else ""
+    cfg_proj   = _cfg_from_run_ctx_clean(rc)  # None if strict
 
-                try:
-                    bL, cL, hL = L["boundaries"], L["cmap"], L["H"]
-                    bR, cR, hR = R["boundaries"], R["cmap"], R["H"]
+    c1, c2, c3 = st.columns([1,1,2])
+    with c1:
+        st.caption("Active policy:")
+        st.code(policy_tag, language="text")
+    with c2:
+        st.caption("Projector hash:")
+        st.code(pj_hash[:12] + ("…" if pj_hash else ""), language="text")
+    with c3:
+        st.caption("One projector decision is reused across the whole batch.")
 
-                    out_L_strict = _one_leg(bL, cL, hL, None)
-                    out_R_strict = _one_leg(bR, cR, hR, None)
+    if st.button("Run Parity Suite", key="btn_run_parity_final"):
+        report_pairs: list[dict] = []
+        rows_preview: list[list[str]] = []
+        errors: list[str] = []
 
-                    s_k2 = _and_pair(out_L_strict.get("2",{}).get("eq"), out_R_strict.get("2",{}).get("eq"))
-                    s_k3 = _and_pair(out_L_strict.get("3",{}).get("eq"), out_R_strict.get("3",{}).get("eq"))
-
-                    if cfg_proj is not None:
-                        try:
-                            out_L_proj = _one_leg(bL, cL, hL, cfg_proj)
-                            out_R_proj = _one_leg(bR, cR, hR, cfg_proj)
-                            p_k2 = _and_pair(out_L_proj.get("2",{}).get("eq"), out_R_proj.get("2",{}).get("eq"))
-                            p_k3 = _and_pair(out_L_proj.get("3",{}).get("eq"), out_R_proj.get("3",{}).get("eq"))
-                        except ValueError as e:
-                            p_k2, p_k3 = False, False
-                            errors.append(f"{label}: {e}")
-                    else:
-                        p_k2, p_k3 = None, None
-
-                    report_pairs.append({
-                        "label": label,
-                        "strict":    {"k2": (None if s_k2 is None else bool(s_k2)),
-                                      "k3": (None if s_k3 is None else bool(s_k3))},
-                        "projected": {"k2": (None if p_k2 is None else bool(p_k2)),
-                                      "k3": (None if p_k3 is None else bool(p_k3))},
-                    })
-                    rows_preview.append([label, _emoji(s_k3), _emoji(p_k3)])
-
-                except Exception as e:
-                    errors.append(f"{label}: {e}")
-
-            payload = {
-                "schema_version": PARITY_SCHEMA_VERSION,
-                "written_at_utc": _iso_utc_now(),
-                "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
-                "policy_tag": policy_tag,
-                **({"projector_hash": pj_hash} if pj_hash else {}),
-                "pairs": report_pairs,
-                "hashes": {
-                    "boundaries_hash": ib.get("boundaries_hash",""),
-                    "C_hash":          ib.get("C_hash",""),
-                    "H_hash":          ib.get("H_hash",""),
-                    "U_hash":          ib.get("U_hash",""),
-                },
-                **({"errors": errors} if errors else {}),
-            }
+        for row in pairs:
+            label = row.get("label","PAIR")
+            L, R = row.get("left", {}), row.get("right", {})
 
             try:
-                _atomic_write_json(PARITY_REPORT_PATH, payload)
-                st.success(f"Parity report saved → {PARITY_REPORT_PATH}")
-                st.caption("Summary (per pair): strict_k3 / projected_k3")
-                for r in rows_preview:
-                    st.write(f"• {r[0]} → strict={r[1]} · projected={r[2]}")
-                with open(PARITY_REPORT_PATH, "rb") as f:
-                    st.download_button("Download parity_report.json", f, file_name="parity_report.json", key="dl_parity_report")
-                if errors:
-                    st.warning("Some pairs had issues; details recorded in the report’s `errors` field.")
-                st.session_state["parity_last_report_pairs"] = report_pairs
+                bL, cL, hL = L["boundaries"], L["cmap"], L["H"]
+                bR, cR, hR = R["boundaries"], R["cmap"], R["H"]
+
+                out_L_strict = _one_leg(bL, cL, hL, None)
+                out_R_strict = _one_leg(bR, cR, hR, None)
+
+                s_k2 = _and_pair(out_L_strict.get("2",{}).get("eq"), out_R_strict.get("2",{}).get("eq"))
+                s_k3 = _and_pair(out_L_strict.get("3",{}).get("eq"), out_R_strict.get("3",{}).get("eq"))
+
+                if cfg_proj is not None:
+                    try:
+                        out_L_proj = _one_leg(bL, cL, hL, cfg_proj)
+                        out_R_proj = _one_leg(bR, cR, hR, cfg_proj)
+                        p_k2 = _and_pair(out_L_proj.get("2",{}).get("eq"), out_R_proj.get("2",{}).get("eq"))
+                        p_k3 = _and_pair(out_L_proj.get("3",{}).get("eq"), out_R_proj.get("3",{}).get("eq"))
+                    except ValueError as e:
+                        p_k2, p_k3 = False, False
+                        errors.append(f"{label}: {e}")
+                else:
+                    p_k2, p_k3 = None, None
+
+                report_pairs.append({
+                    "label": label,
+                    "strict":    {"k2": (None if s_k2 is None else bool(s_k2)),
+                                  "k3": (None if s_k3 is None else bool(s_k3))},
+                    "projected": {"k2": (None if p_k2 is None else bool(p_k2)),
+                                  "k3": (None if p_k3 is None else bool(p_k3))},
+                })
+                rows_preview.append([label, _emoji(s_k3), _emoji(p_k3)])
+
             except Exception as e:
-                st.error(f"Could not write parity_report.json: {e}")
+                errors.append(f"{label}: {e}")
 
-        # Render a compact table only after a successful run this session
-        last_pairs = st.session_state.get("parity_last_report_pairs")
-        if last_pairs:
-            df = pd.DataFrame([
-                {
-                    "Pair": p["label"],
-                    "Strict k2": _emoji(p["strict"]["k2"]),
-                    "Strict k3": _emoji(p["strict"]["k3"]),
-                    "Projected k2": _emoji(p["projected"]["k2"]),
-                    "Projected k3": _emoji(p["projected"]["k3"]),
-                } for p in last_pairs
-            ], columns=["Pair", "Strict k2", "Strict k3", "Projected k2", "Projected k3"])
-            st.caption("Parity summary")
-            st.dataframe(df, use_container_width=True)
-            try:
-                csv_bytes = df.to_csv(index=False).encode("utf-8")
-                st.download_button("Download parity_summary.csv", csv_bytes, file_name="parity_summary.csv")
-            except Exception:
-                pass
-# honor force flag from freezer / other flows
-if st.session_state.pop("should_write_cert", False):
-    st.session_state.pop("_last_cert_write_key", None)
+        payload = {
+            "schema_version": PARITY_SCHEMA_VERSION,
+            "written_at_utc": _iso_utc_now(),
+            "app_version": getattr(hashes, "APP_VERSION", "v0.1-core"),
+            "policy_tag": policy_tag,
+            **({"projector_hash": pj_hash} if pj_hash else {}),
+            "pairs": report_pairs,
+            "hashes": {
+                "boundaries_hash": ib.get("boundaries_hash",""),
+                "C_hash":          ib.get("C_hash",""),
+                "H_hash":          ib.get("H_hash",""),
+                "U_hash":          ib.get("U_hash",""),
+            },
+            **({"errors": errors} if errors else {}),
+        }
+
+        try:
+            _atomic_write_json(PARITY_REPORT_PATH, payload)
+            st.success(f"Parity report saved → {PARITY_REPORT_PATH}")
+            st.caption("Summary (per pair): strict_k3 / projected_k3")
+            for r in rows_preview:
+                st.write(f"• {r[0]} → strict={r[1]} · projected={r[2]}")
+            with open(PARITY_REPORT_PATH, "rb") as f:
+                st.download_button("Download parity_report.json", f, file_name="parity_report.json", key="dl_parity_report_final")
+            if errors:
+                st.warning("Some pairs had issues; details recorded in the report’s `errors` field.")
+            st.session_state["parity_last_report_pairs"] = report_pairs
+        except Exception as e:
+            st.error(f"Could not write parity_report.json: {e}")
+
+    # Render a compact table only after a successful run this session
+    last_pairs = st.session_state.get("parity_last_report_pairs")
+    if last_pairs:
+        import pandas as pd
+        df = pd.DataFrame([
+            {
+                "Pair": p["label"],
+                "Strict k3": _emoji(p["strict"]["k3"]),
+                "Proj k3":   _emoji(p["projected"]["k3"]),
+                "Strict k2": _emoji(p["strict"]["k2"]),
+                "Proj k2":   _emoji(p["projected"]["k2"]),
+            } for p in last_pairs
+        ], columns=["Pair", "Strict k3", "Proj k3", "Strict k2", "Proj k2"])
+        st.caption("Parity summary")
+        st.dataframe(df, use_container_width=True)
+        try:
+            csv_bytes = df.to_csv(index=False).encode("utf-8")
+            st.download_button("Download parity_summary.csv", csv_bytes, file_name="parity_summary.csv", key="dl_parity_summary_final")
+        except Exception:
+            pass
+
+# =============================== Coverage Sampling ==============================
+import os, csv, math, uuid, random
+from pathlib import Path
+from datetime import datetime, timezone
+
+COVERAGE_CSV_PATH = REPORTS_DIR / "coverage_sampling.csv"
+COVERAGE_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+def _utc_iso_z() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def _rand_gf2_matrix(rows: int, cols: int, density: float, rng: random.Random) -> list[list[int]]:
+    """Random 0/1 matrix with P(1)=density, over GF(2)."""
+    density = max(0.0, min(1.0, float(density)))
+    return [[1 if rng.random() < density else 0 for _ in range(cols)] for _ in range(rows)]
+
+def _gf2_rank(M: list[list[int]]) -> int:
+    """Row rank over GF(2) via in-place Gaussian elimination."""
+    if not M: return 0
+    A = [row[:] for row in M]
+    m, n = len(A), len(A[0])
+    r, c = 0, 0
+    while r < m and c < n:
+        # find pivot at or below r in column c
+        pivot = None
+        for i in range(r, m):
+            if A[i][c] & 1:
+                pivot = i; break
+        if pivot is None:
+            c += 1
+            continue
+        # swap into row r
+        if pivot != r:
+            A[r], A[pivot] = A[pivot], A[r]
+        # eliminate below
+        for i in range(r+1, m):
+            if A[i][c] & 1:
+                # row_i ^= row_r
+                A[i] = [(A[i][j] ^ A[r][j]) for j in range(n)]
+        r += 1; c += 1
+    return r
+
+def _col_support_pattern(M: list[list[int]]) -> list[str]:
+    """Return the multiset of column bitstrings (top→bottom), sorted canonically."""
+    if not M: return []
+    rows, cols = len(M), len(M[0])
+    cols_bits = []
+    for j in range(cols):
+        bits = ''.join('1' if (M[i][j] & 1) else '0' for i in range(rows))
+        cols_bits.append(bits)
+    cols_bits.sort()
+    return cols_bits
+
+def _lane_pattern_from_mask(mask: list[int]) -> str:
+    return ''.join(str(int(x) & 1) for x in (mask or []))
+
+def _coverage_signature(d_k1: list[list[int]], n_k: int) -> str:
+    """Signature = rank, ker_dim, and canonicalized column-support multiset."""
+    rk = _gf2_rank(d_k1)
+    ker = max(0, int(n_k) - rk)
+    patt = _col_support_pattern(d_k1)
+    return f"rk={rk};ker={ker};pattern=[{','.join(patt)}]"
+
+def _in_district_guess(signature: str, *, current_lane_pattern: str) -> int:
+    """
+    Minimal heuristic: mark True if the signature's pattern contains the
+    current lane pattern as a contiguous subsequence (or exact match when lengths align).
+    This is a gentle placeholder you can later swap for your registry of known districts.
+    """
+    try:
+        # extract inside [...] then drop commas
+        bracket = signature.split("pattern=[", 1)[1].split("]", 1)[0]
+        # when rows>1 we have multiple bitstrings; we just check if any equals lane pattern
+        col_bitstrings = [s.strip() for s in bracket.split(",") if s.strip()]
+        return int(any(bs == current_lane_pattern for bs in col_bitstrings))
+    except Exception:
+        return 0
+
+with st.expander("Coverage Sampling"):
+    # --- Guards: SSOT freshness + rectifier
+    try:
+        rc = require_fresh_run_ctx()
+        rc = rectify_run_ctx_mask_from_d3()
+    except Exception as e:
+        st.warning(str(e))
+        st.stop()
+
+    # Defaults from current fixture
+    n3_default = int((rc or {}).get("n3") or 0)
+    # If you track n2 in your inputs block dims, use it; else fallback to len(H2 rows)
+    try:
+        H_local = st.session_state.get("overlap_H") or _load_h_local()
+        H2_rows = len((H_local.blocks.__root__.get("2") or []))
+    except Exception:
+        H2_rows = 0
+    n2_default = H2_rows
+
+    # UI controls (unique keys)
+    c1, c2, c3, c4 = st.columns([1,1,1,2])
+    with c1:
+        num_samples = st.number_input("Samples", min_value=1, max_value=10000, value=250, step=50, key="cov_nsamples")
+    with c2:
+        bit_density = st.slider("Bit density", min_value=0.0, max_value=1.0, value=0.25, step=0.05, key="cov_density")
+    with c3:
+        n2 = st.number_input("Rows (n₂)", min_value=0, max_value=2048, value=n2_default, step=1, key="cov_n2")
+    with c4:
+        n3 = st.number_input("Cols (n₃)", min_value=0, max_value=2048, value=n3_default, step=1, key="cov_n3")
+
+    seed_str = st.text_input("Seed (any string/hex)", value="cov-seed-0001", key="cov_seed")
+
+    if st.button("Coverage Sample", key="btn_coverage_sample"):
+        if n3 <= 0 or n2 <= 0:
+            st.warning("Please ensure n₂ and n₃ are both > 0.")
+            st.stop()
+
+        # RNG
+        rng = random.Random()
+        rng.seed(seed_str)
+
+        # One run_id for this sampling action
+        run_id = rc.get("run_id") or str(uuid.uuid4())
+        st.session_state["run_ctx"]["run_id"] = run_id
+
+        # sample + aggregate
+        counts: dict[str, int] = {}
+        lane_pattern = _lane_pattern_from_mask(rc.get("lane_mask_k3") or [])
+        for _ in range(int(num_samples)):
+            # For coverage, we sample d_{k+1} (rows=n2, cols=n3) at the given density
+            d_k1 = _rand_gf2_matrix(n2, n3, bit_density, rng)
+            sig = _coverage_signature(d_k1, n_k=n3)
+            counts[sig] = counts.get(sig, 0) + 1
+
+        # Prepare rows (signature,count,in_district,pct)
+        total = float(num_samples)
+        rows = []
+        for sig, cnt in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+            in_d = _in_district_guess(sig, current_lane_pattern=lane_pattern)
+            pct = 0.0 if total <= 0 else round(100.0 * (cnt / total), 2)
+            rows.append([sig, cnt, in_d, pct])
+
+        # Write CSV with header comment (deterministic metadata)
+        comment = (
+            f"# schema={SCHEMA_VERSION}, app={APP_VERSION}, field=GF(2), "
+            f"seed={seed_str}, run_id={run_id}, n2={n2}, n3={n3}, density={bit_density}, "
+            f"samples={num_samples}, written_at_utc={_utc_iso_z()}"
+        )
+        try:
+            with open(COVERAGE_CSV_PATH, "w", encoding="utf-8", newline="") as f:
+                f.write(comment + "\n")
+                w = csv.writer(f)
+                w.writerow(["signature", "count", "in_district", "pct"])
+                for r in rows:
+                    w.writerow(r)
+            st.success(f"Coverage CSV saved → {COVERAGE_CSV_PATH}")
+            # Show a small preview table
+            import pandas as pd
+            preview = pd.DataFrame(rows[:30], columns=["signature","count","in_district","pct"])
+            st.dataframe(preview, use_container_width=True, hide_index=True)
+            # Download button
+            with open(COVERAGE_CSV_PATH, "rb") as f:
+                st.download_button("Download coverage_sampling.csv", f, file_name="coverage_sampling.csv", key="dl_coverage_csv")
+        except Exception as e:
+            st.error(f"Could not write coverage_sampling.csv: {e}")
+
+
 
 # ------------------------ Cert writer (central, SSOT-only, with A/B embed) ------------------------
 st.divider()
