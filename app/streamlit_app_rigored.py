@@ -1943,6 +1943,151 @@ def _simulate_overlap_with_cfg(cfg_forced):
         "errors": [],
     }
 
+# ====================== Step 2 & 3: SSOT mask + FILE validator usage ======================
+
+def _truth_mask_from_d3(d3: list[list[int]]) -> list[int]:
+    """Column-wise OR over GF(2); returns length n3 mask with values in {0,1}."""
+    if not d3 or not d3[0]:
+        return []
+    rows, n3 = len(d3), len(d3[0])
+    return [1 if any(d3[i][j] & 1 for i in range(rows)) else 0 for j in range(n3)]
+
+def _current_inputs_sig() -> list[str]:
+    _ib = st.session_state.get("_inputs_block") or {}
+    return [
+        str(_ib.get("boundaries_hash", "")),
+        str(_ib.get("C_hash", "")),
+        str(_ib.get("H_hash", "")),
+        str(_ib.get("U_hash", "")),
+        str(_ib.get("shapes_hash", "")),
+    ]
+
+def run_overlap():
+    # 0) Clear previous per-run artifacts
+    for k in ("proj_meta","run_ctx","residual_tags","overlap_out","overlap_H","overlap_cfg","overlap_policy_label"):
+        st.session_state.pop(k, None)
+
+    # 1) Bind projector (fail-fast if FILE invalid)
+    try:
+        P_active, meta = projector_choose_active(cfg_active, boundaries)
+    except ValueError as e:
+        st.error(str(e))
+        d3_now = (boundaries.blocks.__root__.get("3") or [])
+        st.session_state["run_ctx"] = {
+            "policy_tag": policy_label_from_cfg(cfg_active),
+            "mode": "strict" if not (cfg_active.get("enabled_layers") or []) else "projected(auto)",
+            "fixture_nonce": st.session_state.get("_fixture_nonce", 0),
+            "d3": d3_now,
+            "n3": len(d3_now[0]) if (d3_now and d3_now[0]) else 0,
+            "lane_mask_k3": [],
+            "P_active": [],
+            "projector_filename": (cfg_active.get("projector_files", {}) or {}).get("3", ""),
+            "projector_hash": "",
+            "projector_consistent_with_d": False,
+            "source": (cfg_active.get("source") or {}),
+            "errors": [str(e)],
+        }
+        st.stop()
+
+    # 2) Context from projector resolver (authoritative d3/n3/mode)
+    d3   = meta.get("d3") if "d3" in meta else (boundaries.blocks.__root__.get("3") or [])
+    n3   = meta.get("n3") if "n3" in meta else (len(d3[0]) if (d3 and d3[0]) else 0)
+    mode = meta.get("mode") or ("projected(file)" if (cfg_active.get("source", {}).get("3") == "file") else "projected(auto)")
+
+    # 3) SSOT lane mask from THIS d3 (no other sources!)
+    lm_truth = _truth_mask_from_d3(d3)
+    assert len(lm_truth) == n3, f"lane_mask_k3 length {len(lm_truth)} != n3 {n3}"
+
+    # 4) Strict residuals
+    H_local = _load_h_local()
+    H2 = (H_local.blocks.__root__.get("2") or [])
+    C3 = (cmap.blocks.__root__.get("3") or [])
+    I3 = eye(len(C3)) if C3 else []
+    try:
+        R3_strict = _xor_mat(mul(H2, d3), _xor_mat(C3, I3)) if (H2 and d3 and C3) else []
+    except Exception as e:
+        st.error(f"Shape guard failed at k=3: {e}")
+        st.stop()
+
+    def _is_zero(M): return (not M) or all(all((x & 1) == 0 for x in row) for row in M)
+    def _residual_tag(R, lm):
+        if not R or not lm: return "none"
+        rows = len(R)
+        lanes_idx = [j for j, m in enumerate(lm) if m]
+        ker_idx   = [j for j, m in enumerate(lm) if not m]
+        def _col_nonzero(j): return any(R[i][j] & 1 for i in range(rows))
+        lanes_resid = any(_col_nonzero(j) for j in lanes_idx) if lanes_idx else False
+        ker_resid   = any(_col_nonzero(j) for j in ker_idx)   if ker_idx   else False
+        if not lanes_resid and not ker_resid: return "none"
+        if lanes_resid and not ker_resid:     return "lanes"
+        if ker_resid and not lanes_resid:     return "ker"
+        return "mixed"
+
+    tag_strict = _residual_tag(R3_strict, lm_truth)
+    eq3_strict = _is_zero(R3_strict)
+
+    # 5) Projected leg (when enabled)
+    if cfg_active.get("enabled_layers"):
+        R3_proj  = mul(R3_strict, P_active) if (R3_strict and P_active) else []
+        eq3_proj = _is_zero(R3_proj)
+        tag_proj = _residual_tag(R3_proj, lm_truth)
+        out = {"3": {"eq": bool(eq3_proj), "n_k": n3}, "2": {"eq": True}}
+        st.session_state["residual_tags"] = {"strict": tag_strict, "projected": tag_proj}
+    else:
+        out = {"3": {"eq": bool(eq3_strict), "n_k": n3}, "2": {"eq": True}}
+        st.session_state["residual_tags"] = {"strict": tag_strict}
+
+    # 6) Persist SSOT once
+    st.session_state["overlap_out"] = out
+    st.session_state["overlap_cfg"] = cfg_active
+    st.session_state["overlap_policy_label"] = policy_label_from_cfg(cfg_active)
+    st.session_state["overlap_H"] = H_local
+    st.session_state["run_ctx"] = {
+        "policy_tag": st.session_state["overlap_policy_label"],
+        "mode": mode,
+        "fixture_nonce": st.session_state.get("_fixture_nonce", 0),
+        "d3": d3, "n3": n3, "lane_mask_k3": lm_truth,
+        "P_active": P_active,
+        "projector_filename": meta.get("projector_filename", ""),
+        "projector_hash": meta.get("projector_hash", ""),
+        "projector_consistent_with_d": meta.get("projector_consistent_with_d", None),
+        "source": (cfg_active.get("source") or {}),
+        "errors": [],
+    }
+
+    # 7) Debug line: instantly reveals axis/perm mistakes
+    st.caption(f"d3: rows={len(d3)} cols={n3} · lane_mask={lm_truth} (pattern '{''.join(map(str,lm_truth))}')")
+
+    # 8) UI
+    st.json(out)
+    if mode == "projected(file)":
+        if meta.get("projector_consistent_with_d", False):
+            st.success(f"projected(file) OK · {meta.get('projector_filename','')} · {meta.get('projector_hash','')[:12]} ✔️")
+        else:
+            st.warning("Projected(file) is not consistent with current d3 (shape/idempotence/diag/lane).")
+
+# One clear button (unique key)
+if st.button("Run Overlap", key="btn_run_overlap_final"):
+    run_overlap()
+
+# ====================== Defensive rectifier in Freezer (call before saving FILE) ======================
+def _rectify_run_ctx_mask_from_d3_or_stop():
+    _rc = st.session_state.get("run_ctx") or {}
+    if not _rc or not _rc.get("d3"):
+        st.warning("Context is stale. Run Overlap to refresh.")
+        st.stop()
+    n3 = int(_rc.get("n3") or 0)
+    lm_truth = _truth_mask_from_d3(_rc["d3"])
+    assert len(lm_truth) == n3, f"rectifier: lane_mask length {len(lm_truth)} != n3 {n3}"
+    lm_rc = list(_rc.get("lane_mask_k3") or [])
+    if lm_rc != lm_truth:
+        # hard fix + banner — this is the silent source of P3_LANE_MISMATCH
+        _rc["lane_mask_k3"] = lm_truth
+        st.session_state["run_ctx"] = _rc
+        st.info(f"Rectified run_ctx.lane_mask_k3 from {lm_rc} → {lm_truth} based on current d3.")
+
+
+
 # ---------------------------- Projector Freezer (AUTO → FILE) ----------------------------
 with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
     _ss = st.session_state
