@@ -3192,35 +3192,54 @@ def flush_workspace(*, delete_projectors: bool=False) -> dict:
 
 # ───────────────────────── UI Components ─────────────────────────
 
-# Encapsulate UI elements to keep logic organized
+# Small helpers to avoid key collisions & deprecations
+def _mkkey(ns: str, name: str) -> str:
+    return f"{ns}__{name}"
+
+def _fmt_ts(ts_float: float) -> str:
+    # timezone-aware, avoids DeprecationWarning
+    from datetime import datetime, timezone
+    try:
+        return datetime.fromtimestamp(ts_float, timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+    except Exception:
+        return ""
+
+EXPORTS_NS = "exports_v2"  # change once if you ever need to re-namespace
+
 with st.expander("Exports", expanded=False):
     c1, c2 = st.columns(2)
 
-    # Snapshot
+    # ---- Snapshot ZIP ----
     with c1:
-        if st.button("Build Snapshot ZIP", key="btn_build_snapshot_final"):
+        if st.button("Build Snapshot ZIP", key=_mkkey(EXPORTS_NS, "btn_build_snapshot")):
             try:
                 zp = build_everything_snapshot()
                 if zp:
                     st.success(f"Snapshot ready → {zp}")
                     with open(zp, "rb") as fz:
-                        st.download_button("Download snapshot.zip", fz, file_name=os.path.basename(zp), key="dl_snapshot_zip_final")
+                        st.download_button(
+                            "Download snapshot.zip",
+                            fz,
+                            file_name=os.path.basename(zp),
+                            key=_mkkey(EXPORTS_NS, "dl_snapshot_zip"),
+                        )
             except Exception as e:
                 st.error(f"Snapshot failed: {e}")
 
-    # Inputs Bundle
+    # ---- Inputs Bundle ----
     with c2:
-        if st.button("Export Inputs Bundle", key="btn_export_inputs_final"):
+        if st.button("Export Inputs Bundle", key=_mkkey(EXPORTS_NS, "btn_export_inputs")):
             try:
                 ib = st.session_state.get("_inputs_block") or {}
                 di = st.session_state.get("_district_info") or {}
                 rc = st.session_state.get("run_ctx") or {}
                 cert_cached = st.session_state.get("cert_payload")
+
                 district_id = di.get("district_id", "UNKNOWN")
                 run_id = (cert_cached or {}).get("identity", {}).get("run_id") or st.session_state.get("last_run_id")
 
                 if not run_id:
-                    seed_str = "".join(ib.get(k, "") for k in ("boundaries_hash","C_hash","H_hash","U_hash"))
+                    seed_str = "".join(ib.get(k, "") for k in ("boundaries_hash", "C_hash", "H_hash", "U_hash"))
                     ts = _utc_iso_z()
                     # fallback run_id using sha256
                     run_id = hashlib.sha256(f"{seed_str}|{ts}".encode("utf-8")).hexdigest()[:12]
@@ -3238,67 +3257,15 @@ with st.expander("Exports", expanded=False):
                 st.session_state["last_inputs_bundle_path"] = bp
                 st.success(f"Inputs bundle ready → {bp}")
                 with open(bp, "rb") as fz:
-                    st.download_button("Download inputs bundle", fz, file_name=os.path.basename(bp), key="dl_inputs_bundle_final")
-            except Exception as e:
-                st.error(f"Export Inputs Bundle failed: {e}")
-
-
-
-with st.expander("Exports & Maintenance", expanded=False):
-    c1, c2, c3 = st.columns([1,1,1])
-
-    # ---- Snapshot ZIP ----
-    with c1:
-        if st.button("Build Snapshot ZIP", key="btn_build_snapshot_final"):
-            try:
-                zp = build_everything_snapshot()
-                if zp:
-                    st.success(f"Snapshot ready → {zp}")
-                    with open(zp, "rb") as fz:
-                        st.download_button(
-                            "Download snapshot.zip", fz,
-                            file_name=os.path.basename(zp),
-                            key="dl_snapshot_zip_final"
-                        )
-            except Exception as e:
-                st.error(f"Snapshot failed: {e}")
-
-    # ---- Inputs Bundle ----
-    with c2:
-        if st.button("Export Inputs Bundle", key="btn_export_inputs_final"):
-            try:
-                ib = st.session_state.get("_inputs_block") or {}
-                di = st.session_state.get("_district_info") or {}
-                rc = st.session_state.get("run_ctx") or {}
-                cert_cached = st.session_state.get("cert_payload")
-                district_id = di.get("district_id", "UNKNOWN")
-                run_id = (cert_cached or {}).get("identity", {}).get("run_id") or st.session_state.get("last_run_id")
-
-                if not run_id:
-                    seed_str = "".join(ib.get(k, "") for k in ("boundaries_hash","C_hash","H_hash","U_hash"))
-                    ts = _utc_iso_z()
-                    run_id = hashlib.sha256(f"{seed_str}|{ts}".encode("utf-8")).hexdigest()[:12]
-                    st.session_state["last_run_id"] = run_id
-
-                policy_tag = st.session_state.get("overlap_policy_label") or rc.get("policy_tag") or "strict"
-
-                bp = build_inputs_bundle(
-                    inputs_block=ib,
-                    run_ctx=rc,
-                    district_id=district_id,
-                    run_id=run_id,
-                    policy_tag=policy_tag,
-                )
-                st.session_state["last_inputs_bundle_path"] = bp
-                st.success(f"Inputs bundle ready → {bp}")
-                with open(bp, "rb") as fz:
                     st.download_button(
-                        "Download inputs bundle", fz,
+                        "Download inputs bundle",
+                        fz,
                         file_name=os.path.basename(bp),
-                        key="dl_inputs_bundle_final"
+                        key=_mkkey(EXPORTS_NS, "dl_inputs_bundle"),
                     )
             except Exception as e:
                 st.error(f"Export Inputs Bundle failed: {e}")
+
 
     # ---- Flushes ----
     with c3:
