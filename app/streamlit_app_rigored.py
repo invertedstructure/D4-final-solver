@@ -445,56 +445,105 @@ def _diag(P): return [int(P[i][i] & 1) for i in range(len(P))] if P and P[0] els
 # ---------- projector chooser (strict/auto/file) ----------
 class _P3Error(ValueError):
     def __init__(self, code: str, msg: str):
-        super().__init__(f"{code}: {msg}"); self.code = code
+        super().__init__(f"{code}: {msg}")
+        self.code = code
 
 def _read_projector_matrix(path_str: str):
     p = _Path(path_str)
-    if not p.exists(): raise _P3Error("P3_SHAPE", f"projector file not found: {path_str}")
-    with open(p, "r", encoding="utf-8") as f: d = _json.load(f)
+    if not p.exists():
+        raise _P3Error("P3_SHAPE", f"projector file not found: {path_str}")
+    with open(p, "r", encoding="utf-8") as f:
+        d = _json.load(f)
     if isinstance(d, dict):
         b = (d.get("blocks", {}) or {}).get("3")
-        if isinstance(b, list): return b
-    if isinstance(d, list): return d
+        if isinstance(b, list):
+            return b
+    if isinstance(d, list):
+        return d
     raise _P3Error("P3_SHAPE", "unrecognized projector JSON structure")
 
+def _truth_mask_from_d3(d3: list[list[int]]) -> list[int]:
+    """Column-wise OR over GF(2) from THIS d3 snapshot only."""
+    if not d3 or not d3[0]:
+        return []
+    rows, n3 = len(d3), len(d3[0])
+    return [1 if any(int(d3[i][j]) & 1 for i in range(rows)) else 0 for j in range(n3)]
+
 def projector_choose_active(cfg_active: dict, boundaries):
+    # Resolve the exact d3 we’ll use and compute the SSOT mask from it.
     d3 = (boundaries.blocks.__root__.get("3") or [])
+    # normalize to ints defensively
+    d3 = [[int(x) & 1 for x in row] for row in d3] if d3 else []
     n3 = len(d3[0]) if (d3 and d3[0]) else 0
-    lane_mask = _lane_mask_from_d3(boundaries)
-    mode = "strict"; P_active = []; pj_filename = ""; pj_hash = ""; pj_consistent = None
+    lm_truth = _truth_mask_from_d3(d3)
 
+    mode = "strict"
+    P_active = []
+    pj_filename = ""
+    pj_hash = ""
+    pj_consistent = None
+
+    # No projected layer → strict
     if not cfg_active or not cfg_active.get("enabled_layers"):
-        return P_active, {"d3": d3, "n3": n3, "lane_mask": lane_mask, "mode": mode,
-                          "projector_filename": pj_filename, "projector_hash": pj_hash,
-                          "projector_consistent_with_d": pj_consistent}
+        return P_active, {
+            "d3": d3, "n3": n3, "mode": mode,
+            "lane_mask": lm_truth, "lane_mask_k3": lm_truth,
+            "projector_filename": pj_filename,
+            "projector_hash": pj_hash,
+            "projector_consistent_with_d": pj_consistent,
+        }
 
+    # Pick source
     source = (cfg_active.get("source", {}) or {}).get("3", "auto")
     mode = "projected(auto)" if source == "auto" else "projected(file)"
 
     if source == "auto":
-        diag = (lane_mask if lane_mask else [1]*n3)
+        # AUTO projector is always the diagonal of the SSOT lane mask
+        diag = lm_truth if lm_truth else [1] * n3
         P_active = [[1 if i == j and diag[j] else 0 for j in range(n3)] for i in range(n3)]
-        pj_hash = _sha256_hex_obj(P_active); pj_consistent = True
-        return P_active, {"d3": d3, "n3": n3, "lane_mask": lane_mask, "mode": mode,
-                          "projector_filename": "", "projector_hash": pj_hash,
-                          "projector_consistent_with_d": pj_consistent}
+        pj_hash = _sha256_hex_obj(P_active)
+        pj_consistent = True
+        return P_active, {
+            "d3": d3, "n3": n3, "mode": mode,
+            "lane_mask": lm_truth, "lane_mask_k3": lm_truth,
+            "projector_filename": "",
+            "projector_hash": pj_hash,
+            "projector_consistent_with_d": pj_consistent,
+        }
 
+    # FILE mode
     pj_filename = (cfg_active.get("projector_files", {}) or {}).get("3", "")
-    if not pj_filename: raise _P3Error("P3_SHAPE", "no projector file provided for file-mode")
+    if not pj_filename:
+        raise _P3Error("P3_SHAPE", "no projector file provided for file-mode")
 
     P = _read_projector_matrix(pj_filename)
-    m = len(P) or 0; n = len(P[0]) if m else 0
-    if n3 == 0 or m != n3 or n != n3: raise _P3Error("P3_SHAPE", f"expected {n3}x{n3}, got {m}x{n}")
-    if not _is_idempotent_gf2(P):    raise _P3Error("P3_IDEMP", "P is not idempotent over GF(2)")
-    if not _is_diagonal(P):          raise _P3Error("P3_DIAGONAL", "P has off-diagonal non-zeros")
-    pj_diag = _diag(P)
-    if lane_mask and pj_diag != [int(x) for x in lane_mask]:
-        raise _P3Error("P3_LANE_MISMATCH", f"diag(P) != lane_mask(d3) → {pj_diag} vs {lane_mask}")
-    pj_hash = _sha256_hex_obj(P); pj_consistent = True if lane_mask else None
+    m = len(P) or 0
+    n = len(P[0]) if m else 0
+    if n3 == 0 or m != n3 or n != n3:
+        raise _P3Error("P3_SHAPE", f"expected {n3}x{n3}, got {m}x{n}")
+    # normalize to ints
+    P = [[int(x) & 1 for x in row] for row in P]
 
-    return P, {"d3": d3, "n3": n3, "lane_mask": lane_mask, "mode": mode,
-               "projector_filename": pj_filename, "projector_hash": pj_hash,
-               "projector_consistent_with_d": pj_consistent}
+    if not _is_idempotent_gf2(P):
+        raise _P3Error("P3_IDEMP", "P is not idempotent over GF(2)")
+    if not _is_diagonal(P):
+        raise _P3Error("P3_DIAGONAL", "P has off-diagonal non-zeros")
+
+    pj_diag = _diag(P)  # must be 0/1 ints
+    # Compare ONLY to mask derived from THIS d3
+    if pj_diag != [int(x) for x in lm_truth]:
+        raise _P3Error("P3_LANE_MISMATCH", f"diag(P) != lane_mask(d3) → {pj_diag} vs {lm_truth}")
+
+    pj_hash = _sha256_hex_obj(P)
+    pj_consistent = True  # we just validated against the SSOT mask
+
+    return P, {
+        "d3": d3, "n3": n3, "mode": mode,
+        "lane_mask": lm_truth, "lane_mask_k3": lm_truth,
+        "projector_filename": pj_filename,
+        "projector_hash": pj_hash,
+        "projector_consistent_with_d": pj_consistent,
+    }
 
 # ---------- misc ----------
 def hash_matrix_norm(M) -> str:
