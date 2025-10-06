@@ -2574,14 +2574,30 @@ cert_payload = {
 # ---------------- Optional A/B embed (fresh only) ----------------
 _ab = st.session_state.get("ab_compare") or {}
 
-def _hz2(v): return v if isinstance(v, str) else ""
+# Resolve cert + inputs (must already exist at this point)
+cp = cert_payload  # cert_payload was assembled above
 inputs_sig_now = [
-    _hz2(inputs_block_payload.get("boundaries_hash","")),
-    _hz2(inputs_block_payload.get("C_hash","")),
-    _hz2(inputs_block_payload.get("H_hash","")),
-    _hz2(inputs_block_payload.get("U_hash","")),
-    _hz2(inputs_block_payload.get("shapes_hash","")),
+    str((inputs_block_payload or {}).get("boundaries_hash","")),
+    str((inputs_block_payload or {}).get("C_hash","")),
+    str((inputs_block_payload or {}).get("H_hash","")),
+    str((inputs_block_payload or {}).get("U_hash","")),
+    str((inputs_block_payload or {}).get("shapes_hash","")),
 ]
+
+# Safe getters from diagnostics (handle old/new field names)
+def _dget(name: str, default):
+    db = locals().get("diagnostics_block") or {}
+    return (
+        db.get(name) or
+        # accept both “_lanes” and unmasked legacy names
+        (db.get(name + "_lanes") if name.endswith("_full") is False else None) or
+        default
+    )
+
+lane_mask_safe        = _dget("lane_mask_k3", [])
+lane_vec_H2d3_safe    = _dget("lane_vec_H2d3", [])
+lane_vec_C3I_safe     = _dget("lane_vec_C3plusI3", [])
+
 def _pass_vec_from(out_block: dict) -> list[int]:
     return [
         int((out_block or {}).get("2",{}).get("eq", False)),
@@ -2589,31 +2605,31 @@ def _pass_vec_from(out_block: dict) -> list[int]:
     ]
 
 if _ab and (_ab.get("inputs_sig") == inputs_sig_now):
-    # Strict leg snapshot
+    # Strict leg snapshot (prefer A/B ctx; fall back to current diagnostics)
     strict_ctx = _ab.get("strict", {}) or {}
-    cert_payload["policy"]["strict_snapshot"] = {
+    cp.setdefault("policy", {})["strict_snapshot"] = {
         "policy_tag": "strict",
-        "ker_guard": "enforced",
-        "inputs": {"filenames": inputs_block_payload.get("filenames", {})},
-        "lane_mask_k3": diagnostics_block.get("lane_mask_k3", lane_mask),
-        "lane_vec_H2d3": strict_ctx.get("lane_vec_H2d3", lane_vec_H2d3),
-        "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3", lane_vec_C3plusI3),
+        "ker_guard":  "enforced",
+        "inputs": {"filenames": (inputs_block_payload or {}).get("filenames", {})},
+        "lane_mask_k3": lane_mask_safe,
+        "lane_vec_H2d3": strict_ctx.get("lane_vec_H2d3", lane_vec_H2d3_safe),
+        "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3", lane_vec_C3I_safe),
         "pass_vec": _pass_vec_from(strict_ctx.get("out", {})),
         "out": strict_ctx.get("out", {}),
     }
 
-    # Projected leg mirrors ACTIVE (AUTO/FILE)
+    # Projected leg mirrors ACTIVE (AUTO/FILE); Π fields copied from run_ctx
     projected_ctx = _ab.get("projected", {}) or {}
     proj_mode = _rc.get("mode", "projected(auto)")
     proj_tag  = "projected(file)" if proj_mode == "projected(file)" else "projected(auto)"
 
     proj_snap = {
         "policy_tag": proj_tag,
-        "ker_guard": "off",
-        "inputs": {"filenames": inputs_block_payload.get("filenames", {})},
-        "lane_mask_k3": diagnostics_block.get("lane_mask_k3", lane_mask),
-        "lane_vec_H2d3": projected_ctx.get("lane_vec_H2d3", lane_vec_H2d3),
-        "lane_vec_C3plusI3": projected_ctx.get("lane_vec_C3plusI3", lane_vec_C3plusI3),
+        "ker_guard":  "off",
+        "inputs": {"filenames": (inputs_block_payload or {}).get("filenames", {})},
+        "lane_mask_k3": lane_mask_safe,
+        "lane_vec_H2d3": projected_ctx.get("lane_vec_H2d3", lane_vec_H2d3_safe),
+        "lane_vec_C3plusI3": projected_ctx.get("lane_vec_C3plusI3", lane_vec_C3I_safe),
         "pass_vec": _pass_vec_from(projected_ctx.get("out", {})),
         "out": projected_ctx.get("out", {}),
         "projector_hash": _rc.get("projector_hash", projected_ctx.get("projector_hash","")),
@@ -2625,18 +2641,17 @@ if _ab and (_ab.get("inputs_sig") == inputs_sig_now):
     if proj_mode == "projected(file)":
         if _rc.get("projector_filename"):
             proj_snap["projector_filename"] = _rc.get("projector_filename")
-        pf_sha = cert_payload.get("policy", {}).get("projector_file_sha256")
+        pf_sha = (cp.get("policy") or {}).get("projector_file_sha256")
         if pf_sha:
             proj_snap["projector_file_sha256"] = pf_sha
 
-    cert_payload["policy"]["projected_snapshot"] = proj_snap
-    cert_payload["ab_pair_tag"] = f"strict__VS__{proj_tag}"
+    cp["policy"]["projected_snapshot"] = proj_snap
+    cp["ab_pair_tag"] = f"strict__VS__{proj_tag}"
+    cp["ab_embedded"] = True
+else:
+    # Explicitly mark as not embedded (useful for UI tail)
+    cert_payload["ab_embedded"] = False
 
-# --- Optional A/B freshness pill (UI only; non-blocking) ---
-if st.session_state.get("ab_compare"):
-    ab_fresh = (st.session_state["ab_compare"].get("inputs_sig") == inputs_sig_now)
-    st.caption("A/B snapshot: 🟢 fresh (will embed in cert)" if ab_fresh
-               else "A/B snapshot: 🟡 stale (won’t embed)")
 
 # --- assert invariants before hashing/writing ---
 _assert_cert_invariants(cert_payload)
