@@ -2471,6 +2471,18 @@ if _rc.get("mode") == "strict":
     policy_block.pop("projector_filename", None)
     policy_block.pop("projector_consistent_with_d", None)
 
+# ---------------- Residual tags & checks (define BEFORE Inputs/n_k fill) ----------------
+residual_tags  = st.session_state.get("residual_tags", {}) or {}
+is_strict_mode = (_rc.get("mode") == "strict")
+
+# Build checks from the last overlap_out (SSOT) and inject ker_guard
+checks_block = {
+    **(_out or {}),
+    "grid":  bool((_out or {}).get("grid",  True)),
+    "fence": bool((_out or {}).get("fence", True)),
+    "ker_guard": ("enforced" if is_strict_mode else "off"),
+}
+
 # ---------------- Inputs (copy from SSOT; enforce dims) ----------------
 inputs_block_payload = {
     "filenames": _ib.get("filenames", {
@@ -2489,7 +2501,7 @@ inputs_block_payload = {
 if _rc.get("mode") == "projected(file)":
     inputs_block_payload.setdefault("filenames", {})["projector"] = _rc.get("projector_filename","")
 
-# n_k fill for checks (use dims already set by your load block)
+# ---------------- n_k fill for checks (use dims already set by your load block) ----------------
 dims_now = inputs_block_payload.get("dims") or {}
 for _k, _nk in (("2", dims_now.get("n2")), ("3", dims_now.get("n3"))):
     if _k in checks_block:
