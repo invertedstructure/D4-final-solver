@@ -2423,15 +2423,7 @@ signatures_block = {
 }
 
 
-    # ---------------- Residual tags & checks ----------------
-    residual_tags = st.session_state.get("residual_tags", {}) or {}
-    is_strict_mode = (_rc.get("mode") == "strict")
-    checks_block = {
-        **_out,
-        "grid": True,    # hook real flags when wired
-        "fence": True,   # "
-        "ker_guard": ("enforced" if is_strict_mode else "off"),
-    }
+    
 
     # ---------------- Identity ----------------
     district_id = _di.get("district_id", st.session_state.get("district_id", "UNKNOWN"))
