@@ -1902,168 +1902,11 @@ def _simulate_overlap_with_cfg(cfg_forced):
 
 # ---------------------------- Main Block: "Projector Freezer (AUTO → FILE)" -------------------------
 from pathlib import Path
-import os, json as _json, tempfile, shutil, hashlib
+import os, json as _json, tempfile, shutil
 from datetime import datetime, timezone
+import streamlit as st
 
-# Ensure directories exist (only once)
-PROJECTORS_DIR = Path("projectors")
-PROJECTORS_DIR.mkdir(parents=True, exist_ok=True)
-PJ_REG_PATH = PROJECTORS_DIR / "registry.jsonl"
-
-# Utility functions (unchanged)
-def _utc_iso():
-    return datetime.now(timezone.utc).isoformat()
-
-def _sha256_bytes(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
-
-def _atomic_write_json(path: Path, payload: dict):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("wb", delete=False, dir=path.parent) as tmp:
-        blob = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
-        tmp.write(blob)
-        tmp.flush()
-        os.fsync(tmp.fileno())
-        tmp_name = tmp.name
-    os.replace(tmp_name, path)
-    return _sha256_bytes(blob), len(blob)
-
-def _append_registry_row(row: dict):
-    # in-session deduplication based on (district, projector_hash)
-    key = (row.get("district", ""), row.get("projector_hash", ""))
-    seen = st.session_state.setdefault("_pj_registry_keys", set())
-    if key in seen:
-        return False
-    seen.add(key)
-    PROJECTORS_DIR.mkdir(parents=True, exist_ok=True)
-    # atomic append jsonl
-    with tempfile.NamedTemporaryFile("w", delete=False, dir=PROJECTORS_DIR, encoding="utf-8") as tmp:
-        tmp.write(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n")
-        tmp.flush()
-        os.fsync(tmp.fileno())
-        tmp_name = tmp.name
-    with open(PJ_REG_PATH, "a", encoding="utf-8") as final:
-        with open(tmp_name, "r", encoding="utf-8") as src:
-            shutil.copyfileobj(src, final)
-    os.remove(tmp_name)
-    return True
-
-def _diag_projector_from_lane_mask(lm: list[int]) -> list[list[int]]:
-    n = len(lm or [])
-    return [[1 if (i == j and int(lm[j]) == 1) else 0 for j in range(n)] for i in range(n)]
-
-def _freeze_projector(*, district_id: str, lane_mask_k3: list[int], filename_hint: str | None = None) -> dict:
-    if not lane_mask_k3:
-        raise ValueError("No lane mask available (run Overlap first).")
-    P3 = _diag_projector_from_lane_mask(lane_mask_k3)
-    name = filename_hint or f"projector_{district_id or 'UNKNOWN'}.json"
-    pj_path = PROJECTORS_DIR / name
-    payload = {
-        "schema_version": "1.0.0",
-        "written_at_utc": _utc_iso(),
-        "blocks": {"3": P3}
-    }
-    pj_hash, pj_size = _atomic_write_json(pj_path, payload)
-    return {"path": str(pj_path), "projector_hash": pj_hash, "bytes": pj_size, "lane_mask_k3": lane_mask_k3[:]}
-
-def _validate_projector_file(pj_path: str) -> dict:
-    # Use same validator used by overlap (raises ValueError on fail)
-    cfg_file = _cfg_from_policy("projected(file)", pj_path)
-    _, meta = projector_choose_active(cfg_file, boundaries)
-    return meta
-
-def _simulate_overlap_with_cfg(cfg_forced):
-    """
-    Run a FILE overlap without touching the policy widget. Populates:
-      run_ctx, overlap_out, residual_tags, overlap_policy_label
-    """
-    # Bind projector (fail-fast)
-    P_active, meta = projector_choose_active(cfg_forced, boundaries)
-
-    # Context
-    d3 = meta.get("d3") if "d3" in meta else (boundaries.blocks.__root__.get("3") or [])
-    n3 = meta.get("n3") if "n3" in meta else (len(d3[0]) if (d3 and d3[0]) else 0)
-    lane_mask = meta.get("lane_mask", [])
-    mode = meta.get("mode", "projected(file)")
-
-    # Compute strict residual R3 = H2@d3 XOR (C3 XOR I3)
-    H_used = st.session_state.get("overlap_H") or _load_h_local()
-    H2 = (H_used.blocks.__root__.get("2") or [])
-    C3 = (cmap.blocks.__root__.get("3") or [])
-    I3 = eye(len(C3)) if C3 else []
-
-    def _xor(A, B):
-        if not A:
-            return [r[:] for r in (B or [])]
-        if not B:
-            return [r[:] for r in (A or [])]
-        return [[(A[i][j] ^ B[i][j]) & 1 for j in range(len(A[0]))] for i in range(len(A))]
-
-    def _is_zero(M):
-        return (not M) or all(all((x & 1) == 0 for x in row) for row in M)
-
-    R3_strict = _xor(mul(H2, d3), _xor(C3, I3)) if (H2 and d3 and C3) else []
-    R3_proj = mul(R3_strict, P_active) if (R3_strict and P_active) else []
-
-    def _residual_tag(R, lm):
-        if not R or not lm:
-            return "none"
-        rows, cols = len(R), len(R[0])
-        lanes_idx = [j for j, m in enumerate(lm) if m]
-        ker_idx = [j for j, m in enumerate(lm) if not m]
-        def _col_nonzero(j): return any(R[i][j] & 1 for i in range(rows))
-        lanes_resid = any(_col_nonzero(j) for j in lanes_idx) if lanes_idx else False
-        ker_resid = any(_col_nonzero(j) for j in ker_idx) if ker_idx else False
-        if not lanes_resid and not ker_resid:
-            return "none"
-        if lanes_resid and not ker_resid:
-            return "lanes"
-        if ker_resid and not lanes_resid:
-            return "ker"
-        return "mixed"
-
-    tag_strict = _residual_tag(R3_strict, lane_mask)
-    tag_proj = _residual_tag(R3_proj, lane_mask)
-
-    out = {"3": {"eq": bool(_is_zero(R3_proj)), "n_k": n3}, "2": {"eq": True}}
-    # Persist exactly like run_overlap
-    st.session_state["overlap_out"] = out
-    st.session_state["residual_tags"] = {"strict": tag_strict, "projected": tag_proj}
-    st.session_state["overlap_cfg"] = cfg_forced
-    st.session_state["overlap_policy_label"] = policy_label_from_cfg(cfg_forced)
-    st.session_state["run_ctx"] = {
-        "policy_tag": policy_label_from_cfg(cfg_forced),
-        "mode": mode,
-        "d3": d3,
-        "n3": n3,
-        "lane_mask_k3": lane_mask,
-        "P_active": P_active,
-        "projector_filename": meta.get("projector_filename", ""),
-        "projector_hash": meta.get("projector_hash", ""),
-        "projector_consistent_with_d": meta.get("projector_consistent_with_d", None),
-        "errors": [],
-    }
-
-# --------------------------- Main "Freeze Π → FILE" with validation -----------------------------
-with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
-    _rc = st.session_state.get("run_ctx") or {}
-    _di = st.session_state.get("_district_info") or {}
-    _out = st.session_state.get("overlap_out") or {}
-
-    # Eligibility: current mode is AUTO, we have lanes & d3, and last k=3 eq was True
-    elig_freeze = (
-        _rc.get("mode") == "projected(auto)"
-        and bool((_rc.get("lane_mask_k3") or []))
-        and bool((_rc.get("d3") or []))
-        and bool((_out.get("3", {}) or {}).get("eq", False))
-    )
-    district_id = _di.get("district_id", "UNKNOWN")
-import json as _json
-import os, tempfile, shutil
-from datetime import datetime, timezone
-from pathlib import Path
-
-# Ensure directories exist
+# Directory setup
 PROJECTORS_DIR = Path("projectors")
 PROJECTORS_DIR.mkdir(parents=True, exist_ok=True)
 PJ_REG_PATH = PROJECTORS_DIR / "registry.jsonl"
@@ -2088,14 +1931,11 @@ def _atomic_write_json(path: Path, payload: dict):
     return _sha256_bytes(blob), len(blob)
 
 def _append_registry_row(row: dict):
-    # Deduplicate based on district and projector_hash
     key = (row.get("district", ""), row.get("projector_hash", ""))
     seen = st.session_state.setdefault("_pj_registry_keys", set())
     if key in seen:
         return False
     seen.add(key)
-    PROJECTORS_DIR.mkdir(parents=True, exist_ok=True)
-    # Append jsonl atomically
     with tempfile.NamedTemporaryFile("w", delete=False, dir=PROJECTORS_DIR, encoding='utf-8') as tmp:
         tmp.write(_json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n")
         tmp.flush()
@@ -2107,14 +1947,13 @@ def _append_registry_row(row: dict):
     os.remove(tmp_name)
     return True
 
-# Function to generate projector from lane mask
 def _diag_projector_from_lane_mask(lm: list[int]) -> list[list[int]]:
     n = len(lm or [])
     return [[1 if (i == j and int(lm[j]) == 1) else 0 for j in range(n)] for i in range(n)]
 
-# Core function: Freeze projector with validations and freshness checks
+# ---------------------------- Core freeze function with validation and freshness -------------------------
 def _freeze_projector(*, district_id: str, lane_mask_k3: list[int], filename_hint: str | None = None) -> dict:
-    # --- Freshness gate: ensure run_ctx is fresh
+    # --- Freshness gate to ensure run_ctx is current
     _rc = st.session_state.get("run_ctx") or {}
     _fixture_nonce = st.session_state.get("_fixture_nonce")
     fixture_nonce = _rc.get("fixture_nonce")
@@ -2123,7 +1962,7 @@ def _freeze_projector(*, district_id: str, lane_mask_k3: list[int], filename_hin
         st.warning("Run Overlap to refresh context before freezing.")
         st.stop()
 
-    # --- Truth-mask guard: recompute truth lane_mask from current d3 snapshot
+    # --- Recompute truth lane_mask from current d3 snapshot
     d3_snap = _rc.get("d3") or []
     n3 = int(_rc.get("n3") or 0)
     if n3 != len(_rc.get("lane_mask_k3") or []):
@@ -2133,7 +1972,7 @@ def _freeze_projector(*, district_id: str, lane_mask_k3: list[int], filename_hin
         _rc["lane_mask_k3"] = lm_truth
         st.session_state["run_ctx"] = _rc
 
-    # --- Build from truth
+    # --- Build projector matrix from truth
     P_freeze = [[1 if (i == j and lm_truth[j]) else 0 for j in range(n3)] for i in range(n3)]
 
     # --- Validate strictly
@@ -2153,21 +1992,22 @@ def _freeze_projector(*, district_id: str, lane_mask_k3: list[int], filename_hin
         "lane_mask_k3": lm_truth,
     }
 
-# --- Main freeze handler (AUTO → FILE)
+# ---------------------------- UI Section -------------------------
 with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
-    _rc = st.session_state.get("run_ctx") or {}
-    _di = st.session_state.get("_district_info") or {}
+    _ss = st.session_state
+    _rc = _ss.get("run_ctx") or {}
+    _di = _ss.get("_district_info") or {}
     elig_freeze = (
         _rc.get("mode") == "projected(auto)"
         and bool((_rc.get("lane_mask_k3") or []))
         and bool((_rc.get("d3") or []))
-        and bool((_session.get("overlap_out") or {}).get("3", {}).get("eq", False))
+        and bool((_ss.get("overlap_out") or {}).get("3", {}).get("eq", False))
     )
     district_id = _di.get("district_id", "UNKNOWN")
-
+    
     # --- Freshness gate
-    _rc = st.session_state.get("run_ctx") or {}
-    _fixture_nonce = st.session_state.get("_fixture_nonce")
+    _rc = _ss.get("run_ctx") or {}
+    _fixture_nonce = _ss.get("_fixture_nonce")
     fixture_nonce = _rc.get("fixture_nonce")
     fresh = (_rc and fixture_nonce == _fixture_nonce)
     if not (fresh and _rc.get("d3") and _rc.get("lane_mask_k3")):
@@ -2186,102 +2026,9 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
                 st.warning("Projector file already exists. Enable 'Overwrite if exists' or choose a new name.")
                 st.stop()
 
-            # --- Freshness check again
-            _rc = st.session_state.get("run_ctx") or {}
-            _fixture_nonce = st.session_state.get("_fixture_nonce")
-            fixture_nonce = _rc.get("fixture_nonce")
-            fresh = (_rc and fixture_nonce == _fixture_nonce)
-            if not (fresh and _rc.get("d3") and _rc.get("lane_mask_k3")):
-                st.warning("Run Overlap to refresh context before freezing.")
-                st.stop()
-
-            # 1) Recompute truth from current d3 snapshot
-            d3_snap = _rc.get("d3") or []
-            n3 = int(_rc.get("n3") or 0)
-            if n3 != len(_rc.get("lane_mask_k3") or []):
-                n3 = len(d3_snap[0]) if d3_snap else 0
-            lm_truth = [1 if any(d3_snap[i][j] & 1 for i in range(len(d3_snap))) else 0 for j in range(n3)]
-            if lm_truth != (_rc.get("lane_mask_k3") or []):
-                _rc["lane_mask_k3"] = lm_truth
-                st.session_state["run_ctx"] = _rc
-
-            # 2) Build from truth
-            P_freeze = [[1 if (i == j and lm_truth[j]) else 0 for j in range(n3)] for i in range(n3)]
-
-            # 3) Validate strictly
-            validate_projector_file_strict(P_freeze, n3=n3, lane_mask=lm_truth)
-
-            # 4) Save the projector
-            payload = {"schema_version": "1.0.0", "blocks": {"3": P_freeze}}
-            pj_path = PROJECTORS_DIR / pj_basename
-            blob = _json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
-            pj_hash = _sha256_bytes(blob)
-            _atomic_write_json(pj_path, payload)
-
-            # 5) Switch to FILE and re-run overlap
-            cfg_active.setdefault("source", {})["3"] = "file"
-            cfg_active.setdefault("projector_files", {})["3"] = pj_path.as_posix()
-
-            # 6) Mark fixtures changed
-            if "_mark_fixtures_changed" in globals():
-                _mark_fixtures_changed()
-            else:
-                # fallback: bump nonce & clear caches
-                st.session_state["_fixture_nonce"] = int(st.session_state.get("_fixture_nonce", 0)) + 1
-                for k in ("overlap_out", "residual_tags", "overlap_cfg", "overlap_policy_label"):
-                    st.session_state.pop(k, None)
-
-            # 7) Re-run overlap
-            run_overlap()
-
-            # 8) Force cert write
-            st.session_state["should_write_cert"] = True
-            st.session_state.pop("_last_cert_write_key", None)
-
-            st.success(f"Π saved → {pj_path.name} · {pj_hash[:12]}… and switched to FILE.")
-        except Exception as e:
-            st.error(f"Freeze failed: {e}")
-
-# --- Registry tail (optional)
-with st.expander("Projector Registry (last 5)"):
-    try:
-        if PJ_REG_PATH.exists():
-            lines = PJ_REG_PATH.read_text(encoding="utf-8").splitlines()[-5:]
-            for ln in lines:
-                try:
-                    row = _json.loads(ln)
-                    st.write(f"• {row.get('district','?')} · {Path(row.get('filename','')).name} · {row.get('projector_hash','')[:12]}… · {row.get('written_at_utc','')}")
-                except Exception:
-                    continue
-        else:
-            st.caption("No registry yet.")
-    except Exception as e:
-        st.warning(f"Could not read registry tail: {e}")
-
-# --- Second UI approach: switch UI
-with st.expander("Projector Freezer (AUTO → FILE, switch UI)"):
-    _rc = st.session_state.get("run_ctx") or {}
-    _di = st.session_state.get("_district_info") or {}
-    elig = (
-        _rc.get("mode") == "projected(auto)"
-        and bool((_rc.get("lane_mask_k3") or []))
-        and bool((_rc.get("d3") or []))
-        and bool((_session.get("overlap_out") or {}).get("3", {}).get("eq", False))
-    )
-    st.caption("Freeze AUTO Π as a diagonal of lane_mask(d3), switch to FILE, then re-run.")
-    pj_name = st.text_input("Filename", value=f"projector_{_di.get('district_id', 'UNKNOWN')}.json", key="pj_freeze_name_final")
-    overwrite_ok = st.checkbox("Overwrite if exists", value=False, key="pj_freeze_overwrite_final")
-
-    if st.button("Freeze Π → FILE & Re-run", key="btn_freeze_final", disabled=not elig):
-        try:
-            pj_path = PROJECTORS_DIR / pj_name
-            if pj_path.exists() and not overwrite_ok:
-                st.warning("File exists. Enable overwrite or pick a new name.")
-                st.stop()
-
-            # --- Freshness gate
-            _rc = st.session_state.get("run_ctx") or {}
-            _fixture_nonce = st.session_state.get("_fixture_nonce")
+            # --- Re-validate run context
+            _rc = _ss.get("run_ctx") or {}
+            _fixture_nonce = _ss.get("_fixture_nonce")
             fixture_nonce = _rc.get("fixture_nonce")
             fresh = (_rc and fixture_nonce == _fixture_nonce)
             if not (fresh and _rc.get("d3") and _rc.get("lane_mask_k3")):
@@ -2291,27 +2038,26 @@ with st.expander("Projector Freezer (AUTO → FILE, switch UI)"):
             # Recompute truth lane_mask
             d3_snap = _rc.get("d3") or []
             n3 = int(_rc.get("n3") or 0)
-            lm = list(_rc.get("lane_mask_k3") or [])
-            if n3 <= 0 or len(lm) != n3:
-                raise ValueError("Freeze: invalid lane_mask/n3")
+            if n3 != len(_rc.get("lane_mask_k3") or []):
+                n3 = len(d3_snap[0]) if d3_snap else 0
             lm_truth = [1 if any(d3_snap[i][j] & 1 for i in range(len(d3_snap))) else 0 for j in range(n3)]
-            # Update run_ctx if needed
+            assert len(lm_truth) == n3, f"lane_mask length {len(lm_truth)} != n3 {n3}"
             if lm_truth != (_rc.get("lane_mask_k3") or []):
                 _rc["lane_mask_k3"] = lm_truth
-                st.session_state["run_ctx"] = _rc
+                _ss["run_ctx"] = _rc
 
-            # Build from truth
+            # Build projector matrix from truth
             P_freeze = [[1 if (i == j and lm_truth[j]) else 0 for j in range(n3)] for i in range(n3)]
 
             # Validate strictly
             validate_projector_file_strict(P_freeze, n3=n3, lane_mask=lm_truth)
 
-            # Save with schema
+            # Save and get hash
             payload = {"schema_version": "1.0.0", "blocks": {"3": P_freeze}}
-            _json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+            pj_path = PROJECTORS_DIR / pj_basename
             pj_hash, _ = _atomic_write_json(pj_path, payload)
 
-            # Switch to FILE
+            # Switch to FILE mode
             cfg_active.setdefault("source", {})["3"] = "file"
             cfg_active.setdefault("projector_files", {})["3"] = pj_path.as_posix()
 
@@ -2319,21 +2065,22 @@ with st.expander("Projector Freezer (AUTO → FILE, switch UI)"):
             if "_mark_fixtures_changed" in globals():
                 _mark_fixtures_changed()
             else:
-                st.session_state["_fixture_nonce"] = int(st.session_state.get("_fixture_nonce", 0)) + 1
+                _ss["_fixture_nonce"] = int(_ss.get("_fixture_nonce", 0)) + 1
                 for k in ("overlap_out", "residual_tags", "overlap_cfg", "overlap_policy_label"):
-                    st.session_state.pop(k, None)
+                    _ss.pop(k, None)
 
             # Re-run overlap
             run_overlap()
 
             # Force cert write
-            st.session_state["should_write_cert"] = True
-            st.session_state.pop("_last_cert_write_key", None)
+            _ss["should_write_cert"] = True
+            _ss.pop("_last_cert_write_key", None)
 
             st.success(f"Π saved → {pj_path.name} · {pj_hash[:12]}… and switched to FILE.")
         except Exception as e:
             st.error(f"Freeze failed: {e}")
 
+# Additional registry display, switch UI, etc., can be added as needed.
 
 
   
