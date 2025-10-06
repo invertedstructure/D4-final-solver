@@ -2665,8 +2665,6 @@ else:
                     pass
             except Exception as e:
                 st.error(f"Bundle build failed: {e}")
-else:
-    st.caption("No cert produced in this run (nothing to bundle).")
 
 
 # ───────────────────────── Certs on disk (last 5) with A/B badge ─────────────────────────
