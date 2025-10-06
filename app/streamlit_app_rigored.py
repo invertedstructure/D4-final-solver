@@ -1699,7 +1699,7 @@ with safe_expander("Logs: exports (optional)"):
 
 
 
-   # ------------------------------ Projector Freezer (AUTO → FILE) — replacement ------------------------------
+  # ------------------------------ Projector Freezer (AUTO → FILE) — widget-safe ------------------------------
 from pathlib import Path
 import os, json, tempfile, shutil, hashlib
 from datetime import datetime, timezone
@@ -1738,9 +1738,9 @@ def _append_registry_row(row: dict):
     os.remove(tmp_name)
     return True
 
-def _diag_projector_from_lane_mask(lane_mask: list[int]) -> list[list[int]]:
-    n = len(lane_mask or [])
-    return [[1 if (i == j and int(lane_mask[j]) == 1) else 0 for j in range(n)] for i in range(n)]
+def _diag_projector_from_lane_mask(lm: list[int]) -> list[list[int]]:
+    n = len(lm or [])
+    return [[1 if (i==j and int(lm[j])==1) else 0 for j in range(n)] for i in range(n)]
 
 def _freeze_projector(*, district_id: str, lane_mask_k3: list[int], filename_hint: str|None=None) -> dict:
     if not lane_mask_k3:
@@ -1753,10 +1753,72 @@ def _freeze_projector(*, district_id: str, lane_mask_k3: list[int], filename_hin
     return {"path": str(pj_path), "projector_hash": pj_hash, "bytes": pj_size, "lane_mask_k3": lane_mask_k3[:]}
 
 def _validate_projector_file(pj_path: str) -> dict:
+    # Use same validator used by overlap (raises ValueError with P3_* on fail)
     cfg_file = _cfg_from_policy("projected(file)", pj_path)
-    # reuse app validator; raises ValueError on P3_* guards
     _, meta = projector_choose_active(cfg_file, boundaries)
     return meta
+
+def _simulate_overlap_with_cfg(cfg_forced):
+    """
+    Run a FILE overlap without touching the policy widget. Populates:
+      run_ctx, overlap_out, residual_tags, overlap_policy_label
+    """
+    # Bind projector (fail-fast)
+    P_active, meta = projector_choose_active(cfg_forced, boundaries)
+
+    # Context
+    d3 = meta.get("d3") if "d3" in meta else (boundaries.blocks.__root__.get("3") or [])
+    n3 = meta.get("n3") if "n3" in meta else (len(d3[0]) if (d3 and d3[0]) else 0)
+    lane_mask = meta.get("lane_mask", [])
+    mode = meta.get("mode", "projected(file)")
+
+    # Compute strict residual R3 = H2@d3 XOR (C3 XOR I3)
+    H_used = st.session_state.get("overlap_H") or _load_h_local()
+    H2 = (H_used.blocks.__root__.get("2") or [])
+    C3 = (cmap.blocks.__root__.get("3") or [])
+    I3 = eye(len(C3)) if C3 else []
+    def _xor(A, B):
+        if not A: return [r[:] for r in (B or [])]
+        if not B: return [r[:] for r in (A or [])]
+        return [[(A[i][j] ^ B[i][j]) & 1 for j in range(len(A[0]))] for i in range(len(A))]
+    def _is_zero(M): return (not M) or all(all((x & 1)==0 for x in row) for row in M)
+
+    R3_strict = _xor(mul(H2, d3), _xor(C3, I3)) if (H2 and d3 and C3) else []
+    R3_proj   = mul(R3_strict, P_active) if (R3_strict and P_active) else []
+
+    def _residual_tag(R, lm):
+        if not R or not lm: return "none"
+        rows, cols = len(R), len(R[0])
+        lanes_idx = [j for j, m in enumerate(lm) if m]
+        ker_idx   = [j for j, m in enumerate(lm) if not m]
+        def _col_nonzero(j): return any(R[i][j] & 1 for i in range(rows))
+        lanes_resid = any(_col_nonzero(j) for j in lanes_idx) if lanes_idx else False
+        ker_resid   = any(_col_nonzero(j) for j in ker_idx)   if ker_idx   else False
+        if not lanes_resid and not ker_resid: return "none"
+        if lanes_resid and not ker_resid:     return "lanes"
+        if ker_resid and not lanes_resid:     return "ker"
+        return "mixed"
+
+    tag_strict = _residual_tag(R3_strict, lane_mask)
+    tag_proj   = _residual_tag(R3_proj,   lane_mask)
+
+    out = {"3": {"eq": bool(_is_zero(R3_proj)), "n_k": n3}, "2": {"eq": True}}
+    # Persist exactly like run_overlap
+    st.session_state["overlap_out"] = out
+    st.session_state["residual_tags"] = {"strict": tag_strict, "projected": tag_proj}
+    st.session_state["overlap_cfg"] = cfg_forced
+    st.session_state["overlap_policy_label"] = policy_label_from_cfg(cfg_forced)
+    st.session_state["run_ctx"] = {
+        "policy_tag": policy_label_from_cfg(cfg_forced),
+        "mode": mode,
+        "d3": d3, "n3": n3,
+        "lane_mask_k3": lane_mask,
+        "P_active": P_active,
+        "projector_filename": meta.get("projector_filename",""),
+        "projector_hash": meta.get("projector_hash",""),
+        "projector_consistent_with_d": meta.get("projector_consistent_with_d", None),
+        "errors": [],
+    }
 
 # --- UI gating
 _rc  = st.session_state.get("run_ctx") or {}
@@ -1767,21 +1829,21 @@ elig_freeze = (_rc.get("mode") == "projected(auto)") and bool((_out.get("3") or 
 district_id = _di.get("district_id", "UNKNOWN")
 
 with st.expander("Projector Freezer (AUTO → FILE)"):
-    st.caption("Freeze current AUTO Π → file, switch policy to FILE, force-write cert, and re-run.")
+    st.caption("Freeze current AUTO Π → file, run FILE overlap (no UI flip), force-write cert, append registry.")
     pj_basename  = st.text_input("Filename", value=f"projector_{district_id or 'UNKNOWN'}.json",
                                  help="Saved under ./projectors/", key="pj_freeze_name")
     overwrite_ok = st.checkbox("Overwrite if exists", value=False, key="pj_overwrite_ok")
     help_txt     = "Enabled when current run is projected(auto) and k3 is green."
 
-    if st.button("Freeze Π → switch to FILE & re-run", key="btn_freeze_pj", disabled=not elig_freeze, help=help_txt):
+    if st.button("Freeze Π → FILE & re-run (no UI flip)", key="btn_freeze_pj", disabled=not elig_freeze, help=help_txt):
         try:
-            # 0) overwrite guard
+            # overwrite guard
             target = PROJECTORS_DIR / pj_basename
             if target.exists() and not overwrite_ok:
                 st.warning("Projector file already exists. Enable 'Overwrite if exists' or choose a new name.")
                 st.stop()
 
-            # 1) Write projector from current lane mask
+            # 1) Write Π from current lane mask
             lm = list(_rc.get("lane_mask_k3") or [])
             meta_write = _freeze_projector(district_id=district_id, lane_mask_k3=lm, filename_hint=pj_basename)
             st.caption(f"Π saved → `{meta_write['path']}` · {meta_write['projector_hash'][:12]}…")
@@ -1797,20 +1859,14 @@ with st.expander("Projector Freezer (AUTO → FILE)"):
                 "projector_hash": meta_write["projector_hash"],
             })
 
-            # 3) Switch to FILE, force cert write, clear caches, and re-run
-            st.session_state["ov_last_pj_path"] = meta_write["path"]
-            st.session_state["ov_policy_choice"] = "projected(file)"  # if your policy radio uses this key
-            st.session_state["should_write_cert"] = True               # force next cert write
-            st.session_state.pop("_last_cert_write_key", None)         # bypass debounce
-
-            for k in ("run_ctx","overlap_out","residual_tags","ab_compare",
-                      "_projector_cache","_projector_cache_ab"):
+            # 3) Run a FILE overlap without mutating the policy widget
+            cfg_forced = _cfg_from_policy("projected(file)", meta_write["path"])
+            # clear caches that may fight with us
+            for k in ("ab_compare","_projector_cache","_projector_cache_ab"):
                 st.session_state.pop(k, None)
+            _simulate_overlap_with_cfg(cfg_forced)
 
-            run_overlap()
-            st.caption("Switched to projected(file), forced cert write, and re-ran Overlap.")
-
-            # 4) Validate FILE Π with the same guard used by overlap
+            # 4) Validate FILE Π (same checks as overlap) and show verdict
             try:
                 meta_file = _validate_projector_file(meta_write["path"])
                 if bool(meta_file.get("projector_consistent_with_d", False)):
@@ -1819,6 +1875,12 @@ with st.expander("Projector Freezer (AUTO → FILE)"):
                     st.warning("FILE Π saved but not consistent with current d3 (shape/idempotence/diag/lane).")
             except ValueError as ve:
                 st.error(f"FILE Π validation error: {ve}")
+
+            # 5) Force cert writer this run
+            st.session_state["should_write_cert"] = True
+            st.session_state.pop("_last_cert_write_key", None)  # bypass debounce
+
+            st.caption("FILE overlap populated; cert writer will emit a new cert this run.")
 
         except Exception as e:
             st.error(f"Freeze failed: {e}")
