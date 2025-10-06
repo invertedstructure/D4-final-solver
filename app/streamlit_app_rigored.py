@@ -3003,11 +3003,31 @@ else:
         else:
             cert_payload["ab_embedded"] = False
 
-        # Invariants + hash
+                # --- read-only SSOT pulls ---
+        _rc = st.session_state.get("run_ctx") or {}
+        lm = list(_rc.get("lane_mask_k3") or [])
+        n3 = int(_rc.get("n3") or 0)
+        
+        # Defensive: lane mask must match n3
+        assert len(lm) == n3, "cert: lane_mask_k3 length mismatch with n3"
+        
+        # Use SSOT mask and source verbatim
+        diagnostics_block = {
+            **diagnostics_block,             # your existing fields
+            "lane_mask_k3": lm,
+        }
+        policy_block["source"] = (_rc.get("source") or {})   # verbatim; no defaults
+        
+        # (A/B embedding should already be done by now if applicable)
+        
+        # --- invariants + hash ---
         _assert_cert_invariants(cert_payload)
         cert_payload.setdefault("integrity", {})
         cert_payload["integrity"]["content_hash"] = hash_json(cert_payload)
         full_hash = cert_payload["integrity"]["content_hash"]
+        
+        # proceed to write (package writer or atomic fallback)...
+
 
         # Write (prefer package)
         cert_path = None
