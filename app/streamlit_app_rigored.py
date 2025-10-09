@@ -2011,14 +2011,23 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
 GALLERY_PATH = (LOGS_DIR / "gallery.jsonl")
 GALLERY_PATH.parent.mkdir(parents=True, exist_ok=True)
 
+# Shared meta helper (hoisted so Witness can reuse)
+if "_std_meta" not in globals():
+    def _std_meta(run_id=None):
+        return {
+            "schema_version": SCHEMA_VERSION,
+            "written_at_utc": _utc_iso_z(),
+            "app_version":    APP_VERSION,
+            **({"run_id": run_id} if run_id else {}),
+        }
+
 ss = st.session_state
 ss.setdefault("_gallery_keys", set())
 ss.setdefault("_gallery_bootstrapped", False)
 
-with st.expander("Gallery"):
-    # --- Try to get a fresh run_ctx; never st.stop() here ---
-    rc = None
-    rc_ok = True
+with safe_expander("Gallery"):
+    # --- Freshness attempt; never st.stop() here ---
+    rc, rc_ok = None, True
     try:
         rc = require_fresh_run_ctx()
         rc = rectify_run_ctx_mask_from_d3()
@@ -2029,20 +2038,21 @@ with st.expander("Gallery"):
     out = ss.get("overlap_out") or {}
     eligible_green = bool(rc_ok and is_projected_green(rc, out))
 
-    # Global FILE Π invalid gate
-    fm_bad = False
-    try:
-        fm_bad = file_validation_failed()
-    except Exception:
-        fm_bad = False  # If validator not wired yet, don't hard-disable
+    # FILE Π invalid should only block if we're actually in projected(file)
+    def _file_pi_invalid_for_mode(_rc) -> bool:
+        try:
+            return (str((_rc or {}).get("mode","")) == "projected(file)") and file_validation_failed()
+        except Exception:
+            return False
 
+    fm_bad = _file_pi_invalid_for_mode(rc)
     help_txt = "Disabled because projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π."
 
     cert = ss.get("cert_payload")
     if not cert:
         st.info("No cert in memory yet. Run Overlap (let cert writer emit) before adding to gallery.")
 
-    # --- Extract fields only if we have a cert; otherwise use blanks safely ---
+    # --- Extract fields (safe defaults if no cert) ---
     identity = (cert or {}).get("identity") or {}
     policy   = (cert or {}).get("policy")   or {}
     inputs   = (cert or {}).get("inputs")   or {}
@@ -2059,7 +2069,7 @@ with st.expander("Gallery"):
     projector_hash = policy.get("projector_hash", "") or ""
     cert_hash      = ((cert or {}).get("integrity") or {}).get("content_hash", "") or ""
 
-    # 3) Optional UI fields
+    # --- Optional UI fields ---
     c1, c2, c3 = st.columns([1,1,2])
     with c1:
         growth_bumps = st.number_input("growth_bumps", min_value=0, value=0, step=1, key="gal_growth_bumps")
@@ -2068,15 +2078,7 @@ with st.expander("Gallery"):
     with c3:
         tag = st.text_input("tag (optional)", value="", key="gal_tag")
 
-    # 4) Build row per spec (meta first)
-    def _std_meta(run_id=None):
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "written_at_utc": _utc_iso_z(),
-            "app_version":    APP_VERSION,
-            **({"run_id": run_id} if run_id else {}),
-        }
-
+    # --- Build row (meta first) ---
     row = {
         **_std_meta(run_id=(st.session_state.get("run_ctx") or {}).get("run_id")),
         "district":       district_id,
@@ -2097,13 +2099,13 @@ with st.expander("Gallery"):
         "cert_content_hash": cert_hash,
     }
 
-    # 5) Dedupe key
+    # Dedupe key (robust to errors)
     try:
         key = gallery_key(row)
     except Exception:
-        key = None  # still allow UI to render
+        key = None
 
-    # Bootstrap session cache from tail once
+    # Bootstrap dedupe cache from tail once
     if not ss["_gallery_bootstrapped"]:
         for tail_row in _read_jsonl_tail(GALLERY_PATH, N=200):
             try:
@@ -2112,7 +2114,7 @@ with st.expander("Gallery"):
                 continue
         ss["_gallery_bootstrapped"] = True
 
-    # --- Button: Add to Gallery ---
+    # --- Button: Add to Gallery (non-blocking UX) ---
     disabled = bool(fm_bad or (not eligible_green) or (not cert))
     help_txt = (
         "Disabled because projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π."
@@ -2159,6 +2161,7 @@ with st.expander("Gallery"):
     except Exception as e:
         st.warning(f"Could not render gallery tail: {e}")
 
+
 # =========================[ STEP 3 · Witness on Stubborn RED ]=========================
 
 WITNESS_PATH = (LOGS_DIR / "witnesses.jsonl")
@@ -2180,10 +2183,9 @@ def witness_key(row: dict):
         str(h.get("U_hash","")),
     )
 
-with st.expander("Witness logger"):
-    # Freshness attempt; never st.stop()
-    rc = None
-    rc_ok = True
+with safe_expander("Witness logger"):
+    # --- Freshness attempt; never st.stop() here ---
+    rc, rc_ok = None, True
     try:
         rc = require_fresh_run_ctx()
         rc = rectify_run_ctx_mask_from_d3()
@@ -2195,16 +2197,17 @@ with st.expander("Witness logger"):
     eq3 = bool(((out.get("3") or {}).get("eq", False))) if rc_ok else True  # default to not-eligible
     eligible_red = bool(rc_ok and (eq3 is False))
 
-    # FILE Π invalid gate
-    fm_bad = False
-    try:
-        fm_bad = file_validation_failed()
-    except Exception:
-        fm_bad = False
+    # FILE Π invalid should only block in projected(file)
+    def _file_pi_invalid_for_mode(_rc) -> bool:
+        try:
+            return (str((_rc or {}).get("mode","")) == "projected(file)") and file_validation_failed()
+        except Exception:
+            return False
 
+    fm_bad = _file_pi_invalid_for_mode(rc)
     help_txt = "Disabled because projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π."
 
-    # Residual tag choice
+    # Residual tag selection (strict vs projected)
     tags = ss.get("residual_tags") or {}
     mode = str((rc or {}).get("mode","strict"))
     residual_tag_val = tags.get("projected" if mode.startswith("projected") else "strict", "none")
@@ -2274,7 +2277,8 @@ with st.expander("Witness logger"):
     k = witness_key(row)
     disabled = bool(fm_bad or (not eligible_red))
     tip = help_txt if fm_bad else (None if eligible_red else "Enabled only when k=3 is RED (eq=False).")
-    # --- Button: Log Witness ---
+
+    # --- Button: Log Witness (strict-aware gating) ---
     if st.button("Log Witness", key="btn_witness_append", disabled=disabled, help=(tip or "Append witness to witnesses.jsonl")):
         try:
             if k in ss["_witness_keys"]:
@@ -2311,7 +2315,8 @@ with st.expander("Witness logger"):
     except Exception as e:
         st.warning(f"Could not render witnesses tail: {e}")
 
-# ======================= end JSONL 
+# ======================= end JSONL
+
 
 
 
