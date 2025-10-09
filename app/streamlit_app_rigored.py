@@ -2790,7 +2790,113 @@ if "import_parity_pairs" in globals():
 
         return len(st.session_state.get("parity_pairs", []))
 # ----- /resolver -----
+# --- Replacement: smarter resolver (tolerant + aliases) ---
 
+# optional: alias map you can edit from UI (requested_name -> actual_path)
+st.session_state.setdefault("_fixture_aliases", {})  # e.g. {"boundaries D2.json": "inputs/fixtures/boundary_D2.json"}
+
+def _norm(s: str) -> str:
+    """Normalize a filename for fuzzy match: lowercase, drop non-alnum, collapse repeats."""
+    import re
+    s = s.lower()
+    s = s.replace(".json", "")
+    s = s.replace("boundaries", "boundary")  # singularize common variant
+    s = s.replace("shapes", "shape")         # optional: similar tweak
+    s = s.replace(" ", "").replace("_", "").replace("-", "")
+    s = re.sub(r"[^a-z0-9]", "", s)
+    return s
+
+def _find_fixture_file(name: str) -> str:
+    """
+    Resolve a fixture path with:
+      - alias map in session
+      - exact paths
+      - basename search under (., inputs/, inputs/fixtures/)
+      - fuzzy match (spaces/underscores/hyphens/case/“boundaries” vs “boundary”)
+    """
+    if not name or not str(name).strip():
+        raise FileNotFoundError("Empty fixture filename")
+
+    # 0) manual alias wins
+    alias = (st.session_state.get("_fixture_aliases") or {}).get(name)
+    if alias:
+        p = Path(alias)
+        if p.exists() and p.is_file():
+            return p.as_posix()
+
+    target = Path(name)
+    roots = [Path("."), Path("inputs"), FIXTURE_STASH_DIR]
+
+    # 1) direct hits (as-is, inputs/, stash/)
+    for p in [target, Path("inputs")/target.name, FIXTURE_STASH_DIR/target.name]:
+        if p.exists() and p.is_file():
+            return p.as_posix()
+
+    # 2) try with .json suffix if missing
+    if target.suffix.lower() != ".json":
+        tjson = target.with_suffix(".json")
+        for p in [tjson, Path("inputs")/tjson.name, FIXTURE_STASH_DIR/tjson.name]:
+            if p.exists() and p.is_file():
+                return p.as_posix()
+
+    # 3) recursive basename exact match
+    for root in roots:
+        try:
+            for p in root.rglob("*"):
+                if p.is_file() and p.name == target.name:
+                    return p.as_posix()
+        except Exception:
+            pass
+
+    # 4) fuzzy: normalize requested and compare to normalized candidate basenames
+    want = _norm(target.name)
+    best = None
+    for root in roots:
+        try:
+            for p in root.rglob("*.json"):
+                if not p.is_file(): 
+                    continue
+                if _norm(p.name) == want:
+                    best = p.as_posix()
+                    break
+            if best:
+                break
+        except Exception:
+            pass
+
+    if best:
+        return best
+
+    tried = " | ".join([
+        target.as_posix(),
+        (Path("inputs") / target.name).as_posix(),
+        (FIXTURE_STASH_DIR / target.name).as_posix()
+    ])
+    raise FileNotFoundError(
+        f"Fixture file not found for '{name}'. Tried: {tried} "
+        f"(tip: upload to the 'Parity fixtures stash' or add an alias below)."
+    )
+
+# --- Tiny UI to add an alias when names don't match ---
+with st.expander("Parity fixture aliases (optional)"):
+    st.caption("Map the requested name from parity_pairs.json to the actual file you saved.")
+    col1, col2, col3 = st.columns([3,3,1])
+    with col1:
+        alias_key = st.text_input("Requested name (from the pairs JSON)", value="boundaries D2.json", key="fx_alias_key")
+    with col2:
+        # let user pick any existing *.json under the stash
+        stash_files = sorted([p.name for p in FIXTURE_STASH_DIR.glob("*.json")])
+        alias_val = st.selectbox("Point to file (in stash)", options=["— choose —"] + stash_files, index=0, key="fx_alias_val")
+    with col3:
+        if st.button("Add alias", key="fx_alias_add"):
+            if alias_key.strip() and alias_val != "— choose —":
+                st.session_state["_fixture_aliases"][alias_key.strip()] = (FIXTURE_STASH_DIR / alias_val).as_posix()
+                st.success(f"Aliased '{alias_key.strip()}' → {alias_val}")
+
+    if st.session_state["_fixture_aliases"]:
+        st.caption("Current aliases:")
+        for k, v in st.session_state["_fixture_aliases"].items():
+            st.write(f"• {k} → {v}")
 
 
 # ---------------- Parity export hotfix: normalize fixture->paths ----------------
