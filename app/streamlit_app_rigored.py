@@ -2639,11 +2639,12 @@ with safe_expander("Parity pairs: import/export"):
             except Exception as e:
                 st.error(f"Import failed: {e}")
 
-# ============================== Parity Runner ===============================
+# ============================== Parity Runner (non-blocking) ===============================
 
 def _cfg_from_run_ctx(rc: dict) -> dict | None:
     mode = (rc or {}).get("mode", "strict")
-    if mode == "strict": return None
+    if mode == "strict":
+        return None
     cfg = cfg_projected_base()
     if mode == "projected(auto)":
         cfg["source"]["3"] = "auto"
@@ -2651,18 +2652,21 @@ def _cfg_from_run_ctx(rc: dict) -> dict | None:
     if mode == "projected(file)":
         cfg["source"]["3"] = "file"
         pj = (rc or {}).get("projector_filename", "")
-        if pj: cfg.setdefault("projector_files", {})["3"] = pj
+        if pj:
+            cfg.setdefault("projector_files", {})["3"] = pj
         return cfg
     return None
 
 def _and_pair(a: bool | None, b: bool | None) -> bool | None:
-    if a is None or b is None: return None
+    if a is None or b is None:
+        return None
     return bool(a) and bool(b)
 
 def _one_leg(boundaries_obj, cmap_obj, H_obj, projection_cfg: dict | None):
     if projection_cfg is None:
         return overlap_gate.overlap_check(boundaries_obj, cmap_obj, H_obj)
-    _P, _meta = projector_choose_active(projection_cfg, boundaries_obj)  # validates FILE Π
+    # Validate/choose projector once per leg
+    _P, _meta = projector_choose_active(projection_cfg, boundaries_obj)
     return overlap_gate.overlap_check(boundaries_obj, cmap_obj, H_obj, projection_config=projection_cfg)
 
 def _emoji(v):
@@ -2670,36 +2674,40 @@ def _emoji(v):
     return "✅" if bool(v) else "❌"
 
 with st.expander("Parity: run suite (mirrors active policy)"):
+    # Freshness guards — never stop the render
+    rc = None
     try:
         rc = require_fresh_run_ctx()
         rc = rectify_run_ctx_mask_from_d3()
     except Exception as e:
-        st.warning(str(e)); st.stop()
+        st.warning(str(e))
 
     pairs = st.session_state.get("parity_pairs", []) or []
     if not pairs:
         st.info("No parity pairs queued. Use the import/queue controls above.")
-        st.stop()
 
-    rc_   = st.session_state.get("run_ctx", {}) or {}
-    ib    = st.session_state.get("_inputs_block", {}) or {}
-    policy_tag = rc_.get("policy_tag", policy_label_from_cfg(cfg_strict()))
-    pj_hash    = rc_.get("projector_hash","") if rc_.get("mode","").startswith("projected") else ""
-    cfg_proj   = _cfg_from_run_ctx(rc_)  # None if strict
+    # Header info (even when disabled)
+    ib = st.session_state.get("_inputs_block", {}) or {}
+    policy_tag = (rc or {}).get("policy_tag", policy_label_from_cfg(cfg_strict()))
+    pj_hash    = (rc or {}).get("projector_hash","") if (rc or {}).get("mode","").startswith("projected") else ""
+    cfg_proj   = _cfg_from_run_ctx(rc or {})
 
     c1, c2, c3 = st.columns([1,1,2])
-    with c1: st.caption("Active policy:");    st.code(policy_tag, language="text")
-    with c2: st.caption("Projector hash:");   st.code(pj_hash[:12] + ("…" if pj_hash else ""), language="text")
+    with c1: st.caption("Active policy:");  st.code(policy_tag, language="text")
+    with c2: st.caption("Projector hash:"); st.code((pj_hash[:12]+"…") if pj_hash else "—", language="text")
     with c3: st.caption("One projector decision is reused across the whole batch.")
 
-    # FILE Π invalid → disable downstream run button (as requested)
-    _disabled = file_validation_failed()
-    _help_txt = "Disabled because projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π."
+    # Disable when not ready (no stops)
+    file_bad  = file_validation_failed()
+    tips = []
+    if rc is None: tips.append("Run Overlap to initialize run context.")
+    if not pairs:  tips.append("Queue at least one pair.")
+    if file_bad:   tips.append("Projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π.")
+    run_disabled = (rc is None) or (not pairs) or file_bad
+    help_txt = " ".join(tips) or "Run parity across queued pairs."
 
-    if st.button("Run Parity Suite",
-                 key="btn_run_parity_final",
-                 disabled=_disabled,
-                 help=(_help_txt if _disabled else "Run parity across queued pairs")):
+    if st.button("Run Parity Suite", key="btn_run_parity_final",
+                 disabled=run_disabled, help=help_txt):
         report_pairs: list[dict] = []
         rows_preview: list[list[str]] = []
         errors: list[str] = []
@@ -2707,14 +2715,12 @@ with st.expander("Parity: run suite (mirrors active policy)"):
         for row in pairs:
             label = row.get("label","PAIR")
             L, R = row.get("left", {}), row.get("right", {})
-
             try:
                 bL, cL, hL = L["boundaries"], L["cmap"], L["H"]
                 bR, cR, hR = R["boundaries"], R["cmap"], R["H"]
 
                 out_L_strict = _one_leg(bL, cL, hL, None)
                 out_R_strict = _one_leg(bR, cR, hR, None)
-
                 s_k2 = _and_pair(out_L_strict.get("2",{}).get("eq"), out_R_strict.get("2",{}).get("eq"))
                 s_k3 = _and_pair(out_L_strict.get("3",{}).get("eq"), out_R_strict.get("3",{}).get("eq"))
 
@@ -2738,13 +2744,12 @@ with st.expander("Parity: run suite (mirrors active policy)"):
                                   "k3": (None if p_k3 is None else bool(p_k3))},
                 })
                 rows_preview.append([label, _emoji(s_k3), _emoji(p_k3)])
-
             except Exception as e:
                 errors.append(f"{label}: {e}")
 
-        # ---------- Parity report payload (standard meta helper) ----------
+        # Standard meta payload
         payload = {
-            **_std_meta(run_id=(st.session_state.get("run_ctx") or {}).get("run_id")),  # <- NEW standard meta
+            **_std_meta(run_id=(st.session_state.get("run_ctx") or {}).get("run_id")),
             "policy_tag": policy_tag,
             **({"projector_hash": pj_hash} if pj_hash else {}),
             "pairs": report_pairs,
@@ -2764,33 +2769,38 @@ with st.expander("Parity: run suite (mirrors active policy)"):
             for r in rows_preview:
                 st.write(f"• {r[0]} → strict={r[1]} · projected={r[2]}")
             with open(PARITY_REPORT_PATH, "rb") as f:
-                st.download_button("Download parity_report.json", f, file_name="parity_report.json", key="dl_parity_report_final")
+                st.download_button("Download parity_report.json", f,
+                                   file_name="parity_report.json",
+                                   key="dl_parity_report_final")
             if errors:
                 st.warning("Some pairs had issues; details recorded in the report’s `errors` field.")
             st.session_state["parity_last_report_pairs"] = report_pairs
         except Exception as e:
             st.error(f"Could not write parity_report.json: {e}")
 
+    # Summary table (non-blocking)
     last_pairs = st.session_state.get("parity_last_report_pairs")
     if last_pairs:
         import pandas as pd
-        df = pd.DataFrame([
-            {"Pair": p["label"],
-             "Strict k3": _emoji(p["strict"]["k3"]),
-             "Proj k3":   _emoji(p["projected"]["k3"]),
-             "Strict k2": _emoji(p["strict"]["k2"]),
-             "Proj k2":   _emoji(p["projected"]["k2"])}
-            for p in last_pairs
-        ], columns=["Pair", "Strict k3", "Proj k3", "Strict k2", "Proj k2"])
+        df = pd.DataFrame([{
+            "Pair": p["label"],
+            "Strict k3": _emoji(p["strict"]["k3"]),
+            "Proj k3":   _emoji(p["projected"]["k3"]),
+            "Strict k2": _emoji(p["strict"]["k2"]),
+            "Proj k2":   _emoji(p["projected"]["k2"]),
+        } for p in last_pairs], columns=["Pair", "Strict k3", "Proj k3", "Strict k2", "Proj k2"])
         st.caption("Parity summary")
         st.dataframe(df, use_container_width=True)
         try:
             csv_bytes = df.to_csv(index=False).encode("utf-8")
-            st.download_button("Download parity_summary.csv", csv_bytes, file_name="parity_summary.csv", key="dl_parity_summary_final")
+            st.download_button("Download parity_summary.csv", csv_bytes,
+                               file_name="parity_summary.csv",
+                               key="dl_parity_summary_final")
         except Exception:
             pass
 
-# =============================== Coverage Sampling ==============================
+
+# =============================== Coverage Sampling (non-blocking) ==============================
 
 COVERAGE_CSV_PATH = REPORTS_DIR / "coverage_sampling.csv"
 COVERAGE_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
@@ -2808,8 +2818,10 @@ def _gf2_rank(M: list[list[int]]) -> int:
         pivot = None
         for i in range(r, m):
             if A[i][c] & 1: pivot = i; break
-        if pivot is None: c += 1; continue
-        if pivot != r: A[r], A[pivot] = A[pivot], A[r]
+        if pivot is None:
+            c += 1; continue
+        if pivot != r:
+            A[r], A[pivot] = A[pivot], A[r]
         for i in range(r+1, m):
             if A[i][c] & 1:
                 A[i] = [(A[i][j] ^ A[r][j]) for j in range(n)]
@@ -2844,12 +2856,15 @@ def _in_district_guess(signature: str, *, current_lane_pattern: str) -> int:
         return 0
 
 with st.expander("Coverage Sampling"):
+    # Freshness — do not stop the render if missing
+    rc = None
     try:
         rc = require_fresh_run_ctx()
         rc = rectify_run_ctx_mask_from_d3()
     except Exception as e:
-        st.warning(str(e)); st.stop()
+        st.warning(str(e))
 
+    # Defaults (safe even if rc is None)
     n3_default = int((rc or {}).get("n3") or 0)
     try:
         H_local = st.session_state.get("overlap_H") or _load_h_local()
@@ -2860,89 +2875,97 @@ with st.expander("Coverage Sampling"):
 
     c1, c2, c3, c4 = st.columns([1,1,1,2])
     with c1:
-        num_samples = st.number_input("Samples", min_value=1, max_value=10000, value=250, step=50, key="cov_nsamples")
+        num_samples = st.number_input("Samples", min_value=1, max_value=10000,
+                                      value=250, step=50, key="cov_nsamples")
     with c2:
-        bit_density = st.slider("Bit density", min_value=0.0, max_value=1.0, value=0.25, step=0.05, key="cov_density")
+        bit_density = st.slider("Bit density", min_value=0.0, max_value=1.0,
+                                value=0.25, step=0.05, key="cov_density")
     with c3:
-        n2 = st.number_input("Rows (n₂)", min_value=0, max_value=2048, value=n2_default, step=1, key="cov_n2")
+        n2 = st.number_input("Rows (n₂)", min_value=0, max_value=2048,
+                             value=n2_default, step=1, key="cov_n2")
     with c4:
-        n3 = st.number_input("Cols (n₃)", min_value=0, max_value=2048, value=n3_default, step=1, key="cov_n3")
+        n3 = st.number_input("Cols (n₃)", min_value=0, max_value=2048,
+                             value=n3_default, step=1, key="cov_n3")
 
     seed_txt = st.text_input("Seed (any string/hex)", value="cov-seed-0001", key="cov_seed")
 
-    # Disable downstream action if FILE Π invalid (consistent gating)
-    _disabled = file_validation_failed()
-    _help_txt = "Disabled because projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π."
+    # Disable when not ready (no stops)
+    file_bad = file_validation_failed()
+    cov_disabled = file_bad or (rc is None) or (n2_default <= 0) or (n3_default <= 0)
+    tips = []
+    if rc is None: tips.append("Run Overlap first.")
+    if n2_default <= 0 or n3_default <= 0: tips.append("Fixture dims unresolved (n₂/n₃).")
+    if file_bad: tips.append("Projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π.")
+    cov_help = " ".join(tips) or "Generate coverage_sampling.csv with meta header."
 
-    if st.button("Coverage Sample",
-                 key="btn_coverage_sample",
-                 disabled=_disabled,
-                 help=(_help_txt if _disabled else "Generate coverage_sampling.csv with meta header")):
+    if st.button("Coverage Sample", key="btn_coverage_sample",
+                 disabled=cov_disabled, help=cov_help):
 
         if n3 <= 0 or n2 <= 0:
             st.warning("Please ensure n₂ and n₃ are both > 0.")
-            st.stop()
+        else:
+            rng = random.Random(); rng.seed(seed_txt)
 
-        rng = random.Random(); rng.seed(seed_txt)
+            # Stamp a run_id
+            run_id = (st.session_state.get("run_ctx") or {}).get("run_id") or str(uuid.uuid4())
+            st.session_state.setdefault("run_ctx", {})["run_id"] = run_id
 
-        # Ensure a run_id is stamped for this sampling
-        run_id = (st.session_state.get("run_ctx") or {}).get("run_id") or str(uuid.uuid4())
-        st.session_state.setdefault("run_ctx", {})["run_id"] = run_id
+            counts: dict[str, int] = {}
+            lane_pattern = _lane_pattern_from_mask((rc or {}).get("lane_mask_k3") or [])
+            for _ in range(int(num_samples)):
+                d_k1 = _rand_gf2_matrix(int(n2), int(n3), float(bit_density), rng)
+                sig = _coverage_signature(d_k1, n_k=int(n3))
+                counts[sig] = counts.get(sig, 0) + 1
 
-        counts: dict[str, int] = {}
-        lane_pattern = _lane_pattern_from_mask(rc.get("lane_mask_k3") or [])
-        for _ in range(int(num_samples)):
-            d_k1 = _rand_gf2_matrix(n2, n3, float(bit_density), rng)
-            sig = _coverage_signature(d_k1, n_k=n3)
-            counts[sig] = counts.get(sig, 0) + 1
+            total = float(num_samples)
+            rows = []
+            for sig, cnt in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+                in_d = _in_district_guess(sig, current_lane_pattern=lane_pattern)
+                pct = 0.0 if total <= 0 else round(100.0 * (cnt / total), 2)
+                rows.append([sig, cnt, in_d, pct])
 
-        total = float(num_samples)
-        rows = []
-        for sig, cnt in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
-            in_d = _in_district_guess(sig, current_lane_pattern=lane_pattern)
-            pct = 0.0 if total <= 0 else round(100.0 * (cnt / total), 2)
-            rows.append([sig, cnt, in_d, pct])
+            # Standardized meta header
+            meta_lines = [
+                f"schema_version={SCHEMA_VERSION}",
+                f"saved_at={_utc_iso_z()}",
+                f"run_id={(st.session_state.get('run_ctx') or {}).get('run_id','')}",
+                f"app_version={APP_VERSION}",
+                f"seed={seed_txt}",
+                f"bit_density={bit_density}",
+                f"n2={n2}",
+                f"n3={n3}",
+            ]
+            header = ["signature", "count", "in_district", "pct"]
 
-        # ---------- Coverage CSV meta header (standardized) ----------
-        meta_lines = [
-            f"schema_version={SCHEMA_VERSION}",
-            f"saved_at={_utc_iso_z()}",
-            f"run_id={(st.session_state.get('run_ctx') or {}).get('run_id','')}",
-            f"app_version={APP_VERSION}",
-            f"seed={seed_txt}",
-            f"bit_density={bit_density}",
-            f"n2={n2}",
-            f"n3={n3}",
-        ]
+            # Use shared writer if present; otherwise local atomic
+            try:
+                _atomic_write_csv(COVERAGE_CSV_PATH, header, rows, meta_lines)  # type: ignore[arg-type]
+            except Exception:
+                with tempfile.NamedTemporaryFile("w", delete=False, dir=COVERAGE_CSV_PATH.parent,
+                                                 encoding="utf-8", newline="") as tmp:
+                    for line in meta_lines:
+                        tmp.write(f"# {line}\n")
+                    w = csv.writer(tmp); w.writerow(header); w.writerows(rows)
+                    tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
+                os.replace(tmp_name, COVERAGE_CSV_PATH)
 
-        header = ["signature", "count", "in_district", "pct"]
+            st.success(f"Coverage CSV saved → {COVERAGE_CSV_PATH}")
 
-        # Use shared CSV writer if available
-        try:
-            _atomic_write_csv(COVERAGE_CSV_PATH, header, rows, meta_lines)  # type: ignore[arg-type]
-        except Exception:
-            # minimal local writer fallback
-            with tempfile.NamedTemporaryFile("w", delete=False, dir=COVERAGE_CSV_PATH.parent, encoding="utf-8", newline="") as tmp:
-                for line in meta_lines:
-                    tmp.write(f"# {line}\n")
-                w = csv.writer(tmp); w.writerow(header); w.writerows(rows)
-                tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
-            os.replace(tmp_name, COVERAGE_CSV_PATH)
+            try:
+                import pandas as pd
+                preview = pd.DataFrame(rows[:30], columns=header)
+                st.dataframe(preview, use_container_width=True, hide_index=True)
+            except Exception:
+                pass
 
-        st.success(f"Coverage CSV saved → {COVERAGE_CSV_PATH}")
+            try:
+                with open(COVERAGE_CSV_PATH, "rb") as f:
+                    st.download_button("Download coverage_sampling.csv", f,
+                                       file_name="coverage_sampling.csv",
+                                       key="dl_coverage_csv")
+            except Exception:
+                pass
 
-        try:
-            import pandas as pd
-            preview = pd.DataFrame(rows[:30], columns=header)
-            st.dataframe(preview, use_container_width=True, hide_index=True)
-        except Exception:
-            pass
-
-        try:
-            with open(COVERAGE_CSV_PATH, "rb") as f:
-                st.download_button("Download coverage_sampling.csv", f, file_name="coverage_sampling.csv", key="dl_coverage_csv")
-        except Exception:
-            pass
 
 
 
