@@ -1920,42 +1920,44 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
 
 
 
-# =========================[ · Gallery Append & Dedupe ]=========================
+# =========================[ · Gallery Append & Dedupe (non-blocking) ]=========================
 
 GALLERY_PATH = (LOGS_DIR / "gallery.jsonl")
 GALLERY_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-# session dedupe cache (idempotent)
-st.session_state.setdefault("_gallery_keys", set())
-st.session_state.setdefault("_gallery_bootstrapped", False)
+ss = st.session_state
+ss.setdefault("_gallery_keys", set())
+ss.setdefault("_gallery_bootstrapped", False)
 
-def render_gallery_panel():
-    ss = st.session_state
-
-    # 1) Freshness + SSOT guard (soft)
+def _fresh_ctx_or_msg():
+    """Try to fetch/rectify run_ctx; never st.stop()."""
     try:
-        rc  = require_fresh_run_ctx()
-        rc  = rectify_run_ctx_mask_from_d3()
+        rc = require_fresh_run_ctx()
+        rc = rectify_run_ctx_mask_from_d3()
+        return True, rc, None
     except Exception as e:
-        st.warning(str(e))
-        return  # don't kill the app; just skip this panel
+        return False, {}, str(e)
 
+with st.expander("Gallery"):
+    ok, rc, rc_msg = _fresh_ctx_or_msg()
     out = ss.get("overlap_out") or {}
-    eligible_green = is_projected_green(rc, out)
+    eligible_green = (is_projected_green(rc, out) if ok else False)
 
     # Global disable if projected(FILE) invalid
-    fm_bad  = file_validation_failed()
+    fm_bad  = file_validation_failed() if "file_validation_failed" in globals() else False
     help_txt = "Disabled because projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π."
 
+    # Cert present?
     cert = ss.get("cert_payload")
+    if not ok:
+        st.warning(rc_msg or "Run Overlap first.")
     if not cert:
         st.info("No cert in memory yet. Run Overlap (let cert writer emit) before adding to gallery.")
-        return  # early return, not st.stop()
 
-    # 2) Extract canonical fields from the *cert* (read-only)
-    identity = cert.get("identity", {}) or {}
-    policy   = cert.get("policy",   {}) or {}
-    inputs   = cert.get("inputs",   {}) or {}
+    # 2) Extract canonical fields safely
+    identity = (cert or {}).get("identity", {}) or {}
+    policy   = (cert or {}).get("policy",   {}) or {}
+    inputs   = (cert or {}).get("inputs",   {}) or {}
     hashes   = inputs.get("hashes", {}) or {
         "boundaries_hash": inputs.get("boundaries_hash", ""),
         "C_hash":          inputs.get("C_hash", ""),
@@ -1967,7 +1969,7 @@ def render_gallery_panel():
     district_id    = identity.get("district_id", "UNKNOWN")
     policy_tag     = policy.get("policy_tag", "")
     projector_hash = policy.get("projector_hash", "") or ""
-    cert_hash      = (cert.get("integrity") or {}).get("content_hash", "") or ""
+    cert_hash      = ((cert or {}).get("integrity") or {}).get("content_hash", "") or ""
 
     # 3) Optional UI fields
     c1, c2, c3 = st.columns([1,1,2])
@@ -1978,9 +1980,13 @@ def render_gallery_panel():
     with c3:
         tag = st.text_input("tag (optional)", value="", key="gal_tag")
 
-    # 4) Build row per spec (meta first)
+    # 4) Row with standard meta
     row = {
-        **_std_meta(run_id=(st.session_state.get("run_ctx") or {}).get("run_id")),
+        **(_std_meta(run_id=(st.session_state.get("run_ctx") or {}).get("run_id")) if "_std_meta" in globals() else {
+            "schema_version": SCHEMA_VERSION,
+            "written_at_utc": _utc_iso_z(),
+            "app_version":    APP_VERSION,
+        }),
         "district":       district_id,
         "policy": {
             "policy_tag":     policy_tag,
@@ -1999,27 +2005,30 @@ def render_gallery_panel():
         "cert_content_hash": cert_hash,
     }
 
-    # 5) One dedupe key (6-tuple)
     key = gallery_key(row)
 
-    # Bootstrap session cache from tail once
+    # Bootstrap dedupe cache from tail once (best-effort)
     if not ss["_gallery_bootstrapped"]:
         for tail_row in _read_jsonl_tail(GALLERY_PATH, N=200):
-            try:
-                ss["_gallery_keys"].add(gallery_key(tail_row))
-            except Exception:
-                continue
+            try: ss["_gallery_keys"].add(gallery_key(tail_row))
+            except Exception: continue
         ss["_gallery_bootstrapped"] = True
 
-    # 6) Append button (gated by green & FILE state)
-    disabled = fm_bad or (not eligible_green)
-    tip = help_txt if fm_bad else (None if eligible_green else "Enabled only when projected is green (k=3 eq=True).")
-    if st.button(
-        "Add to Gallery",
-        key="btn_gallery_append",
-        disabled=disabled,
-        help=(tip or "Append current cert to gallery.jsonl"),
-    ):
+    # 6) Append button (gated by green & FILE state & cert presence & fresh ctx)
+    disabled = (fm_bad or (not eligible_green) or (not cert) or (not ok))
+    if disabled:
+        if fm_bad:
+            tip = help_txt
+        elif not ok:
+            tip = rc_msg or "Run Overlap first."
+        elif not cert:
+            tip = "Run Overlap to emit a cert before adding to gallery."
+        else:
+            tip = "Enabled only when projected is green (k=3 eq=True)."
+    else:
+        tip = "Append current cert to gallery.jsonl"
+
+    if st.button("Add to Gallery", key="btn_gallery_append", disabled=disabled, help=tip):
         try:
             if key in ss["_gallery_keys"]:
                 st.info("Duplicate skipped (same district/policy/hashes).")
@@ -2055,48 +2064,45 @@ def render_gallery_panel():
     except Exception as e:
         st.warning(f"Could not render gallery tail: {e}")
 
-with st.expander("Gallery"):
-    render_gallery_panel()
-
 # ======================================================================================
-# =========================[ STEP 3 · Witness on Stubborn RED ]=========================
+# =========================[ STEP 3 · Witness on Stubborn RED (non-blocking) ]=========================
 
 WITNESS_PATH = (LOGS_DIR / "witnesses.jsonl")
 WITNESS_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-# session dedupe caches (idempotent)
-st.session_state.setdefault("_witness_keys", set())
-st.session_state.setdefault("_witness_bootstrapped", False)
+ss = st.session_state
+ss.setdefault("_witness_keys", set())
+ss.setdefault("_witness_bootstrapped", False)
 
-def render_witness_panel():
-    ss = st.session_state
+def witness_key(row: dict):
+    h = row.get("hashes") or {}
+    return (
+        str(row.get("district","UNKNOWN")),
+        str(row.get("reason","")),
+        str(row.get("residual_tag","")),
+        str((row.get("policy") or {}).get("policy_tag","")),
+        str(h.get("boundaries_hash","")),
+        str(h.get("C_hash","")),
+        str(h.get("H_hash","")),
+        str(h.get("U_hash","")),
+    )
 
-    # --- Freshness + SSOT guards (soft)
-    try:
-        rc  = require_fresh_run_ctx()
-        rc  = rectify_run_ctx_mask_from_d3()
-    except Exception as e:
-        st.warning(str(e))
-        return
-
+with st.expander("Witness logger"):
+    ok, rc, rc_msg = _fresh_ctx_or_msg()
     out = ss.get("overlap_out") or {}
-    eq3 = bool(((out.get("3") or {}).get("eq", False)))
+    eq3 = bool(((out.get("3") or {}).get("eq", False))) if ok else True  # default to not-eligible if stale
     eligible_red = (eq3 is False)
 
-    # FILE Π invalid gate
-    fm_bad  = file_validation_failed()
+    fm_bad  = file_validation_failed() if "file_validation_failed" in globals() else False
     help_txt = "Disabled because projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π."
 
-    # residual tag selection
+    # Residual tag
     tags = ss.get("residual_tags") or {}
-    mode = str(rc.get("mode","strict"))
+    mode = str((rc or {}).get("mode","strict"))
     residual_tag_val = tags.get("projected" if mode.startswith("projected") else "strict", "none")
 
-    # Pull cert payload if present (for content hash); optional
     cert = ss.get("cert_payload") or {}
     cert_hash = (cert.get("integrity") or {}).get("content_hash","") or ""
-
-    # Canonical hashes (prefer inputs.hashes inside cert; fall back to inputs flat)
     inputs = cert.get("inputs", {}) or {}
     hashes = inputs.get("hashes") or {
         "boundaries_hash": inputs.get("boundaries_hash",""),
@@ -2108,12 +2114,10 @@ def render_witness_panel():
 
     identity = cert.get("identity", {}) or {}
     district_id = identity.get("district_id", "UNKNOWN")
-
     policy = cert.get("policy", {}) or {}
-    policy_tag = policy.get("policy_tag", rc.get("policy_tag",""))
-    projector_hash = policy.get("projector_hash","") or (rc.get("projector_hash","") or "")
+    policy_tag = policy.get("policy_tag", (rc or {}).get("policy_tag",""))
+    projector_hash = policy.get("projector_hash","") or ((rc or {}).get("projector_hash","") or "")
 
-    # UI controls
     c1, c2 = st.columns([1,3])
     with c1:
         reason = st.selectbox(
@@ -2125,12 +2129,15 @@ def render_witness_panel():
     with c2:
         note = st.text_input("note (optional)", value="", key="w_note")
 
-    # Build row per spec (meta first)
     row = {
-        **_std_meta(run_id=(st.session_state.get("run_ctx") or {}).get("run_id")),
+        **(_std_meta(run_id=(st.session_state.get("run_ctx") or {}).get("run_id")) if "_std_meta" in globals() else {
+            "schema_version": SCHEMA_VERSION,
+            "written_at_utc": _utc_iso_z(),
+            "app_version":    APP_VERSION,
+        }),
         "district":       district_id,
         "reason":         reason,
-        "residual_tag":   residual_tag_val,   # "lanes"/"ker"/"mixed"/"none"
+        "residual_tag":   residual_tag_val,
         "policy": {
             "policy_tag":     policy_tag,
             "projector_hash": projector_hash,
@@ -2146,19 +2153,22 @@ def render_witness_panel():
         "note":              note or "",
     }
 
-    # Bootstrap dedupe cache from tail once
     if not ss["_witness_bootstrapped"]:
         for tail_row in _read_jsonl_tail(WITNESS_PATH, N=200):
-            try:
-                ss["_witness_keys"].add(witness_key(tail_row))
-            except Exception:
-                continue
+            try: ss["_witness_keys"].add(witness_key(tail_row))
+            except Exception: continue
         ss["_witness_bootstrapped"] = True
 
     k = witness_key(row)
-    disabled = fm_bad or (not eligible_red)
-    tip = help_txt if fm_bad else (None if eligible_red else "Enabled only when k=3 is RED (eq=False).")
-    if st.button("Log Witness", key="btn_witness_append", disabled=disabled, help=(tip or "Append witness to witnesses.jsonl")):
+    disabled = fm_bad or (not eligible_red) or (not ok)
+    if disabled:
+        if fm_bad: tip = help_txt
+        elif not ok: tip = rc_msg or "Run Overlap first."
+        else: tip = "Enabled only when k=3 is RED (eq=False)."
+    else:
+        tip = "Append witness to witnesses.jsonl"
+
+    if st.button("Log Witness", key="btn_witness_append", disabled=disabled, help=tip):
         try:
             if k in ss["_witness_keys"]:
                 st.info("Duplicate skipped (same district/reason/tag/policy/hashes).")
@@ -2169,7 +2179,6 @@ def render_witness_panel():
         except Exception as e:
             st.error(f"Witness append failed: {e}")
 
-    # Tail view
     try:
         tail = _read_jsonl_tail(WITNESS_PATH, N=8)
         if tail:
@@ -2194,8 +2203,151 @@ def render_witness_panel():
     except Exception as e:
         st.warning(f"Could not render witnesses tail: {e}")
 
-with st.expander("Witness logger"):
-    render_witness_panel()
+# ======================================================================================
+# ========================= JSONL → CSV Exports (Gallery & Witness) =========================
+
+GALLERY_JSONL   = LOGS_DIR / "gallery.jsonl"
+WITNESSES_JSONL = LOGS_DIR / "witnesses.jsonl"
+GALLERY_CSV_OUT = REPORTS_DIR / "gallery_export.csv"
+WITNESS_CSV_OUT = REPORTS_DIR / "witnesses_export.csv"
+
+def _atomic_write_csv(path: Path, header: list[str], rows: list[list], comments: list[str] | None = None):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8", newline="") as tmp:
+        if comments:
+            for line in comments:
+                tmp.write(f"# {line}\n")
+        w = csv.writer(tmp)
+        w.writerow(header)
+        for r in rows:
+            w.writerow(r)
+        tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
+    os.replace(tmp_name, path)
+
+def _jsonl_read_all(path: Path) -> list[dict]:
+    if not path.exists(): return []
+    out = []
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln: continue
+                try: out.append(json.loads(ln))
+                except Exception: continue
+    except Exception:
+        pass
+    return out
+
+def _flatten_gallery_row(r: dict) -> list:
+    h = (r.get("hashes") or {}); pol = (r.get("policy") or {})
+    return [
+        r.get("written_at_utc", ""), r.get("district", "UNKNOWN"),
+        pol.get("policy_tag", ""), pol.get("projector_hash", ""),
+        h.get("boundaries_hash", ""), h.get("C_hash", ""), h.get("H_hash", ""), h.get("U_hash", ""), h.get("shapes_hash", ""),
+        int(r.get("growth_bumps", 0) or 0), str(r.get("strictify", "")), r.get("tag", ""), r.get("cert_content_hash", ""),
+    ]
+
+def _flatten_witness_row(r: dict) -> list:
+    h = (r.get("hashes") or {}); pol = (r.get("policy") or {})
+    return [
+        r.get("written_at_utc", ""), r.get("district", "UNKNOWN"),
+        r.get("reason", ""), r.get("residual_tag", ""),
+        pol.get("policy_tag", ""), pol.get("projector_hash", ""),
+        h.get("boundaries_hash", ""), h.get("C_hash", ""), h.get("H_hash", ""), h.get("U_hash", ""), h.get("shapes_hash", ""),
+        r.get("cert_content_hash", ""), r.get("run_id", ""), r.get("note", ""),
+    ]
+
+with st.expander("Exports · Gallery & Witness (CSV)"):
+    ss = st.session_state
+    ss["_gal_csv_nonce"] = int(ss.get("_gal_csv_nonce", 0))
+    ss["_wit_csv_nonce"] = int(ss.get("_wit_csv_nonce", 0))
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.caption("Gallery → CSV")
+        if not GALLERY_JSONL.exists():
+            st.info("No gallery.jsonl yet.")
+        else:
+            dis = (file_validation_failed() if "file_validation_failed" in globals() else False)
+            if st.button("Export Gallery CSV", key="btn_export_gallery_csv",
+                         disabled=dis,
+                         help=("Disabled because projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π."
+                               if dis else "Export to CSV")):
+                rows_json = _jsonl_read_all(GALLERY_JSONL)
+                header = ["written_at_utc","district","policy_tag","projector_hash",
+                          "boundaries_hash","C_hash","H_hash","U_hash","shapes_hash",
+                          "growth_bumps","strictify","tag","cert_content_hash"]
+                rows_csv = [_flatten_gallery_row(r) for r in rows_json]
+                meta = [
+                    f"schema_version={SCHEMA_VERSION}",
+                    f"written_at_utc={_utc_iso_z()}",
+                    f"app_version={APP_VERSION}",
+                    f"source={GALLERY_JSONL.as_posix()}",
+                    f"rows={len(rows_csv)}",
+                ]
+                try:
+                    _atomic_write_csv(GALLERY_CSV_OUT, header, rows_csv, meta)
+                    st.success(f"Gallery CSV saved → {GALLERY_CSV_OUT}")
+                    ss["_gal_csv_nonce"] += 1
+                except Exception as e:
+                    st.error(f"Failed to write Gallery CSV: {e}")
+
+            if GALLERY_CSV_OUT.exists():
+                try:
+                    with open(GALLERY_CSV_OUT, "rb") as f:
+                        st.download_button(
+                            "Download gallery_export.csv",
+                            f,
+                            file_name="gallery_export.csv",
+                            key=f"dl_gallery_csv_{ss['_gal_csv_nonce']}"
+                        )
+                except Exception:
+                    pass
+
+    with c2:
+        st.caption("Witness → CSV")
+        if not WITNESSES_JSONL.exists():
+            st.info("No witnesses.jsonl yet.")
+        else:
+            dis = (file_validation_failed() if "file_validation_failed" in globals() else False)
+            if st.button("Export Witness CSV", key="btn_export_witness_csv",
+                         disabled=dis,
+                         help=("Disabled because projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π."
+                               if dis else "Export to CSV")):
+                rows_json = _jsonl_read_all(WITNESSES_JSONL)
+                header = ["written_at_utc","district","reason","residual_tag",
+                          "policy_tag","projector_hash",
+                          "boundaries_hash","C_hash","H_hash","U_hash","shapes_hash",
+                          "cert_content_hash","run_id","note"]
+                rows_csv = [_flatten_witness_row(r) for r in rows_json]
+                meta = [
+                    f"schema_version={SCHEMA_VERSION}",
+                    f"written_at_utc={_utc_iso_z()}",
+                    f"app_version={APP_VERSION}",
+                    f"source={WITNESSES_JSONL.as_posix()}",
+                    f"rows={len(rows_csv)}",
+                ]
+                try:
+                    _atomic_write_csv(WITNESS_CSV_OUT, header, rows_csv, meta)
+                    st.success(f"Witness CSV saved → {WITNESS_CSV_OUT}")
+                    ss["_wit_csv_nonce"] += 1
+                except Exception as e:
+                    st.error(f"Failed to write Witness CSV: {e}")
+
+            if WITNESS_CSV_OUT.exists():
+                try:
+                    with open(WITNESS_CSV_OUT, "rb") as f:
+                        st.download_button(
+                            "Download witnesses_export.csv",
+                            f,
+                            file_name="witnesses_export.csv",
+                            key=f"dl_witness_csv_{ss['_wit_csv_nonce']}"
+                        )
+                except Exception:
+                    pass
+# ======================= /end JSONL → CSV Exports (Gallery & Witness) ======================
+
 
 
 
