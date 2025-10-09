@@ -3115,6 +3115,132 @@ if "import_parity_pairs" not in globals():
 
         return len(st.session_state.get("parity_pairs", []))
 # ---------- /shim ----------
+# ===== HARD OVERRIDE: universal path normalizer + clean export/import =====
+from pathlib import Path
+import json as _json, os, tempfile
+
+# -- helpers we rely on (reuse if you already have them) --
+def _ensure_parent_dir(p: Path) -> None:
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    _ensure_parent_dir(path)
+    with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as tmp:
+        _json.dump(payload, tmp, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
+    os.replace(tmp_name, path)
+
+def _safe_parse_json(path: str) -> dict:
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"No parity pairs file at {path}")
+    with p.open("r", encoding="utf-8") as f:
+        return _json.load(f)
+
+def _current_input_filenames():
+    ib = st.session_state.get("_inputs_block") or {}
+    fns = (ib.get("filenames") or {})
+    return {
+        "boundaries": fns.get("boundaries", "inputs/boundaries.json"),
+        "cmap":       fns.get("C",          "inputs/cmap.json"),
+        "H":          fns.get("H",          "inputs/H.json"),
+        "shapes":     fns.get("U",          "inputs/shapes.json"),
+    }
+
+# ---- UNIVERSAL normalizer (accepts (fx) OR (side_name, fx)) ----
+def _paths_from_fixture_or_current__universal(*args):
+    # extract fx dict from either shape
+    fx = None
+    if len(args) == 1 and isinstance(args[0], dict):
+        fx = args[0]
+    elif len(args) >= 2 and isinstance(args[1], dict):
+        fx = args[1]
+    else:
+        # last resort: try to be generous if someone passes kwargs
+        fx = (args[0] if args and isinstance(args[0], dict) else None)
+    if not isinstance(fx, dict):
+        raise TypeError("_paths_from_fixture_or_current(): expected (fx) or (side_name, fx)")
+
+    out = {}
+    for k in ("boundaries","cmap","H","shapes"):
+        v = fx.get(f"{k}_path")
+        if not v and isinstance(fx.get(k), str):
+            v = fx.get(k)
+        out[k] = v or ""
+
+    cur = _current_input_filenames()
+    for k in ("boundaries","cmap","H","shapes"):
+        if not out[k]:
+            out[k] = cur[k]
+    return out
+
+# Force ALL known names to point to the universal normalizer
+globals()["_paths_from_fixture_or_current"] = _paths_from_fixture_or_current__universal
+globals()["__pp_paths_from_row_fixture"]   = _paths_from_fixture_or_current__universal  # legacy alias
+
+# ---- Clean, self-contained JSON payload builder that ONLY uses the universal normalizer ----
+def _parity_pairs_payload__clean(pairs: list[dict]) -> dict:
+    spec_rows = []
+    for row in (pairs or []):
+        label = row.get("label", "PAIR")
+        Lp = _paths_from_fixture_or_current__universal(row.get("left",  {}) or {})
+        Rp = _paths_from_fixture_or_current__universal(row.get("right", {}) or {})
+        spec_rows.append({
+            "label": label,
+            "left":  {"boundaries": Lp["boundaries"], "cmap": Lp["cmap"], "H": Lp["H"], "shapes": Lp["shapes"]},
+            "right": {"boundaries": Rp["boundaries"], "cmap": Rp["cmap"], "H": Rp["H"], "shapes": Rp["shapes"]},
+        })
+    return {
+        "schema_version": "1.0.0",
+        "saved_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "count": len(spec_rows),
+        "pairs": spec_rows,
+    }
+
+def _pairs_from_payload__clean(payload: dict) -> list[dict]:
+    rows = []
+    for r in (payload.get("pairs") or []):
+        L = r.get("left")  or {}
+        R = r.get("right") or {}
+        rows.append({
+            "label": r.get("label","PAIR"),
+            "left":  {"boundaries": L.get("boundaries",""), "cmap": L.get("cmap",""), "H": L.get("H",""), "shapes": L.get("shapes","")},
+            "right": {"boundaries": R.get("boundaries",""), "cmap": R.get("cmap",""), "H": R.get("H",""), "shapes": R.get("shapes","")},
+        })
+    return rows
+
+# ---- Hard-override export/import to use ONLY the clean builders above ----
+if "DEFAULT_PARITY_PATH" not in globals():
+    LOGS_DIR = Path(globals().get("LOGS_DIR", "logs")); LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    DEFAULT_PARITY_PATH = LOGS_DIR / "parity_pairs.json"
+
+def export_parity_pairs(path: str | Path = DEFAULT_PARITY_PATH) -> str:
+    pairs = st.session_state.get("parity_pairs", []) or []
+    payload = _parity_pairs_payload__clean(pairs)
+    _atomic_write_json(Path(path), payload)
+    return str(path)
+
+def import_parity_pairs(path: str | Path = DEFAULT_PARITY_PATH, *, merge: bool = False) -> int:
+    payload = _safe_parse_json(str(path))
+    rows = _pairs_from_payload__clean(payload)
+    if not merge:
+        st.session_state["parity_pairs"] = []
+    # rehydrate using your existing loader
+    for r in rows:
+        L, R = r["left"], r["right"]
+        fxL = load_fixture_from_paths(boundaries_path=L["boundaries"], cmap_path=L["cmap"], H_path=L["H"], shapes_path=L["shapes"])
+        fxR = load_fixture_from_paths(boundaries_path=R["boundaries"], cmap_path=R["cmap"], H_path=R["H"], shapes_path=R["shapes"])
+        add_parity_pair(label=r["label"], left_fixture=fxL, right_fixture=fxR)
+    return len(st.session_state.get("parity_pairs", []))
+
+# ---- Smoke self-test (runs at import-time; harmless) ----
+try:
+    _ = _paths_from_fixture_or_current({"boundaries":"a.json","cmap":"b.json","H":"c.json","shapes":"d.json"})
+    _ = _paths_from_fixture_or_current("left", {"boundaries":"a.json","cmap":"b.json","H":"c.json","shapes":"d.json"})
+except Exception as _e:
+    st.warning(f"_paths_from_fixture_or_current adapter not active: {_e}")
+# ===== /HARD OVERRIDE =====
+
 
 # ---------------- Parity pairs: import/export (robust paths + uploader) ----------------
 
