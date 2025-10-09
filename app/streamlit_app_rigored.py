@@ -2608,6 +2608,119 @@ if "_atomic_write_csv" not in globals():
             tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
         os.replace(tmp_name, path)
 # ---------- /shim ----------
+# ---------- Parity import/export shim (collision-proof) ----------
+from pathlib import Path
+import os, json as _json, tempfile
+from datetime import datetime, timezone
+
+# Defaults
+if "LOGS_DIR" not in globals():
+    LOGS_DIR = Path("logs")
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+if "DEFAULT_PARITY_PATH" not in globals():
+    DEFAULT_PARITY_PATH = LOGS_DIR / "parity_pairs.json"
+
+def __pp_ensure_parent_dir(p: Path) -> None:
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+def __pp_atomic_write_json(path: Path, payload: dict) -> None:
+    __pp_ensure_parent_dir(path)
+    with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as tmp:
+        _json.dump(payload, tmp, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
+    os.replace(tmp_name, path)
+
+def __pp_safe_parse_json(path: str) -> dict:
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"No parity pairs file at {path}")
+    with p.open("r", encoding="utf-8") as f:
+        return _json.load(f)
+
+def __pp_current_input_filenames():
+    ib = st.session_state.get("_inputs_block") or {}
+    fns = (ib.get("filenames") or {})
+    return {
+        "boundaries": fns.get("boundaries", "inputs/boundaries.json"),
+        "cmap":       fns.get("C",          "inputs/cmap.json"),
+        "H":          fns.get("H",          "inputs/H.json"),
+        "shapes":     fns.get("U",          "inputs/shapes.json"),
+    }
+
+def __pp_paths_from_row_fixture(row_fx: dict) -> dict:
+    # Accept both {k_path: "..."} and {k: "..."} shapes; fallback to current inputs.
+    out = {}
+    for k in ("boundaries","cmap","H","shapes"):
+        v = row_fx.get(f"{k}_path") or row_fx.get(k) or ""
+        out[k] = v
+    cur = __pp_current_input_filenames()
+    for k in ("boundaries","cmap","H","shapes"):
+        if not out[k]:
+            out[k] = cur[k]
+    return out
+
+def __pp_pairs_payload(pairs: list[dict]) -> dict:
+    spec_rows = []
+    for row in (pairs or []):
+        label = row.get("label", "PAIR")
+        Lp = __pp_paths_from_row_fixture(row.get("left",  {}) or {})
+        Rp = __pp_paths_from_row_fixture(row.get("right", {}) or {})
+        spec_rows.append({
+            "label": label,
+            "left":  {"boundaries": Lp["boundaries"], "cmap": Lp["cmap"], "H": Lp["H"], "shapes": Lp["shapes"]},
+            "right": {"boundaries": Rp["boundaries"], "cmap": Rp["cmap"], "H": Rp["H"], "shapes": Rp["shapes"]},
+        })
+    return {
+        "schema_version": "1.0.0",
+        "saved_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "count": len(spec_rows),
+        "pairs": spec_rows,
+    }
+
+def __pp_pairs_from_payload(payload: dict) -> list[dict]:
+    rows = []
+    for r in (payload.get("pairs") or []):
+        label = r.get("label","PAIR")
+        L = r.get("left")  or {}
+        R = r.get("right") or {}
+        rows.append({
+            "label": label,
+            "left":  {"boundaries": L.get("boundaries",""), "cmap": L.get("cmap",""), "H": L.get("H",""), "shapes": L.get("shapes","")},
+            "right": {"boundaries": R.get("boundaries",""), "cmap": R.get("cmap",""), "H": R.get("H",""), "shapes": R.get("shapes","")},
+        })
+    return rows
+
+def __pp_export_pairs(path: str | Path = DEFAULT_PARITY_PATH) -> str:
+    pairs = st.session_state.get("parity_pairs", []) or []
+    payload = __pp_pairs_payload(pairs)
+    __pp_atomic_write_json(Path(path), payload)
+    return str(path)
+
+def __pp_import_pairs(path: str | Path = DEFAULT_PARITY_PATH, *, merge: bool = False) -> int:
+    payload = __pp_safe_parse_json(str(path))
+    ver = str(payload.get("schema_version", "0.0.0"))
+    if ver.split(".")[0] != "1":
+        st.warning(f"parity_pairs schema version differs (file={ver}, app=1.0.0); best-effort load.")
+    rows = __pp_pairs_from_payload(payload)
+    if not merge:
+        st.session_state["parity_pairs"] = []
+
+    # Uses your existing loader to build fixtures for the queue:
+    for r in rows:
+        label = r.get("label","PAIR")
+        L, R = r["left"], r["right"]
+        fxL = load_fixture_from_paths(boundaries_path=L["boundaries"], cmap_path=L["cmap"], H_path=L["H"], shapes_path=L["shapes"])
+        fxR = load_fixture_from_paths(boundaries_path=R["boundaries"], cmap_path=R["cmap"], H_path=R["H"], shapes_path=R["shapes"])
+        add_parity_pair(label=label, left_fixture=fxL, right_fixture=fxR)
+
+    return len(st.session_state.get("parity_pairs", []))
+
+# Expose canonical names only if not already defined elsewhere
+if "export_parity_pairs" not in globals():
+    export_parity_pairs = __pp_export_pairs  # noqa: F401
+if "import_parity_pairs" not in globals():
+    import_parity_pairs = __pp_import_pairs  # noqa: F401
+# ---------- /shim ----------
 
 # ---------- Parity import/export FINAL shim (paths-based, idempotent) ----------
 from pathlib import Path
