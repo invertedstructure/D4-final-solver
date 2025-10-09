@@ -2906,6 +2906,260 @@ with st.expander("Parity: run suite (mirrors active policy)"):
         except Exception:
             pass
 
+# ========================== Parity · Save JSON + CSV (SSOT) ==========================
+PARITY_JSON_PATH = REPORTS_DIR / "parity_report.json"
+PARITY_CSV_PATH  = REPORTS_DIR / "parity_summary.csv"
+PARITY_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+def _bool(x) -> bool:
+    return bool(x) is True
+
+def _projector_mode_from_rc(rc: dict) -> str:
+    m = str((rc or {}).get("mode","strict"))
+    if m == "strict": return "strict"
+    if m == "projected(file)": return "file"
+    return "auto"  # treat any other projected* as auto
+
+def _short(h: str) -> str:
+    return (h or "")[:8]
+
+def _get_fixture_nonce() -> str:
+    ss = st.session_state
+    return str(ss.get("fixture_nonce") or ss.get("_fixture_nonce") or "")
+
+def _abool(v):
+    # ensure JSON holds actual booleans, CSV uses 'true'/'false'
+    return True if v is True else False
+
+def _write_json_atomic(path: Path, payload: dict):
+    try:
+        _atomic_write_json(path, payload)  # use your shared helper if present
+    except Exception:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, separators=(",",":"), sort_keys=True)
+            f.flush(); os.fsync(f.fileno())
+        os.replace(tmp, path)
+
+def _write_csv_from_ssot(path: Path, ssot: dict):
+    hdr = [
+        "schema_version","written_at_utc","app_version","policy_tag",
+        "projector_mode","projector_hash","fixture_nonce","pair_label",
+        "left_district","left_boundaries_hash","left_C_hash","left_H_hash","left_U_hash",
+        "right_district","right_boundaries_hash","right_C_hash","right_H_hash","right_U_hash",
+        "strict_k2","strict_k3","projected_k2","projected_k3"
+    ]
+    rows = []
+    root = [
+        str(ssot.get("schema_version","")),
+        str(ssot.get("written_at_utc","")),
+        str(ssot.get("app_version","")),
+        str(ssot.get("policy_tag","")),
+        str(ssot.get("projector_mode","")),
+        str(ssot.get("projector_hash","")),
+        str(ssot.get("fixture_nonce","")),
+    ]
+    for p in (ssot.get("pairs") or []):
+        L = p.get("left", {}) ; R = p.get("right", {})
+        Lh = L.get("hashes", {}) ; Rh = R.get("hashes", {})
+        strict   = p.get("strict", {}) or {}
+        proj     = p.get("projected", {}) or {}
+        row = (
+            root +
+            [str(p.get("pair_label",""))] +
+            [str(L.get("district","")), str(Lh.get("boundaries_hash","")), str(Lh.get("C_hash","")), str(Lh.get("H_hash","")), str(Lh.get("U_hash",""))] +
+            [str(R.get("district","")), str(Rh.get("boundaries_hash","")), str(Rh.get("C_hash","")), str(Rh.get("H_hash","")), str(Rh.get("U_hash",""))] +
+            [str(_abool(strict.get("k2"))).lower(), str(_abool(strict.get("k3"))).lower(),
+             str(_abool(proj.get("k2"))).lower(),   str(_abool(proj.get("k3"))).lower()]
+        )
+        rows.append(row)
+
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(hdr)
+        w.writerows(rows)
+        # trailing comment line for quick eyeballing
+        f.write(f"# rows_total={ssot.get('rows_total',0)} "
+                f"projected_green_count={ssot.get('projected_green_count',0)} "
+                f"projector_hash={ssot.get('projector_hash','')}\n")
+        f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+def _extract_hashes_fallback_to_inputs(side_fx: dict, ib: dict) -> dict:
+    """
+    Try to pull hashes for a side from its fixture spec if present; otherwise
+    fall back to *current* _inputs_block (never recompute).
+    Expected keys if present on side_fx:
+      - 'hashes': {'boundaries_hash','C_hash','H_hash','U_hash'}
+      - or flat keys on side_fx itself with same names.
+    """
+    # fixture-provided hashes
+    h = (side_fx.get("hashes") if isinstance(side_fx, dict) else None) or {}
+    B = h.get("boundaries_hash") or side_fx.get("boundaries_hash","")
+    C = h.get("C_hash")          or side_fx.get("C_hash","")
+    H = h.get("H_hash")          or side_fx.get("H_hash","")
+    U = h.get("U_hash")          or side_fx.get("U_hash","")
+
+    # fallback to current inputs
+    ibh = ib or {}
+    B = B or ibh.get("boundaries_hash","")
+    C = C or ibh.get("C_hash","")
+    H = H or ibh.get("H_hash","")
+    U = U or ibh.get("U_hash","")
+    return {
+        "boundaries_hash": str(B),
+        "C_hash":          str(C),
+        "H_hash":          str(H),
+        "U_hash":          str(U),
+    }
+
+def _build_parity_ssot(*, pairs_result: list[dict], pairs_spec: list[dict], rc: dict, ib: dict) -> dict:
+    """
+    pairs_result: st.session_state['parity_last_report_pairs']  (booleans only)
+    pairs_spec:   st.session_state['parity_pairs']              (labels + optional districts/hashes)
+    rc:           run_ctx
+    ib:           _inputs_block (fallback hashes)
+    """
+    policy_tag = str(rc.get("policy_tag", policy_label_from_cfg(cfg_active)))
+    mode       = _projector_mode_from_rc(rc)
+    pj_hash    = str(rc.get("projector_hash","")) if mode == "file" else ""
+    fx_nonce   = _get_fixture_nonce()
+    app_ver    = APP_VERSION
+    written    = _utc_iso_z()
+
+    # Build decorated pair rows
+    rows = []
+    for i, p in enumerate(pairs_result or []):
+        spec = (pairs_spec or [{}])[i] if i < len(pairs_spec or []) else {}
+        label  = spec.get("label") or p.get("label") or f"PAIR_{i+1}"
+        Lspec  = spec.get("left", {})  or {}
+        Rspec  = spec.get("right", {}) or {}
+        Ldist  = str(Lspec.get("district") or Lspec.get("label") or rc.get("district_id","") or (st.session_state.get("_district_info") or {}).get("district_id","") or "")
+        Rdist  = str(Rspec.get("district") or Rspec.get("label") or Ldist)
+        Lh     = _extract_hashes_fallback_to_inputs(Lspec, ib)
+        Rh     = _extract_hashes_fallback_to_inputs(Rspec, ib)
+
+        strict_k2 = _bool((p.get("strict") or {}).get("k2"))
+        strict_k3 = _bool((p.get("strict") or {}).get("k3"))
+        proj_k2   = _bool((p.get("projected") or {}).get("k2"))
+        proj_k3   = _bool((p.get("projected") or {}).get("k3"))
+
+        rows.append({
+            "pair_label": label,
+            "left":  {"district": Ldist, "hashes": Lh},
+            "right": {"district": Rdist, "hashes": Rh},
+            "strict":    {"k2": strict_k2, "k3": strict_k3},
+            "projected": {"k2": proj_k2,   "k3": proj_k3},
+        })
+
+    rows_total = len(rows)
+    green_cnt  = sum(1 for r in rows if r.get("projected", {}).get("k3") is True)
+    green_pct  = (float(green_cnt) / float(rows_total)) if rows_total else 0.0
+
+    ssot = {
+        "schema_version": "1.0.0",
+        "written_at_utc": written,
+        "app_version":    app_ver,
+        "policy_tag":     policy_tag,
+        "projector_mode": mode,
+        "projector_hash": pj_hash,
+        "fixture_nonce":  fx_nonce,
+        "rows_total": rows_total,
+        "projected_green_count": green_cnt,
+        "projected_green_pct":  green_pct,
+        "pairs": rows,
+    }
+
+    # Optional IDs
+    try:
+        import uuid
+        ssot["run_id"]    = (st.session_state.get("run_ctx") or {}).get("run_id") or uuid.uuid4().hex[:12]
+        ssot["parity_id"] = uuid.uuid4().hex
+    except Exception:
+        pass
+
+    # ----- Integrity checks -----
+    # Mode/policy constant
+    # (We don’t carry per-row mode/policy; we rely on the suite runner already doing one decision for the batch)
+    if mode == "file" and not pj_hash:
+        raise ValueError("Integrity: projector_mode=file but projector_hash is empty.")
+    if rows_total != len(pairs_result or []):
+        raise ValueError("Integrity: rows_total differs from parity results length.")
+    if green_cnt != sum(1 for r in rows if r.get("projected", {}).get("k3") is True):
+        raise ValueError("Integrity: projected_green_count mismatch.")
+    # Hash presence for each row/side
+    for r in rows:
+        for side in ("left","right"):
+            hh = (r.get(side, {}) or {}).get("hashes", {}) or {}
+            for k in ("boundaries_hash","C_hash","H_hash","U_hash"):
+                if not str(hh.get(k,"")).strip():
+                    raise ValueError(f"Integrity: missing hash {k} on {side} of pair '{r.get('pair_label','PAIR')}'.")
+        # Booleans only
+        for leg in ("strict","projected"):
+            lk = r.get(leg, {}) or {}
+            if not isinstance(lk.get("k2"), bool) or not isinstance(lk.get("k3"), bool):
+                raise ValueError(f"Integrity: non-boolean {leg}.k2/k3 in pair '{r.get('pair_label','PAIR')}'.")
+
+    return ssot
+
+# ---------------- UI: Save from the latest suite results ----------------
+with safe_expander("Parity · Save JSON + CSV"):
+    pairs_result = st.session_state.get("parity_last_report_pairs") or []
+    pairs_spec   = st.session_state.get("parity_pairs") or []
+    rc           = st.session_state.get("run_ctx") or {}
+    ib           = st.session_state.get("_inputs_block") or {}
+
+    # Summary banner
+    pol = rc.get("policy_tag", policy_label_from_cfg(cfg_active))
+    mode = _projector_mode_from_rc(rc)
+    pj_h = rc.get("projector_hash","") if mode == "file" else ""
+    st.caption(f"policy={pol} · mode={mode}" + (f" · P={_short(pj_h)}" if pj_h else ""))
+
+    if not pairs_result:
+        st.info("No parity results to save. Run the Parity Suite first.")
+        disabled = True
+        rows_total = projected_green_count = 0
+    else:
+        rows_total = len(pairs_result)
+        projected_green_count = sum(1 for r in pairs_result if (r.get("projected") or {}).get("k3") is True)
+        disabled = False
+
+    pct = (projected_green_count / rows_total) if rows_total else 0.0
+    st.write(f"pairs: {rows_total} | projected GREEN: {projected_green_count} ({pct:.0%})")
+
+    # Fixture staleness hint
+    st.caption(f"fixture_nonce={_get_fixture_nonce() or '—'}")
+
+    if st.button("Save parity JSON+CSV", key="btn_save_parity_both", disabled=disabled,
+                 help=("Writes both reports/parity_report.json and parity_summary.csv from one SSOT dict." if not disabled
+                       else "Disabled until you run the Parity Suite.")):
+        try:
+            ssot = _build_parity_ssot(pairs_result=pairs_result, pairs_spec=pairs_spec, rc=rc, ib=ib)
+        except Exception as e:
+            st.error(f"Parity SSOT failed integrity checks: {e}")
+        else:
+            try:
+                _write_json_atomic(PARITY_JSON_PATH, ssot)
+                _write_csv_from_ssot(PARITY_CSV_PATH, ssot)
+                st.success(f"Saved → {PARITY_JSON_PATH.name} and {PARITY_CSV_PATH.name}")
+                # quick download buttons
+                try:
+                    with open(PARITY_JSON_PATH, "rb") as jf:
+                        st.download_button("Download parity_report.json", jf, file_name="parity_report.json",
+                                           key="dl_parity_json")
+                except Exception:
+                    pass
+                try:
+                    with open(PARITY_CSV_PATH, "rb") as cf:
+                        st.download_button("Download parity_summary.csv", cf, file_name="parity_summary.csv",
+                                           key="dl_parity_csv")
+                except Exception:
+                    pass
+            except Exception as e:
+                st.error(f"Failed to write parity artifacts: {e}")
+
+
 
 # =============================== Coverage Sampling (non-blocking) ==============================
 
