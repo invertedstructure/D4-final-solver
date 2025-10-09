@@ -2547,6 +2547,21 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
 
 
 
+# --- Parity I/O constants (prelude) ---
+from pathlib import Path
+
+# Reuse app globals when present; fall back to sane defaults
+LOGS_DIR    = Path(globals().get("LOGS_DIR", "logs"))
+REPORTS_DIR = Path(globals().get("REPORTS_DIR", "reports"))
+
+PARITY_SCHEMA_VERSION = globals().get("PARITY_SCHEMA_VERSION", "1.0.0")
+
+# Default JSON path for parity pairs
+DEFAULT_PARITY_PATH = LOGS_DIR / "parity_pairs.json"
+
+# Ensure dirs exist
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 
