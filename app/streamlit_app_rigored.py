@@ -3293,6 +3293,62 @@ if "export_parity_pairs" not in globals():
 if "import_parity_pairs" not in globals():
     import_parity_pairs = __pp_import_pairs  # noqa: F401
 # ---------- /shim ----------
+# ---- HARD OVERRIDE: import_parity_pairs without DEFAULT_PARITY_PATH in signature ----
+from pathlib import Path
+import json as _json
+
+# Nuke any earlier definition that captured DEFAULT_PARITY_PATH
+try:
+    del import_parity_pairs  # type: ignore[name-defined]
+except Exception:
+    pass
+
+def _pp_default_pairs_path() -> Path:
+    logs = Path(globals().get("LOGS_DIR", "logs"))
+    logs.mkdir(parents=True, exist_ok=True)
+    return Path(globals().get("DEFAULT_PARITY_PATH", logs / "parity_pairs.json"))
+
+def import_parity_pairs(path=None, *, merge: bool = False) -> int:
+    """
+    Import a parity-pairs JSON (paths spec), resolve each path robustly,
+    and rehydrate the in-memory queue using add_parity_pair(...).
+    """
+    # Resolve default lazily (avoid NameError on DEFAULT_PARITY_PATH)
+    p = Path(path) if path is not None else _pp_default_pairs_path()
+    if not (p.exists() and p.is_file()):
+        raise FileNotFoundError(f"No parity pairs file at {p.as_posix()}")
+
+    payload = _json.loads(p.read_text(encoding="utf-8"))
+    ver = str(payload.get("schema_version", "0.0.0"))
+    if ver.split(".")[0] != "1":
+        st.warning(f"parity_pairs schema version differs (file={ver}, app=1.0.0); best-effort load.")
+
+    rows = payload.get("pairs", []) or []
+    if not merge:
+        clear_parity_pairs()  # must already exist in your code
+
+    count = 0
+    for r in rows:
+        label = r.get("label", "PAIR")
+        L_in = r.get("left")  or {}
+        R_in = r.get("right") or {}
+
+        # Validate keys
+        for side_name, block in (("left", L_in), ("right", R_in)):
+            for k in ("boundaries", "cmap", "H", "shapes"):
+                if k not in block or not str(block[k]).strip():
+                    raise ValueError(f"Malformed pair '{label}': missing {side_name}.{k}")
+
+        # Resolve + load via your robust helpers (must already be defined above)
+        L_fx = _pp_load_fixture_from_paths_or_die(L_in)
+        R_fx = _pp_load_fixture_from_paths_or_die(R_in)
+
+        add_parity_pair(label=label, left_fixture=L_fx, right_fixture=R_fx)
+        count += 1
+
+    return count
+# ---- /override ----
+
 
 # --- Parity I/O constants (prelude) ---
 from pathlib import Path
