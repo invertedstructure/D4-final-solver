@@ -3369,7 +3369,7 @@ else:
         
                        # --- Optional A/B embed (fresh only; no re-derivation here) ---
         _ab = st.session_state.get("ab_compare") or {}
-        if _ab_is_fresh(_ab, rc=_rc):
+        if _ab_is_fresh(_ab, rc=_rc, ib=inputs_block_payload):
             strict_ctx = _ab.get("strict", {}) or {}
             proj_ctx   = _ab.get("projected", {}) or {}
         
