@@ -1597,11 +1597,6 @@ if _ab and (_ab.get("inputs_sig") != _current_inputs_sig()):
 
 # ────────────────────── Reports: Perturbation Sanity & Fence Stress ──────────────────────
 
-# Safe imports (no-ops if already imported)
-from pathlib import Path
-import os, csv, tempfile, json, hashlib
-from datetime import datetime, timezone
-
 # Version/constants (respect existing globals if present)
 SCHEMA_VERSION = globals().get("SCHEMA_VERSION", "1.0.0")
 APP_VERSION    = globals().get("APP_VERSION", "v0.1-core")
