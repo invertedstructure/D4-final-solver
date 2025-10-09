@@ -2580,132 +2580,7 @@ def _paths_from_fixture_or_current(*args):
 
     return out
 # ---------------- /UNIVERSAL adapter ----------------------------------------------------
-# ---------- Parity import: robust path resolver + loader (drop-in) ----------
 
-from pathlib import Path
-import json as _json
-import os
-
-# Where we’ll look for fixture files
-_PP_SEARCH_ROOTS = [
-    Path.cwd(),
-    Path.cwd() / "inputs",
-    Path("/mnt/data"),
-]
-
-def _pp_norm_name(s: str) -> str:
-    # trim, collapse weird quotes/whitespace
-    return (s or "").strip().strip("\"'").replace("\\", "/")
-
-def _pp_candidates_for(name: str):
-    """
-    Given a possibly relative 'name' (e.g., 'boundaries D2.json'),
-    yield a sequence of candidate absolute Paths to try.
-    """
-    name = _pp_norm_name(name)
-    p = Path(name)
-
-    # 1) If absolute and exists, return first
-    if p.is_absolute():
-        yield p
-
-    # 2) Try straight under each search root
-    for root in _PP_SEARCH_ROOTS:
-        yield root / name
-
-    # 3) Common “rename” tweaks (underscores vs spaces)
-    if " " in name:
-        name_us = name.replace(" ", "_")
-        for root in _PP_SEARCH_ROOTS:
-            yield root / name_us
-
-    # 4) Basename-only recursive rglob (case-insensitive)
-    basename = Path(name).name
-    low = basename.lower()
-    for root in _PP_SEARCH_ROOTS:
-        try:
-            for hit in root.rglob("*"):
-                try:
-                    if hit.is_file() and hit.name.lower() == low:
-                        yield hit
-                except Exception:
-                    continue
-        except Exception:
-            continue
-
-def _pp_resolve_fixture_path(label_for_error: str, name: str) -> str:
-    """
-    Resolve 'name' to a real file. Returns absolute POSIX string.
-    Raises FileNotFoundError with a helpful message if not found.
-    """
-    tried = []
-    for cand in _pp_candidates_for(name):
-        tried.append(cand.as_posix())
-        try:
-            if cand.exists() and cand.is_file():
-                return cand.resolve().as_posix()
-        except Exception:
-            continue
-    tried_msg = " | ".join(tried[:8]) + ("" if len(tried) <= 8 else " | …")
-    raise FileNotFoundError(
-        f"Fixture file not found for '{name}'. Tried: {tried_msg}"
-    )
-
-def _pp_load_fixture_from_paths_or_die(LR: dict):
-    """
-    Resolve & load one side (left/right) using your app's loader.
-    Accepts keys: boundaries, cmap, H, shapes.
-    """
-    b = _pp_resolve_fixture_path("boundaries", LR["boundaries"])
-    c = _pp_resolve_fixture_path("cmap",       LR["cmap"])
-    h = _pp_resolve_fixture_path("H",          LR["H"])
-    u = _pp_resolve_fixture_path("shapes",     LR["shapes"])
-    # Use your canonical loader already in the app:
-    return load_fixture_from_paths(
-        boundaries_path=b, cmap_path=c, H_path=h, shapes_path=u
-    )
-
-# If your import_parity_pairs isn’t already overridden, (re)define it here:
-def import_parity_pairs(path: str | Path = DEFAULT_PARITY_PATH, *, merge: bool = False) -> int:
-    """
-    Import a parity-pairs JSON (paths spec), resolve each path robustly, and
-    rehydrate the in-memory queue using your existing add_parity_pair(...).
-    """
-    p = Path(path)
-    if not (p.exists() and p.is_file()):
-        raise FileNotFoundError(f"No parity pairs file at {p.as_posix()}")
-
-    payload = _json.loads(p.read_text(encoding="utf-8"))
-    ver = str(payload.get("schema_version", "0.0.0"))
-    if ver.split(".")[0] != "1":
-        st.warning(f"parity_pairs schema version differs (file={ver}, app=1.0.0); best-effort load.")
-
-    rows = payload.get("pairs", []) or []
-    if not merge:
-        # relies on your previously defined queue helper
-        clear_parity_pairs()
-
-    count = 0
-    for r in rows:
-        label = r.get("label", "PAIR")
-        L_in = r.get("left")  or {}
-        R_in = r.get("right") or {}
-        # Validate shape
-        for side_name, block in (("left", L_in), ("right", R_in)):
-            for k in ("boundaries", "cmap", "H", "shapes"):
-                if k not in block or not str(block[k]).strip():
-                    raise ValueError(f"Malformed pair '{label}': missing {side_name}.{k}")
-
-        # Resolve & load
-        L_fx = _pp_load_fixture_from_paths_or_die(L_in)
-        R_fx = _pp_load_fixture_from_paths_or_die(R_in)
-
-        # Reuse your queue API
-        add_parity_pair(label=label, left_fixture=L_fx, right_fixture=R_fx)
-        count += 1
-
-    return count
-# ---------- /drop-in ----------
 
 # ----- Drop-in: robust resolver + fixture loader (multi-root, fuzzy) -----
 from pathlib import Path
@@ -2916,6 +2791,132 @@ if "import_parity_pairs" in globals():
 
         return len(st.session_state.get("parity_pairs", []))
 # ----- /resolver -----
+# ---------- Parity import: robust path resolver + loader (drop-in) ----------
+
+from pathlib import Path
+import json as _json
+import os
+
+# Where we’ll look for fixture files
+_PP_SEARCH_ROOTS = [
+    Path.cwd(),
+    Path.cwd() / "inputs",
+    Path("/mnt/data"),
+]
+
+def _pp_norm_name(s: str) -> str:
+    # trim, collapse weird quotes/whitespace
+    return (s or "").strip().strip("\"'").replace("\\", "/")
+
+def _pp_candidates_for(name: str):
+    """
+    Given a possibly relative 'name' (e.g., 'boundaries D2.json'),
+    yield a sequence of candidate absolute Paths to try.
+    """
+    name = _pp_norm_name(name)
+    p = Path(name)
+
+    # 1) If absolute and exists, return first
+    if p.is_absolute():
+        yield p
+
+    # 2) Try straight under each search root
+    for root in _PP_SEARCH_ROOTS:
+        yield root / name
+
+    # 3) Common “rename” tweaks (underscores vs spaces)
+    if " " in name:
+        name_us = name.replace(" ", "_")
+        for root in _PP_SEARCH_ROOTS:
+            yield root / name_us
+
+    # 4) Basename-only recursive rglob (case-insensitive)
+    basename = Path(name).name
+    low = basename.lower()
+    for root in _PP_SEARCH_ROOTS:
+        try:
+            for hit in root.rglob("*"):
+                try:
+                    if hit.is_file() and hit.name.lower() == low:
+                        yield hit
+                except Exception:
+                    continue
+        except Exception:
+            continue
+
+def _pp_resolve_fixture_path(label_for_error: str, name: str) -> str:
+    """
+    Resolve 'name' to a real file. Returns absolute POSIX string.
+    Raises FileNotFoundError with a helpful message if not found.
+    """
+    tried = []
+    for cand in _pp_candidates_for(name):
+        tried.append(cand.as_posix())
+        try:
+            if cand.exists() and cand.is_file():
+                return cand.resolve().as_posix()
+        except Exception:
+            continue
+    tried_msg = " | ".join(tried[:8]) + ("" if len(tried) <= 8 else " | …")
+    raise FileNotFoundError(
+        f"Fixture file not found for '{name}'. Tried: {tried_msg}"
+    )
+
+def _pp_load_fixture_from_paths_or_die(LR: dict):
+    """
+    Resolve & load one side (left/right) using your app's loader.
+    Accepts keys: boundaries, cmap, H, shapes.
+    """
+    b = _pp_resolve_fixture_path("boundaries", LR["boundaries"])
+    c = _pp_resolve_fixture_path("cmap",       LR["cmap"])
+    h = _pp_resolve_fixture_path("H",          LR["H"])
+    u = _pp_resolve_fixture_path("shapes",     LR["shapes"])
+    # Use your canonical loader already in the app:
+    return load_fixture_from_paths(
+        boundaries_path=b, cmap_path=c, H_path=h, shapes_path=u
+    )
+
+# If your import_parity_pairs isn’t already overridden, (re)define it here:
+def import_parity_pairs(path: str | Path = DEFAULT_PARITY_PATH, *, merge: bool = False) -> int:
+    """
+    Import a parity-pairs JSON (paths spec), resolve each path robustly, and
+    rehydrate the in-memory queue using your existing add_parity_pair(...).
+    """
+    p = Path(path)
+    if not (p.exists() and p.is_file()):
+        raise FileNotFoundError(f"No parity pairs file at {p.as_posix()}")
+
+    payload = _json.loads(p.read_text(encoding="utf-8"))
+    ver = str(payload.get("schema_version", "0.0.0"))
+    if ver.split(".")[0] != "1":
+        st.warning(f"parity_pairs schema version differs (file={ver}, app=1.0.0); best-effort load.")
+
+    rows = payload.get("pairs", []) or []
+    if not merge:
+        # relies on your previously defined queue helper
+        clear_parity_pairs()
+
+    count = 0
+    for r in rows:
+        label = r.get("label", "PAIR")
+        L_in = r.get("left")  or {}
+        R_in = r.get("right") or {}
+        # Validate shape
+        for side_name, block in (("left", L_in), ("right", R_in)):
+            for k in ("boundaries", "cmap", "H", "shapes"):
+                if k not in block or not str(block[k]).strip():
+                    raise ValueError(f"Malformed pair '{label}': missing {side_name}.{k}")
+
+        # Resolve & load
+        L_fx = _pp_load_fixture_from_paths_or_die(L_in)
+        R_fx = _pp_load_fixture_from_paths_or_die(R_in)
+
+        # Reuse your queue API
+        add_parity_pair(label=label, left_fixture=L_fx, right_fixture=R_fx)
+        count += 1
+
+    return count
+# ---------- /drop-in ----------
 # --- Replacement: smarter resolver (tolerant + aliases) ---
 
 # optional: alias map you can edit from UI (requested_name -> actual_path)
