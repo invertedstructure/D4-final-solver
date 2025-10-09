@@ -2011,6 +2011,19 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
 GALLERY_PATH = (LOGS_DIR / "gallery.jsonl")
 GALLERY_PATH.parent.mkdir(parents=True, exist_ok=True)
 
+# Ensure the dedupe key matches spec
+def gallery_key(row: dict) -> tuple:
+    pol = row.get("policy") or {}
+    h   = row.get("hashes") or {}
+    return (
+        str(row.get("district", "")),
+        str(pol.get("policy_tag", "")),
+        str(h.get("boundaries_hash", "")),
+        str(h.get("C_hash", "")),
+        str(h.get("H_hash", "")),
+        str(h.get("U_hash", "")),
+    )
+
 # Shared meta helper (define if missing)
 if "_std_meta" not in globals():
     def _std_meta(run_id=None):
@@ -2029,7 +2042,6 @@ with safe_expander("Gallery"):
     rc   = ss.get("run_ctx") or {}
     cert = ss.get("cert_payload") or {}
 
-    # ---- cert-required guard (UI-only; no st.stop)
     has_cert = bool(cert)
     if not has_cert:
         st.info("No cert in memory yet. Run Overlap (let cert writer emit) before adding to gallery.")
@@ -2039,20 +2051,20 @@ with safe_expander("Gallery"):
     policy   = (cert.get("policy")   or {}) if has_cert else {}
     inputs   = (cert.get("inputs")   or {}) if has_cert else {}
 
-    # HASHES SOURCE OF TRUTH: artifact_hashes (never recompute)
+    # HASHES SOURCE OF TRUTH: artifact_hashes
     artifacts   = (cert.get("artifact_hashes") or {}) if has_cert else {}
     inputs_hash = (inputs.get("hashes") or {}) if has_cert else {}
 
-    # Prefer artifact_hashes, then fall back to the nested inputs.hashes (for older certs)
     h_boundaries = artifacts.get("boundaries_hash") or inputs_hash.get("boundaries_hash","")
     h_C          = artifacts.get("C_hash")          or inputs_hash.get("C_hash","")
     h_H          = artifacts.get("H_hash")          or inputs_hash.get("H_hash","")
     h_U          = artifacts.get("U_hash")          or inputs_hash.get("U_hash","")
-    h_shapes     = artifacts.get("shapes_hash")     or inputs_hash.get("shapes_hash","") or h_U  # tolerate legacy where shapes==U
+    h_shapes     = artifacts.get("shapes_hash")     or inputs_hash.get("shapes_hash","") or h_U
 
     district_id    = identity.get("district_id", "UNKNOWN")
     policy_tag     = policy.get("policy_tag", rc.get("policy_tag", rc.get("mode", "strict")))
     projector_hash = policy.get("projector_hash", "")
+    pj_consistent  = policy.get("projector_consistent_with_d", None)  # mirror exactly (true/false/None)
     cert_hash      = (cert.get("integrity") or {}).get("content_hash", "") or ""
 
     # ---- Optional UI fields
@@ -2071,6 +2083,8 @@ with safe_expander("Gallery"):
         "policy": {
             "policy_tag":     policy_tag,
             "projector_hash": projector_hash,
+            # NEW: mirror projector_consistent_with_d into gallery rows for quick audits
+            **({ "projector_consistent_with_d": bool(pj_consistent) } if pj_consistent is not None else {}),
         },
         "hashes": {
             "boundaries_hash": h_boundaries,
@@ -2085,7 +2099,7 @@ with safe_expander("Gallery"):
         "cert_content_hash": cert_hash,
     }
 
-    # ---- Dedupe key
+    # ---- Dedupe key (district, policy_tag, B, C, H, U)
     try:
         key = gallery_key(row)
     except Exception:
@@ -2128,6 +2142,7 @@ with safe_expander("Gallery"):
                     "district":  r.get("district",""),
                     "policy_tag": (r.get("policy") or {}).get("policy_tag",""),
                     "proj[:12]": ((r.get("policy") or {}).get("projector_hash","") or "")[:12],
+                    "P_consist": (r.get("policy") or {}).get("projector_consistent_with_d", None),
                     "B[:8]":     (r.get("hashes") or {}).get("boundaries_hash","")[:8],
                     "C[:8]":     (r.get("hashes") or {}).get("C_hash","")[:8],
                     "H[:8]":     (r.get("hashes") or {}).get("H_hash","")[:8],
