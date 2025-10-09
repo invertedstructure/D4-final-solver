@@ -1499,138 +1499,203 @@ if _ab:
 else:
     st.caption("A/B snapshot: —")
 
+
 # ====================== A/B Compare (strict vs active projected) ======================
 
-def perform_overlap_check(boundaries_obj, cmap_obj, H_used, cfg=None):
-    return overlap_gate.overlap_check(boundaries_obj, cmap_obj, H_used, projection_config=cfg)
+def _current_inputs_sig() -> list[str]:
+    """Stable inputs signature (flat hashes or nested)."""
+    ib = st.session_state.get("_inputs_block") or {}
+    h  = (ib.get("hashes") or {})
+    def _hx(k): return ib.get(k) or h.get(k) or ""
+    # shapes_hash may mirror U_hash in some pipelines
+    return [
+        str(_hx("boundaries_hash")),
+        str(_hx("C_hash")),
+        str(_hx("H_hash")),
+        str(_hx("U_hash")),
+        str(_hx("shapes_hash") or _hx("U_hash")),
+    ]
 
-def get_policy_label(cfg):
-    return policy_label_from_cfg(cfg)
-
-# Run button for A/B compare
-if st.button("Run A/B compare", key="ab_run_btn_final"):
+def _policy_label_for(cfg: dict | None) -> str:
     try:
-        ss = st.session_state
-        rc = ss.get("run_ctx") or {}
-        H_used = ss.get("overlap_H") or _load_h_local()
-        cfg_for_ab = ss.get("overlap_cfg") or cfg_active
+        return policy_label_from_cfg(cfg if cfg is not None else cfg_strict())
+    except Exception:
+        # minimal, stable labels
+        if cfg is None: return "strict"
+        src3 = (cfg.get("source") or {}).get("3")
+        return "projected(columns@k=3,file)" if src3 == "file" else "projected(columns@k=3,auto)"
 
-        # Get boundaries & cmap from your app’s globals (fallbacks optional)
-        bnd = boundaries
-        cmap_obj = cmap
+def _proj_cfg_from_rc(boundaries_obj):
+    """
+    Returns (proj_mode, proj_hash, proj_cfg) where:
+      proj_mode ∈ {"strict","projected(auto)","projected(file)"}; proj_hash "" for strict.
+      proj_cfg is None for strict; otherwise a cfg that mirrors *current* RC.
+    Also forces a single deterministic projector decision via projector_choose_active().
+    """
+    rc = st.session_state.get("run_ctx") or {}
+    mode = str(rc.get("mode") or "strict")
 
-        # --- strict leg
-        out_strict = perform_overlap_check(bnd, cmap_obj, H_used)
-        label_strict = get_policy_label(cfg_strict())
+    if mode == "strict":
+        return "strict", "", None
 
-        # --- projected leg (mirrors ACTIVE; validates FILE inside projector_choose_active)
-        src3 = (cfg_for_ab.get("source") or {}).get("3")
-        if src3 == "file":
-            try:
-                P_ab, meta_ab = projector_choose_active(cfg_for_ab, bnd)
-                validate_projector_file_strict(
-                    P_ab,
-                    n3=int(rc.get("n3") or 0),
-                    lane_mask=list(rc.get("lane_mask_k3") or [])
-                )
-            except ValueError as ve:
-                st.error(f"A/B FILE Π invalid: {ve}")
-                st.stop()
+    cfg = cfg_projected_base()
+    if mode == "projected(auto)":
+        cfg["source"]["3"] = "auto"
+        # decide once deterministically
+        _P, meta = projector_choose_active(cfg, boundaries_obj)
+        return "projected(auto)", str(meta.get("projector_hash","")), cfg
+
+    if mode == "projected(file)":
+        cfg["source"]["3"] = "file"
+        pj = rc.get("projector_filename","") or ""
+        if pj:
+            cfg.setdefault("projector_files", {})["3"] = pj
+        _P, meta = projector_choose_active(cfg, boundaries_obj)  # validates FILE Π
+        return "projected(file)", str(meta.get("projector_hash","")), cfg
+
+    # fallback
+    return "strict", "", None
+
+def _xor_bits(A, B):
+    if not A: return [r[:] for r in (B or [])]
+    if not B: return [r[:] for r in (A or [])]
+    r, c = len(A), len(A[0])
+    return [[(A[i][j] ^ B[i][j]) & 1 for j in range(c)] for i in range(r)]
+
+def _bottom_row(M): return M[-1] if (M and len(M)) else []
+
+def _pass_vec(out_block: dict) -> list[int]:
+    return [
+        int(bool((out_block or {}).get("2", {}).get("eq", False))),
+        int(bool((out_block or {}).get("3", {}).get("eq", False))),
+    ]
+
+def _pair_tag_for(mode: str) -> str:
+    if mode == "projected(file)": return "strict__VS__projected(columns@k=3,file)"
+    if mode == "projected(auto)": return "strict__VS__projected(columns@k=3,auto)"
+    return "strict__VS__strict"
+
+# ---------------------------- Run button ----------------------------
+# Gate only when current mode is projected(file) AND FILE Π is invalid
+_rc = st.session_state.get("run_ctx") or {}
+_curr_mode = str(_rc.get("mode") or "strict")
+_ab_disabled = (_curr_mode == "projected(file)") and file_validation_failed()
+_ab_help = ("Disabled because projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π."
+            if _ab_disabled else "Compare strict vs active projected (auto/file) deterministically.")
+
+if st.button("Run A/B compare", key="ab_run_btn_final", disabled=_ab_disabled, help=_ab_help):
+    try:
+        # Freshness guards (never st.stop() here; just surface a clear message)
+        try:
+            _ = require_fresh_run_ctx()
+            _ = rectify_run_ctx_mask_from_d3()
+        except Exception as g:
+            st.warning(f"A/B unavailable: {g}")
+            # Still clear any stale
+            st.session_state.pop("ab_compare", None)
+            # Do not abort the rest of the page
+        # Pull SSOT objects
+        ss   = st.session_state
+        rc   = ss.get("run_ctx") or {}
+        H    = ss.get("overlap_H") or _load_h_local()
+        bnd  = globals().get("boundaries")
+        cmap_obj = globals().get("cmap")
+
+        if not (bnd and cmap_obj and H):
+            st.warning("A/B unavailable: fixture not fully loaded.")
+            ss.pop("ab_compare", None)
         else:
-            P_ab, meta_ab = projector_choose_active(cfg_for_ab, bnd)
+            # Strict leg
+            out_strict = overlap_gate.overlap_check(bnd, cmap_obj, H, projection_config=None)
+            lbl_strict = _policy_label_for(None)
 
-        out_proj = perform_overlap_check(bnd, cmap_obj, H_used, cfg_for_ab)
-        label_proj = get_policy_label(cfg_for_ab)
+            # Projected leg (mirror active policy deterministically)
+            proj_mode, proj_hash, proj_cfg = _proj_cfg_from_rc(bnd)
 
-        # --- lane vectors (use run_ctx lane mask; do not recompute)
-        d3 = (bnd.blocks.__root__.get("3") or [])
-        H2 = (H_used.blocks.__root__.get("2") or [])
-        C3 = (cmap_obj.blocks.__root__.get("3") or [])
-        I3 = eye(len(C3)) if C3 else []
+            # If we are in projected(file), double-validate FILE Π strictly against rc.n3/mask
+            if proj_mode == "projected(file)":
+                try:
+                    n3 = int(rc.get("n3") or 0)
+                    lm = list(rc.get("lane_mask_k3") or [])
+                    _P, _meta = projector_choose_active(proj_cfg, bnd)  # already validated structurally
+                    validate_projector_file_strict(_P, n3=n3, lane_mask=lm)  # strict invariants
+                except ValueError as ve:
+                    st.error(f"A/B FILE Π invalid: {ve}")
+                    # keep UI alive but don't emit snapshot
+                    ss.pop("ab_compare", None)
+                    raise
 
-        def _xor(A, B):
-            if not A: return [r[:] for r in (B or [])]
-            if not B: return [r[:] for r in (A or [])]
-            r, c = len(A), len(A[0])
-            return [[(A[i][j] ^ B[i][j]) & 1 for j in range(c)] for i in range(r)]
+            out_proj   = overlap_gate.overlap_check(bnd, cmap_obj, H, projection_config=proj_cfg)
+            lbl_proj   = _policy_label_for(proj_cfg)
 
-        def _bottom_row(M): return M[-1] if (M and len(M)) else []
-        def _mask(vec, idx): return [vec[j] for j in idx] if (vec and idx) else []
+            # Lane vectors (deterministic; from same fixture)
+            d3 = (bnd.blocks.__root__.get("3") or [])
+            H2 = (H.blocks.__root__.get("2") or [])
+            C3 = (cmap_obj.blocks.__root__.get("3") or [])
+            I3 = eye(len(C3)) if C3 else []
+            H2d3  = mul(H2, d3) if (H2 and d3) else []
+            C3pI3 = _xor_bits(C3, I3) if C3 else []
 
-        lane_mask = list(rc.get("lane_mask_k3") or [])
-        lane_idx = [j for j, m in enumerate(lane_mask) if m]
+            lane_mask = list(rc.get("lane_mask_k3") or [])
+            lane_idx  = [j for j, m in enumerate(lane_mask) if m]
+            lane_vec_H2d3 = [_bottom_row(H2d3)[j] for j in lane_idx] if (H2d3 and lane_idx) else []
+            lane_vec_C3I  = [_bottom_row(C3pI3)[j] for j in lane_idx] if (C3pI3 and lane_idx) else []
 
-        H2d3  = mul(H2, d3) if (H2 and d3) else []
-        C3pI3 = _xor(C3, I3) if C3 else []
+            # Snapshot
+            sig = _current_inputs_sig()
+            pair_tag = _pair_tag_for(proj_mode)
+            ab_payload = {
+                "pair_tag": pair_tag,
+                "inputs_sig": sig,
+                "lane_mask_k3": lane_mask,
+                "strict": {
+                    "label": lbl_strict,
+                    "cfg":   cfg_strict(),
+                    "out":   out_strict,
+                    "ker_guard": "enforced",
+                    "lane_vec_H2d3": lane_vec_H2d3,
+                    "lane_vec_C3plusI3": lane_vec_C3I,
+                    "pass_vec": _pass_vec(out_strict),
+                    "projector_hash": "",
+                },
+                "projected": {
+                    "label": lbl_proj,
+                    "cfg":   proj_cfg or {},
+                    "out":   out_proj,
+                    "ker_guard": "off",
+                    "lane_vec_H2d3": lane_vec_H2d3[:],
+                    "lane_vec_C3plusI3": lane_vec_C3I[:],
+                    "pass_vec": _pass_vec(out_proj),
+                    "projector_filename": ( (_rc.get("projector_filename","") or "") if proj_mode=="projected(file)" else "" ),
+                    "projector_hash": proj_hash,
+                    "projector_consistent_with_d": True if proj_mode!="strict" else None,
+                },
+                # A simple freshness key to guard cert embedding
+                "ab_key": (tuple(sig), proj_mode, proj_hash),
+            }
+            ss["ab_compare"] = ab_payload
 
-        lane_vec_H2d3 = _mask(_bottom_row(H2d3), lane_idx)
-        lane_vec_C3I  = _mask(_bottom_row(C3pI3), lane_idx)
+            # Touch cert writer debounce so it embeds this fresh snapshot on this pass
+            ss["should_write_cert"] = True
+            ss.pop("_last_cert_write_key", None)
 
-        # --- snapshot payload (freshness keyed to *current* inputs hashes)
-        inputs_sig = _current_inputs_sig()
-        pair_tag = f"{label_strict}__VS__{label_proj}"
+            s_ok = bool((out_strict.get("3") or {}).get("eq", False))
+            p_ok = bool((out_proj.get("3") or {}).get("eq", False))
+            st.success(f"A/B updated → strict={'✅' if s_ok else '❌'} · projected={'✅' if p_ok else '❌'} · {pair_tag}")
 
-        ab_payload = {
-            "pair_tag": pair_tag,
-            "inputs_sig": inputs_sig,
-            "lane_mask_k3": lane_mask,
-            "strict": {
-                "label": label_strict,
-                "cfg":   cfg_strict(),
-                "out":   out_strict,
-                "ker_guard": "enforced",
-                "lane_vec_H2d3": lane_vec_H2d3,
-                "lane_vec_C3plusI3": lane_vec_C3I,
-                "pass_vec": [
-                    int(out_strict.get("2",{}).get("eq", False)),
-                    int(out_strict.get("3",{}).get("eq", False)),
-                ],
-                "projector_hash": "",
-            },
-            "projected": {
-                "label": label_proj,
-                "cfg":   cfg_for_ab,
-                "out":   out_proj,
-                "ker_guard": "off",
-                "lane_vec_H2d3": lane_vec_H2d3[:],
-                "lane_vec_C3plusI3": lane_vec_C3I[:],
-                "pass_vec": [
-                    int(out_proj.get("2",{}).get("eq", False)),
-                    int(out_proj.get("3",{}).get("eq", False)),
-                ],
-                "projector_filename": meta_ab.get("projector_filename",""),
-                "projector_hash": meta_ab.get("projector_hash",""),
-                "projector_consistent_with_d": meta_ab.get("projector_consistent_with_d", None),
-            },
-        }
-        st.session_state["ab_compare"] = ab_payload
+            with st.expander("A/B snapshot (details)"):
+                st.json(ab_payload)
 
-        # Trigger cert embedding now
-        st.session_state["should_write_cert"] = True
-        st.session_state.pop("_last_cert_write_key", None)
-
-        # Status update
-        s_ok = bool(out_strict.get("3",{}).get("eq", False))
-        p_ok = bool(out_proj.get("3",{}).get("eq", False))
-        st.success(f"A/B updated → strict={'✅' if s_ok else '❌'} · projected={'✅' if p_ok else '❌'} · {pair_tag}")
-        st.caption("A/B will embed into the cert when inputs hashes are unchanged (fresh).")
-
-        with st.expander("A/B snapshot (details)"):
-            st.json(ab_payload)
-
-    except ValueError as e:
-        st.error(f"A/B projected(file) invalid: {e}")
     except Exception as e:
+        # Do not halt page rendering
         st.error(f"A/B compare failed: {e}")
 
-# Single stale handler / clearer (no duplicate badges)
+# ---------------------------- Stale snapshot clearer ----------------------------
 _ab = st.session_state.get("ab_compare") or {}
 if _ab and (_ab.get("inputs_sig") != _current_inputs_sig()):
     if st.button("Clear stale A/B", key="btn_ab_clear_final"):
         st.session_state.pop("ab_compare", None)
         st.success("Cleared A/B snapshot. Re-run A/B to refresh.")
-
-
 
 
 
@@ -3248,49 +3313,85 @@ else:
         "app_version": getattr(hashes,"APP_VERSION","v0.1-core"),
         "python_version": _py_version_str(),
     }
+# --- Optional A/B embed (fresh only; keyed by inputs_sig + mode + proj_hash) ---
+_ab = st.session_state.get("ab_compare") or {}
 
-    # --- Optional A/B embed (fresh only) ---
-    _ab = st.session_state.get("ab_compare") or {}
-    def _sig_now(_ibp):
-        return [str(_ibp.get("boundaries_hash","")), str(_ibp.get("C_hash","")), str(_ibp.get("H_hash","")),
-                str(_ibp.get("U_hash","")), str(_ibp.get("shapes_hash",""))]
-    if _ab and (_ab.get("inputs_sig") == _sig_now(inputs_block_payload)):
-        strict_ctx = _ab.get("strict", {}) or {}
-        proj_ctx   = _ab.get("projected", {}) or {}
-        proj_mode  = _rc.get("mode","projected(auto)")
-        proj_tag   = "projected(file)" if proj_mode=="projected(file)" else "projected(auto)"
-        def _pv(out_block):
-            return [int((out_block or {}).get("2",{}).get("eq",False)),
-                    int((out_block or {}).get("3",{}).get("eq",False))]
-        cert_payload["policy"]["strict_snapshot"] = {
-            "policy_tag":"strict","ker_guard":"enforced",
-            "inputs":{"filenames": inputs_block_payload.get("filenames", {})},
-            "lane_mask_k3": lane_mask,
-            "lane_vec_H2d3": strict_ctx.get("lane_vec_H2d3"),
-            "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3"),
-            "pass_vec": _pv(strict_ctx.get("out", {})),
-            "out": strict_ctx.get("out", {}),
-        }
-        proj_snap = {
-            "policy_tag": proj_tag,"ker_guard":"off",
-            "inputs":{"filenames": inputs_block_payload.get("filenames", {})},
-            "lane_mask_k3": lane_mask,
-            "lane_vec_H2d3": proj_ctx.get("lane_vec_H2d3"),
-            "lane_vec_C3plusI3": proj_ctx.get("lane_vec_C3plusI3"),
-            "pass_vec": _pv(proj_ctx.get("out", {})),
-            "out": proj_ctx.get("out", {}),
-            "projector_hash": _rc.get("projector_hash", proj_ctx.get("projector_hash","")),
-            "projector_consistent_with_d": _rc.get("projector_consistent_with_d", proj_ctx.get("projector_consistent_with_d")),
-        }
-        if proj_mode == "projected(file)" and _rc.get("projector_filename"):
-            proj_snap["projector_filename"] = _rc.get("projector_filename")
-            pf_sha = cert_payload["policy"].get("projector_file_sha256")
-            if pf_sha: proj_snap["projector_file_sha256"] = pf_sha
-        cert_payload["policy"]["projected_snapshot"] = proj_snap
-        cert_payload["ab_pair_tag"] = f"strict__VS__{proj_tag}"
-        cert_payload["ab_embedded"] = True
-    else:
-        cert_payload["ab_embedded"] = False
+def _sig_now(_ibp: dict) -> list[str]:
+    return [
+        str(_ibp.get("boundaries_hash","")),
+        str(_ibp.get("C_hash","")),
+        str(_ibp.get("H_hash","")),
+        str(_ibp.get("U_hash","")),
+        str(_ibp.get("shapes_hash","")),
+    ]
+
+# Current mode/hash from run context
+_mode_now = str(_rc.get("mode") or "strict")
+_proj_hash_now = (str(_rc.get("projector_hash","")) if _mode_now.startswith("projected") else "")
+_sig = _sig_now(inputs_block_payload)
+
+# Ab freshness key (must match what the A/B block emitted)
+_current_ab_key = (tuple(_sig), _mode_now, _proj_hash_now)
+
+if _ab and tuple(_ab.get("ab_key") or ()) == _current_ab_key:
+    strict_ctx = _ab.get("strict", {}) or {}
+    proj_ctx   = _ab.get("projected", {}) or {}
+
+    # UI-facing tag for projected side
+    proj_tag = (
+        "projected(file)" if _mode_now == "projected(file)"
+        else "projected(auto)" if _mode_now == "projected(auto)"
+        else "projected"
+    )
+
+    def _pv(out_block: dict) -> list[int]:
+        return [
+            int((out_block or {}).get("2", {}).get("eq", False)),
+            int((out_block or {}).get("3", {}).get("eq", False)),
+        ]
+
+    # Strict snapshot
+    cert_payload["policy"]["strict_snapshot"] = {
+        "policy_tag": "strict",
+        "ker_guard":  "enforced",
+        "inputs": {"filenames": inputs_block_payload.get("filenames", {})},
+        "lane_mask_k3": lane_mask,
+        "lane_vec_H2d3": strict_ctx.get("lane_vec_H2d3"),
+        "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3"),
+        "pass_vec": _pv(strict_ctx.get("out", {})),
+        "out": strict_ctx.get("out", {}),
+    }
+
+    # Projected snapshot (auto/file mirrors current RC)
+    proj_snap = {
+        "policy_tag": proj_tag,
+        "ker_guard":  "off",
+        "inputs": {"filenames": inputs_block_payload.get("filenames", {})},
+        "lane_mask_k3": lane_mask,
+        "lane_vec_H2d3": proj_ctx.get("lane_vec_H2d3"),
+        "lane_vec_C3plusI3": proj_ctx.get("lane_vec_C3plusI3"),
+        "pass_vec": _pv(proj_ctx.get("out", {})),
+        "out": proj_ctx.get("out", {}),
+        "projector_hash": _proj_hash_now or proj_ctx.get("projector_hash",""),
+        "projector_consistent_with_d": True,
+    }
+    if _mode_now == "projected(file)" and _rc.get("projector_filename"):
+        proj_snap["projector_filename"] = _rc.get("projector_filename")
+        pf_sha = cert_payload.get("policy", {}).get("projector_file_sha256") or ""
+        if pf_sha:
+            proj_snap["projector_file_sha256"] = pf_sha
+
+    cert_payload.setdefault("policy", {})["projected_snapshot"] = proj_snap
+    cert_payload["ab_pair_tag"] = f"strict__VS__{proj_tag}"
+    cert_payload["ab_embedded"] = True
+else:
+    # Stale or absent A/B snapshot → do not embed
+    cert_payload["ab_embedded"] = False
+    cert_payload.get("policy", {}).pop("strict_snapshot", None)
+    cert_payload.get("policy", {}).pop("projected_snapshot", None)
+    cert_payload.pop("ab_pair_tag", None)
+
+    
 
     # ---------- Standard meta before hashing (requested) ----------
     cert_payload.setdefault("schema_version", SCHEMA_VERSION)
