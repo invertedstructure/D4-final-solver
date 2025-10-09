@@ -3874,10 +3874,12 @@ def _full_flush_workspace(delete_projectors: bool = False):
             pass
     return flush_workspace(delete_projectors=delete_projectors)
 
-# ───────────────────────── UI: Exports / Snapshot / Flush (dedup) ─────────────────────────
+# ───────────────────────── UI: Exports / Snapshot / Flush (dedup, namespaced) ─────────────────────────
 EXPORTS_NS = "exports_v2"
 
-with st.expander("Exports", expanded=False):
+import os  
+
+with safe_expander("Exports", expanded=False):
     c1, c2, c3 = st.columns(3)
 
     # ---- Snapshot ZIP ----
@@ -3938,16 +3940,30 @@ with st.expander("Exports", expanded=False):
     # ---- Flushes ----
     with c3:
         st.caption("Flush / Reset")
-        if st.button("Quick Reset (session only)", key="btn_quick_reset_session",
-                     help="Clears computed session data, bumps nonce; does not touch files."):
+        if st.button(
+            "Quick Reset (session only)",
+            key=_mkkey(EXPORTS_NS, "btn_quick_reset_session"),
+            help="Clears computed session data, bumps nonce; does not touch files.",
+        ):
             out = _session_flush_run_cache()
             st.success(f"Run cache flushed · token={out['token']} · key={out['ckey_short']}")
 
-        inc_pj = st.checkbox("Also remove projectors (full flush)", value=False, key="flush_inc_pj_final")
-        confirm  = st.checkbox("I understand this deletes files on disk", value=False, key="ff_confirm_v2")
-        if st.button("Full Flush (certs/logs/reports/bundles)", key="btn_full_flush_everything",
-                     disabled=not confirm,
-                     help="Deletes persisted outputs; keeps inputs. Bumps nonce & resets session."):
+        inc_pj = st.checkbox(
+            "Also remove projectors (full flush)",
+            value=False,
+            key=_mkkey(EXPORTS_NS, "flush_inc_pj"),
+        )
+        confirm = st.checkbox(
+            "I understand this deletes files on disk",
+            value=False,
+            key=_mkkey(EXPORTS_NS, "ff_confirm"),
+        )
+        if st.button(
+            "Full Flush (certs/logs/reports/bundles)",
+            key=_mkkey(EXPORTS_NS, "btn_full_flush"),
+            disabled=not confirm,
+            help="Deletes persisted outputs; keeps inputs. Bumps nonce & resets session.",
+        ):
             try:
                 info = _full_flush_workspace(delete_projectors=inc_pj)
                 st.success(f"Workspace flushed · {info['token']}")
@@ -3956,6 +3972,7 @@ with st.expander("Exports", expanded=False):
                     st.json(info)
             except Exception as e:
                 st.error(f"Flush failed: {e}")
+
 
 
 
