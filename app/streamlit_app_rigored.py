@@ -2006,12 +2006,12 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
 
 
 
-# =========================[ · Gallery Append & Dedupe ]=========================
+# =========================[ · Gallery Append & Dedupe (cert-required) ]=========================
 
 GALLERY_PATH = (LOGS_DIR / "gallery.jsonl")
 GALLERY_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-# Shared meta helper (hoisted so Witness can reuse)
+# Shared meta helper (define if missing)
 if "_std_meta" not in globals():
     def _std_meta(run_id=None):
         return {
@@ -2026,72 +2026,48 @@ ss.setdefault("_gallery_keys", set())
 ss.setdefault("_gallery_bootstrapped", False)
 
 with safe_expander("Gallery"):
-    # --- Freshness attempt; never st.stop() here ---
-    rc, rc_ok = None, True
-    try:
-        rc = require_fresh_run_ctx()
-        rc = rectify_run_ctx_mask_from_d3()
-    except Exception as e:
-        rc_ok = False
-        st.info("Run Overlap first (gallery actions will be disabled).")
+    rc   = ss.get("run_ctx") or {}
+    cert = ss.get("cert_payload") or {}
 
-    out = ss.get("overlap_out") or {}
-    eligible_green = bool(rc_ok and is_projected_green(rc, out))
-
-    # FILE Π invalid should only block if we're actually in projected(file)
-    def _file_pi_invalid_for_mode(_rc) -> bool:
-        try:
-            return (str((_rc or {}).get("mode","")) == "projected(file)") and file_validation_failed()
-        except Exception:
-            return False
-
-    fm_bad = _file_pi_invalid_for_mode(rc)
-    help_txt = "Disabled because projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π."
-
-    cert = ss.get("cert_payload")
-    if not cert:
+    # ---- cert-required guard (UI-only; we don't st.stop())
+    has_cert = bool(cert)
+    if not has_cert:
         st.info("No cert in memory yet. Run Overlap (let cert writer emit) before adding to gallery.")
 
-    # --- Extract fields (safe defaults if no cert) ---
-    identity = (cert or {}).get("identity") or {}
-    policy   = (cert or {}).get("policy")   or {}
-    inputs   = (cert or {}).get("inputs")   or {}
-    hashes   = inputs.get("hashes") or {
-        "boundaries_hash": inputs.get("boundaries_hash", ""),
-        "C_hash":          inputs.get("C_hash", ""),
-        "H_hash":          inputs.get("H_hash", ""),
-        "U_hash":          inputs.get("U_hash", ""),
-        "shapes_hash":     inputs.get("shapes_hash", ""),
-    }
+    # ---- Pull fields from the cert (authoritative)
+    identity = (cert.get("identity") or {}) if has_cert else {}
+    policy   = (cert.get("policy")   or {}) if has_cert else {}
+    inputs   = (cert.get("inputs")   or {}) if has_cert else {}
+    hashes   = (inputs.get("hashes") or {}) if has_cert else {}
 
     district_id    = identity.get("district_id", "UNKNOWN")
-    policy_tag     = policy.get("policy_tag", "")
-    projector_hash = policy.get("projector_hash", "") or ""
-    cert_hash      = ((cert or {}).get("integrity") or {}).get("content_hash", "") or ""
+    policy_tag     = policy.get("policy_tag", rc.get("policy_tag", rc.get("mode", "strict")))
+    projector_hash = policy.get("projector_hash", "")
+    cert_hash      = (cert.get("integrity") or {}).get("content_hash", "") or ""
 
-    # --- Optional UI fields ---
+    # ---- Optional UI fields
     c1, c2, c3 = st.columns([1,1,2])
     with c1:
         growth_bumps = st.number_input("growth_bumps", min_value=0, value=0, step=1, key="gal_growth_bumps")
     with c2:
-        strictify = st.selectbox("strictify", options=["tbd","no","yes"], index=0, key="gal_strictify")
+        strictify = st.selectbox("strictify", options=["tbd", "no", "yes"], index=0, key="gal_strictify")
     with c3:
         tag = st.text_input("tag (optional)", value="", key="gal_tag")
 
-    # --- Build row (meta first) ---
+    # ---- Row (meta first)
     row = {
-        **_std_meta(run_id=(st.session_state.get("run_ctx") or {}).get("run_id")),
-        "district":       district_id,
+        **_std_meta(run_id=(ss.get("run_ctx") or {}).get("run_id")),
+        "district": district_id,
         "policy": {
             "policy_tag":     policy_tag,
             "projector_hash": projector_hash,
         },
         "hashes": {
-            "boundaries_hash": hashes.get("boundaries_hash",""),
-            "C_hash":          hashes.get("C_hash",""),
-            "H_hash":          hashes.get("H_hash",""),
-            "U_hash":          hashes.get("U_hash",""),
-            "shapes_hash":     hashes.get("shapes_hash",""),
+            "boundaries_hash": hashes.get("boundaries_hash", ""),
+            "C_hash":          hashes.get("C_hash", ""),
+            "H_hash":          hashes.get("H_hash", ""),
+            "U_hash":          hashes.get("U_hash", ""),
+            "shapes_hash":     hashes.get("shapes_hash", ""),
         },
         "growth_bumps":      int(growth_bumps),
         "strictify":         str(strictify),
@@ -2099,13 +2075,13 @@ with safe_expander("Gallery"):
         "cert_content_hash": cert_hash,
     }
 
-    # Dedupe key (robust to errors)
+    # ---- Dedupe key
     try:
         key = gallery_key(row)
     except Exception:
         key = None
 
-    # Bootstrap dedupe cache from tail once
+    # ---- Bootstrap dedupe cache from tail (once)
     if not ss["_gallery_bootstrapped"]:
         for tail_row in _read_jsonl_tail(GALLERY_PATH, N=200):
             try:
@@ -2114,16 +2090,10 @@ with safe_expander("Gallery"):
                 continue
         ss["_gallery_bootstrapped"] = True
 
-    # --- Button: Add to Gallery (non-blocking UX) ---
-    disabled = bool(fm_bad or (not eligible_green) or (not cert))
-    help_txt = (
-        "Disabled because projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π."
-        if fm_bad else
-        "Enabled only when projected is green (k=3 eq=True) and a cert exists."
-        if (not eligible_green or not cert) else
-        "Append current cert to gallery.jsonl"
-    )
-    if st.button("Add to Gallery", key="btn_gallery_append", disabled=disabled, help=help_txt):
+    # ---- Button (disabled only when no cert)
+    tip = ("Append current cert to gallery.jsonl" if has_cert
+           else "Disabled until a cert is written this run.")
+    if st.button("Add to Gallery", key="btn_gallery_append", disabled=not has_cert, help=tip):
         try:
             if key is None:
                 st.warning("Could not compute dedupe key; skipping append.")
@@ -2136,7 +2106,7 @@ with safe_expander("Gallery"):
         except Exception as e:
             st.error(f"Gallery append failed: {e}")
 
-    # --- Tail view ---
+    # ---- Tail view
     try:
         tail = _read_jsonl_tail(GALLERY_PATH, N=8)
         if tail:
