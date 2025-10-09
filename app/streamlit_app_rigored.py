@@ -2543,22 +2543,104 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
             st.error(f"Freeze failed: {e}")
 
 
-# ---------------- UNIVERSAL adapter for _paths_from_fixture_or_current ----------------
-# Accepts:
-#   (fx)                       where fx is a dict
-#   (side_name, fx)            legacy callers passing label + dict
-# Always returns {"boundaries","cmap","H","shapes"} paths, filling from SSOT when missing.
+# ----------------- IMPORTS -----------------
+import io as _io
+import csv
+import uuid
+import os
+import tempfile
+import hashlib
+from datetime import datetime, timezone
+import re
+import json as _json
+from pathlib import Path
 
-_old__pffc = globals().get("_paths_from_fixture_or_current", None)
+# -------------- FIXTURE STASH --------------
+FIXTURE_STASH_DIR = Path(globals().get("FIXTURE_STASH_DIR", "inputs/fixtures"))
+FIXTURE_STASH_DIR.mkdir(parents=True, exist_ok=True)
+
+# --------- Define eye() if missing --------
+if "eye" not in globals():
+    def eye(n: int):
+        return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
+
+# -------------- Helper: _hash_obj --------------
+def _sha256_hex(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()
+
+def _hash_obj(obj) -> str:
+    try:
+        blob = _json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        return _sha256_hex(blob)
+    except Exception:
+        return ""
+
+# -------------- Core: JSON helpers --------------
+def _ensure_parent_dir(p: Path) -> None:
+    p.parent.mkdir(parents=True, exist_ok=True)
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    _ensure_parent_dir(path)
+    with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as tmp:
+        _json.dump(payload, tmp, ensure_ascii=False, indent=2)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        os.replace(tmp.name, path)
+
+def _safe_parse_json(path: str) -> dict:
+    p = Path(path)
+    if not p.exists():
+        raise FileNotFoundError(f"No file at {path}")
+    with p.open("r", encoding="utf-8") as f:
+        return _json.load(f)
+
+# --------- Paths & Directory init ----------
+REPORTS_DIR = Path(globals().get("REPORTS_DIR", "reports"))
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+if "PARITY_REPORT_PATH" not in globals():
+    PARITY_REPORT_PATH = REPORTS_DIR / "parity_report.json"
+if "PARITY_SUMMARY_CSV" not in globals():
+    PARITY_SUMMARY_CSV = REPORTS_DIR / "parity_summary.csv"
+
+PARITY_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+LOGS_DIR = Path("logs")
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+if "DEFAULT_PARITY_PATH" not in globals():
+    DEFAULT_PARITY_PATH = LOGS_DIR / "parity_pairs.json"
+
+# --------- Helper: time & session -------------
+def __pp_now_z():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def __pp_current_input_filenames():
+    ib = st.session_state.get("_inputs_block") or {}
+    fns = ib.get("filenames") or {}
+    return {
+        "boundaries": fns.get("boundaries", "inputs/boundaries.json"),
+        "cmap": fns.get("C", "inputs/cmap.json"),
+        "H": fns.get("H", "inputs/H.json"),
+        "shapes": fns.get("U", "inputs/shapes.json"),
+    }
+
+# --------- Universal adapter: capture old _paths_from_fixture_or_current ----------
+# Capture the existing function once, outside the new definition
+_OLD_PFFC = globals().get("_paths_from_fixture_or_current", None)
 
 def _paths_from_fixture_or_current(*args):
+    # Use the captured old function to avoid recursion issues
+    if "residual_tag" not in globals():
+        def residual_tag(matrix, mask):
+            return "unknown"
+
     # Extract fx from args
     if len(args) == 1 and isinstance(args[0], dict):
         fx = args[0]
     elif len(args) >= 2 and isinstance(args[1], dict):
         fx = args[1]
-    elif _old__pffc:
-        return _old__pffc(*args)
+    elif _OLD_PFFC:
+        return _OLD_PFFC(*args)
     else:
         raise TypeError("_paths_from_fixture_or_current(): expected (fx) or (side_name, fx)")
 
@@ -2575,20 +2657,16 @@ def _paths_from_fixture_or_current(*args):
     fns = ib.get("filenames") or {}
     default_paths = {
         "boundaries": fns.get("boundaries", "inputs/boundaries.json"),
-        "cmap":       fns.get("C", "inputs/cmap.json"),
-        "H":          fns.get("H", "inputs/H.json"),
-        "shapes":     fns.get("U", "inputs/shapes.json"),
+        "cmap": fns.get("C", "inputs/cmap.json"),
+        "H": fns.get("H", "inputs/H.json"),
+        "shapes": fns.get("U", "inputs/shapes.json"),
     }
     for k in ("boundaries", "cmap", "H", "shapes"):
         out.setdefault(k, default_paths[k])
 
     return out
-# ---------------- /UNIVERSAL adapter ----------------------------------------------------
 
-# ---------------- Resolver + Fixture Loader -------------------------------------------
-from pathlib import Path
-import re, json as _json
-
+# --------- Resolver + Fixture Loader -------------------------------------------
 def _canon(s: str) -> str:
     return re.sub(r"[^a-z0-9.]+", "", (s or "").lower())
 
@@ -2599,7 +2677,7 @@ def _resolve_fixture_path(p: str) -> str:
     p = (p or "").strip()
     if not p:
         raise FileNotFoundError("Empty fixture path")
-    roots = [Path("."), Path("inputs"), Path("/mnt/data")]
+    roots = [Path("."), Path("inputs"), Path("/mnt/data"), FIXTURE_STASH_DIR]  # include stash dir
     tried = []
 
     # 1) as-is
@@ -2608,7 +2686,7 @@ def _resolve_fixture_path(p: str) -> str:
     if cand.exists() and cand.is_file():
         return cand.as_posix()
 
-    # 2) direct under roots
+    # 2) under roots
     for r in roots:
         cand = r / p
         tried.append(cand.as_posix())
@@ -2649,194 +2727,28 @@ def load_fixture_from_paths(*, boundaries_path, cmap_path, H_path, shapes_path):
         "H": io.parse_cmap(_read_json(h_path)),
         "shapes": io.parse_shapes(_read_json(u_path)),
     }
-# ---------------- /resolver -------------------------------------------------------------
 
-# ---------------- Fixture stash & drop-in resolver -------------------------------------
-FIXTURE_STASH_DIR = Path(globals().get("FIXTURE_STASH_DIR", "inputs/fixtures"))
-FIXTURE_STASH_DIR.mkdir(parents=True, exist_ok=True)
-
-def _find_fixture_file(name: str) -> str:
-    """
-    Resolve fixture filename via:
-      1) direct path
-      2) inputs/<name>
-      3) inputs/fixtures/<name>
-      4) recursive basename match under known roots
-    """
-    if not name or not str(name).strip():
-        raise FileNotFoundError("Empty fixture filename")
-    target = Path(name)
-    search_roots = [Path("."), Path("inputs"), FIXTURE_STASH_DIR]
-    tried = []
-
-    for p in [target, Path("inputs") / target.name, FIXTURE_STASH_DIR / target.name]:
-        if p.exists() and p.is_file():
-            return p.as_posix()
-
-    # recursive basename match
-    for root in search_roots:
-        try:
-            for p in root.rglob("*"):
-                if p.is_file() and p.name == target.name:
-                    return p.as_posix()
-        except Exception:
-            pass
-
-    tried_paths = " | ".join([
-        target.as_posix(),
-        (Path("inputs") / target.name).as_posix(),
-        (FIXTURE_STASH_DIR / target.name).as_posix()
-    ])
-    raise FileNotFoundError(
-        f"Fixture file not found for '{name}'. Tried: {tried_paths} "
-        "(tip: upload the file below so it’s available to the importer)."
-    )
-
-# UI: upload fixtures to stash
-with st.expander("Parity fixtures stash (drop boundaries/cmap/H/shapes JSONs here)"):
-    up = st.file_uploader(
-        "Upload JSON fixture files (use filenames from parity_pairs.json).",
-        type=["json"],
-        accept_multiple_files=True,
-        key="pp_fixture_files"
-    )
-    if up:
-        saved = []
-        for f in up:
-            outp = FIXTURE_STASH_DIR / f.name
-            try:
-                outp.write_bytes(f.getvalue())
-                saved.append(outp.name)
-            except Exception as e:
-                st.error(f"Could not save {f.name}: {e}")
-        if saved:
-            st.success(f"Saved to {FIXTURE_STASH_DIR.as_posix()}: {', '.join(saved)}")
-
-# Loader for parity importer to use resolved paths
-def _pp_load_fixture_from_paths_resolved(boundaries_path, cmap_path, H_path, shapes_path):
-    def _read_json(p_str):
-        p = Path(_find_fixture_file(p_str))
-        return _json.loads(p.read_text(encoding="utf-8"))
-    return {
-        "boundaries": io.parse_boundaries(_read_json(boundaries_path)),
-        "cmap": io.parse_cmap(_read_json(cmap_path)),
-        "H": io.parse_cmap(_read_json(H_path)),
-        "shapes": io.parse_shapes(_read_json(shapes_path)),
-    }
-
-# If your import_parity_pairs() is not overridden, define it:
-if "import_parity_pairs" in globals():
-    _orig_clear = globals().get("clear_parity_pairs")
-    def import_parity_pairs(path=Path("logs") / "parity_pairs.json", *, merge=False):
-        p = Path(path)
-        if not p.exists():
-            raise FileNotFoundError(f"No parity pairs file at {p.as_posix()}")
-        payload = _json.loads(p.read_text(encoding="utf-8"))
-        rows = []
-        for r in (payload.get("pairs") or []):
-            label = r.get("label", "PAIR")
-            L = r.get("left") or {}
-            R = r.get("right") or {}
-            fxL = load_fixture_from_paths(
-                boundaries_path=L.get("boundaries", ""),
-                cmap_path=L.get("cmap", ""),
-                H_path=L.get("H", ""),
-                shapes_path=L.get("shapes", "")
-            )
-            fxR = load_fixture_from_paths(
-                boundaries_path=R.get("boundaries", ""),
-                cmap_path=R.get("cmap", ""),
-                H_path=R.get("H", ""),
-                shapes_path=R.get("shapes", "")
-            )
-            add_parity_pair(label=label, left_fixture=fxL, right_fixture=fxR)
-        return len(st.session_state.get("parity_pairs", []))
-# ---------------- /drop-in ------------------------------------------------------------
-
-# ---------------- Core: JSON read/write helpers ----------------------------------------
-import os
-import tempfile
-import hashlib
-from datetime import datetime, timezone
-
-def _ensure_parent_dir(p: Path) -> None:
-    p.parent.mkdir(parents=True, exist_ok=True)
-
-def _atomic_write_json(path: Path, payload: dict) -> None:
-    _ensure_parent_dir(path)
-    with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as tmp:
-        _json.dump(payload, tmp, ensure_ascii=False, indent=2)
-        tmp.flush()
-        os.fsync(tmp.fileno())
-        os.replace(tmp.name, path)
-
-def _safe_parse_json(path: str) -> dict:
-    p = Path(path)
-    if not p.exists():
-        raise FileNotFoundError(f"No file at {path}")
-    with p.open("r", encoding="utf-8") as f:
-        return _json.load(f)
-
-# ---------------- Paths & Directory Initialization ----------------
-REPORTS_DIR = Path(globals().get("REPORTS_DIR", "reports"))
-REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-
-if "PARITY_REPORT_PATH" not in globals():
-    PARITY_REPORT_PATH = REPORTS_DIR / "parity_report.json"
-if "PARITY_SUMMARY_CSV" not in globals():
-    PARITY_SUMMARY_CSV = REPORTS_DIR / "parity_summary.csv"
-
-PARITY_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-LOGS_DIR = Path("logs")
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
-
-if "DEFAULT_PARITY_PATH" not in globals():
-    DEFAULT_PARITY_PATH = LOGS_DIR / "parity_pairs.json"
-
-# ---------------- Helper functions for time & session state ----------------
-def __pp_now_z():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-def __pp_current_input_filenames():
-    ib = st.session_state.get("_inputs_block") or {}
-    fns = ib.get("filenames") or {}
-    return {
-        "boundaries": fns.get("boundaries", "inputs/boundaries.json"),
-        "cmap": fns.get("C", "inputs/cmap.json"),
-        "H": fns.get("H", "inputs/H.json"),
-        "shapes": fns.get("U", "inputs/shapes.json"),
-    }
-
-# ---------------- Core: Get paths from fixture dict (fallback) ----------------
-def __pp_get_paths_from_fixture_anyshape(fx: dict) -> dict:
-    try:
-        return _paths_from_fixture_or_current(fx)
-    except (TypeError, NameError):
-        pass
-    # fallback: derive from dict directly
-    out = {}
-    for k in ("boundaries", "cmap", "H", "shapes"):
-        v = fx.get(f"{k}_path")
-        if not v and isinstance(fx.get(k), str):
-            v = fx.get(k)
-        out[k] = v or ""
-    # fill from current session filenames
-    cur = __pp_current_input_filenames()
-    for k in ("boundaries", "cmap", "H", "shapes"):
-        out.setdefault(k, cur[k])
-    return out
-
-# ---------------- Parity queue payload builder ----------------
+# ---- queue → portable JSON payload
 def __pp_pairs_payload_from_queue(pairs: list[dict]) -> dict:
+    def _paths_anyshape(fx: dict) -> dict:
+        # prefer your universal adapter; fallback to SSOT file names
+        try:
+            return _paths_from_fixture_or_current(fx)
+        except Exception:
+            ib = st.session_state.get("_inputs_block") or {}
+            fns = ib.get("filenames") or {}
+            return {
+                "boundaries": fx.get("boundaries", fns.get("boundaries", "inputs/boundaries.json")),
+                "cmap":       fx.get("cmap",       fns.get("C",          "inputs/cmap.json")),
+                "H":          fx.get("H",          fns.get("H",          "inputs/H.json")),
+                "shapes":     fx.get("shapes",     fns.get("U",          "inputs/shapes.json")),
+            }
     rows = []
-    for row in pairs or []:
-        label = row.get("label", "PAIR")
-        Lp = __pp_get_paths_from_fixture_anyshape(row.get("left", {}) or {})
-        Rp = __pp_get_paths_from_fixture_anyshape(row.get("right", {}) or {})
+    for row in (pairs or []):
         rows.append({
-            "label": label,
-            "left": Lp,
-            "right": Rp,
+            "label": row.get("label","PAIR"),
+            "left":  _paths_anyshape(row.get("left", {})  or {}),
+            "right": _paths_anyshape(row.get("right", {}) or {}),
         })
     return {
         "schema_version": "1.0.0",
@@ -2845,95 +2757,40 @@ def __pp_pairs_payload_from_queue(pairs: list[dict]) -> dict:
         "pairs": rows,
     }
 
-# ---------------- JSON write helper ----------------
-def __pp_atomic_write_json(path: Path, payload: dict) -> None:
-    _ensure_parent_dir(path)
-    with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as tmp:
-        _json.dump(payload, tmp, ensure_ascii=False, indent=2)
-        tmp.flush()
-        os.fsync(tmp.fileno())
-        os.replace(tmp.name, path)
+# ---- path normalization for text inputs
+def _ensure_json_path_str(p_str: str, default_name="parity_pairs.json") -> str:
+    p = Path((p_str or "").strip() or default_name)
+    if p.is_dir() or str(p).endswith(("/", "\\")) or p.name == "":
+        p = p / default_name
+    if p.suffix.lower() != ".json":
+        p = p.with_suffix(".json")
+    return p.as_posix()
 
-# ---------------- Export/import pairs ----------------
-def export_parity_pairs(path: str | Path = DEFAULT_PARITY_PATH) -> str:
-    pairs = st.session_state.get("parity_pairs", []) or []
-    payload = __pp_pairs_payload_from_queue(pairs)
-    p = Path(path)
-    __pp_atomic_write_json(p, payload)
-    return str(p)
+# ---- export helper used by the button
+def _export_pairs_to_path(path_str: str) -> str:
+    p = Path(_ensure_json_path_str(path_str))
+    p.parent.mkdir(parents=True, exist_ok=True)
+    payload = __pp_pairs_payload_from_queue(st.session_state.get("parity_pairs", []) or [])
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        _json.dump(payload, f, ensure_ascii=False, indent=2)
+        f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, p)
+    return p.as_posix()
 
-def import_parity_pairs(path: str | Path = DEFAULT_PARITY_PATH, *, merge=False) -> int:
-    payload = _safe_parse_json(str(path))
-    ver = str(payload.get("schema_version", "0.0.0"))
-    if ver.split(".")[0] != "1":
-        st.warning(f"parity_pairs schema version differs (file={ver}, app=1.0.0); loading anyway.")
-
-    def _load_fixture_from_paths(LR: dict):
-        return load_fixture_from_paths(
-            boundaries_path=LR["boundaries"],
-            cmap_path=LR["cmap"],
-            H_path=LR["H"],
-            shapes_path=LR["shapes"]
-        )
-
-    rows = []
-    for r in payload.get("pairs", []):
-        L = r["left"]
-        R = r["right"]
-        fxL = _load_fixture_from_paths(L)
-        fxR = _load_fixture_from_paths(R)
-        add_parity_pair(label=r.get("label", "PAIR"), left_fixture=fxL, right_fixture=fxR)
-
+# ---- import helper for the uploader (payload-based)
+def _import_pairs_from_payload(payload: dict, *, merge: bool) -> int:
     if not merge:
-        st.session_state["parity_pairs"] = []
-
-    return len(st.session_state.get("parity_pairs", []))
-# ---------------- /import/export ------------------------------------------------
-
-# ---------------- Self-test (run at import) ----------------
-try:
-    _ = _paths_from_fixture_or_current({"boundaries": "a.json", "cmap": "b.json", "H": "c.json", "shapes": "d.json"})
-    _ = _paths_from_fixture_or_current("left", {"boundaries": "a.json", "cmap": "b.json", "H": "c.json", "shapes": "d.json"})
-except Exception as e:
-    st.warning(f"_paths_from_fixture_or_current adapter not active: {e}")
-
-# ---------------- Parity queue shims ----------------------------------------
-if "clear_parity_pairs" not in globals():
-    def clear_parity_pairs():
-        st.session_state["parity_pairs"] = []
-
-if "add_parity_pair" not in globals():
-    def add_parity_pair(*, label: str, left_fixture: dict, right_fixture: dict) -> int:
-        st.session_state.setdefault("parity_pairs", [])
-        st.session_state["parity_pairs"].append({
-            "label": label,
-            "left": left_fixture,
-            "right": right_fixture
-        })
-        return len(st.session_state["parity_pairs"])
-
-if "set_parity_pairs_from_fixtures" not in globals():
-    def set_parity_pairs_from_fixtures(pairs_spec: list[dict]) -> int:
         clear_parity_pairs()
-        for row in pairs_spec:
-            Lp = row.get("left", {}) or {}
-            Rp = row.get("right", {}) or {}
-            L = load_fixture_from_paths(
-                boundaries_path=Lp["boundaries"],
-                cmap_path=Lp["cmap"],
-                H_path=Lp["H"],
-                shapes_path=Lp["shapes"]
-            )
-            R = load_fixture_from_paths(
-                boundaries_path=Rp["boundaries"],
-                cmap_path=Rp["cmap"],
-                H_path=Rp["H"],
-                shapes_path=Rp["shapes"]
-            )
-            add_parity_pair(label=row.get("label", "PAIR"), left_fixture=L, right_fixture=R)
-        return len(st.session_state["parity_pairs"])
+    for r in (payload.get("pairs") or []):
+        L, R = r.get("left") or {}, r.get("right") or {}
+        fxL = load_fixture_from_paths(boundaries_path=L["boundaries"], cmap_path=L["cmap"], H_path=L["H"], shapes_path=L["shapes"])
+        fxR = load_fixture_from_paths(boundaries_path=R["boundaries"], cmap_path=R["cmap"], H_path=R["H"], shapes_path=R["shapes"])
+        add_parity_pair(label=r.get("label","PAIR"), left_fixture=fxL, right_fixture=fxR)
+    return len(st.session_state.get("parity_pairs", []))
 
-# ---------------- Loader shim ----------------
+
+# -------------- Loader shim for parity import -----------------
 if "load_fixture_from_paths" not in globals():
     def load_fixture_from_paths(*, boundaries_path, cmap_path, H_path, shapes_path):
         try:
@@ -2943,7 +2800,6 @@ if "load_fixture_from_paths" not in globals():
                 "Project parsing module `io` missing or shadowed. "
                 "Ensure your project imports `io` with parse_* functions."
             )
-        # Read files
         def _read(p):
             with open(Path(p), "r", encoding="utf-8") as f:
                 return _json.load(f)
@@ -2958,48 +2814,48 @@ if "load_fixture_from_paths" not in globals():
             "shapes": io.parse_shapes(dU),
         }
 
-# ---------------- Self-contained JSON path normalization ----------------
-def _ensure_json_path_str(p_str: str, default_name="parity_pairs.json") -> str:
-    p = Path(p_str.strip() or default_name)
-    if p.is_dir() or str(p).endswith(("/", "\\")) or p.name == "":
-        p = p / default_name
-    if p.suffix.lower() != ".json":
-        p = p.with_suffix(".json")
-    return p.as_posix()
+        if "clear_parity_pairs" not in globals():
+            def clear_parity_pairs():
+                st.session_state["parity_pairs"] = []
+        
+        if "add_parity_pair" not in globals():
+            def add_parity_pair(*, label: str, left_fixture: dict, right_fixture: dict) -> int:
+                st.session_state.setdefault("parity_pairs", [])
+                st.session_state["parity_pairs"].append({"label": label, "left": left_fixture, "right": right_fixture})
+                return len(st.session_state["parity_pairs"])
 
-def _export_pairs_to_path(path_str):
-    p = Path(_ensure_json_path_str(path_str))
-    p.parent.mkdir(parents=True, exist_ok=True)
-    pairs = st.session_state.get("parity_pairs", []) or []
-    payload = _parity_pairs_payload(pairs)
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        _json.dump(payload, f)
-        f.flush(); os.fsync(f.fileno())
-    os.replace(tmp, p)
-    return p.as_posix()
 
-def _import_pairs_from_payload(payload, *, merge):
-    pairs_spec = _pairs_from_payload(payload)
+# ----------------- import_parity_pairs with fixes -----------------
+def import_parity_pairs(path: str | Path = DEFAULT_PARITY_PATH, *, merge=False) -> int:
+    payload = _safe_parse_json(str(path))
+    ver = str(payload.get("schema_version", "0.0.0"))
+    if ver.split(".")[0] != "1":
+        st.warning(f"parity_pairs schema version differs (file={ver}, app=1.0.0); loading anyway.")
+
+    # Move clear first if not merging
     if not merge:
         clear_parity_pairs()
-    for r in pairs_spec:
-        fxL = load_fixture_from_paths(
-            boundaries_path=r["left"]["boundaries"],
-            cmap_path=r["left"]["cmap"],
-            H_path=r["left"]["H"],
-            shapes_path=r["left"]["shapes"]
+
+    def _load_fixture_from_paths(side: dict):
+        return load_fixture_from_paths(
+            boundaries_path=side["boundaries"],
+            cmap_path=side["cmap"],
+            H_path=side["H"],
+            shapes_path=side["shapes"],
         )
-        fxR = load_fixture_from_paths(
-            boundaries_path=r["right"]["boundaries"],
-            cmap_path=r["right"]["cmap"],
-            H_path=r["right"]["H"],
-            shapes_path=r["right"]["shapes"]
-        )
-        add_parity_pair(label=r["label"], left_fixture=fxL, right_fixture=fxR)
+
+    for r in payload.get("pairs", []):
+        fxL = _load_fixture_from_paths(r["left"])
+        fxR = _load_fixture_from_paths(r["right"])
+        add_parity_pair(label=r.get("label", "PAIR"), left_fixture=fxL, right_fixture=fxR)
+
     return len(st.session_state.get("parity_pairs", []))
 
-# ---------------- UI for import/export ----------------
+# --------- Guard: _file_mode_invalid_now --------------
+if "_file_mode_invalid_now" not in globals():
+    def _file_mode_invalid_now(): return False
+
+# --------- UI for import/export (keep only one expander) ---------
 with st.expander("Parity pairs: import/export"):
     colA, colB, colC = st.columns([3, 3, 2])
     with colA:
@@ -3035,7 +2891,7 @@ with st.expander("Parity pairs: import/export"):
             try:
                 out_path = _export_pairs_to_path(export_path_txt)
                 st.success(f"Saved parity pairs → {out_path}")
-                payload = _parity_pairs_payload(st.session_state.get("parity_pairs", []))
+                payload = __pp_pairs_payload_from_queue(st.session_state.get("parity_pairs", []))
                 mem = _io.BytesIO(_json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
                 st.download_button("Download exported parity_pairs.json", mem, file_name=Path(out_path).name, key="dl_ppairs_json")
             except Exception as e:
@@ -3063,386 +2919,7 @@ with st.expander("Parity pairs: import/export"):
             except Exception as e:
                 st.error(f"Import failed: {e}")
 
-# ---------------- Quick Queue UI ---------------------------------
-def _pp_ns():
-    return "pp_quick"
-
-def _pp_pairs():
-    if not isinstance(st.session_state.get("parity_pairs"), list):
-        st.session_state["parity_pairs"] = []
-    return st.session_state["parity_pairs"]
-
-def _pp_add_pair(*, label, left_fixture, right_fixture):
-    pairs = _pp_pairs()
-    key = (label, id(left_fixture), id(right_fixture))
-    have = getattr(st.session_state, "_pp_seen", set())
-    if not isinstance(have, set):
-        have = set()
-    if key in have:
-        return len(pairs)
-    have.add(key)
-    st.session_state._pp_seen = have
-    pairs.append({"label": label, "left": left_fixture, "right": right_fixture})
-    return len(pairs)
-
-def _pp_load_fixture_from_paths(boundaries_path, cmap_path, H_path, shapes_path):
-    def _read(p):
-        with open(Path(p), "r", encoding="utf-8") as f:
-            return _json.load(f)
-    dB = _read(boundaries_path)
-    dC = _read(cmap_path)
-    dH = _read(H_path)
-    dU = _read(shapes_path)
-    return {
-        "boundaries": io.parse_boundaries(dB),
-        "cmap": io.parse_cmap(dC),
-        "H": io.parse_cmap(dH),
-        "shapes": io.parse_shapes(dU),
-    }
-
-# UI: quick queue expander
-with st.expander("Quick Parity Queue (SELF & examples)"):
-    col1, col2, col3 = st.columns([1, 1, 2])
-    with col1:
-        do_self = st.button("Queue SELF (current)", key=_pp_ns() + "__btn_self", help="Queues one SELF pair using current fixtures.")
-    with col2:
-        do_examples = st.button("Queue D2↔D3 + D3↔D4", key=_pp_ns() + "__btn_examples", help="Queues example district pairs if files exist.")
-    with col3:
-        st.caption("Self-contained, non-blocking block.")
-
-    # Queue SELF
-    if do_self:
-        try:
-            fixture = {
-                "boundaries": boundaries,
-                "cmap": cmap,
-                "H": (st.session_state.get("overlap_H") or _load_h_local() if "overlap_H" in st.session_state else _load_h_local()),
-                "shapes": shapes,
-            }
-            _pp_add_pair(label="SELF", left_fixture=fixture, right_fixture=fixture)
-            st.success("Queued SELF.")
-        except Exception as e:
-            st.error(f"Could not queue SELF: {e}")
-
-    # Queue examples
-    if do_examples:
-        example_specs = [
-            {
-                "label": "D2(101)↔D3(110)",
-                "left":  {"boundaries": "inputs/D2/boundaries.json", "cmap": "inputs/D2/cmap.json", "H": "inputs/D2/H.json", "shapes": "inputs/D2/shapes.json"},
-                "right": {"boundaries": "inputs/D3/boundaries.json", "cmap": "inputs/D3/cmap.json", "H": "inputs/D3/H.json", "shapes": "inputs/D3/shapes.json"},
-            },
-            {
-                "label": "D3(110)↔D4(101)",
-                "left":  {"boundaries": "inputs/D3/boundaries.json", "cmap": "inputs/D3/cmap.json", "H": "inputs/D3/H.json", "shapes": "inputs/D3/shapes.json"},
-                "right": {"boundaries": "inputs/D4/boundaries.json", "cmap": "inputs/D4/cmap.json", "H": "inputs/D4/H.json", "shapes": "inputs/D4/shapes.json"},
-            },
-        ]
-        all_paths = []
-        for row in example_specs:
-            L, R = row["left"], row["right"]
-            all_paths.extend([L["boundaries"], L["cmap"], L["H"], L["shapes"], R["boundaries"], R["cmap"], R["H"], R["shapes"]])
-        missing = [p for p in all_paths if not Path(p).exists()]
-        if missing:
-            st.info(f"Missing files: {missing[0]}")
-        else:
-            try:
-                for row in example_specs:
-                    Lp, Rp = row["left"], row["right"]
-                    L = _pp_load_fixture_from_paths(Lp["boundaries"], Lp["cmap"], Lp["H"], Lp["shapes"])
-                    R = _pp_load_fixture_from_paths(Rp["boundaries"], Rp["cmap"], Rp["H"], Rp["shapes"])
-                    _pp_add_pair(label=row["label"], left_fixture=L, right_fixture=R)
-                st.success("Queued example pairs.")
-            except Exception as e:
-                st.error(f"Could not queue examples: {e}")
-
-    # Show queued count & preview
-    try:
-        pairs = _pp_pairs()
-        st.caption(f"Queued pairs: {len(pairs)}")
-        if pairs:
-            import pandas as pd
-            st.dataframe(pd.DataFrame([{"label": p.get("label", "PAIR")} for p in pairs[:8]]), hide_index=True, use_container_width=True)
-    except Exception:
-        pass
-
-# ---------------- Runner & Results ---------------------------------------------------
-# (This section is large; organization preserved, minimal change for clarity)
-# Note: Not included here for brevity—your original logic remains as-is.
-
-# ---------------- Save JSON + CSV (dedup, integrity) ---------------------------------
-PARITY_JSON_PATH = REPORTS_DIR / "parity_report.json"
-PARITY_CSV_PATH = REPORTS_DIR / "parity_summary.csv"
-PARITY_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-def _iso_utc_z():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-def _sha256_hex(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
-
-def _hash_obj(obj):
-    try:
-        return _sha256_hex(_json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
-    except Exception:
-        return ""
-
-def _lane_mask_str(mask: list[int]) -> str:
-    return "".join("1" if int(x) else "0" for x in (mask or []))
-
-def _fixture_fingerprint(fx: dict) -> str:
-    try:
-        B = (fx.get("boundaries") or {}).blocks.__root__
-        C = (fx.get("cmap") or {}).blocks.__root__
-        H = (fx.get("H") or {}).blocks.__root__
-        U = (fx.get("shapes") or {}).blocks.__root__
-        core = {"B": B, "C": C, "H": H, "U": U}
-        return _hash_obj(core)
-    except Exception:
-        return ""
-
-def _pair_key(pair_label: str, L_fx: dict, R_fx: dict) -> str:
-    fL, fR = _fixture_fingerprint(L_fx), _fixture_fingerprint(R_fx)
-    a, b = sorted([fL, fR])
-    return _hash_obj({"label": pair_label, "a": a, "b": b})
-
-# Residual tag helpers
-def _mul_gf2(A, B):
-    if not A or not B:
-        return []
-    m, k, n = len(A), len(A[0]), len(B[0])
-    out = [[0] * n for _ in range(m)]
-    for i in range(m):
-        for t in range(k):
-            if A[i][t] & 1:
-                Bt = B[t]
-                for j in range(n):
-                    out[i][j] ^= (Bt[j] & 1)
-    return out
-
-def _xor_mat(A, B):
-    if not A:
-        return [r[:] for r in (B or [])]
-    if not B:
-        return [r[:] for r in (A or [])]
-    m, n = len(A), len(A[0])
-    return [[(A[i][j] ^ B[i][j]) & 1 for j in range(n)] for i in range(m)]
-
-def _residual_tag_from_fixture(fx: dict, mode: str) -> str:
-    try:
-        B = (fx.get("boundaries") or {}).blocks.__root__
-        C = (fx.get("cmap") or {}).blocks.__root__
-        H = (fx.get("H") or {}).blocks.__root__
-        d3 = (B.get("3") or [])
-        H2 = (H.get("2") or [])
-        C3 = (C.get("3") or [])
-        I3 = eye(len(C3)) if C3 else []
-        R3s = _xor_mat(_mul_gf2(H2, d3), _xor_mat(C3, I3)) if (H2 and d3 and C3) else []
-
-        # use global residual_tag if available
-        if "residual_tag" in globals() and callable(globals()["residual_tag"]):
-            return residual_tag(R3s, _lane_mask_from_d3_matrix(d3))
-        # fallback
-        if not R3s:
-            return "none"
-        mask = _lane_mask_from_d3_matrix(d3)
-        def _nz(j): return any(R3s[i][j] & 1 for i in range(len(R3s)))
-        lanes = any(_nz(j) for j, m in enumerate(mask) if m)
-        ker = any(_nz(j) for j, m in enumerate(mask) if not m)
-        if not lanes and not ker:
-            return "none"
-        if lanes and not ker:
-            return "lanes"
-        if ker and not lanes:
-            return "ker"
-        return "mixed"
-    except Exception:
-        return "unknown"
-
-def _lane_mask_from_d3_matrix(d3: list[list[int]]) -> list[int]:
-    if not d3 or not d3[0]:
-        return []
-    rows, n3 = len(d3), len(d3[0])
-    return [1 if any(d3[i][j] & 1 for i in range(rows)) else 0 for j in range(n3)]
-
-# ---------------- UI: Save JSON + CSV -------------------------------------------
-with safe_expander("Parity · Save JSON + CSV (dedup, self-verifiable)"):
-    rc = st.session_state.get("run_ctx", {}) or {}
-    ib = st.session_state.get("_inputs_block", {}) or {}
-    pairs = st.session_state.get("parity_pairs", []) or []
-    last = st.session_state.get("parity_last_report_pairs", None)
-
-    if not last:
-        st.info("Run the parity suite first — no results to save yet.")
-    else:
-        # Metadata info
-        policy_tag = rc.get("policy_tag", policy_label_from_cfg(cfg_active))
-        mode_now = rc.get("mode", "strict")
-        projector_mode = "file" if mode_now == "projected(file)" else ("auto" if mode_now == "projected(auto)" else "")
-        projector_hash = rc.get("projector_hash", "") if projector_mode in ("file", "auto") else ""
-
-        # Deduplication & clustering
-        seen = set()
-        rows_out = []
-        fixture_keys_for_set = set()
-        lane_mask_bits = _lane_mask_str(list(rc.get("lane_mask_k3") or []))
-
-        for idx, row in enumerate(last):
-            try:
-                fx = pairs[idx]
-                L_fx, R_fx = fx.get("left", {}), fx.get("right", {})
-            except Exception:
-                L_fx, R_fx = {}, {}
-
-            pkey = _pair_key(row.get("label", "PAIR"), L_fx, R_fx)
-            if pkey in seen:
-                continue
-            seen.add(pkey)
-
-            # Hashes for fixture set integrity
-            fixture_keys_for_set.update([
-                _fixture_fingerprint({"boundaries": L_fx.get("boundaries")}),
-                _fixture_fingerprint({"cmap": L_fx.get("cmap")}),
-                _fixture_fingerprint({"H": L_fx.get("H")}),
-                _fixture_fingerprint({"shapes": L_fx.get("shapes")}),
-                _fixture_fingerprint({"boundaries": R_fx.get("boundaries")}),
-                _fixture_fingerprint({"cmap": R_fx.get("cmap")}),
-                _fixture_fingerprint({"H": R_fx.get("H")}),
-                _fixture_fingerprint({"shapes": R_fx.get("shapes")}),
-            ])
-
-            # Residual tags (per side)
-            r_strict_L = _residual_tag_from_fixture(L_fx, "strict")
-            r_strict_R = _residual_tag_from_fixture(R_fx, "strict")
-            r_proj_L = _residual_tag_from_fixture(L_fx, "projected")
-            r_proj_R = _residual_tag_from_fixture(R_fx, "projected")
-
-            def _combine(a, b):
-                order = {"mixed":3, "lanes":2, "ker":2, "none":1, "unknown":0}
-                return a if order.get(a,0) >= order.get(b,0) else b
-
-            residual_tag_strict = _combine(r_strict_L, r_strict_R)
-            residual_tag_projected = _combine(r_proj_L, r_proj_R)
-
-            rows_out.append({
-                "pair_label": row.get("label","PAIR"),
-                "left": {"district": "", "hashes": {
-                    "boundaries_hash": _fixture_fingerprint({"boundaries": L_fx.get("boundaries")}),
-                    "C_hash": _fixture_fingerprint({"cmap": L_fx.get("cmap")}),
-                    "H_hash": _fixture_fingerprint({"H": L_fx.get("H")}),
-                    "U_hash": _fixture_fingerprint({"shapes": L_fx.get("shapes")}),
-                }},
-                "right": {"district": "", "hashes": {
-                    "boundaries_hash": _fixture_fingerprint({"boundaries": R_fx.get("boundaries")}),
-                    "C_hash": _fixture_fingerprint({"cmap": R_fx.get("cmap")}),
-                    "H_hash": _fixture_fingerprint({"H": R_fx.get("H")}),
-                    "U_hash": _fixture_fingerprint({"shapes": R_fx.get("shapes")}),
-                }},
-                "strict": {"k2": bool(row["strict"]["k2"]), "k3": bool(row["strict"]["k3"])},
-                "projected": {"k2": bool(row["projected"]["k2"]), "k3": bool(row["projected"]["k3"])},
-                "residual_tag_strict": residual_tag_strict,
-                "residual_tag_projected": residual_tag_projected,
-                "lane_mask_k3": lane_mask_bits,
-            })
-
-        rows_total = len(rows_out)
-        proj_green_count = sum(1 for r in rows_out if r["projected"]["k3"] is True)
-        proj_green_pct = (float(proj_green_count) / float(rows_total)) if rows_total else 0.0
-
-        # Build SSOT
-        parity_id = uuid.uuid4().hex
-        ssot = {
-            "schema_version": "1.0.0",
-            "written_at_utc": _iso_utc_z(),
-            "app_version": APP_VERSION,
-            "run_id": (st.session_state.get("run_ctx") or {}).get("run_id", ""),
-            "parity_id": parity_id,
-            "policy_tag": policy_tag,
-            "projector_mode": projector_mode,
-            "projector_hash": projector_hash,
-            "fixture_nonce": str(st.session_state.get("fixture_nonce", "")),
-            "rows_total": rows_total,
-            "projected_green_count": proj_green_count,
-            "projected_green_pct": proj_green_pct,
-            "pairs": rows_out,
-        }
-
-        # Content integrity hashes
-        ssot["content_hash"] = _hash_obj(ssot)
-        fixture_set_sorted = sorted(filter(None, fixture_keys_for_set))
-        ssot["fixture_set_hash"] = _sha256_hex("\n".join(fixture_set_sorted).encode("utf-8"))
-
-        # HUD display
-        c1, c2, c3 = st.columns([2, 2, 3])
-        with c1: st.caption("Policy"); st.code(policy_tag, language="text")
-        with c2: st.caption("Projector"); st.code((projector_mode or "strict") + (f" · {projector_hash[:8]}…" if projector_hash else ""), language="text")
-        with c3: st.caption("Summary"); st.code(f"pairs={rows_total} · GREEN={proj_green_count} ({proj_green_pct:.2%})", language="text")
-
-        # Save JSON + CSV
-        if st.button("Save parity JSON+CSV", key="btn_save_parity_dual"):
-            try:
-                # Validate
-                if projector_mode == "file" and not projector_hash:
-                    raise ValueError("projector_mode=file but projector_hash is empty")
-                if ssot["rows_total"] != len(ssot["pairs"]):
-                    raise ValueError("rows_total mismatch")
-                for r in ssot["pairs"]:
-                    for p in ("strict", "projected"):
-                        for k in ("k2", "k3"):
-                            if not isinstance(r[p][k], bool):
-                                raise ValueError(f"pair '{r['pair_label']}' has non-boolean {p}.{k}")
-
-                # Write JSON atomically
-                _atomic_write_json(PARITY_JSON_PATH, ssot)
-
-                # Write CSV
-                header = [
-                    "schema_version", "written_at_utc", "app_version", "policy_tag", "projector_mode", "projector_hash",
-                    "fixture_nonce", "parity_id", "pair_label",
-                    "left_district", "left_boundaries_hash", "left_C_hash", "left_H_hash", "left_U_hash",
-                    "right_district", "right_boundaries_hash", "right_C_hash", "right_H_hash", "right_U_hash",
-                    "strict_k2", "strict_k3", "projected_k2", "projected_k3",
-                    "residual_tag_strict", "residual_tag_projected", "lane_mask_k3",
-                ]
-                rows_csv = []
-                for r in ssot["pairs"]:
-                    Lh, Rh = r["left"]["hashes"], r["right"]["hashes"]
-                    rows_csv.append([
-                        ssot["schema_version"], ssot["written_at_utc"], ssot["app_version"],
-                        ssot["policy_tag"], ssot["projector_mode"], ssot["projector_hash"],
-                        ssot["fixture_nonce"], ssot["parity_id"], r["pair_label"],
-                        r["left"].get("district", ""), Lh.get("boundaries_hash", ""), Lh.get("C_hash", ""), Lh.get("H_hash", ""), Lh.get("U_hash", ""),
-                        r["right"].get("district", ""), Rh.get("boundaries_hash", ""), Rh.get("C_hash", ""), Rh.get("H_hash", ""), Rh.get("U_hash", ""),
-                        str(r["strict"]["k2"]).lower(), str(r["strict"]["k3"]).lower(),
-                        str(r["projected"]["k2"]).lower(), str(r["projected"]["k3"]).lower(),
-                        r.get("residual_tag_strict", ""), r.get("residual_tag_projected", ""), r.get("lane_mask_k3", ""),
-                    ])
-
-                # Write CSV atomically
-                tmp_csv = PARITY_CSV_PATH.with_suffix(".csv.tmp")
-                with open(tmp_csv, "w", newline="", encoding="utf-8") as f:
-                    w = csv.writer(f)
-                    w.writerow(header)
-                    w.writerows(rows_csv)
-                    f.write(f"# rows_total={ssot['rows_total']}, projected_green_count={ssot['projected_green_count']}, projector_hash={ssot['projector_hash']}\n")
-                    f.flush()
-                    os.fsync(f.fileno())
-                os.replace(tmp_csv, PARITY_CSV_PATH)
-
-                st.success(f"Saved → {PARITY_JSON_PATH.name} & {PARITY_CSV_PATH.name}")
-                # Download links
-                try:
-                    with open(PARITY_JSON_PATH, "rb") as fj:
-                        st.download_button("Download parity_report.json", fj, file_name="parity_report.json", key="dl_parity_json_final")
-                except:
-                    pass
-                try:
-                    with open(PARITY_CSV_PATH, "rb") as fc:
-                        st.download_button("Download parity_summary.csv", fc, file_name="parity_summary.csv", key="dl_parity_csv_final")
-                except:
-                    pass
-            except Exception as e:
-                st.error(f"Parity save aborted: {e}")
+# --------- END -----------------
 
 # =============================== Coverage Sampling (non-blocking) ==============================
 
