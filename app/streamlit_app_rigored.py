@@ -3281,6 +3281,42 @@ if "set_parity_pairs_from_fixtures" not in globals():
             add_parity_pair(label=row.get("label", "PAIR"), left_fixture=L, right_fixture=R)
         return len(st.session_state.get("parity_pairs", []))
 # === /shims ===
+            
+# === Parity loader shim (only if your app didn't already define it) ===
+if "load_fixture_from_paths" not in globals():
+    # We assume your project parsing module is available as `io`
+    # (the same one you use elsewhere: io.parse_boundaries, io.parse_cmap, io.parse_shapes).
+    def load_fixture_from_paths(*, boundaries_path: str, cmap_path: str, H_path: str, shapes_path: str):
+        # Friendly sanity: make sure we didn't shadow your project parser with Python's stdlib io
+        try:
+            _ = (io.parse_boundaries, io.parse_cmap, io.parse_shapes)  # type: ignore[attr-defined]
+        except Exception as e:
+            raise RuntimeError(
+                "Project parsing module `io` is not available or was shadowed. "
+                "Ensure your solver's `io` (with parse_* functions) is imported and named `io`."
+            ) from e
+
+        # Reuse the safe JSON reader if present; otherwise minimal read
+        if "_safe_parse_json" in globals():
+            dB = _safe_parse_json(boundaries_path)  # type: ignore[name-defined]
+            dC = _safe_parse_json(cmap_path)        # type: ignore[name-defined]
+            dH = _safe_parse_json(H_path)           # type: ignore[name-defined]
+            dU = _safe_parse_json(shapes_path)      # type: ignore[name-defined]
+        else:
+            import json
+            from pathlib import Path
+            def _read(p): 
+                with open(Path(p), "r", encoding="utf-8") as f: 
+                    return json.load(f)
+            dB, dC, dH, dU = _read(boundaries_path), _read(cmap_path), _read(H_path), _read(shapes_path)
+
+        return {
+            "boundaries": io.parse_boundaries(dB),  # type: ignore[attr-defined]
+            "cmap":       io.parse_cmap(dC),        # type: ignore[attr-defined]
+            "H":          io.parse_cmap(dH),        # type: ignore[attr-defined]
+            "shapes":     io.parse_shapes(dU),      # type: ignore[attr-defined]
+        }
+# === /loader shim ===
 
 
 # ---------------- Parity pairs: import/export (robust paths + uploader) ----------------
