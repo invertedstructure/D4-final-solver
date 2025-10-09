@@ -1,12 +1,28 @@
 # ────────────────────────────── IMPORTS (top) ──────────────────────────────
-import sys, os, json, csv, hashlib, platform, zipfile, tempfile, shutil, importlib.util, types, pathlib
-from pathlib import Path
+import sys
+import os
+import json
+import csv
+import hashlib
+import platform
+import zipfile
+import tempfile
+import shutil
+import importlib.util
+import types
+import secrets
+import math
+import uuid
+import random
 from io import BytesIO
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from pathlib import Path
+
+import pandas as pd
 import streamlit as st
-import secrets
-# alias shim used by helpers (underscored names)
+
+# underscored aliases used by helpers
 import os as _os
 import json as _json
 import hashlib as _hashlib
@@ -15,27 +31,15 @@ import zipfile as _zipfile
 import tempfile as _tempfile
 import shutil as _shutil
 from pathlib import Path as _Path
-
-
-
-
-
-
-
-
-
-
-
-
-
+from uuid import uuid4
 
 # Page config early so Streamlit is happy
 st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
 
 # ────────────────────────────── PACKAGE LOADER ──────────────────────────────
-HERE   = Path(__file__).resolve().parent
+HERE = Path(__file__).resolve().parent
 OTCORE = HERE / "otcore"
-CORE   = HERE / "core"
+CORE = HERE / "core"
 PKG_DIR = OTCORE if OTCORE.exists() else CORE
 PKG_NAME = "otcore" if OTCORE.exists() else "core"
 
@@ -71,14 +75,14 @@ for _mod in (
     if _mod in sys.modules:
         del sys.modules[_mod]
 
-overlap_gate  = _load_pkg_module(f"{PKG_NAME}.overlap_gate",  "overlap_gate.py")
-projector     = _load_pkg_module(f"{PKG_NAME}.projector",     "projector.py")
-otio          = _load_pkg_module(f"{PKG_NAME}.io",            "io.py")
-hashes        = _load_pkg_module(f"{PKG_NAME}.hashes",        "hashes.py")
-unit_gate     = _load_pkg_module(f"{PKG_NAME}.unit_gate",     "unit_gate.py")
+overlap_gate = _load_pkg_module(f"{PKG_NAME}.overlap_gate", "overlap_gate.py")
+projector = _load_pkg_module(f"{PKG_NAME}.projector", "projector.py")
+otio = _load_pkg_module(f"{PKG_NAME}.io", "io.py")
+hashes = _load_pkg_module(f"{PKG_NAME}.hashes", "hashes.py")
+unit_gate = _load_pkg_module(f"{PKG_NAME}.unit_gate", "unit_gate.py")
 triangle_gate = _load_pkg_module(f"{PKG_NAME}.triangle_gate", "triangle_gate.py")
-towers        = _load_pkg_module(f"{PKG_NAME}.towers",        "towers.py")
-export_mod    = _load_pkg_module(f"{PKG_NAME}.export",        "export.py")
+towers = _load_pkg_module(f"{PKG_NAME}.towers", "towers.py")
+export_mod = _load_pkg_module(f"{PKG_NAME}.export", "export.py")
 
 # Legacy alias so existing code can keep using io.parse_* safely
 io = otio
@@ -97,13 +101,8 @@ DISTRICT_MAP: dict[str, str] = {
 }
 
 # ======================= App constants & helpers =======================
-from uuid import uuid4
-import platform
-from datetime import datetime, timezone
-
 SCHEMA_VERSION = "1.0.0"
-APP_VERSION    = "v0.1-core"
-FIELD          = "GF(2)"  # displayed only; math stays the same
+FIELD = "GF(2)"  # displayed only; math stays the same
 
 def _utc_iso_z() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -125,7 +124,6 @@ def _std_meta(*, include_python: bool = False, run_id: str | None = None) -> dic
     if run_id:
         meta["run_id"] = run_id
     return meta
-
 
 # ====================== Policy label symmetry (full tag) ======================
 def policy_label_from_cfg_full(cfg: dict) -> str:
@@ -155,29 +153,13 @@ def policy_label_from_state(rc: dict, cfg_active: dict) -> str:
         return "projected(columns@k=3,auto)"
     # fallback
     return policy_label_from_cfg_full(cfg_active or {})
-# ============================================================================
-
-
 
 # =========================[ STEP 1 · Core helpers + guards ]=========================
-
-from pathlib import Path
-import os, json, tempfile, shutil, hashlib
-from uuid import uuid4
-from datetime import datetime, timezone
-
-# ---- Constants (single source)
-SCHEMA_VERSION = globals().get("SCHEMA_VERSION", "1.0.0")
-APP_VERSION    = globals().get("APP_VERSION",    "v0.1-core")
-FIELD          = globals().get("FIELD",          "GF(2)")
-
 # ---- Directories (be tolerant if not pre-defined)
-LOGS_DIR = Path(globals().get("LOGS_DIR", "logs")); LOGS_DIR.mkdir(parents=True, exist_ok=True)
+LOGS_DIR = Path(globals().get("LOGS_DIR", "logs"))
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 # ---- Tiny time/uuid utils
-def _utc_iso_z() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
 def new_run_id() -> str:
     return str(uuid4())
 
@@ -205,6 +187,12 @@ def require_fresh_run_ctx():
         st.stop()
     if int(rc.get("fixture_nonce", -1)) != int(ss.get("fixture_nonce", -2)):
         st.warning("STALE_RUN_CTX: Inputs changed; please click Run Overlap to refresh.")
+        st.stop()
+    # also assert mask shape is sane
+    n3 = int(rc.get("n3") or 0)
+    lm = list(rc.get("lane_mask_k3") or [])
+    if lm and n3 and len(lm) != n3:
+        st.warning("Context mask length mismatch; please click Run Overlap to refresh.")
         st.stop()
     return rc  # allow callers to grab it
 
@@ -251,7 +239,10 @@ def _atomic_append_jsonl(path: Path, row: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     blob = json.dumps(row, separators=(",", ":"), sort_keys=True, ensure_ascii=False) + "\n"
     with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as tmp:
-        tmp.write(blob); tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
+        tmp.write(blob)
+        tmp.flush()
+        os.fsync(tmp.fileno())
+        tmp_name = tmp.name
     with open(path, "a", encoding="utf-8") as final, open(tmp_name, "r", encoding="utf-8") as src:
         shutil.copyfileobj(src, final)
     os.remove(tmp_name)
@@ -259,7 +250,6 @@ def _atomic_append_jsonl(path: Path, row: dict):
 def _read_jsonl_tail(path: Path, N: int = 200) -> list[dict]:
     if not path.exists():
         return []
-    # Simple tail: read whole if tiny; otherwise seek from end
     try:
         with open(path, "rb") as f:
             f.seek(0, os.SEEK_END)
@@ -274,53 +264,58 @@ def _read_jsonl_tail(path: Path, N: int = 200) -> list[dict]:
             lines = data.splitlines()[-N:]
         return [json.loads(l.decode("utf-8")) for l in lines if l.strip()]
     except Exception:
-        # fallback: full read
         with open(path, "r", encoding="utf-8") as f:
             lines = f.readlines()[-N:]
         out = []
         for ln in lines:
-            try: out.append(json.loads(ln))
-            except Exception: continue
+            try:
+                out.append(json.loads(ln))
+            except Exception:
+                continue
         return out
 
 # ---- Predicates used across UI
 def is_projected_green(run_ctx: dict | None, overlap_out: dict | None) -> bool:
-    if not run_ctx or not overlap_out: return False
+    if not run_ctx or not overlap_out:
+        return False
     mode = str(run_ctx.get("mode") or "")
     return mode.startswith("projected") and bool(((overlap_out.get("3") or {}).get("eq", False)))
 
 def is_strict_red_lanes(run_ctx: dict | None, overlap_out: dict | None, residual_tags: dict | None) -> bool:
-    if not run_ctx or not overlap_out: return False
-    if str(run_ctx.get("mode") or "") != "strict": return False
-    if bool(((overlap_out.get("3") or {}).get("eq", True))): return False
+    if not run_ctx or not overlap_out:
+        return False
+    if str(run_ctx.get("mode") or "") != "strict":
+        return False
+    if bool(((overlap_out.get("3") or {}).get("eq", True))):
+        return False
     tag = ((residual_tags or {}).get("strict") or "")
     return tag == "lanes"
 
 # ---- Hash key builders for dedupe
 def gallery_key(row: dict) -> tuple:
     pol = row.get("policy") or {}
-    h   = row.get("hashes") or {}
+    h = row.get("hashes") or {}
     return (
-        row.get("district",""),
-        pol.get("policy_tag",""),
-        h.get("boundaries_hash",""),
-        h.get("C_hash",""),
-        h.get("H_hash",""),
-        h.get("U_hash",""),
+        row.get("district", ""),
+        pol.get("policy_tag", ""),
+        h.get("boundaries_hash", ""),
+        h.get("C_hash", ""),
+        h.get("H_hash", ""),
+        h.get("U_hash", ""),
     )
 
 def witness_key(row: dict) -> tuple:
     pol = row.get("policy") or {}
-    h   = row.get("hashes") or {}
+    h = row.get("hashes") or {}
     return (
-        row.get("district",""),
-        row.get("reason",""),
-        row.get("residual_tag",""),
-        pol.get("policy_tag",""),
-        h.get("boundaries_hash",""),
-        h.get("C_hash",""),
-        h.get("H_hash",""),
-        h.get("U_hash",""),
+        row.get("district", ""),
+        row.get("reason", ""),
+        row.get("residual_tag", ""),
+        pol.get("policy_tag", ""),
+        h.get("boundaries_hash", ""),
+        h.get("C_hash", ""),
+        h.get("H_hash", ""),
+        h.get("U_hash", ""),
     )
 
 # ---- Session-level dedupe caches (init once)
@@ -334,146 +329,20 @@ def run_stamp_line() -> str:
     ss = st.session_state
     rc = ss.get("run_ctx") or {}
     ib = ss.get("_inputs_block") or {}
-    pol = rc.get("policy_tag","?")
+    pol = rc.get("policy_tag", "?")
     n3 = int(rc.get("n3") or 0)
-    hB = (ib.get("boundaries_hash","") or "")[:8]
-    hC = (ib.get("C_hash","") or "")[:8]
-    hH = (ib.get("H_hash","") or "")[:8]
-    hU = (ib.get("U_hash","") or "")[:8]
-    pH = (rc.get("projector_hash","") or "")[:8]
-    rid = (rc.get("run_id","") or "")[:8]
+    hB = (ib.get("boundaries_hash", "") or "")[:8]
+    hC = (ib.get("C_hash", "") or "")[:8]
+    hH = (ib.get("H_hash", "") or "")[:8]
+    hU = (ib.get("U_hash", "") or "")[:8]
+    pH = (rc.get("projector_hash", "") or "")[:8]
+    rid = (rc.get("run_id", "") or "")[:8]
     return f"{pol} | n3={n3} | B {hB} · C {hC} · H {hH} · U {hU} | P {pH} | run {rid}"
-# ====================================================================================
 
-
-# ───────────────────────── SSOT + Freshness helpers (drop-in) ─────────────────────────
-import hashlib, secrets
-import streamlit as st
-
-# 1) Ensure a session-wide fixture nonce exists
-def _ensure_fixture_nonce():
-    ss = st.session_state
-    if "_fixture_nonce" not in ss:
-        ss["_fixture_nonce"] = 1
-
-# 2) Bump nonce and clear computed session state (session-only flush core)
-def _bump_fixture_nonce():
-    ss = st.session_state
-    _ensure_fixture_nonce()
-    ss["_fixture_nonce"] = int(ss.get("_fixture_nonce", 0)) + 1
-    # Clear computed caches only (do not touch file pickers / inputs)
-    for k in (
-        "run_ctx", "overlap_out", "residual_tags",
-        "overlap_cfg", "overlap_policy_label", "overlap_H",
-        "ab_compare", "_projector_cache", "_projector_cache_ab",
-        "cert_payload", "last_cert_path",
-    ):
-        ss.pop(k, None)
-
-# 3) Safe wrapper you can call from *any* fixture-changing code paths
-def _mark_fixtures_changed():
-    _bump_fixture_nonce()
-
-# 4) Light reset right before an Overlap run (button handler should call this)
-def _soft_reset_before_overlap():
-    ss = st.session_state
-    for k in (
-        "run_ctx", "overlap_out", "residual_tags",
-        "overlap_cfg", "overlap_policy_label", "overlap_H",
-        "ab_compare", "_last_cert_write_key",
-        "_projector_cache", "_projector_cache_ab",
-        "cert_payload", "last_cert_path",
-    ):
-        ss.pop(k, None)
-
-# 5) Guard macro for actions that require fresh run_ctx
-def require_fresh_run_ctx():
-    ss = st.session_state
-    _ensure_fixture_nonce()
-    rc = ss.get("run_ctx")
-    if not rc:
-        st.warning("Run Overlap first.")
-        st.stop()
-    if int(rc.get("fixture_nonce", -1)) != int(ss.get("_fixture_nonce", -2)):
-        st.warning("Inputs changed since last run. Please click Run Overlap to refresh.")
-        st.stop()
-    # also assert mask shape is sane
-    n3 = int(rc.get("n3") or 0)
-    lm = list(rc.get("lane_mask_k3") or [])
-    if lm and n3 and len(lm) != n3:
-        st.warning("Context mask length mismatch; please click Run Overlap to refresh.")
-        st.stop()
-    return rc  # handy for callers
-
-# 6) Truth mask from a concrete d3 (GF(2) column-wise OR)
-def _truth_mask_from_d3(d3: list[list[int]]) -> list[int]:
-    if not d3 or not d3[0]:
-        return []
-    rows, cols = len(d3), len(d3[0])
-    return [1 if any(d3[i][j] & 1 for i in range(rows)) else 0 for j in range(cols)]
-
-# 7) Defensive rectifier used right before freezing Π
-def _rectify_run_ctx_mask_from_d3_or_stop():
-    ss = st.session_state
-    rc = require_fresh_run_ctx()  # ensures rc exists & fresh
-    d3 = rc.get("d3") or []
-    n3 = int(rc.get("n3") or 0)
-    if not d3 or n3 <= 0:
-        st.warning("Context is missing d3/n3. Run Overlap again.")
-        st.stop()
-    lm_truth = _truth_mask_from_d3(d3)
-    if len(lm_truth) != n3:
-        st.warning(f"rectifier: lane_mask length {len(lm_truth)} != n3 {n3}. Run Overlap again.")
-        st.stop()
-    lm_rc = list(rc.get("lane_mask_k3") or [])
-    if lm_rc != lm_truth:
-        rc["lane_mask_k3"] = lm_truth
-        ss["run_ctx"] = rc
-        st.info(f"Rectified run_ctx.lane_mask_k3 from {lm_rc} → {lm_truth} based on current d3.")
-    return rc  # rectified and fresh
-
-# 8) Unique key helper for download widgets etc.
-def unique_key(prefix: str) -> str:
-    ss = st.session_state
-    counter = ss.setdefault(f"__key_{prefix}", 0) + 1
-    ss[f"__key_{prefix}"] = counter
-    return f"{prefix}__{counter}"
-
-
-# ---------- Freshness / reset helpers ----------
-def _ensure_fixture_nonce():
-    ss = st.session_state
-    if "_fixture_nonce" not in ss:
-        ss["_fixture_nonce"] = 1
-
-def _mark_fixtures_changed():
-    ss = st.session_state
-    _ensure_fixture_nonce()
-    ss["_fixture_nonce"] += 1
-    # clear only things that depend on inputs/projector selection
-    for k in ("run_ctx","overlap_out","overlap_cfg","overlap_policy_label",
-              "overlap_H","residual_tags","ab_compare","_projector_cache",
-              "_projector_cache_ab","_last_cert_write_key"):
-        ss.pop(k, None)
-
-def _soft_reset_before_overlap():
-    """Light reset before an Overlap run; does NOT touch files on disk."""
-    ss = st.session_state
-    for k in ("run_ctx","overlap_out","overlap_cfg","overlap_policy_label",
-              "overlap_H","residual_tags","_last_cert_write_key"):
-        ss.pop(k, None)
-
-# Freshness / mutation tracking
-def _bump_fixture_nonce():
-    st.session_state["_fixture_nonce"] = (st.session_state.get("_fixture_nonce") or 0) + 1
-
-def _mark_fixtures_changed():
-    # call this whenever boundaries/C/H/U/shapes OR projector source toggles
-    _bump_fixture_nonce()
-    for k in ("run_ctx","overlap_out","residual_tags","ab_compare"):
-        st.session_state.pop(k, None)
-
-
+# ───────────────────────── SSOT + Freshness helpers (aliases) ─────────────────────────
+# For legacy names present elsewhere in code, provide lightweight aliases.
+_mark_fixtures_changed = _bump_fixture_nonce  # legacy compatibility
+_soft_reset_before_overlap = soft_reset_before_overlap  # legacy compatibility
 
 # ---------- stable hashing (bytes + json-obj) ----------
 def _sha256_hex_bytes(b: bytes) -> str:
@@ -487,21 +356,20 @@ def hash_json(obj) -> str:
     return _sha256_hex_obj(obj)
 
 def _iso_utc_now() -> str:
-    return datetime.now(_timezone.utc).isoformat()
+    return datetime.now(timezone.utc).isoformat()
 
 # ====================== Π FILE Validator (strict) ======================
 def _mul_gf2(A, B):
     # Use app's mul if present; otherwise a safe GF(2) fallback
     if "mul" in globals() and callable(globals()["mul"]):
         return mul(A, B)
-    if not A or not B: return []
+    if not A or not B:
+        return []
     m, k, n = len(A), len(A[0]), len(B[0])
-    # assume B is k x n
-    out = [[0]*n for _ in range(m)]
+    out = [[0] * n for _ in range(m)]
     for i in range(m):
         for t in range(k):
             if A[i][t] & 1:
-                # xor-add row of B
                 bt = B[t]
                 for j in range(n):
                     out[i][j] ^= (bt[j] & 1)
@@ -515,24 +383,20 @@ def validate_projector_file_strict(P, *, n3: int, lane_mask: list[int]) -> None:
         got_r = len(P) if isinstance(P, list) else 0
         got_c = len(P[0]) if (isinstance(P, list) and P and isinstance(P[0], list)) else 0
         raise ValueError(f"P3_SHAPE: expected {n3}x{n3}, got {got_r}x{got_c}")
-
     # idempotence over GF(2)
     PP = _mul_gf2(P, P)
     if PP != P:
         raise ValueError("P3_IDEMP: P@P != P (GF2)")
-
     # diagonal-only
     for i in range(n3):
         for j in range(n3):
             if i != j and (P[i][j] & 1):
                 raise ValueError("P3_DIAGONAL: off-diagonal element is 1")
-
     # lane diag match
     diag = [int(P[i][i]) & 1 for i in range(n3)]
-    lm   = [int(x) & 1 for x in (lane_mask or [])]
+    lm = [int(x) & 1 for x in (lane_mask or [])]
     if diag != lm:
         raise ValueError(f"P3_LANE_MISMATCH: diag(P)={diag} vs lane_mask(d3)={lm}")
-
 
 # ---------- safe expander (never nests real expanders) ----------
 try:
@@ -589,7 +453,8 @@ def _stamp_filename(state_key: str, upload):
         pass
 
 # ---------- atomic writers ----------
-def atomic_write_json(path: str | _Path, obj: dict, *, pretty: bool = False):
+def _atomic_write_json(path: str | _Path, obj: dict, *, pretty: bool = False):
+    """Canonical JSON atomic writer (kept for existing call sites)."""
     path = _Path(path)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.parent.mkdir(parents=True, exist_ok=True)
@@ -601,24 +466,36 @@ def atomic_write_json(path: str | _Path, obj: dict, *, pretty: bool = False):
         separators=None if pretty else (",", ":"),
     ).encode("utf-8")
     with open(tmp, "wb") as f:
-        f.write(blob); f.flush(); _os.fsync(f.fileno())
+        f.write(blob)
+        f.flush()
+        _os.fsync(f.fileno())
     _os.replace(tmp, path)
 
+def atomic_write_json(path: str | _Path, obj: dict, *, pretty: bool = False):
+    """Alias kept for places that used the non-underscored name."""
+    _atomic_write_json(path, obj, pretty=pretty)
+
 def atomic_append_jsonl(path: str | _Path, row: dict):
-    path = _Path(path); path.parent.mkdir(parents=True, exist_ok=True)
+    path = _Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     line = _json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
     with open(tmp, "wb") as f:
-        f.write(line.encode("utf-8")); f.flush(); _os.fsync(f.fileno())
+        f.write(line.encode("utf-8"))
+        f.flush()
+        _os.fsync(f.fileno())
     with open(path, "ab") as out, open(tmp, "rb") as src:
-        out.write(src.read()); out.flush(); _os.fsync(out.fileno())
+        out.write(src.read())
+        out.flush()
+        _os.fsync(out.fileno())
     try:
         tmp.unlink(missing_ok=True)
     except Exception:
         pass
 
 def _atomic_write_csv(path: _Path, header: list[str], rows: list[list], meta_comment_lines: list[str] | None = None):
-    tmp = _Path(str(path) + ".tmp"); tmp.parent.mkdir(parents=True, exist_ok=True)
+    tmp = _Path(str(path) + ".tmp")
+    tmp.parent.mkdir(parents=True, exist_ok=True)
     with open(tmp, "w", newline="", encoding="utf-8") as f:
         w = _csv.writer(f)
         if meta_comment_lines:
@@ -626,7 +503,8 @@ def _atomic_write_csv(path: _Path, header: list[str], rows: list[list], meta_com
                 w.writerow([f"# {k}"])
         w.writerow(header)
         w.writerows(rows)
-        f.flush(); _os.fsync(f.fileno())
+        f.flush()
+        _os.fsync(f.fileno())
     _os.replace(tmp, path)
 
 # ---------- lane mask / signatures ----------
@@ -671,13 +549,17 @@ def policy_label_from_cfg(cfg: dict) -> str:
     return "projected(columns@k=3,file)" if src == "file" else "projected(columns@k=3,auto)"
 
 # ---------- tiny GF(2) ops ----------
-def _eye(n: int): return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
+def _eye(n: int):
+    return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
 
-def _mul_gf2(A, B):
-    if not A or not B or not A[0] or not B[0]: return []
-    r, k = len(A), len(A[0]); k2, c = len(B), len(B[0])
-    if k != k2: raise ValueError(f"dim mismatch: {r}x{k} @ {k2}x{c}")
-    out = [[0]*c for _ in range(r)]
+def _mul_gf2_basic(A, B):
+    if not A or not B or not A[0] or not B[0]:
+        return []
+    r, k = len(A), len(A[0])
+    k2, c = len(B), len(B[0])
+    if k != k2:
+        raise ValueError(f"dim mismatch: {r}x{k} @ {k2}x{c}")
+    out = [[0] * c for _ in range(r)]
     for i in range(r):
         Ai = A[i]
         for t in range(k):
@@ -688,18 +570,24 @@ def _mul_gf2(A, B):
     return out
 
 def _is_idempotent_gf2(P):
-    try: return _mul_gf2(P, P) == P
-    except Exception: return False
+    try:
+        return _mul_gf2_basic(P, P) == P
+    except Exception:
+        return False
 
 def _is_diagonal(P):
-    m = len(P) or 0; n = len(P[0]) if m else 0
-    if m != n: return False
+    m = len(P) or 0
+    n = len(P[0]) if m else 0
+    if m != n:
+        return False
     for i in range(m):
         for j in range(n):
-            if i != j and (P[i][j] & 1): return False
+            if i != j and (P[i][j] & 1):
+                return False
     return True
 
-def _diag(P): return [int(P[i][i] & 1) for i in range(len(P))] if P and P[0] else []
+def _diag(P):
+    return [int(P[i][i] & 1) for i in range(len(P))] if P and P[0] else []
 
 # ---------- projector chooser (strict/auto/file) ----------
 class _P3Error(ValueError):
@@ -721,17 +609,9 @@ def _read_projector_matrix(path_str: str):
         return d
     raise _P3Error("P3_SHAPE", "unrecognized projector JSON structure")
 
-def _truth_mask_from_d3(d3: list[list[int]]) -> list[int]:
-    """Column-wise OR over GF(2) from THIS d3 snapshot only."""
-    if not d3 or not d3[0]:
-        return []
-    rows, n3 = len(d3), len(d3[0])
-    return [1 if any(int(d3[i][j]) & 1 for i in range(rows)) else 0 for j in range(n3)]
-
 def projector_choose_active(cfg_active: dict, boundaries):
     # Resolve the exact d3 we’ll use and compute the SSOT mask from it.
     d3 = (boundaries.blocks.__root__.get("3") or [])
-    # normalize to ints defensively
     d3 = [[int(x) & 1 for x in row] for row in d3] if d3 else []
     n3 = len(d3[0]) if (d3 and d3[0]) else 0
     lm_truth = _truth_mask_from_d3(d3)
@@ -745,14 +625,16 @@ def projector_choose_active(cfg_active: dict, boundaries):
     # No projected layer → strict
     if not cfg_active or not cfg_active.get("enabled_layers"):
         return P_active, {
-            "d3": d3, "n3": n3, "mode": mode,
-            "lane_mask": lm_truth, "lane_mask_k3": lm_truth,
+            "d3": d3,
+            "n3": n3,
+            "mode": mode,
+            "lane_mask": lm_truth,
+            "lane_mask_k3": lm_truth,
             "projector_filename": pj_filename,
             "projector_hash": pj_hash,
             "projector_consistent_with_d": pj_consistent,
         }
 
-    # Pick source
     source = (cfg_active.get("source", {}) or {}).get("3", "auto")
     mode = "projected(auto)" if source == "auto" else "projected(file)"
 
@@ -763,8 +645,11 @@ def projector_choose_active(cfg_active: dict, boundaries):
         pj_hash = _sha256_hex_obj(P_active)
         pj_consistent = True
         return P_active, {
-            "d3": d3, "n3": n3, "mode": mode,
-            "lane_mask": lm_truth, "lane_mask_k3": lm_truth,
+            "d3": d3,
+            "n3": n3,
+            "mode": mode,
+            "lane_mask": lm_truth,
+            "lane_mask_k3": lm_truth,
             "projector_filename": "",
             "projector_hash": pj_hash,
             "projector_consistent_with_d": pj_consistent,
@@ -780,7 +665,6 @@ def projector_choose_active(cfg_active: dict, boundaries):
     n = len(P[0]) if m else 0
     if n3 == 0 or m != n3 or n != n3:
         raise _P3Error("P3_SHAPE", f"expected {n3}x{n3}, got {m}x{n}")
-    # normalize to ints
     P = [[int(x) & 1 for x in row] for row in P]
 
     if not _is_idempotent_gf2(P):
@@ -789,16 +673,18 @@ def projector_choose_active(cfg_active: dict, boundaries):
         raise _P3Error("P3_DIAGONAL", "P has off-diagonal non-zeros")
 
     pj_diag = _diag(P)  # must be 0/1 ints
-    # Compare ONLY to mask derived from THIS d3
     if pj_diag != [int(x) for x in lm_truth]:
         raise _P3Error("P3_LANE_MISMATCH", f"diag(P) != lane_mask(d3) → {pj_diag} vs {lm_truth}")
 
     pj_hash = _sha256_hex_obj(P)
-    pj_consistent = True  # we just validated against the SSOT mask
+    pj_consistent = True  # validated against SSOT mask
 
     return P, {
-        "d3": d3, "n3": n3, "mode": mode,
-        "lane_mask": lm_truth, "lane_mask_k3": lm_truth,
+        "d3": d3,
+        "n3": n3,
+        "mode": mode,
+        "lane_mask": lm_truth,
+        "lane_mask_k3": lm_truth,
         "projector_filename": pj_filename,
         "projector_hash": pj_hash,
         "projector_consistent_with_d": pj_consistent,
@@ -806,53 +692,72 @@ def projector_choose_active(cfg_active: dict, boundaries):
 
 # ---------- misc ----------
 def hash_matrix_norm(M) -> str:
-    if not M: return hash_json([])
+    if not M:
+        return hash_json([])
     norm = [[int(x) & 1 for x in row] for row in M]
     return hash_json(norm)
 
 def _zip_arcname(abspath: str) -> str:
     p = _Path(abspath)
-    try: return p.resolve().relative_to(_Path.cwd().resolve()).as_posix()
-    except Exception: return p.name
+    try:
+        return p.resolve().relative_to(_Path.cwd().resolve()).as_posix()
+    except Exception:
+        return p.name
 
 def build_cert_bundle(*, district_id: str, policy_tag: str, cert_path: str,
                       content_hash: str | None = None, extras: list[str] | None = None) -> str:
     cert_p = _Path(cert_path)
-    if not cert_p.exists(): raise FileNotFoundError(f"Cert not found: {cert_path}")
-    with open(cert_p, "r", encoding="utf-8") as f: cert = _json.load(f)
-    if not content_hash: content_hash = ((cert.get("integrity") or {}).get("content_hash") or "")
+    if not cert_p.exists():
+        raise FileNotFoundError(f"Cert not found: {cert_path}")
+    with open(cert_p, "r", encoding="utf-8") as f:
+        cert = _json.load(f)
+    if not content_hash:
+        content_hash = ((cert.get("integrity") or {}).get("content_hash") or "")
     suffix = content_hash[:12] if content_hash else "nohash"
     safe_policy = (policy_tag or cert.get("policy", {}).get("policy_tag", "policy")).replace("/", "_").replace(" ", "_")
     zpath = BUNDLES_DIR / f"overlap_bundle__{district_id or 'UNKNOWN'}__{safe_policy}__{suffix}.zip"
     files = [str(cert_p)]
     for p in (extras or []):
-        if p and _os.path.exists(p): files.append(p)
+        if p and _os.path.exists(p):
+            files.append(p)
     fd, tmp_name = _tempfile.mkstemp(dir=BUNDLES_DIR, prefix=".tmp_bundle_", suffix=".zip")
-    _os.close(fd); tmp_path = _Path(tmp_name)
+    _os.close(fd)
+    tmp_path = _Path(tmp_name)
     try:
         with _zipfile.ZipFile(tmp_path, "w", compression=_zipfile.ZIP_DEFLATED) as zf:
             for abspath in files:
                 abspath = str(_Path(abspath).resolve())
                 zf.write(abspath, arcname=_zip_arcname(abspath))
-        try: _os.replace(tmp_path, zpath)
-        except OSError: _shutil.move(str(tmp_path), str(zpath))
+        try:
+            _os.replace(tmp_path, zpath)
+        except OSError:
+            _shutil.move(str(tmp_path), str(zpath))
     finally:
-        if tmp_path.exists(): tmp_path.unlink(missing_ok=True)
+        if tmp_path.exists():
+            tmp_path.unlink(missing_ok=True)
     return str(zpath)
 
 # ---------- inputs block builder (SSOT) ----------
 def build_inputs_block(boundaries, cmap, H_used, shapes, filenames: dict) -> dict:
     C3 = (cmap.blocks.__root__.get("3") or [])
     d3 = (boundaries.blocks.__root__.get("3") or [])
-    dims = {"n3": len(C3) if C3 else (len(d3[0]) if (d3 and d3[0]) else 0),
-            "n2": len(cmap.blocks.__root__.get("2") or [])}
+    dims = {
+        "n3": len(C3) if C3 else (len(d3[0]) if (d3 and d3[0]) else 0),
+        "n2": len(cmap.blocks.__root__.get("2") or []),
+    }
     hashes_dict = {
         "boundaries_hash": hash_json(boundaries.dict() if hasattr(boundaries, "dict") else {}),
-        "C_hash":          hash_json(cmap.dict() if hasattr(cmap, "dict") else {}),
-        "H_hash":          hash_json(H_used.dict() if hasattr(H_used, "dict") else {}),
-        "U_hash":          hash_json(shapes.dict() if hasattr(shapes, "dict") else {}),
+        "C_hash": hash_json(cmap.dict() if hasattr(cmap, "dict") else {}),
+        "H_hash": hash_json(H_used.dict() if hasattr(H_used, "dict") else {}),
+        "U_hash": hash_json(shapes.dict() if hasattr(shapes, "dict") else {}),
     }
-    return {"filenames": filenames, "dims": dims, **hashes_dict, "shapes_hash": hashes_dict["U_hash"]}
+    return {
+        "filenames": filenames,
+        "dims": dims,
+        **hashes_dict,
+        "shapes_hash": hashes_dict["U_hash"],
+    }
+
 
 
 # ───────────────────────────────── SIDEBAR ───────────────────────────────────
