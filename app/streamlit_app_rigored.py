@@ -2666,6 +2666,130 @@ def load_fixture_from_paths(*, boundaries_path: str, cmap_path: str, H_path: str
         "shapes":     io.parse_shapes(dU),
     }
 # ----- /drop-in -----
+# ----- Parity fixture stash + robust resolver (drop-in) -----
+from pathlib import Path
+import json as _json
+
+# where we’ll stash uploaded fixture files
+FIXTURE_STASH_DIR = Path(globals().get("FIXTURE_STASH_DIR", "inputs/fixtures"))
+FIXTURE_STASH_DIR.mkdir(parents=True, exist_ok=True)
+
+def _find_fixture_file(name: str) -> str:
+    """
+    Resolve a fixture path by trying:
+      1) the given path as-is
+      2) inputs/<name>
+      3) inputs/fixtures/<name>
+      4) recursive basename match under (., inputs/, inputs/fixtures/)
+    Returns a POSIX string path or raises FileNotFoundError with a helpful message.
+    """
+    if not name or not str(name).strip():
+        raise FileNotFoundError("Empty fixture filename")
+
+    target = Path(name)
+    search_roots = [Path("."), Path("inputs"), FIXTURE_STASH_DIR]
+
+    # direct hits
+    for p in [target,
+              Path("inputs") / target.name,
+              FIXTURE_STASH_DIR / target.name]:
+        if p.exists() and p.is_file():
+            return p.as_posix()
+
+    # recursive basename match (exact name)
+    for root in search_roots:
+        try:
+            for p in root.rglob("*"):
+                if p.is_file() and p.name == target.name:
+                    return p.as_posix()
+        except Exception:
+            pass
+
+    tried = " | ".join([
+        target.as_posix(),
+        (Path("inputs") / target.name).as_posix(),
+        (FIXTURE_STASH_DIR / target.name).as_posix()
+    ])
+    raise FileNotFoundError(
+        f"Fixture file not found for '{name}'. Tried: {tried} "
+        f"(tip: upload the file below so it’s available to the importer)."
+    )
+
+# small, optional uploader to place fixture JSONs where the resolver can find them
+with st.expander("Parity fixtures stash (drop boundaries/cmap/H/shapes JSONs here)"):
+    up = st.file_uploader(
+        "Upload one or more JSON fixture files (use the exact filenames referenced in parity_pairs.json).",
+        type=["json"],
+        accept_multiple_files=True,
+        key="pp_fixture_files"
+    )
+    if up:
+        saved = []
+        for f in up:
+            outp = FIXTURE_STASH_DIR / f.name
+            try:
+                outp.write_bytes(f.getvalue())
+                saved.append(outp.name)
+            except Exception as e:
+                st.error(f"Could not save {f.name}: {e}")
+        if saved:
+            st.success(f"Saved to {FIXTURE_STASH_DIR.as_posix()}: " + ", ".join(saved))
+
+# patch the path-based loader used by your parity importer
+def _pp_load_fixture_from_paths_resolved(boundaries_path: str, cmap_path: str, H_path: str, shapes_path: str):
+    """Resolve each path via _find_fixture_file and load the parsed fixture."""
+    def _read_json_resolved(p_str: str):
+        p = Path(_find_fixture_file(p_str))
+        return _json.loads(p.read_text(encoding="utf-8"))
+    dB = _read_json_resolved(boundaries_path)
+    dC = _read_json_resolved(cmap_path)
+    dH = _read_json_resolved(H_path)
+    dU = _read_json_resolved(shapes_path)
+    return {
+        "boundaries": io.parse_boundaries(dB),
+        "cmap":       io.parse_cmap(dC),
+        "H":          io.parse_cmap(dH),
+        "shapes":     io.parse_shapes(dU),
+    }
+
+# if your import_parity_pairs() defined a local helper, rebind it to use the resolver:
+if "import_parity_pairs" in globals():
+    # wrap the existing import_parity_pairs to swap its loader
+    _orig_set_pairs = globals().get("set_parity_pairs_from_fixtures")
+    _orig_clear     = globals().get("clear_parity_pairs")
+
+    def _pairs_from_payload(payload: dict) -> list[dict]:
+        rows = []
+        for r in (payload.get("pairs") or []):
+            label = r.get("label", "PAIR")
+            L = r.get("left")  or {}
+            R = r.get("right") or {}
+            rows.append({"label": label, "left": L, "right": R})
+        return rows
+
+    def import_parity_pairs(path: str | Path = Path("logs") / "parity_pairs.json", *, merge: bool = False) -> int:
+        p = Path(path)
+        if not p.exists():
+            raise FileNotFoundError(f"No parity pairs file at {p.as_posix()}")
+        payload = _json.loads(p.read_text(encoding="utf-8"))
+        rows = _pairs_from_payload(payload)
+
+        if not merge and callable(_orig_clear):
+            _orig_clear()
+
+        # build fixtures with the resolved loader
+        for r in rows:
+            Lp, Rp = r["left"], r["right"]
+            fxL = _pp_load_fixture_from_paths_resolved(
+                Lp.get("boundaries",""), Lp.get("cmap",""), Lp.get("H",""), Lp.get("shapes","")
+            )
+            fxR = _pp_load_fixture_from_paths_resolved(
+                Rp.get("boundaries",""), Rp.get("cmap",""), Rp.get("H",""), Rp.get("shapes","")
+            )
+            add_parity_pair(label=r.get("label","PAIR"), left_fixture=fxL, right_fixture=fxR)
+
+        return len(st.session_state.get("parity_pairs", []))
+# ----- /resolver -----
 
 
 
