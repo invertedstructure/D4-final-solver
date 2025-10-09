@@ -2791,9 +2791,8 @@ if "import_parity_pairs" in globals():
 
         return len(st.session_state.get("parity_pairs", []))
 # ----- /resolver -----
-# Safe default getter (works even if LOGS_DIR/DEFAULT_PARITY_PATH aren't defined yet)
+# Safe default path getter (works even if LOGS_DIR / DEFAULT_PARITY_PATH aren't defined yet)
 def _pp_default_pairs_path() -> Path:
-    from pathlib import Path
     logs = Path(globals().get("LOGS_DIR", "logs"))
     logs.mkdir(parents=True, exist_ok=True)
     return Path(globals().get("DEFAULT_PARITY_PATH", logs / "parity_pairs.json"))
@@ -2801,10 +2800,9 @@ def _pp_default_pairs_path() -> Path:
 def import_parity_pairs(path=None, *, merge: bool = False) -> int:
     """
     Import a parity-pairs JSON (paths spec), resolve each path robustly,
-    and rehydrate the in-memory queue using add_parity_pair(...).
+    and rehydrate the in-memory queue using your existing add_parity_pair(...).
     """
-    from pathlib import Path
-    # resolve default path lazily to avoid NameError
+    # Resolve default path lazily to avoid NameError
     p = Path(path) if path is not None else _pp_default_pairs_path()
     if not (p.exists() and p.is_file()):
         raise FileNotFoundError(f"No parity pairs file at {p.as_posix()}")
@@ -2816,24 +2814,29 @@ def import_parity_pairs(path=None, *, merge: bool = False) -> int:
 
     rows = payload.get("pairs", []) or []
     if not merge:
-        clear_parity_pairs()
+        clear_parity_pairs()   # your existing function
 
     count = 0
     for r in rows:
         label = r.get("label", "PAIR")
         L_in = r.get("left")  or {}
         R_in = r.get("right") or {}
+
+        # Validate required keys
         for side_name, block in (("left", L_in), ("right", R_in)):
             for k in ("boundaries", "cmap", "H", "shapes"):
                 if k not in block or not str(block[k]).strip():
                     raise ValueError(f"Malformed pair '{label}': missing {side_name}.{k}")
 
-        L_fx = _pp_load_fixture_from_paths_or_die(L_in)
+        # Resolve & load using the robust resolver you already pasted
+        L_fx = _pp_load_fixture_from_paths_or_die(L_in)  # uses load_fixture_from_paths(...)
         R_fx = _pp_load_fixture_from_paths_or_die(R_in)
-        add_parity_pair(label=label, left_fixture=L_fx, right_fixture=R_fx)
+
+        add_parity_pair(label=label, left_fixture=L_fx, right_fixture=R_fx)  # your queue API
         count += 1
 
     return count
+
 
 # ---------- Parity import: robust path resolver + loader (drop-in) ----------
 
