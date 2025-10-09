@@ -898,19 +898,18 @@ if d_shapes and d_bound and d_cmap:
         # Prefer raw-bytes boundary hash when available
         try:
             if hasattr(f_bound, "getvalue"):
-                _raw = f_bound.getvalue()
-                boundaries_hash_fresh = _sha256_hex_bytes(_raw)
+                boundaries_hash_fresh = _sha256_hex_bytes(f_bound.getvalue())
             else:
                 boundaries_hash_fresh = _sha256_hex_obj(d_bound)
         except Exception:
             boundaries_hash_fresh = _sha256_hex_obj(d_bound)
 
         # Light district info (lane mask + signature)
-        d3_block         = (boundaries.blocks.__root__.get("3") or [])
-        lane_mask_k3_now = _lane_mask_from_d3(boundaries)
-        d3_rows          = len(d3_block)
-        d3_cols          = (len(d3_block[0]) if d3_block else 0)
-        district_sig     = _district_signature(lane_mask_k3_now, d3_rows, d3_cols)
+        d3_block          = (boundaries.blocks.__root__.get("3") or [])
+        lane_mask_k3_now  = _lane_mask_from_d3(boundaries)
+        d3_rows           = len(d3_block)
+        d3_cols           = (len(d3_block[0]) if d3_block else 0)
+        district_sig      = _district_signature(lane_mask_k3_now, d3_rows, d3_cols)
         district_id_fresh = DISTRICT_MAP.get(boundaries_hash_fresh, "UNKNOWN")
 
         # Clear stale session bits if boundaries changed
@@ -994,46 +993,14 @@ else:
     st.info("Upload required files: " + ", ".join(missing))
     st.stop()
 
-
-# ---- Policy config helpers (define once, before Tab 2 uses them) -------------
-def cfg_strict() -> dict:
-    return {
-        "enabled_layers": [],
-        "modes": {},
-        "source": {},
-        "projector_files": {},
-    }
-
-def cfg_projected_base() -> dict:
-    return {
-        "enabled_layers": [3],
-        "modes": {"3": "columns"},
-        "source": {"3": "auto"},
-        "projector_files": {},
-    }
-
-def policy_label_from_cfg(cfg: dict) -> str:
-    if not cfg or not cfg.get("enabled_layers"):
-        return "strict"
-    src = (cfg.get("source", {}) or {}).get("3", "auto")
-    mode = (cfg.get("modes", {}) or {}).get("3", "columns")
-    return f"projected({mode}@k=3,{src})"
-
 # ===================== Projected(FILE) validation banner & guard =====================
-# Always clear previous error at the start of a new Overlap
-# (Do this inside run_overlap() right before/after calling projector_choose_active)
-#   st.session_state.pop("_file_mode_error", None)
-
 def file_validation_failed() -> bool:
     """Convenience predicate: returns True if last attempt to use FILE Π failed validation."""
     return bool(st.session_state.get("_file_mode_error"))
 
-
-
 # --- ensure tabs exist even if earlier branches ran before creating them
 if "tab1" not in globals():
     tab1, tab2, tab3, tab4, tab5 = st.tabs(["Unit", "Overlap", "Triangle", "Towers", "Export"])
-
 
 # ------------------------------ UNIT TAB -------------------------------------
 with tab1:
@@ -1049,26 +1016,24 @@ with tab1:
         # Re-bind district from Unit override (prefer raw bytes hash)
         try:
             if hasattr(f_B, "getvalue"):
-                _rawB = f_B.getvalue()
-                boundaries_hash_fresh = _sha256_hex_bytes(_rawB)
+                boundaries_hash_fresh = _sha256_hex_bytes(f_B.getvalue())
             else:
                 boundaries_hash_fresh = _sha256_hex_obj(d_B)
         except Exception:
             boundaries_hash_fresh = _sha256_hex_obj(d_B)
 
-        d3_block = (boundaries.blocks.__root__.get("3") or [])
+        d3_block         = (boundaries.blocks.__root__.get("3") or [])
         lane_mask_k3_now = _lane_mask_from_d3(boundaries)
-        d3_rows = len(d3_block)
-        d3_cols = (len(d3_block[0]) if d3_block else 0)
-        district_sig = _district_signature(lane_mask_k3_now, d3_rows, d3_cols)
+        d3_rows          = len(d3_block)
+        d3_cols          = (len(d3_block[0]) if d3_block else 0)
+        district_sig     = _district_signature(lane_mask_k3_now, d3_rows, d3_cols)
         district_id_fresh = DISTRICT_MAP.get(boundaries_hash_fresh, "UNKNOWN")
 
         # Clear stale session bits if boundaries changed
         _prev_bhash = st.session_state.get("_last_boundaries_hash")
         if _prev_bhash and _prev_bhash != boundaries_hash_fresh:
-            st.session_state.pop("ab_compare", None)
-            st.session_state.pop("district_id", None)
-            st.session_state.pop("_projector_cache", None)
+            for k in ("ab_compare", "district_id", "_projector_cache"):
+                st.session_state.pop(k, None)
         st.session_state["_last_boundaries_hash"] = boundaries_hash_fresh
 
         # Update SSOT
@@ -1149,6 +1114,7 @@ except Exception:
 
     def eye(n):
         return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
+
 
 
 
