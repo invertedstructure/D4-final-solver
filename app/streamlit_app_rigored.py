@@ -1903,18 +1903,20 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
 GALLERY_PATH = (LOGS_DIR / "gallery.jsonl")
 GALLERY_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-ss = st.session_state
-# session dedupe cache
-ss.setdefault("_gallery_keys", set())
-ss.setdefault("_gallery_bootstrapped", False)
+# session dedupe cache (idempotent)
+st.session_state.setdefault("_gallery_keys", set())
+st.session_state.setdefault("_gallery_bootstrapped", False)
 
-with st.expander("Gallery"):
-    # 1) Freshness + SSOT guard
+def render_gallery_panel():
+    ss = st.session_state
+
+    # 1) Freshness + SSOT guard (soft)
     try:
         rc  = require_fresh_run_ctx()
         rc  = rectify_run_ctx_mask_from_d3()
-    except Exception:
-        st.stop()
+    except Exception as e:
+        st.warning(str(e))
+        return  # don't kill the app; just skip this panel
 
     out = ss.get("overlap_out") or {}
     eligible_green = is_projected_green(rc, out)
@@ -1926,7 +1928,7 @@ with st.expander("Gallery"):
     cert = ss.get("cert_payload")
     if not cert:
         st.info("No cert in memory yet. Run Overlap (let cert writer emit) before adding to gallery.")
-        st.stop()
+        return  # early return, not st.stop()
 
     # 2) Extract canonical fields from the *cert* (read-only)
     identity = cert.get("identity", {}) or {}
@@ -1975,7 +1977,7 @@ with st.expander("Gallery"):
         "cert_content_hash": cert_hash,
     }
 
-    # 5) One dedupe key (6-tuple); use the same function for BOTH new row & tail rows
+    # 5) One dedupe key (6-tuple)
     key = gallery_key(row)
 
     # Bootstrap session cache from tail once
@@ -1988,7 +1990,6 @@ with st.expander("Gallery"):
         ss["_gallery_bootstrapped"] = True
 
     # 6) Append button (gated by green & FILE state)
-    # final disabled state and tooltip
     disabled = fm_bad or (not eligible_green)
     tip = help_txt if fm_bad else (None if eligible_green else "Enabled only when projected is green (k=3 eq=True).")
     if st.button(
@@ -2032,37 +2033,29 @@ with st.expander("Gallery"):
     except Exception as e:
         st.warning(f"Could not render gallery tail: {e}")
 
+with st.expander("Gallery"):
+    render_gallery_panel()
+
 # ======================================================================================
 # =========================[ STEP 3 · Witness on Stubborn RED ]=========================
 
 WITNESS_PATH = (LOGS_DIR / "witnesses.jsonl")
 WITNESS_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-ss = st.session_state
-ss.setdefault("_witness_keys", set())
-ss.setdefault("_witness_bootstrapped", False)
+# session dedupe caches (idempotent)
+st.session_state.setdefault("_witness_keys", set())
+st.session_state.setdefault("_witness_bootstrapped", False)
 
-def witness_key(row: dict):
-    """8-tuple dedupe: (district, reason, residual_tag, policy_tag, B, C, H, U)."""
-    h = row.get("hashes") or {}
-    return (
-        str(row.get("district","UNKNOWN")),
-        str(row.get("reason","")),
-        str(row.get("residual_tag","")),
-        str((row.get("policy") or {}).get("policy_tag","")),
-        str(h.get("boundaries_hash","")),
-        str(h.get("C_hash","")),
-        str(h.get("H_hash","")),
-        str(h.get("U_hash","")),
-    )
+def render_witness_panel():
+    ss = st.session_state
 
-with st.expander("Witness logger"):
-    # --- Freshness + SSOT guards
+    # --- Freshness + SSOT guards (soft)
     try:
         rc  = require_fresh_run_ctx()
         rc  = rectify_run_ctx_mask_from_d3()
-    except Exception:
-        st.stop()
+    except Exception as e:
+        st.warning(str(e))
+        return
 
     out = ss.get("overlap_out") or {}
     eq3 = bool(((out.get("3") or {}).get("eq", False)))
@@ -2072,7 +2065,7 @@ with st.expander("Witness logger"):
     fm_bad  = file_validation_failed()
     help_txt = "Disabled because projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π."
 
-    # Pick the correct residual tag (strict vs projected)
+    # residual tag selection
     tags = ss.get("residual_tags") or {}
     mode = str(rc.get("mode","strict"))
     residual_tag_val = tags.get("projected" if mode.startswith("projected") else "strict", "none")
@@ -2178,6 +2171,11 @@ with st.expander("Witness logger"):
             st.caption("No witnesses logged yet.")
     except Exception as e:
         st.warning(f"Could not render witnesses tail: {e}")
+
+with st.expander("Witness logger"):
+    render_witness_panel()
+
+
 
 
 # -------------------------- FREEZER HELPERS -------------------------------------------
