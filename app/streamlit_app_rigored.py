@@ -2545,69 +2545,6 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
 
 
 
-
-
-# --- Parity I/O constants (prelude) ---
-from pathlib import Path
-
-# Reuse app globals when present; fall back to sane defaults
-LOGS_DIR    = Path(globals().get("LOGS_DIR", "logs"))
-REPORTS_DIR = Path(globals().get("REPORTS_DIR", "reports"))
-
-PARITY_SCHEMA_VERSION = globals().get("PARITY_SCHEMA_VERSION", "1.0.0")
-
-# Default JSON path for parity pairs
-DEFAULT_PARITY_PATH = LOGS_DIR / "parity_pairs.json"
-
-# Ensure dirs exist
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
-REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-
-
-
-  # ---------- Parity artifact paths (shim) ----------
-from pathlib import Path
-import os, json as _json, tempfile
-
-# Base reports dir
-REPORTS_DIR = Path(globals().get("REPORTS_DIR", "reports"))
-REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-
-# Define paths if missing
-if "PARITY_REPORT_PATH" not in globals():
-    PARITY_REPORT_PATH = REPORTS_DIR / "parity_report.json"
-if "PARITY_SUMMARY_CSV" not in globals():
-    PARITY_SUMMARY_CSV = REPORTS_DIR / "parity_summary.csv"
-
-PARITY_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-# Minimal atomic writers (only if your app doesn't already define them)
-if "_ensure_parent_dir" not in globals():
-    def _ensure_parent_dir(p: Path) -> None:
-        p.parent.mkdir(parents=True, exist_ok=True)
-
-if "_atomic_write_json" not in globals():
-    def _atomic_write_json(path: Path, payload: dict) -> None:
-        _ensure_parent_dir(path)
-        with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as tmp:
-            _json.dump(payload, tmp, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-            tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
-        os.replace(tmp_name, path)
-
-# Optional CSV writer shim if your parity code uses it
-if "_atomic_write_csv" not in globals():
-    import csv
-    def _atomic_write_csv(path: Path, header: list[str], rows: list[list], comments: list[str] | None = None):
-        _ensure_parent_dir(path)
-        with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8", newline="") as tmp:
-            if comments:
-                for line in comments:
-                    tmp.write(f"# {line}\n")
-            w = csv.writer(tmp)
-            w.writerow(header); w.writerows(rows)
-            tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
-        os.replace(tmp_name, path)
-# ---------- /shim ----------
 # ---------- Parity import/export shim (collision-proof) ----------
 from pathlib import Path
 import os, json as _json, tempfile
@@ -2721,6 +2658,69 @@ if "export_parity_pairs" not in globals():
 if "import_parity_pairs" not in globals():
     import_parity_pairs = __pp_import_pairs  # noqa: F401
 # ---------- /shim ----------
+
+# --- Parity I/O constants (prelude) ---
+from pathlib import Path
+
+# Reuse app globals when present; fall back to sane defaults
+LOGS_DIR    = Path(globals().get("LOGS_DIR", "logs"))
+REPORTS_DIR = Path(globals().get("REPORTS_DIR", "reports"))
+
+PARITY_SCHEMA_VERSION = globals().get("PARITY_SCHEMA_VERSION", "1.0.0")
+
+# Default JSON path for parity pairs
+DEFAULT_PARITY_PATH = LOGS_DIR / "parity_pairs.json"
+
+# Ensure dirs exist
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+
+
+  # ---------- Parity artifact paths (shim) ----------
+from pathlib import Path
+import os, json as _json, tempfile
+
+# Base reports dir
+REPORTS_DIR = Path(globals().get("REPORTS_DIR", "reports"))
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Define paths if missing
+if "PARITY_REPORT_PATH" not in globals():
+    PARITY_REPORT_PATH = REPORTS_DIR / "parity_report.json"
+if "PARITY_SUMMARY_CSV" not in globals():
+    PARITY_SUMMARY_CSV = REPORTS_DIR / "parity_summary.csv"
+
+PARITY_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+# Minimal atomic writers (only if your app doesn't already define them)
+if "_ensure_parent_dir" not in globals():
+    def _ensure_parent_dir(p: Path) -> None:
+        p.parent.mkdir(parents=True, exist_ok=True)
+
+if "_atomic_write_json" not in globals():
+    def _atomic_write_json(path: Path, payload: dict) -> None:
+        _ensure_parent_dir(path)
+        with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as tmp:
+            _json.dump(payload, tmp, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+            tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
+        os.replace(tmp_name, path)
+
+# Optional CSV writer shim if your parity code uses it
+if "_atomic_write_csv" not in globals():
+    import csv
+    def _atomic_write_csv(path: Path, header: list[str], rows: list[list], comments: list[str] | None = None):
+        _ensure_parent_dir(path)
+        with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8", newline="") as tmp:
+            if comments:
+                for line in comments:
+                    tmp.write(f"# {line}\n")
+            w = csv.writer(tmp)
+            w.writerow(header); w.writerows(rows)
+            tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
+        os.replace(tmp_name, path)
+# ---------- /shim ----------
+
 
 # ---------- Parity import/export FINAL shim (paths-based, idempotent) ----------
 from pathlib import Path
