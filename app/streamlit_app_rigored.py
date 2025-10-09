@@ -192,6 +192,12 @@ if "_utc_iso" not in globals():
         return datetime.now(timezone.utc).isoformat()
 
 
+def _file_mode_invalid_now() -> bool:
+    """True only when we're in projected(FILE) mode *and* the FILE Π fails validation."""
+    rc = st.session_state.get("run_ctx") or {}
+    return (str(rc.get("mode")) == "projected(file)") and bool(file_validation_failed())
+
+
 
 
 # =========================[ STEP 1 · Core helpers + guards ]=========================
@@ -2036,14 +2042,16 @@ with st.expander("Gallery"):
                 continue
         ss["_gallery_bootstrapped"] = True
 
-    # 6) Append button (gated; never st.stop())
+    # --- Button: Add to Gallery ---
     disabled = bool(fm_bad or (not eligible_green) or (not cert))
-    tip = (
-        help_txt if fm_bad else
-        ("Enabled only when projected is green (k=3 eq=True) and a cert exists."
-         if (not eligible_green or not cert) else "Append current cert to gallery.jsonl")
+    help_txt = (
+        "Disabled because projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π."
+        if fm_bad else
+        "Enabled only when projected is green (k=3 eq=True) and a cert exists."
+        if (not eligible_green or not cert) else
+        "Append current cert to gallery.jsonl"
     )
-    if st.button("Add to Gallery", key="btn_gallery_append", disabled=disabled, help=tip):
+    if st.button("Add to Gallery", key="btn_gallery_append", disabled=disabled, help=help_txt):
         try:
             if key is None:
                 st.warning("Could not compute dedupe key; skipping append.")
@@ -2056,7 +2064,7 @@ with st.expander("Gallery"):
         except Exception as e:
             st.error(f"Gallery append failed: {e}")
 
-    # 7) Tail view (last 8)
+    # --- Tail view ---
     try:
         tail = _read_jsonl_tail(GALLERY_PATH, N=8)
         if tail:
@@ -2081,7 +2089,6 @@ with st.expander("Gallery"):
     except Exception as e:
         st.warning(f"Could not render gallery tail: {e}")
 
-# ======================================================================================
 # =========================[ STEP 3 · Witness on Stubborn RED ]=========================
 
 WITNESS_PATH = (LOGS_DIR / "witnesses.jsonl")
@@ -2197,6 +2204,7 @@ with st.expander("Witness logger"):
     k = witness_key(row)
     disabled = bool(fm_bad or (not eligible_red))
     tip = help_txt if fm_bad else (None if eligible_red else "Enabled only when k=3 is RED (eq=False).")
+    # --- Button: Log Witness ---
     if st.button("Log Witness", key="btn_witness_append", disabled=disabled, help=(tip or "Append witness to witnesses.jsonl")):
         try:
             if k in ss["_witness_keys"]:
@@ -2208,7 +2216,7 @@ with st.expander("Witness logger"):
         except Exception as e:
             st.error(f"Witness append failed: {e}")
 
-    # Tail view
+    # --- Tail view ---
     try:
         tail = _read_jsonl_tail(WITNESS_PATH, N=8)
         if tail:
@@ -2232,7 +2240,8 @@ with st.expander("Witness logger"):
             st.caption("No witnesses logged yet.")
     except Exception as e:
         st.warning(f"Could not render witnesses tail: {e}")
-# ======================= /end JSONL → CSV Exports (Gallery & Witness) ======================
+
+# ======================= end JSONL 
 
 
 
@@ -2392,6 +2401,7 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
     disabled = fm_bad or (not elig_freeze)
     tip = help_txt if fm_bad else (None if elig_freeze else "Enabled when current run is projected(auto) and k=3 is green.")
 
+    # --- Button: Freeze Π → FILE & re-run ---
     if st.button("Freeze Π → FILE & re-run",
                  key="btn_freeze_final2",
                  disabled=disabled,
@@ -2465,9 +2475,7 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
 
 
 
-
-  
-    # ======================== Parity: import/export & queue ========================
+  # ======================== Parity: import/export & queue ========================
 
 PARITY_SCHEMA_VERSION = "1.0.0"
 DEFAULT_PARITY_PATH = Path("logs") / "parity_pairs.json"
@@ -2536,7 +2544,7 @@ def _parity_pairs_payload(pairs: list[dict]) -> dict:
         "pairs": [
             {
                 "label": row.get("label", "PAIR"),
-                "left":  {k: row.get("left_path_"+k,  row.get("left", {}).get(k+"_path", ""))  for k in ("boundaries","cmap","H","shapes")},
+                "left":  {k: row.get("left_path_"+k,  row.get("left", {}).get(k+"_path", "")) for k in ("boundaries","cmap","H","shapes")},
                 "right": {k: row.get("right_path_"+k, row.get("right", {}).get(k+"_path", "")) for k in ("boundaries","cmap","H","shapes")},
             } for row in pairs
         ],
@@ -2547,7 +2555,7 @@ def _pairs_from_payload(payload: dict) -> list[dict]:
     return [
         {
             "label": r.get("label", "PAIR"),
-            "left":  {k: r.get("left", {}).get(k, "")  for k in ("boundaries","cmap","H","shapes")},
+            "left":  {k: r.get("left", {}).get(k, "") for k in ("boundaries","cmap","H","shapes")},
             "right": {k: r.get("right", {}).get(k, "") for k in ("boundaries","cmap","H","shapes")},
         } for r in payload.get("pairs", [])
     ]
@@ -2635,14 +2643,28 @@ with safe_expander("Parity pairs: import/export"):
 
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("Export parity_pairs.json", key="pp_do_export"):
+        # Apply _file_mode_invalid_now() check here
+        disabled_export = _file_mode_invalid_now()
+        help_export = (
+            "Disabled because projected(FILE) validation failed. Export to file disabled."
+            if disabled_export else
+            "Export the current parity pairs to a JSON file."
+        )
+        if st.button("Export parity_pairs.json", key="pp_do_export", disabled=disabled_export, help=help_export):
             try:
                 p = export_parity_pairs(export_path)
                 st.success(f"Saved parity pairs → {p}")
             except Exception as e:
                 st.error(f"Export failed: {e}")
     with c2:
-        if st.button("Import parity_pairs.json", key="pp_do_import"):
+        # Apply _file_mode_invalid_now() check here
+        disabled_import = _file_mode_invalid_now()
+        help_import = (
+            "Disabled because projected(FILE) validation failed. Import from file disabled."
+            if disabled_import else
+            "Import parity pairs from a JSON file."
+        )
+        if st.button("Import parity_pairs.json", key="pp_do_import", disabled=disabled_import, help=help_import):
             try:
                 n = import_parity_pairs(import_path, merge=merge_load)
                 st.success(f"Loaded {n} pairs from {import_path}")
@@ -2975,7 +2997,7 @@ with st.expander("Coverage Sampling"):
                                        key="dl_coverage_csv")
             except Exception:
                 pass
-
+  
 
 
 
