@@ -3240,6 +3240,47 @@ try:
 except Exception as _e:
     st.warning(f"_paths_from_fixture_or_current adapter not active: {_e}")
 # ===== /HARD OVERRIDE =====
+# === Parity queue shims (safe to paste once; only define if missing) ===
+if "clear_parity_pairs" not in globals():
+    def clear_parity_pairs() -> None:
+        st.session_state["parity_pairs"] = []
+
+if "add_parity_pair" not in globals():
+    def add_parity_pair(*, label: str, left_fixture: dict, right_fixture: dict) -> int:
+        """
+        Append a pair of already-loaded fixtures to the in-memory queue.
+        Returns the new length of the queue.
+        """
+        st.session_state.setdefault("parity_pairs", [])
+        st.session_state["parity_pairs"].append({
+            "label": label, "left": left_fixture, "right": right_fixture
+        })
+        return len(st.session_state["parity_pairs"])
+
+if "set_parity_pairs_from_fixtures" not in globals():
+    def set_parity_pairs_from_fixtures(pairs_spec: list[dict]) -> int:
+        """
+        pairs_spec rows must carry file paths:
+          {"label": "...",
+           "left":  {"boundaries": "...", "cmap": "...", "H": "...", "shapes": "..."},
+           "right": {"boundaries": "...", "cmap": "...", "H": "...", "shapes": "..."}}
+        """
+        clear_parity_pairs()
+        for row in (pairs_spec or []):
+            Lp = row.get("left",  {}) or {}
+            Rp = row.get("right", {}) or {}
+            # Reuse your existing loader
+            L = load_fixture_from_paths(
+                boundaries_path=Lp["boundaries"], cmap_path=Lp["cmap"],
+                H_path=Lp["H"], shapes_path=Lp["shapes"]
+            )
+            R = load_fixture_from_paths(
+                boundaries_path=Rp["boundaries"], cmap_path=Rp["cmap"],
+                H_path=Rp["H"], shapes_path=Rp["shapes"]
+            )
+            add_parity_pair(label=row.get("label", "PAIR"), left_fixture=L, right_fixture=R)
+        return len(st.session_state.get("parity_pairs", []))
+# === /shims ===
 
 
 # ---------------- Parity pairs: import/export (robust paths + uploader) ----------------
