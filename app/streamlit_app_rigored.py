@@ -2542,6 +2542,44 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
         except Exception as e:
             st.error(f"Freeze failed: {e}")
 
+# ---------------- UNIVERSAL adapter for _paths_from_fixture_or_current ----------------
+# Accepts BOTH forms:
+#   (fx)                       where fx is a dict
+#   (side_name, fx)            legacy callers passing a label + dict
+# Always returns {"boundaries","cmap","H","shapes"} path strings, filling from SSOT when missing.
+
+_old__pffc = globals().get("_paths_from_fixture_or_current", None)
+
+def _paths_from_fixture_or_current(*args):
+    # 1) Try to extract fx from args (support both shapes)
+    fx = None
+    if len(args) == 1 and isinstance(args[0], dict):
+        fx = args[0]
+    elif len(args) >= 2 and isinstance(args[1], dict):
+        fx = args[1]
+    elif _old__pffc:
+        # Fall back to the previous implementation if our arg pattern doesn't match
+        return _old__pffc(*args)
+    else:
+        raise TypeError("_paths_from_fixture_or_current(): expected (fx) or (side_name, fx)")
+
+    # 2) Prefer explicit *_path, else a direct path string under the key, else SSOT filenames
+    out = {}
+    for k in ("boundaries", "cmap", "H", "shapes"):
+        v = fx.get(f"{k}_path")
+        if not v and isinstance(fx.get(k), str):   # sometimes the path is directly under k
+            v = fx.get(k)
+        out[k] = v or ""
+
+    ib = st.session_state.get("_inputs_block") or {}
+    fns = (ib.get("filenames") or {})
+    out.setdefault("boundaries", fns.get("boundaries", "inputs/boundaries.json"))
+    out.setdefault("cmap",       fns.get("C",          "inputs/cmap.json"))
+    out.setdefault("H",          fns.get("H",          "inputs/H.json"))
+    out.setdefault("shapes",     fns.get("U",          "inputs/shapes.json"))
+
+    return out
+# ---------------- /UNIVERSAL adapter ----------------------------------------------------
 
 # ---------------- Parity export hotfix: normalize fixture->paths ----------------
 import json as _json, os, tempfile
