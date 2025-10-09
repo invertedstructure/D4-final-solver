@@ -2679,6 +2679,130 @@ with safe_expander("Parity pairs: import/export"):
             except Exception as e:
                 st.error(f"Import failed: {e}")
 
+# ===================== Quick Parity Queue (self-contained) =====================
+# Paste this anywhere after your core imports and io.parse_* are available.
+
+from pathlib import Path
+
+# --- local helpers (namespaced) ---
+def _pp_ns():
+    return "pp_quick"
+
+def _pp_pairs():
+    ss = st.session_state
+    if not isinstance(ss.get("parity_pairs"), list):
+        ss["parity_pairs"] = []
+    return ss["parity_pairs"]
+
+def _pp_add_pair(*, label: str, left_fixture: dict, right_fixture: dict) -> int:
+    """Append if not already present by (label,left_id,right_id); tolerant."""
+    pairs = _pp_pairs()
+    key = (label, id(left_fixture), id(right_fixture))
+    have = getattr(st.session_state, "_pp_seen", set())
+    if not isinstance(have, set):
+        have = set()
+    if key in have:
+        return len(pairs)
+    have.add(key)
+    st.session_state._pp_seen = have
+    pairs.append({"label": label, "left": left_fixture, "right": right_fixture})
+    return len(pairs)
+
+def _pp_load_fixture_from_paths(boundaries_path: str, cmap_path: str, H_path: str, shapes_path: str):
+    """Tiny path->fixture loader; raises if a path is missing/invalid."""
+    def _read(p):
+        p = Path(p)
+        with p.open("r", encoding="utf-8") as f:
+            return _json.load(f)
+    dB = _read(boundaries_path)
+    dC = _read(cmap_path)
+    dH = _read(H_path)
+    dU = _read(shapes_path)
+    return {
+        "boundaries": io.parse_boundaries(dB),
+        "cmap":       io.parse_cmap(dC),
+        "H":          io.parse_cmap(dH),
+        "shapes":     io.parse_shapes(dU),
+    }
+
+# --- UI ---
+with safe_expander("Quick Parity Queue (SELF & examples)"):
+    col1, col2, col3 = st.columns([1,1,2])
+
+    with col1:
+        do_self = st.button("Queue SELF (current)", key=_pp_ns()+"__btn_self",
+                            help="Queues one SELF pair using the current in-memory fixture.")
+
+    with col2:
+        do_examples = st.button("Queue D2↔D3 + D3↔D4", key=_pp_ns()+"__btn_examples",
+                                help="Queues example district pairs if ./inputs/D2,D3,D4 files exist.")
+
+    with col3:
+        st.caption("This block is self-contained and never blocks parity runner.")
+
+    # --- SELF pair from in-memory fixture ---
+    if do_self:
+        try:
+            # Prefer the exact in-memory objects you already used for Overlap
+            fixture = {
+                "boundaries": boundaries,
+                "cmap":       cmap,
+                "H":          (st.session_state.get("overlap_H") or _load_h_local() if "overlap_H" in st.session_state else _load_h_local()),
+                "shapes":     shapes,
+            }
+            _pp_add_pair(label="SELF", left_fixture=fixture, right_fixture=fixture)
+            st.success("Queued SELF parity pair.")
+        except Exception as e:
+            st.error(f"Could not queue SELF: {e}")
+
+    # --- Examples from disk if present ---
+    if do_examples:
+        example_specs = [
+            {
+                "label": "D2(101)↔D3(110)",
+                "left":  {"boundaries":"inputs/D2/boundaries.json","cmap":"inputs/D2/cmap.json","H":"inputs/D2/H.json","shapes":"inputs/D2/shapes.json"},
+                "right": {"boundaries":"inputs/D3/boundaries.json","cmap":"inputs/D3/cmap.json","H":"inputs/D3/H.json","shapes":"inputs/D3/shapes.json"},
+            },
+            {
+                "label": "D3(110)↔D4(101)",
+                "left":  {"boundaries":"inputs/D3/boundaries.json","cmap":"inputs/D3/cmap.json","H":"inputs/D3/H.json","shapes":"inputs/D3/shapes.json"},
+                "right": {"boundaries":"inputs/D4/boundaries.json","cmap":"inputs/D4/cmap.json","H":"inputs/D4/H.json","shapes":"inputs/D4/shapes.json"},
+            },
+        ]
+        # Check all paths exist first (best effort)
+        all_paths = []
+        for row in example_specs:
+            L, R = row["left"], row["right"]
+            all_paths += [L["boundaries"], L["cmap"], L["H"], L["shapes"],
+                          R["boundaries"], R["cmap"], R["H"], R["shapes"]]
+        missing = [p for p in all_paths if not Path(p).exists()]
+        if missing:
+            st.info("Example files not found under ./inputs — skipping queue. "
+                    f"Create them or adjust paths. Missing sample: {missing[0]}")
+        else:
+            try:
+                for row in example_specs:
+                    Lp, Rp = row["left"], row["right"]
+                    L = _pp_load_fixture_from_paths(Lp["boundaries"], Lp["cmap"], Lp["H"], Lp["shapes"])
+                    R = _pp_load_fixture_from_paths(Rp["boundaries"], Rp["cmap"], Rp["H"], Rp["shapes"])
+                    _pp_add_pair(label=row["label"], left_fixture=L, right_fixture=R)
+                st.success("Queued D2↔D3 and D3↔D4 example pairs.")
+            except Exception as e:
+                st.error(f"Could not queue examples: {e}")
+
+    # --- Preview / Count ---
+    try:
+        pairs = _pp_pairs()
+        st.caption(f"Queued pairs: {len(pairs)}")
+        if pairs:
+            preview = [{"label": p.get("label","PAIR")} for p in pairs[:8]]
+            import pandas as pd
+            st.dataframe(pd.DataFrame(preview), hide_index=True, use_container_width=True)
+    except Exception:
+        pass
+# =================== /Quick Parity Queue (self-contained) ===================
+
+
 
 # ============================== Parity Runner (non-blocking) ===============================
 
