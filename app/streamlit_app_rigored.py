@@ -13,7 +13,6 @@ import types
 import secrets
 import math
 import uuid
-import random
 from io import BytesIO
 from contextlib import contextmanager
 from datetime import datetime, timezone
@@ -22,7 +21,7 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 
-# underscored aliases used by helpers
+# Underscored aliases for helpers
 import os as _os
 import json as _json
 import hashlib as _hashlib
@@ -36,6 +35,7 @@ from uuid import uuid4
 # Page config early so Streamlit is happy
 st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
 
+
 # ────────────────────────────── PACKAGE LOADER ──────────────────────────────
 HERE = Path(__file__).resolve().parent
 OTCORE = HERE / "otcore"
@@ -43,7 +43,7 @@ CORE = HERE / "core"
 PKG_DIR = OTCORE if OTCORE.exists() else CORE
 PKG_NAME = "otcore" if OTCORE.exists() else "core"
 
-# Ensure pkg namespace exists (so submodules import cleanly)
+# Ensure pkg namespace exists
 if PKG_NAME not in sys.modules:
     pkg = types.ModuleType(PKG_NAME)
     pkg.__path__ = [str(PKG_DIR)]
@@ -75,6 +75,7 @@ for _mod in (
     if _mod in sys.modules:
         del sys.modules[_mod]
 
+# Load modules
 overlap_gate = _load_pkg_module(f"{PKG_NAME}.overlap_gate", "overlap_gate.py")
 projector = _load_pkg_module(f"{PKG_NAME}.projector", "projector.py")
 otio = _load_pkg_module(f"{PKG_NAME}.io", "io.py")
@@ -84,21 +85,21 @@ triangle_gate = _load_pkg_module(f"{PKG_NAME}.triangle_gate", "triangle_gate.py"
 towers = _load_pkg_module(f"{PKG_NAME}.towers", "towers.py")
 export_mod = _load_pkg_module(f"{PKG_NAME}.export", "export.py")
 
-# Legacy alias so existing code can keep using io.parse_* safely
+# Legacy alias
 io = otio
 
-# App version string used elsewhere
+# App version string
 APP_VERSION = getattr(hashes, "APP_VERSION", "v0.1-core")
 
+
 # ───────────────────── DISTRICT MAP (optional) ─────────────────────
-# Map raw-bytes sha256(boundaries.json) → human-friendly district label.
-# Fill as you discover hashes (the sidebar shows the hash to copy/paste).
 DISTRICT_MAP: dict[str, str] = {
     "9da8b7f605c113ee059160cdaf9f93fe77e181476c72e37eadb502e7e7ef9701": "D1",
     "4356e6b608443b315d7abc50872ed97a9e2c837ac8b85879394495e64ec71521": "D2",
     "28f8db2a822cb765e841a35c2850a745c667f4228e782d0cfdbcb710fd4fecb9": "D3",
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
+
 
 # ======================= App constants & helpers =======================
 SCHEMA_VERSION = "1.0.0"
@@ -124,6 +125,7 @@ def _std_meta(*, include_python: bool = False, run_id: str | None = None) -> dic
     if run_id:
         meta["run_id"] = run_id
     return meta
+
 
 # ====================== Policy label symmetry (full tag) ======================
 def policy_label_from_cfg_full(cfg: dict) -> str:
@@ -154,13 +156,10 @@ def policy_label_from_state(rc: dict, cfg_active: dict) -> str:
     # fallback
     return policy_label_from_cfg_full(cfg_active or {})
 
+
 # =========================[ STEP 1 · Core helpers + guards ]=========================
 from pathlib import Path
 from contextlib import contextmanager
-import os, json, shutil, tempfile, csv as _csv, hashlib as _hashlib, json as _json
-import streamlit as st
-from uuid import uuid4
-from datetime import datetime, timezone
 
 # ---- Directories (be tolerant if not pre-defined)
 LOGS_DIR = Path(globals().get("LOGS_DIR", "logs"))
@@ -193,12 +192,10 @@ def ensure_unique_widget_key(key: str) -> str:
             return k2
         i += 1
 
-# Central registry for commonly reused keys (use these instead of raw strings)
+# Central registry for common keys
 class _WKey:
-    # Example: shapes uploaders (you had key="shapes" twice)
     shapes_up      = _mkkey("inputs", "shapes_uploader")
     shapes_up_alt  = _mkkey("inputsB", "shapes_uploader")
-
 WKEY = _WKey()
 
 # ---- Tiny time/uuid utils
@@ -209,15 +206,14 @@ def new_run_id() -> str:
 def _ensure_fixture_nonce():
     ss = st.session_state
     if "fixture_nonce" not in ss:
-        # prefer "fixture_nonce" (public) over legacy "_fixture_nonce"
         ss["fixture_nonce"] = int(ss.get("_fixture_nonce", 0)) or 1
-        ss["_fixture_nonce"] = ss["fixture_nonce"]  # keep legacy mirror for old code paths
+        ss["_fixture_nonce"] = ss["fixture_nonce"]
 
 def _bump_fixture_nonce():
     ss = st.session_state
     cur = int(ss.get("fixture_nonce", 0))
     ss["fixture_nonce"] = cur + 1
-    ss["_fixture_nonce"] = ss["fixture_nonce"]  # keep legacy mirror
+    ss["_fixture_nonce"] = ss["fixture_nonce"]
 
 # ---- Freshness guard (use at start of every action)
 def require_fresh_run_ctx():
@@ -230,25 +226,25 @@ def require_fresh_run_ctx():
     if int(rc.get("fixture_nonce", -1)) != int(ss.get("fixture_nonce", -2)):
         st.warning("STALE_RUN_CTX: Inputs changed; please click Run Overlap to refresh.")
         st.stop()
-    # also assert mask shape is sane
+    # assert mask shape sanity
     n3 = int(rc.get("n3") or 0)
     lm = list(rc.get("lane_mask_k3") or [])
     if lm and n3 and len(lm) != n3:
         st.warning("Context mask length mismatch; please click Run Overlap to refresh.")
         st.stop()
-    return rc  # allow callers to grab it
+    return rc
 
-# ---- Truth mask from a stored d3 (GF(2) column-wise OR)
+# ---- Truth mask from stored d3 (GF(2) column-wise OR)
 def _truth_mask_from_d3(d3: list[list[int]]) -> list[int]:
     if not d3 or not d3[0]:
         return []
     rows, cols = len(d3), len(d3[0])
     return [1 if any(int(d3[i][j]) & 1 for i in range(rows)) else 0 for j in range(cols)]
 
-# ---- Rectifier: overwrite stale lane_mask_k3 from run_ctx.d3 (no external reads)
+# ---- Rectify run_ctx mask from d3
 def rectify_run_ctx_mask_from_d3():
     ss = st.session_state
-    rc = require_fresh_run_ctx()  # also ensures presence
+    rc = require_fresh_run_ctx()
     d3 = rc.get("d3") or []
     n3 = int(rc.get("n3") or 0)
     if not d3 or n3 <= 0:
@@ -265,7 +261,7 @@ def rectify_run_ctx_mask_from_d3():
         st.info(f"Rectified run_ctx.lane_mask_k3 from {lm_rc or '[]'} → {lm_truth} based on stored d3.")
     return ss["run_ctx"]
 
-# ---- Soft reset: clears per-run caches (call at top of Run Overlap)
+# ---- Soft reset: clears per-run caches
 def soft_reset_before_overlap():
     ss = st.session_state
     for k in (
@@ -276,7 +272,7 @@ def soft_reset_before_overlap():
     ):
         ss.pop(k, None)
 
-# ---- JSONL helpers (atomic append + fast tail)
+# ---- JSONL helpers
 def _atomic_append_jsonl(path: Path, row: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     blob = json.dumps(row, separators=(",", ":"), sort_keys=True, ensure_ascii=False) + "\n"
@@ -333,7 +329,8 @@ def is_strict_red_lanes(run_ctx: dict | None, overlap_out: dict | None, residual
     tag = ((residual_tags or {}).get("strict") or "")
     return tag == "lanes"
 
-# ---- Hash key builders for dedupe
+
+# ---- Hash key builders for deduplication
 def gallery_key(row: dict) -> tuple:
     pol = row.get("policy") or {}
     h = row.get("hashes") or {}
@@ -360,13 +357,13 @@ def witness_key(row: dict) -> tuple:
         h.get("U_hash", ""),
     )
 
-# ---- Session-level dedupe caches (init once)
+# Session-level deduplication caches
 if "_gallery_keys" not in st.session_state:
     st.session_state["_gallery_keys"] = set()
 if "_witness_keys" not in st.session_state:
     st.session_state["_witness_keys"] = set()
 
-# ---- Run stamp helper (nice to print in UI)
+# ---- Run stamp helper
 def run_stamp_line() -> str:
     ss = st.session_state
     rc = ss.get("run_ctx") or {}
@@ -381,11 +378,13 @@ def run_stamp_line() -> str:
     rid = (rc.get("run_id", "") or "")[:8]
     return f"{pol} | n3={n3} | B {hB} · C {hC} · H {hH} · U {hU} | P {pH} | run {rid}"
 
-# ───────────────────────── SSOT + Freshness helpers (aliases) ─────────────────────────
-_mark_fixtures_changed = _bump_fixture_nonce  # legacy compatibility
-_soft_reset_before_overlap = soft_reset_before_overlap  # legacy compatibility
 
-# ---------- stable hashing (bytes + json-obj) ----------
+# ───────────────────────── SSOT + Freshness helpers (aliases) ─────────────────────────
+_mark_fixtures_changed = _bump_fixture_nonce  # legacy
+_soft_reset_before_overlap = soft_reset_before_overlap  # legacy
+
+
+# ---------- stable hashing ----------
 def _sha256_hex_bytes(b: bytes) -> str:
     return _hashlib.sha256(b).hexdigest()
 
@@ -399,25 +398,29 @@ def hash_json(obj) -> str:
 def _iso_utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-# ====================== Π FILE Validator (strict) ======================
+
+# ====================== FILE Validator (strict) ======================
 def _mul_gf2(A, B):
     # Use app's mul if present; otherwise a safe GF(2) fallback
     if "mul" in globals() and callable(globals()["mul"]):
         return mul(A, B)
     if not A or not B:
         return []
-    m, k, n = len(A), len(A[0]), len(B[0])
-    out = [[0] * n for _ in range(m)]
+    m, k = len(A), len(A[0])
+    k2, c = len(B), len(B[0])
+    if k != k2:
+        raise ValueError(f"dim mismatch: {m}x{k} @ {k2}x{c}")
+    out = [[0] * c for _ in range(m)]
     for i in range(m):
         for t in range(k):
             if A[i][t] & 1:
                 bt = B[t]
-                for j in range(n):
+                for j in range(c):
                     out[i][j] ^= (bt[j] & 1)
     return out
 
 def validate_projector_file_strict(P, *, n3: int, lane_mask: list[int]) -> None:
-    # shape
+    # shape validation
     if not (isinstance(P, list) and all(isinstance(r, list) for r in P)):
         raise ValueError("P3_SHAPE: projector is not a 2D list")
     if len(P) != n3 or any(len(r) != n3 for r in P):
@@ -442,7 +445,7 @@ def validate_projector_file_strict(P, *, n3: int, lane_mask: list[int]) -> None:
 # ---------- safe expander (never nests real expanders) ----------
 try:
     from streamlit.errors import StreamlitAPIException  # type: ignore
-except Exception:  # pragma: no cover
+except Exception:
     class StreamlitAPIException(Exception):  # type: ignore
         pass
 
@@ -450,8 +453,8 @@ except Exception:  # pragma: no cover
 def safe_expander(title: str, **kwargs):
     """
     Drop-in replacement for st.expander that never raises the
-    'Expanders may not be nested' error. If a real expander
-    would fail (already inside one), we render a container.
+    'Expanders may not be nested' error. If the real expander fails,
+    fallback to a container.
     """
     def _container_fallback():
         st.caption(f"⚠️ Nested section: **{title}** (container fallback)")
@@ -484,7 +487,7 @@ def read_json_file(upload):
         return None
 
 def _stamp_filename(state_key: str, upload):
-    """Record the uploaded filename into st.session_state[state_key] when present."""
+    """Record uploaded filename into session state."""
     try:
         if upload is not None and hasattr(upload, "name"):
             st.session_state[state_key] = str(upload.name)
@@ -495,7 +498,7 @@ def _stamp_filename(state_key: str, upload):
 
 # ---------- atomic writers ----------
 def _atomic_write_json(path: str | Path, obj: dict, *, pretty: bool = False):
-    """Canonical JSON atomic writer (kept for existing call sites)."""
+    """Canonical JSON atomic writer."""
     path = Path(path)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.parent.mkdir(parents=True, exist_ok=True)
@@ -513,7 +516,7 @@ def _atomic_write_json(path: str | Path, obj: dict, *, pretty: bool = False):
     os.replace(tmp, path)
 
 def atomic_write_json(path: str | Path, obj: dict, *, pretty: bool = False):
-    """Alias kept for places that used the non-underscored name."""
+    """Alias for _atomic_write_json."""
     _atomic_write_json(path, obj, pretty=pretty)
 
 def atomic_append_jsonl(path: str | Path, row: dict):
@@ -547,7 +550,6 @@ def _atomic_write_csv(path: Path, header: list[str], rows: list[list], meta_comm
         f.flush()
         os.fsync(f.fileno())
     os.replace(tmp, path)
-
 
 # ---------- lane mask / signatures ----------
 def _lane_mask_from_d3(boundaries) -> list[int]:
@@ -800,8 +802,6 @@ def build_inputs_block(boundaries, cmap, H_used, shapes, filenames: dict) -> dic
         "shapes_hash": hashes_dict["U_hash"],
     }
 
-
-
 # ───────────────────────────────── SIDEBAR ───────────────────────────────────
 with st.sidebar:
     st.markdown("### Upload core inputs")
@@ -848,10 +848,10 @@ if d_shapes and d_bound and d_cmap:
         shapes     = io.parse_shapes(d_shapes)
         boundaries = io.parse_boundaries(d_bound)
         cmap       = io.parse_cmap(d_cmap)
-        support    = io.parse_support(read_json_file(f_support))            if f_support  else None
-        triangle   = io.parse_triangle_schema(read_json_file(f_triangle))   if f_triangle else None
+        support    = io.parse_support(read_json_file(f_support)) if f_support else None
+        triangle   = io.parse_triangle_schema(read_json_file(f_triangle)) if f_triangle else None
 
-        # Prefer raw-bytes boundary hash when available
+        # Boundary hash (prefer raw bytes)
         try:
             if hasattr(f_bound, "getvalue"):
                 boundaries_hash_fresh = _sha256_hex_bytes(f_bound.getvalue())
@@ -860,48 +860,47 @@ if d_shapes and d_bound and d_cmap:
         except Exception:
             boundaries_hash_fresh = _sha256_hex_obj(d_bound)
 
-        # Light district info (lane mask + signature)
-        d3_block          = (boundaries.blocks.__root__.get("3") or [])
-        lane_mask_k3_now  = _lane_mask_from_d3(boundaries)
-        d3_rows           = len(d3_block)
-        d3_cols           = (len(d3_block[0]) if d3_block else 0)
-        district_sig      = _district_signature(lane_mask_k3_now, d3_rows, d3_cols)
+        # Light district info
+        d3_block = (boundaries.blocks.__root__.get("3") or [])
+        lane_mask_k3_now = _lane_mask_from_d3(boundaries)
+        d3_rows = len(d3_block)
+        d3_cols = len(d3_block[0]) if d3_block else 0
+        district_sig = _district_signature(lane_mask_k3_now, d3_rows, d3_cols)
         district_id_fresh = DISTRICT_MAP.get(boundaries_hash_fresh, "UNKNOWN")
 
-        # Clear stale session bits if boundaries changed
+        # Clear stale session bits
         _prev_bhash = st.session_state.get("_last_boundaries_hash")
         if _prev_bhash and _prev_bhash != boundaries_hash_fresh:
             for k in ("ab_compare", "district_id", "_projector_cache"):
                 st.session_state.pop(k, None)
         st.session_state["_last_boundaries_hash"] = boundaries_hash_fresh
 
-        # ── SSOT: authoritative filenames, dims, and hashes (no recompute elsewhere) ──
+        # Save SSOT info
         C2 = (cmap.blocks.__root__.get("2") or [])
         C3 = (cmap.blocks.__root__.get("3") or [])
-        # H source = parsed overlap_H if present, else empty cmap shell (consistent schema)
         H_used = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
 
         ib["filenames"] = {
             "boundaries": st.session_state.get("fname_boundaries", "boundaries.json"),
-            "C":          st.session_state.get("fname_cmap",       "cmap.json"),
-            "H":          "H.json",   # adjust if you have an uploader for H
-            "U":          st.session_state.get("fname_shapes",     "shapes.json"),
+            "C": st.session_state.get("fname_cmap", "cmap.json"),
+            "H": "H.json",
+            "U": st.session_state.get("fname_shapes", "shapes.json"),
         }
         ib["dims"] = {
             "n2": len(C2),
-            "n3": (len(C3[0]) if C3 else (len(d3_block[0]) if (d3_block and d3_block[0]) else 0)),
+            "n3": len(C3[0]) if C3 else len(d3_block[0]) if (d3_block and d3_block[0]) else 0,
         }
         ib["boundaries_hash"] = boundaries_hash_fresh
-        ib["C_hash"]          = hash_json(cmap.dict())
-        ib["H_hash"]          = hash_json(H_used.dict())
-        ib["U_hash"]          = hash_json(shapes.dict())
-        ib["shapes_hash"]     = ib["U_hash"]  # 3D alias
+        ib["C_hash"] = hash_json(cmap.dict())
+        ib["H_hash"] = hash_json(H_used.dict())
+        ib["U_hash"] = hash_json(shapes.dict())
+        ib["shapes_hash"] = ib["U_hash"]
 
-        # Mirror fresh district info for later blocks
+        # Save district info in session
         st.session_state["_district_info"] = {
-            "district_id":        district_id_fresh,
-            "boundaries_hash":    boundaries_hash_fresh,
-            "lane_mask_k3_now":   lane_mask_k3_now,
+            "district_id": district_id_fresh,
+            "boundaries_hash": boundaries_hash_fresh,
+            "lane_mask_k3_now": lane_mask_k3_now,
             "district_signature": district_sig,
             "d3_rows": d3_rows,
             "d3_cols": d3_cols,
@@ -917,12 +916,16 @@ if d_shapes and d_bound and d_cmap:
         )
 
         with safe_expander("Hashes / provenance"):
-            named = [("boundaries", boundaries.dict()),
-                     ("shapes", shapes.dict()),
-                     ("cmap", cmap.dict()),
-                     ("H_used", H_used.dict())]
-            if support:  named.append(("support",  support.dict()))
-            if triangle: named.append(("triangle", triangle.dict()))
+            named = [
+                ("boundaries", boundaries.dict()),
+                ("shapes", shapes.dict()),
+                ("cmap", cmap.dict()),
+                ("H_used", H_used.dict()),
+            ]
+            if support:
+                named.append(("support", support.dict()))
+            if triangle:
+                named.append(("triangle", triangle.dict()))
             ch = hashes.bundle_content_hash(named)
             ts = hashes.timestamp_iso_lisbon()
             rid = hashes.run_id(ch, ts)
@@ -949,10 +952,12 @@ else:
     st.info("Upload required files: " + ", ".join(missing))
     st.stop()
 
+
 # ===================== Projected(FILE) validation banner & guard =====================
 def file_validation_failed() -> bool:
-    """Convenience predicate: returns True if last attempt to use FILE Π failed validation."""
+    """Returns True if last FILE mode validation failed."""
     return bool(st.session_state.get("_file_mode_error"))
+
 
 # --- ensure tabs exist even if earlier branches ran before creating them
 if "tab1" not in globals():
@@ -969,7 +974,7 @@ with tab1:
     if d_B:
         boundaries = io.parse_boundaries(d_B)
 
-        # Re-bind district from Unit override (prefer raw bytes hash)
+        # Re-bind district from override (prefer raw bytes hash)
         try:
             if hasattr(f_B, "getvalue"):
                 boundaries_hash_fresh = _sha256_hex_bytes(f_B.getvalue())
@@ -978,14 +983,14 @@ with tab1:
         except Exception:
             boundaries_hash_fresh = _sha256_hex_obj(d_B)
 
-        d3_block         = (boundaries.blocks.__root__.get("3") or [])
+        d3_block = (boundaries.blocks.__root__.get("3") or [])
         lane_mask_k3_now = _lane_mask_from_d3(boundaries)
-        d3_rows          = len(d3_block)
-        d3_cols          = (len(d3_block[0]) if d3_block else 0)
-        district_sig     = _district_signature(lane_mask_k3_now, d3_rows, d3_cols)
+        d3_rows = len(d3_block)
+        d3_cols = len(d3_block[0]) if d3_block else 0
+        district_sig = _district_signature(lane_mask_k3_now, d3_rows, d3_cols)
         district_id_fresh = DISTRICT_MAP.get(boundaries_hash_fresh, "UNKNOWN")
 
-        # Clear stale session bits if boundaries changed
+        # Clear stale session bits
         _prev_bhash = st.session_state.get("_last_boundaries_hash")
         if _prev_bhash and _prev_bhash != boundaries_hash_fresh:
             for k in ("ab_compare", "district_id", "_projector_cache"):
@@ -994,11 +999,11 @@ with tab1:
 
         # Update SSOT
         st.session_state["_inputs_block"]["boundaries_filename"] = st.session_state.get("fname_boundaries", "boundaries.json")
-        st.session_state["_inputs_block"]["boundaries_hash"]     = boundaries_hash_fresh
+        st.session_state["_inputs_block"]["boundaries_hash"] = boundaries_hash_fresh
         st.session_state["_district_info"] = {
-            "district_id":        district_id_fresh,
-            "boundaries_hash":    boundaries_hash_fresh,
-            "lane_mask_k3_now":   lane_mask_k3_now,
+            "district_id": district_id_fresh,
+            "boundaries_hash": boundaries_hash_fresh,
+            "lane_mask_k3_now": lane_mask_k3_now,
             "district_signature": district_sig,
             "d3_rows": d3_rows,
             "d3_cols": d3_cols,
@@ -1034,9 +1039,6 @@ with tab1:
             st.error(f"Unit gate failed: {e}")
 
 # ───────────────────────── GF(2) ops shim for Tab 2 (global) ──────────────────────────
-# Provides mul, add, eye exactly as Tab 2 expects. If the library is present,
-# we import; otherwise we use local pure-python fallbacks (bitwise XOR math).
-
 try:
     from otcore.linalg_gf2 import mul as _mul_lib, add as _add_lib, eye as _eye_lib
     mul = _mul_lib
@@ -1070,7 +1072,6 @@ except Exception:
 
     def eye(n):
         return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
-
 
 
 
