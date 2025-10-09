@@ -1563,8 +1563,9 @@ else:
     st.caption("A/B snapshot: —")
 
 
+
 # ====================== A/B Compare (strict vs ACTIVE projected) ======================
-with st.expander("A/B compare (strict vs active projected)"):
+with safe_expander("A/B compare (strict vs active projected)"):
     if st.button("Run A/B compare", key="ab_run_btn_final"):
         try:
             ss = st.session_state
@@ -1582,7 +1583,7 @@ with st.expander("A/B compare (strict vs active projected)"):
 
             # projected leg MUST mirror current policy exactly
             mode_now = rc.get("mode")
-            if mode_now == "projected(file)":
+            if mode_now == "projected/file)":
                 # reuse same file & hash
                 pj_file = rc.get("projector_filename","") or ""
                 pj_hash = rc.get("projector_hash","") or ""
@@ -1632,7 +1633,7 @@ with st.expander("A/B compare (strict vs active projected)"):
             H2d3  = mul(H2, d3) if (H2 and d3) else []
             C3pI3 = _xor(C3, I3) if C3 else []
             lane_vec_H2d3 = _mask(_bottom_row(H2d3), lane_idx)
-            lane_vec_C3I  = _mask(_bottom_row(C3pI3), lane_idx)
+            lane_vec_C3plusI3 = _mask(_bottom_row(C3pI3), lane_idx)
 
             # snapshot payload (deterministic + fresh)
             inputs_sig = _inputs_sig_now()
@@ -1647,7 +1648,7 @@ with st.expander("A/B compare (strict vs active projected)"):
                     "out":   out_strict,
                     "ker_guard": "enforced",
                     "lane_vec_H2d3": lane_vec_H2d3,
-                    "lane_vec_C3plusI3": lane_vec_C3I,
+                    "lane_vec_C3plusI3": lane_vec_C3plusI3,
                     "pass_vec": [
                         int(out_strict.get("2",{}).get("eq", False)),
                         int(out_strict.get("3",{}).get("eq", False)),
@@ -1661,7 +1662,7 @@ with st.expander("A/B compare (strict vs active projected)"):
                     "out":   out_proj,
                     "ker_guard": "off",
                     "lane_vec_H2d3": lane_vec_H2d3[:],
-                    "lane_vec_C3plusI3": lane_vec_C3I[:],
+                    "lane_vec_C3plusI3": lane_vec_C3plusI3[:],
                     "pass_vec": [
                         int(out_proj.get("2",{}).get("eq", False)),
                         int(out_proj.get("3",{}).get("eq", False)),
@@ -1680,7 +1681,8 @@ with st.expander("A/B compare (strict vs active projected)"):
             s_ok = bool(out_strict.get("3",{}).get("eq", False))
             p_ok = bool(out_proj.get("3",{}).get("eq", False))
             st.success(f"A/B updated → strict={'✅' if s_ok else '❌'} · projected={'✅' if p_ok else '❌'} · {ab_payload['pair_tag']}")
-            with st.expander("A/B snapshot (details)"):
+            # replace nested expander with safe_expander to avoid nesting errors
+            with safe_expander("A/B snapshot (details)"):
                 st.json(ab_payload)
 
         except ValueError as e:
@@ -1688,7 +1690,7 @@ with st.expander("A/B compare (strict vs active projected)"):
         except Exception as e:
             st.error(f"A/B compare failed: {e}")
 
-    # one-click stale clearer when inputs/policy drifted
+    # stale clearer (unchanged)
     _ab = st.session_state.get("ab_compare") or {}
     if _ab and (not _ab_is_fresh(_ab, rc=st.session_state.get("run_ctx") or {})):
         if st.button("Clear stale A/B", key="btn_ab_clear_final"):
