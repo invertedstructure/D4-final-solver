@@ -156,6 +156,28 @@ def policy_label_from_state(rc: dict, cfg_active: dict) -> str:
     # fallback
     return policy_label_from_cfg_full(cfg_active or {})
 
+# --- compat shim for legacy call sites ---------------------------------
+if "_rectify_run_ctx_mask_from_d3_or_stop" not in globals():
+    def _rectify_run_ctx_mask_from_d3_or_stop():
+        """Require fresh run_ctx and rectify mask; hard-stop if stale."""
+        try:
+            rc = require_fresh_run_ctx()        # raises via st.stop() on stale
+            rc = rectify_run_ctx_mask_from_d3() # may also st.stop() on mismatch
+            return rc
+        except Exception as e:
+            # If your rectifiers switched to soft warnings elsewhere,
+            # keep this call site hard-guarded for Freezer correctness.
+            st.warning(str(e))
+            st.stop()
+
+# UTC ISO helper (if not already present)
+if "_utc_iso" not in globals():
+    from datetime import datetime, timezone
+    def _utc_iso() -> str:
+        return datetime.now(timezone.utc).isoformat()
+
+
+
 
 # =========================[ STEP 1 · Core helpers + guards ]=========================
 from pathlib import Path
