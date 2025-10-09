@@ -2550,201 +2550,120 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
 
 
 
-  # ======================== Parity: import/export & queue ========================
+# ---------------- Parity pairs: import/export (robust paths + uploader) ----------------
 
-PARITY_SCHEMA_VERSION = "1.0.0"
-DEFAULT_PARITY_PATH = Path("logs") / "parity_pairs.json"
-PARITY_REPORT_PATH  = Path("reports") / "parity_report.json"
-PARITY_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+def _ensure_json_path_str(p_str: str, default_name: str = "parity_pairs.json") -> str:
+    """
+    If p_str is a directory ('.' or 'logs/'), convert to dir/default_name.
+    If it has no suffix, append .json.
+    Return normalized POSIX string.
+    """
+    p = Path(p_str.strip() or default_name)
+    if p.is_dir() or str(p).endswith(("/", "\\")) or p.name == "":
+        p = p / default_name
+    if p.suffix.lower() != ".json":
+        p = p.with_suffix(".json")
+    return p.as_posix()
 
-def _iso_utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-def _ensure_parent_dir(p: Path) -> None:
+def _export_pairs_to_path(path_str: str) -> str:
+    p = Path(_ensure_json_path_str(path_str))
     p.parent.mkdir(parents=True, exist_ok=True)
-
-def _atomic_write_json(path: Path, payload: dict) -> None:
-    _ensure_parent_dir(path)
-    with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as tmp:
-        _json.dump(payload, tmp, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
-    os.replace(tmp_name, path)
-
-def _safe_parse_json(path: str) -> dict:
-    p = Path(path)
-    if not p.exists():
-        raise FileNotFoundError(f"File not found: {path}")
-    with open(p, "r", encoding="utf-8") as f:
-        return _json.load(f)
-
-def load_fixture_from_paths(*, boundaries_path: str, cmap_path: str, H_path: str, shapes_path: str):
-    dB = _safe_parse_json(boundaries_path)
-    dC = _safe_parse_json(cmap_path)
-    dH = _safe_parse_json(H_path)
-    dU = _safe_parse_json(shapes_path)
-    return {
-        "boundaries": io.parse_boundaries(dB),
-        "cmap":       io.parse_cmap(dC),
-        "H":          io.parse_cmap(dH),
-        "shapes":     io.parse_shapes(dU),
-    }
-
-def add_parity_pair(*, label: str, left_fixture: dict, right_fixture: dict) -> int:
-    req = ("boundaries","cmap","H","shapes")
-    for side_name, fx in (("left", left_fixture), ("right", right_fixture)):
-        if not isinstance(fx, dict) or any(k not in fx for k in req):
-            raise ValueError(f"{side_name} fixture malformed; expected keys {req}")
-    st.session_state.setdefault("parity_pairs", [])
-    st.session_state["parity_pairs"].append({"label": label, "left": left_fixture, "right": right_fixture})
-    return len(st.session_state["parity_pairs"])
-
-def clear_parity_pairs() -> None:
-    st.session_state["parity_pairs"] = []
-
-def set_parity_pairs_from_fixtures(pairs_spec: list[dict]) -> int:
-    clear_parity_pairs()
-    for row in pairs_spec:
-        label = row.get("label", "PAIR")
-        Lp, Rp = row.get("left", {}), row.get("right", {})
-        L = load_fixture_from_paths(boundaries_path=Lp["boundaries"], cmap_path=Lp["cmap"], H_path=Lp["H"], shapes_path=Lp["shapes"])
-        R = load_fixture_from_paths(boundaries_path=Rp["boundaries"], cmap_path=Rp["cmap"], H_path=Rp["H"], shapes_path=Rp["shapes"])
-        add_parity_pair(label=label, left_fixture=L, right_fixture=R)
-    return len(st.session_state.get("parity_pairs", []))
-
-def _parity_pairs_payload(pairs: list[dict]) -> dict:
-    return {
-        "schema_version": PARITY_SCHEMA_VERSION,
-        "saved_at": _iso_utc_now(),
-        "count": len(pairs),
-        "pairs": [
-            {
-                "label": row.get("label", "PAIR"),
-                "left":  {k: row.get("left_path_"+k,  row.get("left", {}).get(k+"_path", "")) for k in ("boundaries","cmap","H","shapes")},
-                "right": {k: row.get("right_path_"+k, row.get("right", {}).get(k+"_path", "")) for k in ("boundaries","cmap","H","shapes")},
-            } for row in pairs
-        ],
-    }
-
-def _pairs_from_payload(payload: dict) -> list[dict]:
-    if not isinstance(payload, dict): return []
-    return [
-        {
-            "label": r.get("label", "PAIR"),
-            "left":  {k: r.get("left", {}).get(k, "") for k in ("boundaries","cmap","H","shapes")},
-            "right": {k: r.get("right", {}).get(k, "") for k in ("boundaries","cmap","H","shapes")},
-        } for r in payload.get("pairs", [])
-    ]
-
-def export_parity_pairs(path: str | Path = DEFAULT_PARITY_PATH) -> str:
-    path = Path(path); _ensure_parent_dir(path)
     pairs = st.session_state.get("parity_pairs", []) or []
-    payload = _parity_pairs_payload(pairs)
-    with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as tmp:
-        _json.dump(payload, tmp, indent=2)
-        tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
-    os.replace(tmp_name, path)
-    return str(path)
+    payload = _parity_pairs_payload(pairs)   # uses your existing helper
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        _json.dump(payload, f, ensure_ascii=False, indent=2)
+        f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, p)
+    return p.as_posix()
 
-def import_parity_pairs(path: str | Path = DEFAULT_PARITY_PATH, *, merge: bool = False) -> int:
-    path = Path(path)
-    if not path.exists():
-        raise FileNotFoundError(f"No parity pairs file at {path}")
-    with open(path, "r", encoding="utf-8") as f:
-        payload = _json.load(f)
-    ver = payload.get("schema_version", "0.0.0")
-    if ver.split(".")[0] != PARITY_SCHEMA_VERSION.split(".")[0]:
-        st.warning(f"parity_pairs schema version differs (file={ver}, app={PARITY_SCHEMA_VERSION}); best-effort load.")
+def _import_pairs_from_payload(payload: dict, *, merge: bool) -> int:
+    # Use your existing helpers to load into session
     pairs_spec = _pairs_from_payload(payload)
     if not merge:
         clear_parity_pairs()
-    set_parity_pairs_from_fixtures(pairs_spec)
-    return len(st.session_state.get("parity_pairs", []))
-
-with safe_expander("Parity: queue sample D2/D3/D4 pairs (optional)"):
-    st.caption("Only queues pairs if files exist under ./inputs/.")
-    c1, c2 = st.columns(2)
-    with c1:
-        do_self = st.button("Queue SELF (current fixture vs itself)", key="pp_self_btn")
-    with c2:
-        do_examples = st.button("Queue D2↔D3, D3↔D4 examples", key="pp_examples_btn")
-
-    if do_self:
-        try:
-            fixture = {
-                "boundaries": boundaries,
-                "cmap": cmap,
-                "H": st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}}),
-                "shapes": shapes,
-            }
-            add_parity_pair(label="SELF", left_fixture=fixture, right_fixture=fixture)
-            st.success("Queued SELF parity pair.")
-        except Exception as e:
-            st.error(f"Could not queue SELF: {e}")
-
-    if do_examples:
-        spec = [
-            {
-                "label": "D2(101)↔D3(110)",
-                "left":  {"boundaries":"inputs/D2/boundaries.json","cmap":"inputs/D2/cmap.json","H":"inputs/D2/H.json","shapes":"inputs/D2/shapes.json"},
-                "right": {"boundaries":"inputs/D3/boundaries.json","cmap":"inputs/D3/cmap.json","H":"inputs/D3/H.json","shapes":"inputs/D3/shapes.json"},
-            },
-            {
-                "label": "D3(110)↔D4(101)",
-                "left":  {"boundaries":"inputs/D3/boundaries.json","cmap":"inputs/D3/cmap.json","H":"inputs/D3/H.json","shapes":"inputs/D3/shapes.json"},
-                "right": {"boundaries":"inputs/D4/boundaries.json","cmap":"inputs/D4/cmap.json","H":"inputs/D4/H.json","shapes":"inputs/D4/shapes.json"},
-            },
-        ]
-        flat = []
-        for r in spec:
-            L, R = r["left"], r["right"]
-            flat += [L["boundaries"], L["cmap"], L["H"], L["shapes"], R["boundaries"], R["cmap"], R["H"], R["shapes"]]
-        if not all(Path(p).exists() for p in flat):
-            st.info("Example files not found under ./inputs — skipping queuing.")
-        else:
-            try:
-                set_parity_pairs_from_fixtures(spec)
-                st.success("Queued D2↔D3 and D3↔D4 example pairs.")
-            except Exception as e:
-                st.error(f"Could not queue examples: {e}")
+    return set_parity_pairs_from_fixtures(pairs_spec)
 
 with safe_expander("Parity pairs: import/export"):
     colA, colB, colC = st.columns([3,3,2])
     with colA:
-        export_path = st.text_input("Export path", value=str(DEFAULT_PARITY_PATH), key="pp_export_path")
+        export_path_txt = st.text_input(
+            "Export path",
+            value=str(DEFAULT_PARITY_PATH),
+            key="pp_export_path",
+            help="Path to save pairs JSON. Directories like '.' or 'logs/' will become logs/parity_pairs.json",
+        )
     with colB:
-        import_path = st.text_input("Import path", value=str(DEFAULT_PARITY_PATH), key="pp_import_path")
+        import_path_txt = st.text_input(
+            "Import path",
+            value=str(DEFAULT_PARITY_PATH),
+            key="pp_import_path",
+            help="Optional: path to load pairs JSON from disk. Or use the uploader on the right.",
+        )
     with colC:
         merge_load = st.checkbox("Merge on import", value=False, key="pp_merge")
 
+    # File uploader (import alternative)
+    up_col1, up_col2 = st.columns([2,3])
+    with up_col1:
+        uploaded_json = st.file_uploader("Import via upload", type=["json"], key="pp_uploader")
+    with up_col2:
+        st.caption("Tip: upload OR type a path; upload wins if both are provided.")
+
     c1, c2 = st.columns(2)
     with c1:
-        # Apply _file_mode_invalid_now() check here
-        disabled_export = _file_mode_invalid_now()
+        # Export
+        disabled_export = _file_mode_invalid_now()  # reuse your existing guard
         help_export = (
-            "Disabled because projected(FILE) validation failed. Export to file disabled."
+            "Disabled because projected(FILE) validation failed. Export disabled."
             if disabled_export else
-            "Export the current parity pairs to a JSON file."
+            "Write pairs to a JSON file and offer a download."
         )
         if st.button("Export parity_pairs.json", key="pp_do_export", disabled=disabled_export, help=help_export):
             try:
-                p = export_parity_pairs(export_path)
-                st.success(f"Saved parity pairs → {p}")
+                out_path = _export_pairs_to_path(export_path_txt)
+                st.success(f"Saved parity pairs → {out_path}")
+
+                # Also offer a download directly
+                payload = _parity_pairs_payload(st.session_state.get("parity_pairs", []) or [])
+                mem = _io.BytesIO(_json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
+                st.download_button(
+                    "Download exported parity_pairs.json",
+                    mem,
+                    file_name=Path(out_path).name,
+                    key="dl_ppairs_json"
+                )
             except Exception as e:
                 st.error(f"Export failed: {e}")
+
     with c2:
-        # Apply _file_mode_invalid_now() check here
+        # Import (prefer uploader if present)
         disabled_import = _file_mode_invalid_now()
         help_import = (
-            "Disabled because projected(FILE) validation failed. Import from file disabled."
+            "Disabled because projected(FILE) validation failed. Import disabled."
             if disabled_import else
-            "Import parity pairs from a JSON file."
+            "Load pairs from the uploaded JSON or the path."
         )
         if st.button("Import parity_pairs.json", key="pp_do_import", disabled=disabled_import, help=help_import):
             try:
-                n = import_parity_pairs(import_path, merge=merge_load)
-                st.success(f"Loaded {n} pairs from {import_path}")
+                if uploaded_json is not None:
+                    # Read from the uploaded file
+                    payload = _json.loads(uploaded_json.getvalue().decode("utf-8"))
+                    n = _import_pairs_from_payload(payload, merge=merge_load)
+                    st.success(f"Loaded {n} pairs from uploaded file")
+                else:
+                    # Read from path
+                    path_str = _ensure_json_path_str(import_path_txt)
+                    p = Path(path_str)
+                    if not (p.exists() and p.is_file()):
+                        raise FileNotFoundError(f"No parity pairs file at {path_str}")
+                    with open(p, "r", encoding="utf-8") as f:
+                        payload = _json.load(f)
+                    n = _import_pairs_from_payload(payload, merge=merge_load)
+                    st.success(f"Loaded {n} pairs from {path_str}")
             except Exception as e:
                 st.error(f"Import failed: {e}")
+
 
 # ============================== Parity Runner (non-blocking) ===============================
 
