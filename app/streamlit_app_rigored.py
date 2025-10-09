@@ -2581,51 +2581,69 @@ def _paths_from_fixture_or_current(*args):
     return out
 # ---------------- /UNIVERSAL adapter ----------------------------------------------------
 
-# ----- Drop-in: robust resolver + fixture loader (handles "boundaries D2.json", etc.) -----
+# ----- Drop-in: robust resolver + fixture loader (multi-root, fuzzy) -----
 from pathlib import Path
-import json as _json
+import re, json as _json
 
-def _pp_norm_name(p: str) -> str:
-    # normalize for fuzzy matching (ignore spaces & case)
-    return Path(p).name.replace(" ", "").lower()
+def _canon(s: str) -> str:
+    # ignore spaces, underscores, hyphens, and case
+    return re.sub(r"[^a-z0-9.]+", "", (s or "").lower())
 
 def _resolve_fixture_path(p: str) -> str:
     """
-    Best-effort resolver for fixture file paths that may be bare names,
-    include spaces, or omit the inputs/ directory.
-    Tries:
-      1) as-is
-      2) inputs/<p>
-      3) recursive search under inputs/ for a file with same name ignoring spaces/case
+    Resolve quirky filenames like 'boundaries D2.json' or 'C- D3.json' even if
+    they live under inputs/ or /mnt/data. Tries:
+      1) exact path
+      2) <root>/<p> for roots in [., inputs/, /mnt/data]
+      3) recursive fuzzy search under roots (canonical name match)
     """
     p = (p or "").strip()
+    if not p:
+        raise FileNotFoundError("Empty fixture path")
+
+    roots = [
+        Path("."),                      # project root
+        Path("inputs"),                 # conventional inputs
+        Path("/mnt/data"),              # upload area in your env
+    ]
+
     tried = []
-    candidates = []
 
-    if p:
-        candidates.append(Path(p))
-    inputs_dir = Path("inputs")
-    if p:
-        candidates.append(inputs_dir / p)
+    # 1) as-is
+    cand = Path(p)
+    tried.append(cand.as_posix())
+    if cand.exists() and cand.is_file():
+        return cand.as_posix()
 
-    # recursive fuzzy search under inputs/
-    target = _pp_norm_name(p)
-    if inputs_dir.exists():
-        for q in inputs_dir.rglob("*"):
-            if q.is_file() and _pp_norm_name(q.name) == target:
-                candidates.append(q)
+    # 2) direct under roots
+    for r in roots:
+        cand = r / p
+        tried.append(cand.as_posix())
+        if cand.exists() and cand.is_file():
+            return cand.as_posix()
 
-    for c in candidates:
-        tried.append(c.as_posix())
-        if c.exists() and c.is_file():
-            return c.as_posix()
+    # 3) recursive fuzzy search under roots
+    target = _canon(Path(p).name)
+    for r in roots:
+        if not r.exists():
+            continue
+        for q in r.rglob("*"):
+            if q.is_file():
+                # compare canonical names (e.g., 'boundariesd2.json')
+                if _canon(q.name) == target:
+                    return q.as_posix()
+                # also allow canonical stem match if user omitted punctuation
+                if _canon(q.stem) == _canon(Path(p).stem):
+                    return q.as_posix()
 
-    raise FileNotFoundError(f"Fixture file not found for '{p}'. Tried: " + " | ".join(tried[:8]))
+    raise FileNotFoundError(
+        f"Fixture file not found for '{p}'. Tried: " + " | ".join(tried[:10])
+        + " (also searched recursively under ./, inputs/, /mnt/data with fuzzy match)"
+    )
 
-# If your app already defines load_fixture_from_paths, we safely override it here
 def load_fixture_from_paths(*, boundaries_path: str, cmap_path: str, H_path: str, shapes_path: str):
     """
-    Paths may be bare filenames with spaces. We resolve them robustly, then parse.
+    Robust wrapper: resolves paths then parses with your io.parse_* hooks.
     """
     b_path = _resolve_fixture_path(boundaries_path)
     c_path = _resolve_fixture_path(cmap_path)
@@ -2648,6 +2666,7 @@ def load_fixture_from_paths(*, boundaries_path: str, cmap_path: str, H_path: str
         "shapes":     io.parse_shapes(dU),
     }
 # ----- /drop-in -----
+
 
 
 # ---------------- Parity export hotfix: normalize fixture->paths ----------------
