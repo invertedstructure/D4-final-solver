@@ -1597,17 +1597,33 @@ if _ab and (_ab.get("inputs_sig") != _current_inputs_sig()):
 
 # ────────────────────── Reports: Perturbation Sanity & Fence Stress ──────────────────────
 
-# Versions / paths (use your globals)
+# Safe imports (no-ops if already imported)
+from pathlib import Path
+import os, csv, tempfile, json, hashlib
+from datetime import datetime, timezone
+
+# Version/constants (respect existing globals if present)
+SCHEMA_VERSION = globals().get("SCHEMA_VERSION", "1.0.0")
+APP_VERSION    = globals().get("APP_VERSION", "v0.1-core")
+
+# Paths (safe init)
+REPORTS_DIR = Path(globals().get("REPORTS_DIR", "reports"))
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Schema tags for these reports
 PERTURB_SCHEMA_VERSION = SCHEMA_VERSION
 FENCE_SCHEMA_VERSION   = "1.0.1"  # fence targets U (carrier) when hooks present
 APP_VER                = APP_VERSION
-REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Outputs
 PERTURB_OUT_PATH = REPORTS_DIR / "perturbation_sanity.csv"
 FENCE_OUT_PATH   = REPORTS_DIR / "fence_stress.csv"
 
 # Local helpers (tool-scoped)
 def _copy_mat(M): return [row[:] for row in (M or [])]
-def _is_zero(M): return (not M) or all(all((x & 1) == 0 for x in row) for row in M)
+
+def _is_zero(M):
+    return (not M) or all(all((x & 1) == 0 for x in row) for row in M)
 
 def _strict_R3(H2, d3, C3):
     I3 = eye(len(C3)) if C3 else []
@@ -1635,7 +1651,8 @@ def _sig_tag_eq(boundaries_obj, cmap_obj, H_used_obj, P_active=None):
     else:
         def _residual_tag_local(R, mask):
             if not R or not mask: return "none"
-            rows = len(R); nz = lambda j: any(R[i][j] & 1 for i in range(rows))
+            rows = len(R)
+            nz   = lambda j: any(R[i][j] & 1 for i in range(rows))
             lanes = any(nz(j) for j, m in enumerate(mask) if m)
             ker   = any(nz(j) for j, m in enumerate(mask) if not m)
             if not lanes and not ker: return "none"
@@ -1644,7 +1661,7 @@ def _sig_tag_eq(boundaries_obj, cmap_obj, H_used_obj, P_active=None):
             return "mixed"
         tag_s = _residual_tag_local(R3s, lm)
 
-    eq_s  = _is_zero(R3s)
+    eq_s = _is_zero(R3s)
     if P_active:
         R3p   = _projected_R3(R3s, P_active)
         tag_p = residual_tag(R3p, lm) if "residual_tag" in globals() and callable(globals()["residual_tag"]) else tag_s
@@ -1652,6 +1669,7 @@ def _sig_tag_eq(boundaries_obj, cmap_obj, H_used_obj, P_active=None):
     else:
         tag_p, eq_p = None, None
     return lm, tag_s, bool(eq_s), tag_p, (None if eq_p is None else bool(eq_p))
+
 
 # -------- optional carrier (U) mutation hooks ----------
 HAS_U_HOOKS = (
