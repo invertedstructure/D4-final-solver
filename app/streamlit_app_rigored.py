@@ -2855,6 +2855,188 @@ def import_parity_pairs(path: str | Path = DEFAULT_PARITY_PATH, *, merge=False) 
 if "_file_mode_invalid_now" not in globals():
     def _file_mode_invalid_now(): return False
 
+# ================== Parity · Quick Queue + Mini Runner (drop-in) ==================
+
+# --- Small util to try+load one fixture side from a path bundle
+def _pp_try_load(side: dict):
+    return load_fixture_from_paths(
+        boundaries_path=side["boundaries"],
+        cmap_path=side["cmap"],
+        H_path=side["H"],
+        shapes_path=side["shapes"],
+    )
+
+# --- Self & District queue buttons
+with st.expander("Parity · Quick Queue"):
+    c1, c2 = st.columns([1,2])
+
+    with c1:
+        if st.button("➕ Queue SELF (same fixtures)", key="pp_btn_self_v2"):
+            try:
+                fx = {
+                    "boundaries": boundaries,
+                    "cmap": cmap,
+                    "H": (st.session_state.get("overlap_H") or _load_h_local() if "overlap_H" in st.session_state else _load_h_local()),
+                    "shapes": shapes,
+                }
+                add_parity_pair(label="SELF", left_fixture=fx, right_fixture=fx)
+                st.success("Queued SELF pair.")
+            except Exception as e:
+                st.error(f"SELF queue failed: {e}")
+
+    with c2:
+        st.caption("District parity set (row₁ & row₂). Uses robust resolver; filenames can be like `H row1.json`/`H_row1.json`/`H.json`.")
+        if st.button("➕ Queue District Parity set", key="pp_btn_district_set_v2"):
+            # row₁: D2–101 ↔ D3–110 and D3–110 ↔ D4–101  (H=row₁ on each leg)
+            # row₂: D2–011 ↔ D4–011                        (H=row₂ on each leg)
+            # We keep paths flexible; resolver will fuzzy-match spaces/underscores.
+            specs = [
+                # row₁ (chain)
+                ("row₁: D2–101 ↔ D3–110",
+                 {"boundaries":"inputs/D2/boundaries.json","cmap":"inputs/D2/cmap.json","H":"inputs/D2/H row1.json","shapes":"inputs/D2/shapes.json"},
+                 {"boundaries":"inputs/D3/boundaries.json","cmap":"inputs/D3/cmap.json","H":"inputs/D3/H row1.json","shapes":"inputs/D3/shapes.json"}),
+                ("row₁: D3–110 ↔ D4–101",
+                 {"boundaries":"inputs/D3/boundaries.json","cmap":"inputs/D3/cmap.json","H":"inputs/D3/H row1.json","shapes":"inputs/D3/shapes.json"},
+                 {"boundaries":"inputs/D4/boundaries.json","cmap":"inputs/D4/cmap.json","H":"inputs/D4/H row1.json","shapes":"inputs/D4/shapes.json"}),
+                # row₂ (direct)
+                ("row₂: D2–011 ↔ D4–011",
+                 {"boundaries":"inputs/D2/boundaries.json","cmap":"inputs/D2/cmap.json","H":"inputs/D2/H row2.json","shapes":"inputs/D2/shapes.json"},
+                 {"boundaries":"inputs/D4/boundaries.json","cmap":"inputs/D4/cmap.json","H":"inputs/D4/H row2.json","shapes":"inputs/D4/shapes.json"}),
+            ]
+            ok, skipped = 0, []
+            for label, Lp, Rp in specs:
+                try:
+                    L = _pp_try_load(Lp)
+                    R = _pp_try_load(Rp)
+                    add_parity_pair(label=label, left_fixture=L, right_fixture=R)
+                    ok += 1
+                except Exception as e:
+                    skipped.append(f"{label} → {e}")
+            if ok:
+                st.success(f"Queued {ok} district parity pair(s).")
+            if skipped:
+                st.info("Some specs were skipped:\n- " + "\n- ".join(skipped))
+
+    # Small live preview
+    try:
+        pairs = st.session_state.get("parity_pairs", []) or []
+        st.caption(f"Queued pairs: {len(pairs)}")
+        if pairs:
+            import pandas as pd
+            st.dataframe(pd.DataFrame([{"Pair": p.get("label","PAIR")} for p in pairs], columns=["Pair"]),
+                         hide_index=True, use_container_width=True)
+    except Exception:
+        pass
+
+# --- Mini parity runner (safe). Uses strict; tries projected if your ctx/helpers exist.
+def _pp_active_projection_cfg() -> dict | None:
+    # Try to mirror your app’s “policy = projected(file)” context if available
+    try:
+        rc = st.session_state.get("run_ctx") or {}
+        mode = rc.get("mode","strict")
+        if mode == "strict":
+            return None
+        # prefer your cfg builders if present
+        if "cfg_projected_base" in globals():
+            cfg = cfg_projected_base()   # type: ignore
+        else:
+            cfg = {"source":{"2":"file","3":"file"}, "projector_files":{}}
+        if mode == "projected(auto)":
+            cfg["source"]["3"] = "auto"
+            return cfg
+        if mode == "projected(file)":
+            cfg["source"]["3"] = "file"
+            pj = rc.get("projector_filename","")
+            if pj:
+                cfg.setdefault("projector_files", {})["3"] = pj
+            return cfg
+    except Exception:
+        pass
+    return None
+
+def _pp_one_leg(boundaries_obj, cmap_obj, H_obj, projection_cfg: dict | None):
+    # fall back gracefully if your projection chooser isn’t available
+    try:
+        if projection_cfg is None:
+            return overlap_gate.overlap_check(boundaries_obj, cmap_obj, H_obj)  # type: ignore
+        # reuse app chooser if present (won’t throw if absent)
+        if "projector_choose_active" in globals():
+            _P, _meta = projector_choose_active(projection_cfg, boundaries_obj)  # type: ignore
+        return overlap_gate.overlap_check(boundaries_obj, cmap_obj, H_obj, projection_config=projection_cfg)  # type: ignore
+    except Exception as e:
+        # mark as failure in projected path
+        return {"2":{"eq":False}, "3":{"eq":False}, "_err":str(e)}
+
+def _pp_and(a, b):
+    if a is None or b is None:
+        return None
+    return bool(a) and bool(b)
+
+def _pp_emoji(v):
+    if v is None: return "—"
+    return "✅" if bool(v) else "❌"
+
+with st.expander("Parity · Run Suite"):
+    pairs = st.session_state.get("parity_pairs", []) or []
+    if not pairs:
+        st.info("No pairs queued yet. Use the Quick Queue above.")
+    # Context display (best-effort)
+    try:
+        rc = st.session_state.get("run_ctx") or {}
+        policy_tag = rc.get("policy_tag") or "strict"
+        pj_hash = rc.get("projector_hash","") if rc.get("mode","").startswith("projected") else ""
+        c1,c2 = st.columns([1,1])
+        with c1: st.caption("Active policy");  st.code(policy_tag, language="text")
+        with c2: st.caption("Projector hash"); st.code((pj_hash[:12]+"…") if pj_hash else "—", language="text")
+    except Exception:
+        pass
+
+    run_disabled = not bool(pairs)
+    if st.button("▶ Run Parity Suite", key="pp_btn_run_suite_v2", disabled=run_disabled):
+        cfg_proj = _pp_active_projection_cfg()
+        report_pairs, rows_preview, errors = [], [], []
+        for row in pairs:
+            label = row.get("label","PAIR")
+            L, R = row.get("left",{}), row.get("right",{})
+            try:
+                bL,cL,hL = L["boundaries"], L["cmap"], L["H"]
+                bR,cR,hR = R["boundaries"], R["cmap"], R["H"]
+                out_L_strict = _pp_one_leg(bL,cL,hL, None)
+                out_R_strict = _pp_one_leg(bR,cR,hR, None)
+                s_k2 = _pp_and(out_L_strict.get("2",{}).get("eq"), out_R_strict.get("2",{}).get("eq"))
+                s_k3 = _pp_and(out_L_strict.get("3",{}).get("eq"), out_R_strict.get("3",{}).get("eq"))
+
+                if cfg_proj is not None:
+                    out_L_proj = _pp_one_leg(bL,cL,hL, cfg_proj)
+                    out_R_proj = _pp_one_leg(bR,cR,hR, cfg_proj)
+                    p_k2 = _pp_and(out_L_proj.get("2",{}).get("eq"), out_R_proj.get("2",{}).get("eq"))
+                    p_k3 = _pp_and(out_L_proj.get("3",{}).get("eq"), out_R_proj.get("3",{}).get("eq"))
+                else:
+                    p_k2 = p_k3 = None
+
+                report_pairs.append({
+                    "label": label,
+                    "strict":    {"k2": (None if s_k2 is None else bool(s_k2)),
+                                  "k3": (None if s_k3 is None else bool(s_k3))},
+                    "projected": {"k2": (None if p_k2 is None else bool(p_k2)),
+                                  "k3": (None if p_k3 is None else bool(p_k3))},
+                })
+                rows_preview.append([label, _pp_emoji(s_k3), _pp_emoji(p_k3)])
+            except Exception as e:
+                errors.append(f"{label}: {e}")
+
+        st.session_state["parity_last_report_pairs"] = report_pairs
+        if errors:
+            st.warning("Some pairs had issues:\n- " + "\n- ".join(errors[:6]) + ("" if len(errors)<=6 else "\n- …"))
+
+        st.caption("Summary per pair (strict_k3 / projected_k3):")
+        for r in rows_preview:
+            st.write(f"• {r[0]} → strict={r[1]} · projected={r[2]}")
+
+# ===============================================================================
+
+
+
 # --------- UI for import/export (keep only one expander) ---------
 with st.expander("Parity pairs: import/export"):
     colA, colB, colC = st.columns([3, 3, 2])
