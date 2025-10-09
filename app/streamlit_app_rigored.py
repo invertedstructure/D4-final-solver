@@ -165,6 +165,21 @@ from contextlib import contextmanager
 LOGS_DIR = Path(globals().get("LOGS_DIR", "logs"))
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
+# --- Inputs signature (canonical, de-duplicated) ---
+def current_inputs_sig() -> list[str]:
+    ib = st.session_state.get("_inputs_block") or {}
+    return [
+        str(ib.get("boundaries_hash", "")),
+        str(ib.get("C_hash", "")),
+        str(ib.get("H_hash", "")),
+        str(ib.get("U_hash", "")),
+        str(ib.get("shapes_hash", "")),
+    ]
+
+# Back-compat alias for older call sites
+_current_inputs_sig = current_inputs_sig
+
+
 # ========================= Widget key utilities (NEW) =========================
 def _mkkey(ns: str, name: str) -> str:
     """Deterministic, readable widget key: '<ns>__<name>'."""
