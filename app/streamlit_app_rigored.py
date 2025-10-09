@@ -2029,16 +2029,26 @@ with safe_expander("Gallery"):
     rc   = ss.get("run_ctx") or {}
     cert = ss.get("cert_payload") or {}
 
-    # ---- cert-required guard (UI-only; we don't st.stop())
+    # ---- cert-required guard (UI-only; no st.stop)
     has_cert = bool(cert)
     if not has_cert:
         st.info("No cert in memory yet. Run Overlap (let cert writer emit) before adding to gallery.")
 
-    # ---- Pull fields from the cert (authoritative)
+    # ---- Pull fields from the cert (authoritative SSOT)
     identity = (cert.get("identity") or {}) if has_cert else {}
     policy   = (cert.get("policy")   or {}) if has_cert else {}
     inputs   = (cert.get("inputs")   or {}) if has_cert else {}
-    hashes   = (inputs.get("hashes") or {}) if has_cert else {}
+
+    # HASHES SOURCE OF TRUTH: artifact_hashes (never recompute)
+    artifacts   = (cert.get("artifact_hashes") or {}) if has_cert else {}
+    inputs_hash = (inputs.get("hashes") or {}) if has_cert else {}
+
+    # Prefer artifact_hashes, then fall back to the nested inputs.hashes (for older certs)
+    h_boundaries = artifacts.get("boundaries_hash") or inputs_hash.get("boundaries_hash","")
+    h_C          = artifacts.get("C_hash")          or inputs_hash.get("C_hash","")
+    h_H          = artifacts.get("H_hash")          or inputs_hash.get("H_hash","")
+    h_U          = artifacts.get("U_hash")          or inputs_hash.get("U_hash","")
+    h_shapes     = artifacts.get("shapes_hash")     or inputs_hash.get("shapes_hash","") or h_U  # tolerate legacy where shapes==U
 
     district_id    = identity.get("district_id", "UNKNOWN")
     policy_tag     = policy.get("policy_tag", rc.get("policy_tag", rc.get("mode", "strict")))
@@ -2063,11 +2073,11 @@ with safe_expander("Gallery"):
             "projector_hash": projector_hash,
         },
         "hashes": {
-            "boundaries_hash": hashes.get("boundaries_hash", ""),
-            "C_hash":          hashes.get("C_hash", ""),
-            "H_hash":          hashes.get("H_hash", ""),
-            "U_hash":          hashes.get("U_hash", ""),
-            "shapes_hash":     hashes.get("shapes_hash", ""),
+            "boundaries_hash": h_boundaries,
+            "C_hash":          h_C,
+            "H_hash":          h_H,
+            "U_hash":          h_U,
+            "shapes_hash":     h_shapes,
         },
         "growth_bumps":      int(growth_bumps),
         "strictify":         str(strictify),
