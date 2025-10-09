@@ -3347,8 +3347,8 @@ else:
             "app_version": getattr(hashes,"APP_VERSION","v0.1-core"),
             "python_version": _py_version_str(),
         }
-
-               # --- Optional A/B embed (fresh only; no re-derivation here) ---
+        
+                       # --- Optional A/B embed (fresh only; no re-derivation here) ---
         _ab = st.session_state.get("ab_compare") or {}
         if _ab_is_fresh(_ab, rc=_rc):
             strict_ctx = _ab.get("strict", {}) or {}
@@ -3360,6 +3360,7 @@ else:
                     int((out_block or {}).get("3",{}).get("eq", False)),
                 ]
         
+            # stage snapshots
             cert_payload["policy"]["strict_snapshot"] = {
                 "policy_tag": "strict",
                 "ker_guard": "enforced",
@@ -3393,13 +3394,22 @@ else:
             cert_payload["ab_pair_tag"] = _ab.get("pair_tag") or f"strict__VS__{proj_snap['policy_tag']}"
             cert_payload["ab_embedded"] = True
         
-            # cheap internal guard: if we embed A/B, projected leg must match current checks
+            # soft guard: if mismatch, drop the embed instead of failing the cert
             ab_proj_k3 = bool((_ab.get("projected") or {}).get("out", {}).get("3", {}).get("eq", False))
             cur_k3     = bool(checks_block.get("3", {}).get("eq", False))
             if ab_proj_k3 != cur_k3:
-                raise ValueError("A/B mismatch: embedded projected leg disagrees with active run; re-run A/B.")
+                # remove staged snapshots + flag as stale
+                try:
+                    cert_payload["policy"].pop("strict_snapshot", None)
+                    cert_payload["policy"].pop("projected_snapshot", None)
+                except Exception:
+                    pass
+                cert_payload.pop("ab_pair_tag", None)
+                cert_payload["ab_embedded"] = False
+                cert_payload["ab_stale_reason"] = "projected_k3_mismatch"  # visible hint
         else:
             cert_payload["ab_embedded"] = False
+
 
 
         # ---------- Standard meta before hashing ----------
