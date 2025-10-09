@@ -155,9 +155,51 @@ def policy_label_from_state(rc: dict, cfg_active: dict) -> str:
     return policy_label_from_cfg_full(cfg_active or {})
 
 # =========================[ STEP 1 · Core helpers + guards ]=========================
+from pathlib import Path
+from contextlib import contextmanager
+import os, json, shutil, tempfile, csv as _csv, hashlib as _hashlib, json as _json
+import streamlit as st
+from uuid import uuid4
+from datetime import datetime, timezone
+
 # ---- Directories (be tolerant if not pre-defined)
 LOGS_DIR = Path(globals().get("LOGS_DIR", "logs"))
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+# ========================= Widget key utilities (NEW) =========================
+def _mkkey(ns: str, name: str) -> str:
+    """Deterministic, readable widget key: '<ns>__<name>'."""
+    return f"{ns}__{name}"
+
+def ensure_unique_widget_key(key: str) -> str:
+    """
+    If a widget key was already used in this run, suffix it with __2/__3/…
+    Use this when you cannot easily rename at call site.
+    """
+    ss = st.session_state
+    used = ss.setdefault("_used_widget_keys", set())
+    if key not in used:
+        used.add(key)
+        return key
+    # bump suffix until free
+    i = 2
+    while True:
+        k2 = f"{key}__{i}"
+        if k2 not in used:
+            used.add(k2)
+            if not ss.get("_warned_dup_keys", False):
+                st.caption("⚠️ auto-deduped a duplicate widget key; please rename keys in code.")
+                ss["_warned_dup_keys"] = True
+            return k2
+        i += 1
+
+# Central registry for commonly reused keys (use these instead of raw strings)
+class _WKey:
+    # Example: shapes uploaders (you had key="shapes" twice)
+    shapes_up      = _mkkey("inputs", "shapes_uploader")
+    shapes_up_alt  = _mkkey("inputsB", "shapes_uploader")
+
+WKEY = _WKey()
 
 # ---- Tiny time/uuid utils
 def new_run_id() -> str:
@@ -340,7 +382,6 @@ def run_stamp_line() -> str:
     return f"{pol} | n3={n3} | B {hB} · C {hC} · H {hH} · U {hU} | P {pH} | run {rid}"
 
 # ───────────────────────── SSOT + Freshness helpers (aliases) ─────────────────────────
-# For legacy names present elsewhere in code, provide lightweight aliases.
 _mark_fixtures_changed = _bump_fixture_nonce  # legacy compatibility
 _soft_reset_before_overlap = soft_reset_before_overlap  # legacy compatibility
 
@@ -433,12 +474,12 @@ def read_json_file(upload):
         return None
     if isinstance(upload, dict):
         return upload
-    if isinstance(upload, (str, _os.PathLike, _Path)):
+    if isinstance(upload, (str, os.PathLike, Path)):
         with open(str(upload), "r", encoding="utf-8") as f:
-            return _json.load(f)
+            return json.load(f)
     try:
         data = upload.getvalue() if hasattr(upload, "getvalue") else upload.read()
-        return _json.loads(data.decode("utf-8"))
+        return json.loads(data.decode("utf-8"))
     except Exception:
         return None
 
@@ -453,12 +494,12 @@ def _stamp_filename(state_key: str, upload):
         pass
 
 # ---------- atomic writers ----------
-def _atomic_write_json(path: str | _Path, obj: dict, *, pretty: bool = False):
+def _atomic_write_json(path: str | Path, obj: dict, *, pretty: bool = False):
     """Canonical JSON atomic writer (kept for existing call sites)."""
-    path = _Path(path)
+    path = Path(path)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.parent.mkdir(parents=True, exist_ok=True)
-    blob = _json.dumps(
+    blob = json.dumps(
         obj,
         sort_keys=True,
         ensure_ascii=False,
@@ -468,33 +509,33 @@ def _atomic_write_json(path: str | _Path, obj: dict, *, pretty: bool = False):
     with open(tmp, "wb") as f:
         f.write(blob)
         f.flush()
-        _os.fsync(f.fileno())
-    _os.replace(tmp, path)
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
 
-def atomic_write_json(path: str | _Path, obj: dict, *, pretty: bool = False):
+def atomic_write_json(path: str | Path, obj: dict, *, pretty: bool = False):
     """Alias kept for places that used the non-underscored name."""
     _atomic_write_json(path, obj, pretty=pretty)
 
-def atomic_append_jsonl(path: str | _Path, row: dict):
-    path = _Path(path)
+def atomic_append_jsonl(path: str | Path, row: dict):
+    path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
-    line = _json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+    line = json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
     with open(tmp, "wb") as f:
         f.write(line.encode("utf-8"))
         f.flush()
-        _os.fsync(f.fileno())
+        os.fsync(f.fileno())
     with open(path, "ab") as out, open(tmp, "rb") as src:
         out.write(src.read())
         out.flush()
-        _os.fsync(out.fileno())
+        os.fsync(out.fileno())
     try:
         tmp.unlink(missing_ok=True)
     except Exception:
         pass
 
-def _atomic_write_csv(path: _Path, header: list[str], rows: list[list], meta_comment_lines: list[str] | None = None):
-    tmp = _Path(str(path) + ".tmp")
+def _atomic_write_csv(path: Path, header: list[str], rows: list[list], meta_comment_lines: list[str] | None = None):
+    tmp = Path(str(path) + ".tmp")
     tmp.parent.mkdir(parents=True, exist_ok=True)
     with open(tmp, "w", newline="", encoding="utf-8") as f:
         w = _csv.writer(f)
@@ -504,8 +545,9 @@ def _atomic_write_csv(path: _Path, header: list[str], rows: list[list], meta_com
         w.writerow(header)
         w.writerows(rows)
         f.flush()
-        _os.fsync(f.fileno())
-    _os.replace(tmp, path)
+        os.fsync(f.fileno())
+    os.replace(tmp, path)
+
 
 # ---------- lane mask / signatures ----------
 def _lane_mask_from_d3(boundaries) -> list[int]:
