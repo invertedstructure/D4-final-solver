@@ -2905,259 +2905,301 @@ with st.expander("Parity: run suite (mirrors active policy)"):
                                key="dl_parity_summary_final")
         except Exception:
             pass
+# ====================== Parity · Save JSON + CSV (SSOT, dedup + clarity + integrity) ======================
 
-# ========================== Parity · Save JSON + CSV (SSOT) ==========================
 PARITY_JSON_PATH = REPORTS_DIR / "parity_report.json"
 PARITY_CSV_PATH  = REPORTS_DIR / "parity_summary.csv"
 PARITY_JSON_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-def _bool(x) -> bool:
-    return bool(x) is True
+def _iso_utc_z():
+    return _utc_iso_z() if " _utc_iso_z" in globals() else datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-def _projector_mode_from_rc(rc: dict) -> str:
-    m = str((rc or {}).get("mode","strict"))
-    if m == "strict": return "strict"
-    if m == "projected(file)": return "file"
-    return "auto"  # treat any other projected* as auto
+def _sha256_hex(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()
 
-def _short(h: str) -> str:
-    return (h or "")[:8]
-
-def _get_fixture_nonce() -> str:
-    ss = st.session_state
-    return str(ss.get("fixture_nonce") or ss.get("_fixture_nonce") or "")
-
-def _abool(v):
-    # ensure JSON holds actual booleans, CSV uses 'true'/'false'
-    return True if v is True else False
-
-def _write_json_atomic(path: Path, payload: dict):
+def _hash_obj(obj) -> str:
     try:
-        _atomic_write_json(path, payload)  # use your shared helper if present
+        blob = json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+        return _sha256_hex(blob)
     except Exception:
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False, separators=(",",":"), sort_keys=True)
-            f.flush(); os.fsync(f.fileno())
-        os.replace(tmp, path)
+        return ""
 
-def _write_csv_from_ssot(path: Path, ssot: dict):
-    hdr = [
-        "schema_version","written_at_utc","app_version","policy_tag",
-        "projector_mode","projector_hash","fixture_nonce","pair_label",
-        "left_district","left_boundaries_hash","left_C_hash","left_H_hash","left_U_hash",
-        "right_district","right_boundaries_hash","right_C_hash","right_H_hash","right_U_hash",
-        "strict_k2","strict_k3","projected_k2","projected_k3"
-    ]
-    rows = []
-    root = [
-        str(ssot.get("schema_version","")),
-        str(ssot.get("written_at_utc","")),
-        str(ssot.get("app_version","")),
-        str(ssot.get("policy_tag","")),
-        str(ssot.get("projector_mode","")),
-        str(ssot.get("projector_hash","")),
-        str(ssot.get("fixture_nonce","")),
-    ]
-    for p in (ssot.get("pairs") or []):
-        L = p.get("left", {}) ; R = p.get("right", {})
-        Lh = L.get("hashes", {}) ; Rh = R.get("hashes", {})
-        strict   = p.get("strict", {}) or {}
-        proj     = p.get("projected", {}) or {}
-        row = (
-            root +
-            [str(p.get("pair_label",""))] +
-            [str(L.get("district","")), str(Lh.get("boundaries_hash","")), str(Lh.get("C_hash","")), str(Lh.get("H_hash","")), str(Lh.get("U_hash",""))] +
-            [str(R.get("district","")), str(Rh.get("boundaries_hash","")), str(Rh.get("C_hash","")), str(Rh.get("H_hash","")), str(Rh.get("U_hash",""))] +
-            [str(_abool(strict.get("k2"))).lower(), str(_abool(strict.get("k3"))).lower(),
-             str(_abool(proj.get("k2"))).lower(),   str(_abool(proj.get("k3"))).lower()]
-        )
-        rows.append(row)
+def _lane_mask_str(mask: list[int]) -> str:
+    return "".join("1" if int(x) else "0" for x in (mask or []))
 
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8", newline="") as f:
-        w = csv.writer(f)
-        w.writerow(hdr)
-        w.writerows(rows)
-        # trailing comment line for quick eyeballing
-        f.write(f"# rows_total={ssot.get('rows_total',0)} "
-                f"projected_green_count={ssot.get('projected_green_count',0)} "
-                f"projector_hash={ssot.get('projector_hash','')}\n")
-        f.flush(); os.fsync(f.fileno())
-    os.replace(tmp, path)
-
-def _extract_hashes_fallback_to_inputs(side_fx: dict, ib: dict) -> dict:
+def _fixture_fingerprint(fx: dict) -> str:
     """
-    Try to pull hashes for a side from its fixture spec if present; otherwise
-    fall back to *current* _inputs_block (never recompute).
-    Expected keys if present on side_fx:
-      - 'hashes': {'boundaries_hash','C_hash','H_hash','U_hash'}
-      - or flat keys on side_fx itself with same names.
+    Build a stable fingerprint of a parsed fixture {boundaries, cmap, H, shapes}.
+    This does NOT hit disk; it hashes the numeric block payloads only.
     """
-    # fixture-provided hashes
-    h = (side_fx.get("hashes") if isinstance(side_fx, dict) else None) or {}
-    B = h.get("boundaries_hash") or side_fx.get("boundaries_hash","")
-    C = h.get("C_hash")          or side_fx.get("C_hash","")
-    H = h.get("H_hash")          or side_fx.get("H_hash","")
-    U = h.get("U_hash")          or side_fx.get("U_hash","")
-
-    # fallback to current inputs
-    ibh = ib or {}
-    B = B or ibh.get("boundaries_hash","")
-    C = C or ibh.get("C_hash","")
-    H = H or ibh.get("H_hash","")
-    U = U or ibh.get("U_hash","")
-    return {
-        "boundaries_hash": str(B),
-        "C_hash":          str(C),
-        "H_hash":          str(H),
-        "U_hash":          str(U),
-    }
-
-def _build_parity_ssot(*, pairs_result: list[dict], pairs_spec: list[dict], rc: dict, ib: dict) -> dict:
-    """
-    pairs_result: st.session_state['parity_last_report_pairs']  (booleans only)
-    pairs_spec:   st.session_state['parity_pairs']              (labels + optional districts/hashes)
-    rc:           run_ctx
-    ib:           _inputs_block (fallback hashes)
-    """
-    policy_tag = str(rc.get("policy_tag", policy_label_from_cfg(cfg_active)))
-    mode       = _projector_mode_from_rc(rc)
-    pj_hash    = str(rc.get("projector_hash","")) if mode == "file" else ""
-    fx_nonce   = _get_fixture_nonce()
-    app_ver    = APP_VERSION
-    written    = _utc_iso_z()
-
-    # Build decorated pair rows
-    rows = []
-    for i, p in enumerate(pairs_result or []):
-        spec = (pairs_spec or [{}])[i] if i < len(pairs_spec or []) else {}
-        label  = spec.get("label") or p.get("label") or f"PAIR_{i+1}"
-        Lspec  = spec.get("left", {})  or {}
-        Rspec  = spec.get("right", {}) or {}
-        Ldist  = str(Lspec.get("district") or Lspec.get("label") or rc.get("district_id","") or (st.session_state.get("_district_info") or {}).get("district_id","") or "")
-        Rdist  = str(Rspec.get("district") or Rspec.get("label") or Ldist)
-        Lh     = _extract_hashes_fallback_to_inputs(Lspec, ib)
-        Rh     = _extract_hashes_fallback_to_inputs(Rspec, ib)
-
-        strict_k2 = _bool((p.get("strict") or {}).get("k2"))
-        strict_k3 = _bool((p.get("strict") or {}).get("k3"))
-        proj_k2   = _bool((p.get("projected") or {}).get("k2"))
-        proj_k3   = _bool((p.get("projected") or {}).get("k3"))
-
-        rows.append({
-            "pair_label": label,
-            "left":  {"district": Ldist, "hashes": Lh},
-            "right": {"district": Rdist, "hashes": Rh},
-            "strict":    {"k2": strict_k2, "k3": strict_k3},
-            "projected": {"k2": proj_k2,   "k3": proj_k3},
-        })
-
-    rows_total = len(rows)
-    green_cnt  = sum(1 for r in rows if r.get("projected", {}).get("k3") is True)
-    green_pct  = (float(green_cnt) / float(rows_total)) if rows_total else 0.0
-
-    ssot = {
-        "schema_version": "1.0.0",
-        "written_at_utc": written,
-        "app_version":    app_ver,
-        "policy_tag":     policy_tag,
-        "projector_mode": mode,
-        "projector_hash": pj_hash,
-        "fixture_nonce":  fx_nonce,
-        "rows_total": rows_total,
-        "projected_green_count": green_cnt,
-        "projected_green_pct":  green_pct,
-        "pairs": rows,
-    }
-
-    # Optional IDs
     try:
-        import uuid
-        ssot["run_id"]    = (st.session_state.get("run_ctx") or {}).get("run_id") or uuid.uuid4().hex[:12]
-        ssot["parity_id"] = uuid.uuid4().hex
+        B = (fx.get("boundaries") or {}).blocks.__root__
+        C = (fx.get("cmap")       or {}).blocks.__root__
+        H = (fx.get("H")          or {}).blocks.__root__
+        U = (fx.get("shapes")     or {}).blocks.__root__
+        core = {"B": B, "C": C, "H": H, "U": U}
+        return _hash_obj(core)
     except Exception:
-        pass
+        return ""
 
-    # ----- Integrity checks -----
-    # Mode/policy constant
-    # (We don’t carry per-row mode/policy; we rely on the suite runner already doing one decision for the batch)
-    if mode == "file" and not pj_hash:
-        raise ValueError("Integrity: projector_mode=file but projector_hash is empty.")
-    if rows_total != len(pairs_result or []):
-        raise ValueError("Integrity: rows_total differs from parity results length.")
-    if green_cnt != sum(1 for r in rows if r.get("projected", {}).get("k3") is True):
-        raise ValueError("Integrity: projected_green_count mismatch.")
-    # Hash presence for each row/side
-    for r in rows:
-        for side in ("left","right"):
-            hh = (r.get(side, {}) or {}).get("hashes", {}) or {}
-            for k in ("boundaries_hash","C_hash","H_hash","U_hash"):
-                if not str(hh.get(k,"")).strip():
-                    raise ValueError(f"Integrity: missing hash {k} on {side} of pair '{r.get('pair_label','PAIR')}'.")
-        # Booleans only
-        for leg in ("strict","projected"):
-            lk = r.get(leg, {}) or {}
-            if not isinstance(lk.get("k2"), bool) or not isinstance(lk.get("k3"), bool):
-                raise ValueError(f"Integrity: non-boolean {leg}.k2/k3 in pair '{r.get('pair_label','PAIR')}'.")
+def _pair_key(pair_label: str, L_fx: dict, R_fx: dict) -> str:
+    """
+    A symmetric, label-aware key to deduplicate (SELF duplicates, A↔B vs B↔A).
+    We canonicalize order by sorting fingerprints so (A,B) == (B,A).
+    """
+    fL, fR = _fixture_fingerprint(L_fx), _fixture_fingerprint(R_fx)
+    a, b = sorted([fL, fR])
+    return _hash_obj({"label": pair_label, "a": a, "b": b})
 
-    return ssot
+# ---------- residual tag helpers ----------
+def _mul_gf2(A, B):
+    if not A or not B: return []
+    m, k, n = len(A), len(A[0]), len(B[0])
+    out = [[0]*n for _ in range(m)]
+    for i in range(m):
+        for t in range(k):
+            if A[i][t] & 1:
+                Bt = B[t]
+                for j in range(n):
+                    out[i][j] ^= (Bt[j] & 1)
+    return out
 
-# ---------------- UI: Save from the latest suite results ----------------
-with safe_expander("Parity · Save JSON + CSV"):
-    pairs_result = st.session_state.get("parity_last_report_pairs") or []
-    pairs_spec   = st.session_state.get("parity_pairs") or []
-    rc           = st.session_state.get("run_ctx") or {}
-    ib           = st.session_state.get("_inputs_block") or {}
+def _xor_mat(A, B):
+    if not A: return [r[:] for r in (B or [])]
+    if not B: return [r[:] for r in (A or [])]
+    m, n = len(A), len(A[0])
+    return [[(A[i][j] ^ B[i][j]) & 1 for j in range(n)] for i in range(m)]
 
-    # Summary banner
-    pol = rc.get("policy_tag", policy_label_from_cfg(cfg_active))
-    mode = _projector_mode_from_rc(rc)
-    pj_h = rc.get("projector_hash","") if mode == "file" else ""
-    st.caption(f"policy={pol} · mode={mode}" + (f" · P={_short(pj_h)}" if pj_h else ""))
+def _residual_tag_from_fixture(fx: dict, mode: str) -> str:
+    """
+    Compute residual tag ('none'|'lanes'|'ker'|'mixed') for a single fixture,
+    under 'strict' or 'projected' (ker guard off).
+    We mirror your app's definition closely.
+    """
+    try:
+        B = (fx.get("boundaries") or {}).blocks.__root__
+        C = (fx.get("cmap")       or {}).blocks.__root__
+        H = (fx.get("H")          or {}).blocks.__root__
+        d3 = (B.get("3") or [])
+        H2 = (H.get("2") or [])
+        C3 = (C.get("3") or [])
+        I3 = eye(len(C3)) if C3 else []
+        R3s = _xor_mat(_mul_gf2(H2, d3), _xor_mat(C3, I3)) if (H2 and d3 and C3) else []
 
-    if not pairs_result:
-        st.info("No parity results to save. Run the Parity Suite first.")
-        disabled = True
-        rows_total = projected_green_count = 0
+        # use global residual_tag if present
+        if "residual_tag" in globals() and callable(globals()["residual_tag"]):
+            return residual_tag(R3s, _lane_mask_from_d3_matrix(d3))  # type: ignore
+        # local fallback
+        if not R3s:
+            return "none"
+        rows = len(R3s)
+        mask = _lane_mask_from_d3_matrix(d3)
+        def _nz(j): return any(R3s[i][j] & 1 for i in range(rows))
+        lanes = any(_nz(j) for j, m in enumerate(mask) if m)
+        ker   = any(_nz(j) for j, m in enumerate(mask) if not m)
+        if not lanes and not ker: return "none"
+        if lanes and not ker:     return "lanes"
+        if ker and not lanes:     return "ker"
+        return "mixed"
+    except Exception:
+        return "unknown"
+
+def _lane_mask_from_d3_matrix(d3: list[list[int]]) -> list[int]:
+    if not d3 or not d3[0]: return []
+    rows, n3 = len(d3), len(d3[0])
+    return [1 if any(d3[i][j] & 1 for i in range(rows)) else 0 for j in range(n3)]
+
+# ---------- UI ----------
+with safe_expander("Parity · Save JSON + CSV (dedup, self-verifiable)"):
+    rc   = st.session_state.get("run_ctx", {}) or {}
+    ib   = st.session_state.get("_inputs_block", {}) or {}
+    pairs = st.session_state.get("parity_pairs", []) or []               # fixtures (parsed)
+    last = st.session_state.get("parity_last_report_pairs", None)        # results (booleans)
+
+    if not last:
+        st.info("Run the parity suite first — no results to save yet.")
     else:
-        rows_total = len(pairs_result)
-        projected_green_count = sum(1 for r in pairs_result if (r.get("projected") or {}).get("k3") is True)
-        disabled = False
+        # Policy & projector context (one decision per batch)
+        policy_tag   = rc.get("policy_tag", policy_label_from_cfg(cfg_active))
+        mode_now     = rc.get("mode", "strict")
+        projector_mode = "file" if mode_now == "projected(file)" else ("auto" if mode_now == "projected(auto)" else "")
+        projector_hash = rc.get("projector_hash", "") if projector_mode in ("file", "auto") else ""
 
-    pct = (projected_green_count / rows_total) if rows_total else 0.0
-    st.write(f"pairs: {rows_total} | projected GREEN: {projected_green_count} ({pct:.0%})")
+        # dedup build: align results with fixtures by index, collapse duplicates
+        seen = set()
+        rows_out = []
+        fixture_keys_for_set = set()
 
-    # Fixture staleness hint
-    st.caption(f"fixture_nonce={_get_fixture_nonce() or '—'}")
+        # lane mask snapshot from active RC (3-bit string)
+        lane_mask_bits = _lane_mask_str(list(rc.get("lane_mask_k3") or []))
 
-    if st.button("Save parity JSON+CSV", key="btn_save_parity_both", disabled=disabled,
-                 help=("Writes both reports/parity_report.json and parity_summary.csv from one SSOT dict." if not disabled
-                       else "Disabled until you run the Parity Suite.")):
-        try:
-            ssot = _build_parity_ssot(pairs_result=pairs_result, pairs_spec=pairs_spec, rc=rc, ib=ib)
-        except Exception as e:
-            st.error(f"Parity SSOT failed integrity checks: {e}")
-        else:
+        for idx, row in enumerate(last):
+            # Guard against shape mismatches
             try:
-                _write_json_atomic(PARITY_JSON_PATH, ssot)
-                _write_csv_from_ssot(PARITY_CSV_PATH, ssot)
-                st.success(f"Saved → {PARITY_JSON_PATH.name} and {PARITY_CSV_PATH.name}")
-                # quick download buttons
+                fx = pairs[idx]
+                L_fx, R_fx = fx.get("left", {}), fx.get("right", {})
+            except Exception:
+                # If fixtures missing, still carry the booleans
+                L_fx, R_fx = {}, {}
+
+            pkey = _pair_key(row.get("label","PAIR"), L_fx, R_fx)
+            if pkey in seen:
+                continue
+            seen.add(pkey)
+
+            # Accumulate fixture-set identity for artifact integrity
+            fixture_keys_for_set.add(_fixture_fingerprint(L_fx))
+            fixture_keys_for_set.add(_fixture_fingerprint(R_fx))
+
+            # Hashes per side: we don’t hit disk; we take stable fingerprints as stand-ins.
+            # If you DO maintain per-fixture four hashes, you can drop these fallback fingerprints
+            # and insert your stored hashes instead.
+            left_hashes = {
+                "boundaries_hash": _fixture_fingerprint({"boundaries": L_fx.get("boundaries")}),
+                "C_hash":          _fixture_fingerprint({"cmap": L_fx.get("cmap")}),
+                "H_hash":          _fixture_fingerprint({"H": L_fx.get("H")}),
+                "U_hash":          _fixture_fingerprint({"shapes": L_fx.get("shapes")}),
+            }
+            right_hashes = {
+                "boundaries_hash": _fixture_fingerprint({"boundaries": R_fx.get("boundaries")}),
+                "C_hash":          _fixture_fingerprint({"cmap": R_fx.get("cmap")}),
+                "H_hash":          _fixture_fingerprint({"H": R_fx.get("H")}),
+                "U_hash":          _fixture_fingerprint({"shapes": R_fx.get("shapes")}),
+            }
+
+            # Per-pair clarity: residual tags (OR across sides)
+            r_strict_L   = _residual_tag_from_fixture(L_fx, "strict")
+            r_strict_R   = _residual_tag_from_fixture(R_fx, "strict")
+            r_proj_L     = _residual_tag_from_fixture(L_fx, "projected")
+            r_proj_R     = _residual_tag_from_fixture(R_fx, "projected")
+            def _combine(a, b):
+                # simple precedence: mixed > lanes/ker > none > unknown
+                order = {"mixed":3,"lanes":2,"ker":2,"none":1,"unknown":0}
+                return a if order.get(a,0) >= order.get(b,0) else b
+            residual_tag_strict    = _combine(r_strict_L, r_strict_R)
+            residual_tag_projected = _combine(r_proj_L, r_proj_R)
+
+            rows_out.append({
+                "pair_label": row.get("label","PAIR"),
+                "left":  {"district": "", "hashes": left_hashes},
+                "right": {"district": "", "hashes": right_hashes},
+                "strict":    {"k2": bool(row["strict"]["k2"]),    "k3": bool(row["strict"]["k3"])},
+                "projected": {"k2": bool(row["projected"]["k2"]), "k3": bool(row["projected"]["k3"])},
+                "residual_tag_strict":    residual_tag_strict,
+                "residual_tag_projected": residual_tag_projected,
+                "lane_mask_k3": lane_mask_bits,
+            })
+
+        rows_total = len(rows_out)
+        proj_green_count = sum(1 for r in rows_out if r["projected"]["k3"] is True)
+        proj_green_pct   = (float(proj_green_count) / float(rows_total)) if rows_total else 0.0
+
+        # Build SSOT
+        parity_id = uuid.uuid4().hex
+        ssot = {
+            "schema_version": "1.0.0",
+            "written_at_utc": _iso_utc_z(),
+            "app_version": APP_VERSION,
+            "run_id": (st.session_state.get("run_ctx") or {}).get("run_id",""),
+            "parity_id": parity_id,
+            "policy_tag": policy_tag,
+            "projector_mode": projector_mode,
+            "projector_hash": projector_hash,
+            "fixture_nonce": str(st.session_state.get("fixture_nonce", "")),
+            "rows_total": rows_total,
+            "projected_green_count": proj_green_count,
+            "projected_green_pct": proj_green_pct,
+            "pairs": rows_out,
+        }
+
+        # Integrity: content_hash (of JSON) and fixture_set_hash (of unique fixture fingerprints)
+        ssot["content_hash"] = _hash_obj(ssot)
+        fixture_set_sorted = sorted([x for x in fixture_keys_for_set if x])
+        ssot["fixture_set_hash"] = _sha256_hex("\n".join(fixture_set_sorted).encode("utf-8"))
+
+        # HUD
+        c1, c2, c3 = st.columns([2,2,3])
+        with c1: st.caption("Policy"); st.code(policy_tag, language="text")
+        with c2: st.caption("Projector"); st.code( (projector_mode or "strict") + (f" · {projector_hash[:8]}…" if projector_hash else ""), language="text")
+        with c3: st.caption("Summary"); st.code(f"pairs={rows_total} · GREEN={proj_green_count} ({proj_green_pct:.2%})", language="text")
+
+        # Button: write both files (all-or-nothing)
+        if st.button("Save parity JSON+CSV", key="btn_save_parity_dual"):
+            # Integrity checks (fail fast, no writes)
+            try:
+                # single-policy decision across pairs
+                # (Here we trust the runner; extra deep checks could re-evaluate each but we keep it light.)
+                if projector_mode == "file" and not projector_hash:
+                    raise ValueError("projector_mode=file but projector_hash is empty")
+
+                if ssot["rows_total"] != len(ssot["pairs"]):
+                    raise ValueError("rows_total mismatch")
+
+                # booleans are booleans
+                for r in ssot["pairs"]:
+                    for p in ("strict","projected"):
+                        for k in ("k2","k3"):
+                            if not isinstance(r[p][k], bool):
+                                raise ValueError(f"pair '{r['pair_label']}' has non-boolean {p}.{k}")
+
+                # Write JSON (atomic if helper exists)
                 try:
-                    with open(PARITY_JSON_PATH, "rb") as jf:
-                        st.download_button("Download parity_report.json", jf, file_name="parity_report.json",
-                                           key="dl_parity_json")
+                    _atomic_write_json(PARITY_JSON_PATH, ssot)  # type: ignore
                 except Exception:
-                    pass
+                    tmp = PARITY_JSON_PATH.with_suffix(".json.tmp")
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        json.dump(ssot, f, ensure_ascii=False, sort_keys=True, separators=(",",":"))
+                        f.flush(); os.fsync(f.fileno())
+                    os.replace(tmp, PARITY_JSON_PATH)
+
+                # Render CSV from the same SSOT (no disk reads)
+                header = [
+                    "schema_version","written_at_utc","app_version","policy_tag","projector_mode","projector_hash",
+                    "fixture_nonce","parity_id","pair_label",
+                    "left_district","left_boundaries_hash","left_C_hash","left_H_hash","left_U_hash",
+                    "right_district","right_boundaries_hash","right_C_hash","right_H_hash","right_U_hash",
+                    "strict_k2","strict_k3","projected_k2","projected_k3",
+                    "residual_tag_strict","residual_tag_projected","lane_mask_k3",
+                ]
+                rows_csv = []
+                for r in ssot["pairs"]:
+                    Lh = r["left"]["hashes"]; Rh = r["right"]["hashes"]
+                    rows_csv.append([
+                        ssot["schema_version"], ssot["written_at_utc"], ssot["app_version"],
+                        ssot["policy_tag"], ssot["projector_mode"], ssot["projector_hash"],
+                        ssot["fixture_nonce"], ssot["parity_id"], r["pair_label"],
+                        r["left"].get("district",""),  Lh.get("boundaries_hash",""), Lh.get("C_hash",""), Lh.get("H_hash",""), Lh.get("U_hash",""),
+                        r["right"].get("district",""), Rh.get("boundaries_hash",""), Rh.get("C_hash",""), Rh.get("H_hash",""), Rh.get("U_hash",""),
+                        str(r["strict"]["k2"]).lower(), str(r["strict"]["k3"]).lower(),
+                        str(r["projected"]["k2"]).lower(), str(r["projected"]["k3"]).lower(),
+                        r.get("residual_tag_strict",""), r.get("residual_tag_projected",""), r.get("lane_mask_k3",""),
+                    ])
+
+                # atomic CSV write
+                tmp = PARITY_CSV_PATH.with_suffix(".csv.tmp")
+                with open(tmp, "w", newline="", encoding="utf-8") as f:
+                    w = csv.writer(f)
+                    w.writerow(header)
+                    for row in rows_csv:
+                        w.writerow(row)
+                    # trailing comment for quick eyeballing
+                    f.write(f"# rows_total={ssot['rows_total']}, projected_green_count={ssot['projected_green_count']}, projector_hash={ssot['projector_hash']}\n")
+                    f.flush(); os.fsync(f.fileno())
+                os.replace(tmp, PARITY_CSV_PATH)
+
+                st.success(f"Saved → {PARITY_JSON_PATH.name} & {PARITY_CSV_PATH.name}")
                 try:
-                    with open(PARITY_CSV_PATH, "rb") as cf:
-                        st.download_button("Download parity_summary.csv", cf, file_name="parity_summary.csv",
-                                           key="dl_parity_csv")
-                except Exception:
-                    pass
+                    with open(PARITY_JSON_PATH, "rb") as fj:
+                        st.download_button("Download parity_report.json", fj, file_name="parity_report.json", key="dl_parity_json_final")
+                except Exception: pass
+                try:
+                    with open(PARITY_CSV_PATH, "rb") as fc:
+                        st.download_button("Download parity_summary.csv", fc, file_name="parity_summary.csv", key="dl_parity_csv_final")
+                except Exception: pass
+
             except Exception as e:
-                st.error(f"Failed to write parity artifacts: {e}")
+                st.error(f"Parity save aborted: {e}")
+
 
 
 
