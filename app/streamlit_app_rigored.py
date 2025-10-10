@@ -3790,11 +3790,7 @@ with st.expander("Parity · Run Suite"):
                         pr = "✅" if p["projected"]["k3"] else "❌"
                     st.write(f"• {p['label']} → strict={s} · projected={pr}")
         
-                #--------------------------------------PILL-----------------------------------------pill = "strict" if mode == "strict" else ( 
-                pill = "strict" if mode=="strict" else (f"projected({submode})" + (f" · {_short_hash(projector_hash)}" if submode=="file" else ""))
-st.caption("Policy"); st.code(pill, language="text")
-
-        
+                       
             
 
 
