@@ -3697,33 +3697,65 @@ with st.expander("Parity · Presets & Queue"):
             }, name="District Parity")
 
     # --- 3) Smoke preset (inline; zero path dependency)
-    with cC:
-        if st.button("Insert defaults · Smoke (inline)", key="pp_preset_smoke"):
-            _insert_preset_payload({
-                "schema_version": "1.0.0",
-                "policy_hint": "projected:auto",
-                "pairs": [
-                    {
-                        "label": "SELF • ker-only vs ker-only (D3 dims 2×3)",
-                        "left":  {
-                            "embedded": {
-                                "boundaries": {"name":"D3 dims", "blocks":{"3->2":[[1,1,0],[0,1,0]]}},
-                                "shapes":     {"n2":2,"n3":3},
-                                "cmap":       {"name":"C3 ker-only; C2=I", "blocks":{"3":[[1,0,0],[0,1,0],[0,0,0]], "2":[[1,0],[0,1]]}},
-                                "H":          {"name":"H=0", "blocks":{"2":[[0,0],[0,0],[0,0]]}}
+with cC:
+    if st.button("Insert defaults · Smoke (inline)", key="pp_preset_smoke"):
+        _insert_preset_payload({
+            "schema_version": "1.0.0",
+            "policy_hint": "projected:auto",
+            "pairs": [
+                {
+                    "label": "SELF • ker-only vs ker-only (D3 dims 2×3)",
+                    "left":  {
+                        "embedded": {
+                            "boundaries": {
+                                "name": "D3 dims",
+                                "blocks": {
+                                    "3": [[1,1,0],[0,1,0]]
+                                }
+                            },
+                            "shapes":     { "n": { "2": 2, "3": 3 } },
+                            "cmap":       {
+                                "name": "C3 ker-only; C2=I",
+                                "blocks": {
+                                    "3": [[1,0,0],[0,1,0],[0,0,0]],
+                                    "2": [[1,0],[0,1]]
+                                }
+                            },
+                            "H":          {
+                                "name": "H=0",
+                                "blocks": {
+                                    "2": [[0,0],[0,0],[0,0]]
+                                }
                             }
-                        },
-                        "right": {
-                            "embedded": {
-                                "boundaries": {"name":"D3 dims", "blocks":{"3->2":[[1,1,0],[0,1,0]]}},
-                                "shapes":     {"n2":2,"n3":3},
-                                "cmap":       {"name":"C3 ker-only; C2=I", "blocks":{"3":[[1,0,0],[0,1,0],[0,0,0]], "2":[[1,0],[0,1]]}},
-                                "H":          {"name":"H=0", "blocks":{"2":[[0,0],[0,0],[0,0]]}}
+                        }
+                    },
+                    "right": {
+                        "embedded": {
+                            "boundaries": {
+                                "name": "D3 dims",
+                                "blocks": {
+                                    "3": [[1,1,0],[0,1,0]]
+                                }
+                            },
+                            "shapes":     { "n": { "2": 2, "3": 3 } },
+                            "cmap":       {
+                                "name": "C3 ker-only; C2=I",
+                                "blocks": {
+                                    "3": [[1,0,0],[0,1,0],[0,0,0]],
+                                    "2": [[1,0],[0,1]]
+                                }
+                            },
+                            "H":          {
+                                "name": "H=0",
+                                "blocks": {
+                                    "2": [[0,0],[0,0],[0,0]]
+                                }
                             }
                         }
                     }
-                ]
-            }, name="Smoke (inline)")
+                }
+            ]
+        }, name="Smoke (inline)")
 
     # --- 4) Quick preview of current table ---
     table = st.session_state.get("parity_pairs_table") or []
