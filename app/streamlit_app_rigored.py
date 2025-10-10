@@ -147,6 +147,9 @@ def _ab_autoclear_if_stale():
 _ab_autoclear_if_stale()
 
 
+
+
+
 # ======================= App constants & helpers =======================
 SCHEMA_VERSION = "1.0.0"
 FIELD = "GF(2)"  # displayed only; math stays the same
@@ -2564,6 +2567,9 @@ if "eye" not in globals():
     def eye(n: int):
         return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
 
+
+
+
 # -------------- Helper: _hash_obj --------------
 def _sha256_hex(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
@@ -2593,7 +2599,7 @@ def _safe_parse_json(path: str) -> dict:
         raise FileNotFoundError(f"No file at {path}")
     with p.open("r", encoding="utf-8") as f:
         return _json.load(f)
-
+        
 # --------- Paths & Directory init ----------
 REPORTS_DIR = Path(globals().get("REPORTS_DIR", "reports"))
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -2665,6 +2671,238 @@ def _paths_from_fixture_or_current(*args):
         out.setdefault(k, default_paths[k])
 
     return out
+
+# ---- Parity types & state ----
+from typing import TypedDict, Optional, Literal
+
+class Side(TypedDict, total=False):
+    embedded: dict
+    boundaries: str
+    shapes: str
+    cmap: str
+    H: str
+
+class PairSpec(TypedDict):
+    label: str
+    left: Side
+    right: Side
+
+class SkippedSpec(TypedDict, total=False):
+    label: str
+    side: Literal["left","right"]
+    missing: list[str]
+    error: str
+
+class RunCtx(TypedDict, total=False):
+    policy_hint: Literal["strict","projected:auto","projected:file","mirror_active"]
+    projector_mode: Literal["strict","auto","file"]
+    projector_filename: Optional[str]
+    projector_hash: str
+    lane_mask_note: Optional[str]
+
+def _ensure_state():
+    st.session_state.setdefault("parity_pairs_table", [])   # editable table rows (PairSpec-like)
+    st.session_state.setdefault("parity_pairs_queue", [])   # validated runnable pairs
+    st.session_state.setdefault("parity_skipped_specs", []) # skipped reasons (SkippedSpec)
+    st.session_state.setdefault("parity_run_ctx", {})       # RunCtx
+    st.session_state.setdefault("parity_last_report_pairs", None)  # results cache
+
+
+def resolve_side(side: Side) -> dict:
+    if "embedded" in side:
+        return parse_embedded(side["embedded"])  # your existing io.parse_* over objects
+    missing = [k for k in ("boundaries","shapes","cmap","H") if not side.get(k)]
+    if missing:
+        raise KeyError(f"PARITY_SPEC_MISSING:{missing}")
+    for k in ("boundaries","shapes","cmap","H"):
+        p = Path(side[k])
+        if not (p.exists() and p.is_file()):
+            raise FileNotFoundError(f"PARITY_FILE_NOT_FOUND:{k}={side[k]}")
+    return parse_from_paths(
+        boundaries_path=side["boundaries"], shapes_path=side["shapes"],
+        cmap_path=side["cmap"], H_path=side["H"]
+    )
+
+def lane_mask_k3_from_boundaries(boundaries) -> tuple[list[int], str]:
+    d3 = (boundaries.blocks.__root__.get("3->2") 
+          or boundaries.blocks.__root__.get("3")  # if your format uses "3" for 3→2
+          or [])
+    if not d3: return [], ""
+    cols = len(d3[0])
+    mask = [1 if any(row[j] & 1 for row in d3) else 0 for j in range(cols)]
+    return mask, "".join("1" if b else "0" for b in mask)
+
+def run_pair(spec: PairSpec, run_ctx: RunCtx) -> dict:
+    label = spec["label"]
+    try:
+        L = resolve_side(spec["left"])
+    except Exception as e:
+        raise RuntimeError(f"SKIP:left:{e}")
+    try:
+        R = resolve_side(spec["right"])
+    except Exception as e:
+        raise RuntimeError(f"SKIP:right:{e}")
+
+    # lane mask from THIS pair’s boundaries
+    mask_vec, mask_str = lane_mask_k3_from_boundaries(L["boundaries"])  # boundaries object
+    # (optionally assert R yields same mask; not required)
+
+    # strict leg
+    sL = run_leg_strict(L)  # returns {"k2":bool,"k3":bool,"residual":"none|lanes|ker|mixed|error"}
+    sR = run_leg_strict(R)
+    strict = {"k2": bool(sL["k2"] and sR["k2"]),
+              "k3": bool(sL["k3"] and sR["k3"]),
+              "residual_tag": combine_residuals(sL["residual"], sR["residual"])}
+
+    # projected leg?
+    projected = None
+    if run_ctx["projector_mode"] == "auto":
+        Pi = projector_from_lane_mask(mask_vec)  # diag(mask)
+        pL = run_leg_projected(L, Pi)
+        pR = run_leg_projected(R, Pi)
+        projected = {"k2": bool(pL["k2"] and pR["k2"]),
+                     "k3": bool(pL["k3"] and pR["k3"]),
+                     "residual_tag": combine_residuals(pL["residual"], pR["residual"])}
+    elif run_ctx["projector_mode"] == "file":
+        Pi = get_frozen_projector()  # set once during compute_run_ctx / validation
+        # Optionally enforce lane compatibility and hard-error:
+        if not diag_matches_mask_if_required(Pi, mask_vec):
+            raise RuntimeError(f"P3_LANE_MISMATCH: diag(P) != lane_mask(d3) : {diag_to_str(Pi)} vs {mask_str}")
+        pL = run_leg_projected(L, Pi)
+        pR = run_leg_projected(R, Pi)
+        projected = {"k2": bool(pL["k2"] and pR["k2"]),
+                     "k3": bool(pL["k3"] and pR["k3"]),
+                     "residual_tag": combine_residuals(pL["residual"], pR["residual"])}
+
+    # hashes
+    Lh = hashes_for_fixture(L)  # {"boundaries":"…","shapes":"…","cmap":"…","H":"…"}
+    Rh = hashes_for_fixture(R)
+    pair_hash = sha256_tuple(Lh, Rh)
+
+    return {
+        "label": label,
+        "pair_hash": pair_hash,
+        "lane_mask_k3": mask_vec,
+        "lane_mask": mask_str,
+        "left_hashes": Lh,
+        "right_hashes": Rh,
+        "strict": strict,
+        **({"projected": projected} if projected is not None else {}),
+    }
+
+def queue_all_valid_from_table():
+    _ensure_state()
+    st.session_state["parity_pairs_queue"].clear()
+    st.session_state["parity_skipped_specs"].clear()
+
+    rows = st.session_state["parity_pairs_table"]
+    for row in rows:
+        spec: PairSpec = {"label": row["label"], "left": row["left"], "right": row["right"]}
+        # lightweight check: embedded or all 4 fields for each side
+        misses = []
+        for side_name in ("left","right"):
+            s = spec[side_name]
+            if "embedded" in s: 
+                continue
+            miss = [k for k in ("boundaries","shapes","cmap","H") if not s.get(k)]
+            if miss:
+                st.session_state["parity_skipped_specs"].append({"label": spec["label"], "side": side_name, "missing": miss})
+                break
+        else:
+            st.session_state["parity_pairs_queue"].append(spec)
+
+
+def run_parity_suite():
+    _ensure_state()
+    queue = st.session_state["parity_pairs_queue"]
+    skipped = st.session_state["parity_skipped_specs"]
+    if not queue:
+        st.info("Queued pairs: 0 — nothing to run.")
+        return
+
+    # Freeze decision
+    rc_in = st.session_state.get("parity_run_ctx") or {}
+    try:
+        rc = compute_run_ctx(rc_in.get("policy_hint","mirror_active"), rc_in.get("projector_filename"))
+    except Exception as e:
+        st.error(str(e))  # e.g., PARITY_SCHEMA_INVALID or projector invalid
+        return
+    st.session_state["parity_run_ctx"] = rc  # freeze for this run
+
+    # Optional: if file mode, set global frozen projector (Pi) once here.
+
+    results = []
+    proj_green = 0
+    rows_total = len(queue)
+    rows_skipped = len(skipped)
+    rows_run = 0
+
+    for spec in queue:
+        try:
+            out = run_pair(spec, rc)
+            results.append(out)
+            rows_run += 1
+            if rc["projector_mode"] != "strict" and out.get("projected",{}).get("k3") is True:
+                proj_green += 1
+        except RuntimeError as e:
+            # convert into skipped entry and continue
+            parts = str(e).split(":", 2)
+            if parts and parts[0].startswith("SKIP"):
+                side = parts[1] if len(parts) > 1 else ""
+                skipped.append({"label": spec["label"], "side": side, "error": parts[-1]})
+            else:
+                st.error(str(e))
+                return  # hard abort if it’s a non-skip fatal
+
+    # Write artifacts (next step)
+    write_parity_artifacts(results, rc, skipped, rows_total, rows_skipped, rows_run, proj_green)
+    st.session_state["parity_last_report_pairs"] = results
+def run_parity_suite():
+    _ensure_state()
+    queue = st.session_state["parity_pairs_queue"]
+    skipped = st.session_state["parity_skipped_specs"]
+    if not queue:
+        st.info("Queued pairs: 0 — nothing to run.")
+        return
+
+    # Freeze decision
+    rc_in = st.session_state.get("parity_run_ctx") or {}
+    try:
+        rc = compute_run_ctx(rc_in.get("policy_hint","mirror_active"), rc_in.get("projector_filename"))
+    except Exception as e:
+        st.error(str(e))  # e.g., PARITY_SCHEMA_INVALID or projector invalid
+        return
+    st.session_state["parity_run_ctx"] = rc  # freeze for this run
+
+    # Optional: if file mode, set global frozen projector (Pi) once here.
+
+    results = []
+    proj_green = 0
+    rows_total = len(queue)
+    rows_skipped = len(skipped)
+    rows_run = 0
+
+    for spec in queue:
+        try:
+            out = run_pair(spec, rc)
+            results.append(out)
+            rows_run += 1
+            if rc["projector_mode"] != "strict" and out.get("projected",{}).get("k3") is True:
+                proj_green += 1
+        except RuntimeError as e:
+            # convert into skipped entry and continue
+            parts = str(e).split(":", 2)
+            if parts and parts[0].startswith("SKIP"):
+                side = parts[1] if len(parts) > 1 else ""
+                skipped.append({"label": spec["label"], "side": side, "error": parts[-1]})
+            else:
+                st.error(str(e))
+                return  # hard abort if it’s a non-skip fatal
+
+    # Write artifacts (next step)
+    write_parity_artifacts(results, rc, skipped, rows_total, rows_skipped, rows_run, proj_green)
+    st.session_state["parity_last_report_pairs"] = results
+
 
 # --------- Resolver + Fixture Loader -------------------------------------------
 def _canon(s: str) -> str:
