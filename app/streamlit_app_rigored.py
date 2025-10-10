@@ -2748,14 +2748,7 @@ def _lane_mask_from_boundaries(boundaries_obj) -> list[int]:
     rows, n3 = len(d3), len(d3[0])
     return [1 if any(d3[i][j] & 1 for i in range(rows)) else 0 for j in range(n3)]
 
-def _hash_fixture_side(fx: dict) -> dict:
-    def h(x): return _hash_obj((x or {}).blocks.__root__)
-    return {
-        "boundaries": h(fx.get("boundaries")),
-        "shapes":     h(fx.get("shapes")),
-        "cmap":       h(fx.get("cmap")),
-        "H":          h(fx.get("H")),
-    }
+
 
 def _pair_hash(left_hashes: dict, right_hashes: dict) -> str:
     tup = (
