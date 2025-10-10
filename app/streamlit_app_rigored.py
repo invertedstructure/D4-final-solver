@@ -3378,18 +3378,24 @@ def import_parity_pairs(
 
 # ================== Parity · Run Suite (strict resolver, single decision) ==================
 def _policy_from_hint():
-    hint = st.session_state.get("parity_policy_hint") or "mirror_active"
-    rc   = st.session_state.get("run_ctx") or {}
-    if hint == "mirror_active":
-        m = rc.get("mode", "strict")
-        # normalize to our 3 modes
-        if m == "projected(auto)": return ("projected", "auto")
-        if m == "projected(file)": return ("projected", "file")
+    hint = (st.session_state.get("parity_policy_hint") or "mirror_active").strip()
+    if hint == "strict":
         return ("strict", "")
-    if hint == "strict":           return ("strict", "")
-    if hint == "projected:auto":   return ("projected", "auto")
-    if hint == "projected:file":   return ("projected", "file")
-    return ("strict", "")
+    if hint == "projected:auto":
+        return ("projected", "auto")
+    if hint == "projected:file":
+        return ("projected", "file")
+    # mirror_active: mirror the app's current policy, but normalize
+    rc = st.session_state.get("run_ctx") or {}
+    mode = rc.get("mode", "strict")
+    if mode == "strict":
+        return ("strict","")
+    if mode == "projected(auto)":
+        return ("projected","auto")
+    if mode == "projected(file)":
+        return ("projected","file")
+    return ("strict","")
+
 
 def _short_hash(h: str) -> str:
     return (h[:8] + "…") if h else "—"
