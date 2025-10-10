@@ -3557,6 +3557,211 @@ with st.expander("Parity · Run Suite"):
             st.write(f"• {p['label']} → strict={s} · projected={pr}")
 # ================================================================================ 
 
+# ================== Parity · Presets & Queue ALL valid ==================
+with st.expander("Parity · Presets & Queue"):
+    st.caption("Insert a preset spec into the editable table, then **Queue ALL valid pairs** to resolve and add them to the live queue used by the runner. No fuzzy search: missing fields/paths are listed under Skipped.")
+
+    def _insert_preset_payload(payload: dict, *, name: str):
+        try:
+            pairs, policy_hint = validate_pairs_payload(payload)
+            st.session_state["parity_pairs_table"] = pairs
+            st.session_state["parity_policy_hint"] = policy_hint
+            st.success(f"Inserted preset: {name} · {len(pairs)} pair(s)")
+        except Exception as e:
+            st.error(f"PARITY_SCHEMA_INVALID: {e}")
+
+    cA, cB, cC, cD = st.columns([2,2,2,2])
+
+    # --- 1) Row Parity preset (within-district row1 vs row2)
+    with cA:
+        if st.button("Insert defaults · Row Parity", key="pp_preset_row"):
+            _insert_preset_payload({
+                "schema_version": "1.0.0",
+                "policy_hint": "mirror_active",
+                "pairs": [
+                    {
+                        "label": "D3 • row1(101) ↔ row2(010)",
+                        "left":  {
+                            "boundaries": "inputs/D3/boundaries.json",
+                            "shapes":     "inputs/D3/shapes.json",
+                            "cmap":       "inputs/D3/Cmap_C3_bottomrow_101_D2D3.json",
+                            "H":          "inputs/D3/H_row1_selector.json"
+                        },
+                        "right": {
+                            "boundaries": "inputs/D3/boundaries.json",
+                            "shapes":     "inputs/D3/shapes.json",
+                            "cmap":       "inputs/D3/Cmap_C3_bottomrow_010_D3.json",
+                            "H":          "inputs/D3/H_row2_selector.json"
+                        }
+                    },
+                    {
+                        "label": "D2 • row1(101) ↔ row2(011)",
+                        "left":  {
+                            "boundaries": "inputs/D2/boundaries.json",
+                            "shapes":     "inputs/D2/shapes.json",
+                            "cmap":       "inputs/D2/Cmap_C3_bottomrow_101_D2.json",
+                            "H":          "inputs/D2/H_row1_selector.json"
+                        },
+                        "right": {
+                            "boundaries": "inputs/D2/boundaries.json",
+                            "shapes":     "inputs/D2/shapes.json",
+                            "cmap":       "inputs/D2/Cmap_C3_bottomrow_011_D2.json",
+                            "H":          "inputs/D2/H_row2_selector.json"
+                        }
+                    },
+                    {
+                        "label": "D4 • row1(101) ↔ row2(011)",
+                        "left":  {
+                            "boundaries": "inputs/D4/boundaries.json",
+                            "shapes":     "inputs/D4/shapes.json",
+                            "cmap":       "inputs/D4/cmap_C3_bottomrow_101_D4.json",
+                            "H":          "inputs/D4/H_row1_selector.json"
+                        },
+                        "right": {
+                            "boundaries": "inputs/D4/boundaries.json",
+                            "shapes":     "inputs/D4/shapes.json",
+                            "cmap":       "inputs/D4/Cmap_C3_bottomrow_011_D4.json",
+                            "H":          "inputs/D4/H_row2_selector.json"
+                        }
+                    }
+                ]
+            }, name="Row Parity")
+
+    # --- 2) District Parity preset (cross-district, same-H chains)
+    with cB:
+        if st.button("Insert defaults · District Parity", key="pp_preset_district"):
+            _insert_preset_payload({
+                "schema_version": "1.0.0",
+                "policy_hint": "mirror_active",
+                "pairs": [
+                    {
+                        "label": "row1 chain • D2(101) ↔ D3(110)",
+                        "left":  {
+                            "boundaries": "inputs/D2/boundaries.json",
+                            "shapes":     "inputs/D2/shapes.json",
+                            "cmap":       "inputs/D2/Cmap_C3_bottomrow_101_D2.json",
+                            "H":          "inputs/D2/H_row1_selector.json"
+                        },
+                        "right": {
+                            "boundaries": "inputs/D3/boundaries.json",
+                            "shapes":     "inputs/D3/shapes.json",
+                            "cmap":       "inputs/D3/Cmap_C3_bottomrow_110_D3.json",
+                            "H":          "inputs/D3/H_row1_selector.json"
+                        }
+                    },
+                    {
+                        "label": "row1 chain • D3(110) ↔ D4(101)",
+                        "left":  {
+                            "boundaries": "inputs/D3/boundaries.json",
+                            "shapes":     "inputs/D3/shapes.json",
+                            "cmap":       "inputs/D3/Cmap_C3_bottomrow_110_D3.json",
+                            "H":          "inputs/D3/H_row1_selector.json"
+                        },
+                        "right": {
+                            "boundaries": "inputs/D4/boundaries.json",
+                            "shapes":     "inputs/D4/shapes.json",
+                            "cmap":       "inputs/D4/cmap_C3_bottomrow_101_D4.json",
+                            "H":          "inputs/D4/H_row1_selector.json"
+                        }
+                    },
+                    {
+                        "label": "row2 chain • D2(011) ↔ D4(011)",
+                        "left":  {
+                            "boundaries": "inputs/D2/boundaries.json",
+                            "shapes":     "inputs/D2/shapes.json",
+                            "cmap":       "inputs/D2/Cmap_C3_bottomrow_011_D2.json",
+                            "H":          "inputs/D2/H_row2_selector.json"
+                        },
+                        "right": {
+                            "boundaries": "inputs/D4/boundaries.json",
+                            "shapes":     "inputs/D4/shapes.json",
+                            "cmap":       "inputs/D4/Cmap_C3_bottomrow_011_D4.json",
+                            "H":          "inputs/D4/H_row2_selector.json"
+                        }
+                    }
+                ]
+            }, name="District Parity")
+
+    # --- 3) Smoke preset (inline; zero path dependency)
+    with cC:
+        if st.button("Insert defaults · Smoke (inline)", key="pp_preset_smoke"):
+            _insert_preset_payload({
+                "schema_version": "1.0.0",
+                "policy_hint": "projected:auto",
+                "pairs": [
+                    {
+                        "label": "SELF • ker-only vs ker-only (D3 dims 2×3)",
+                        "left":  {
+                            "embedded": {
+                                "boundaries": {"name":"D3 dims", "blocks":{"3->2":[[1,1,0],[0,1,0]]}},
+                                "shapes":     {"n2":2,"n3":3},
+                                "cmap":       {"name":"C3 ker-only; C2=I", "blocks":{"3":[[1,0,0],[0,1,0],[0,0,0]], "2":[[1,0],[0,1]]}},
+                                "H":          {"name":"H=0", "blocks":{"2":[[0,0],[0,0],[0,0]]}}
+                            }
+                        },
+                        "right": {
+                            "embedded": {
+                                "boundaries": {"name":"D3 dims", "blocks":{"3->2":[[1,1,0],[0,1,0]]}},
+                                "shapes":     {"n2":2,"n3":3},
+                                "cmap":       {"name":"C3 ker-only; C2=I", "blocks":{"3":[[1,0,0],[0,1,0],[0,0,0]], "2":[[1,0],[0,1]]}},
+                                "H":          {"name":"H=0", "blocks":{"2":[[0,0],[0,0],[0,0]]}}
+                            }
+                        }
+                    }
+                ]
+            }, name="Smoke (inline)")
+
+    # --- 4) Quick preview of current table ---
+    table = st.session_state.get("parity_pairs_table") or []
+    if table:
+        st.caption(f"Pairs in table: {len(table)}")
+        try:
+            import pandas as pd
+            st.dataframe(pd.DataFrame([{"label": p.get("label","PAIR")} for p in table]),
+                         hide_index=True, use_container_width=True)
+        except Exception:
+            st.write("\n".join("• " + (p.get("label","PAIR") or "") for p in table[:6]))
+
+    # --- 5) Queue ALL valid pairs (strict resolver; record skips) ---
+    if st.button("Queue ALL valid pairs", key="pp_queue_all_valid", disabled=not bool(table)):
+        queued = 0
+        skipped = []
+        # Reset the live queue before enqueuing (fresh, reproducible)
+        st.session_state["parity_pairs"] = []
+
+        for spec in table:
+            label = spec.get("label","PAIR")
+            L     = spec.get("left") or {}
+            R     = spec.get("right") or {}
+
+            okL, fxL = _resolve_side_or_skip_exact(L, label=label, side_name="left")
+            okR, fxR = _resolve_side_or_skip_exact(R, label=label, side_name="right")
+            if okL != "ok":
+                skipped.append(fxL); continue
+            if okR != "ok":
+                skipped.append(fxR); continue
+
+            # Enqueue the fully parsed fixtures used by the runner
+            add_parity_pair(label=label, left_fixture=fxL, right_fixture=fxR)
+            queued += 1
+
+        if queued:
+            st.success(f"Queued {queued} pair(s) into the live parity queue.")
+        if skipped:
+            st.info("Skipped specs:")
+            for s in skipped[:20]:
+                if "missing" in s:
+                    st.write(f"• {s['label']} [{s['side']}] → PARITY_SPEC_MISSING: {s['missing']}")
+                else:
+                    st.write(f"• {s['label']} [{s['side']}] → {s.get('error','error')}")
+
+    # Optional tiny helper on the right
+    with cD:
+        st.caption("Tips")
+        st.markdown("- Edit paths in your presets before Queue ALL.\n- Inline preset never needs files.\n- FILE mode requires a valid projector file.")
+# ======================================================================
+
+
 
 
 
