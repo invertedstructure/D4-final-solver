@@ -3428,8 +3428,7 @@ def _policy_from_hint():
 
     return ("strict","")  # safe default
 
-def _short_hash(h: str) -> str:
-    return (h[:8] + "…") if h else "—"
+
 
 
  # ================= Parity · Run Suite (final, with AUTO/FILE guards) =================
