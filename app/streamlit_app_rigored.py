@@ -3388,8 +3388,49 @@ st.radio(
 )
 
 
+# --- Policy resolver used by the Parity · Run Suite block
+def _policy_from_hint():
+    """
+    Resolve parity policy with this precedence:
+    1) UI radio: st.session_state["parity_policy_choice"]
+    2) Imported hint: st.session_state["parity_policy_hint"] in
+       {"strict","projected:auto","projected:file","mirror_active"}
+    3) Mirror app run_ctx.mode ("strict" / "projected(auto)" / "projected(file)")
+    Returns: (mode, submode) where mode in {"strict","projected"} and submode in {"","auto","file"}.
+    """
+    # 1) UI radio (if you have one)
+    choice = st.session_state.get("parity_policy_choice")
+    if choice == "strict":
+        return ("strict", "")
+    if choice == "projected(auto)":
+        return ("projected", "auto")
+    if choice == "projected(file)":
+        return ("projected", "file")
 
-# ================== Parity · Run Suite (strict resolver, single decision) ==================
+    # 2) Imported hint (from the pairs payload)
+    hint = (st.session_state.get("parity_policy_hint") or "mirror_active").strip()
+    if hint == "strict":
+        return ("strict", "")
+    if hint == "projected:auto":
+        return ("projected", "auto")
+    if hint == "projected:file":
+        return ("projected", "file")
+
+    # 3) Mirror the app's current policy
+    rc = st.session_state.get("run_ctx") or {}
+    mode = rc.get("mode", "strict")
+    if mode == "strict":
+        return ("strict","")
+    if mode == "projected(auto)":
+        return ("projected","auto")
+    if mode == "projected(file)":
+        return ("projected","file")
+
+    return ("strict","")  # safe default
+
+def _short_hash(h: str) -> str:
+    return (h[:8] + "…") if h else "—"
+
 
  # ================= Parity · Run Suite (final, with AUTO/FILE guards) =================
 with st.expander("Parity · Run Suite"):
