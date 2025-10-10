@@ -2682,6 +2682,50 @@ def validate_pairs_payload(payload: dict) -> tuple[list[dict], str]:
 
     return out_pairs, ph
 
+#------------------------------------------------------------
+def _path_exists_strict(p: str) -> bool:
+    try:
+        return Path(p).exists() and Path(p).is_file()
+    except Exception:
+        return False
+
+def _pp_resolve_side_or_skip(side: dict, *, label: str, side_name: str):
+    # embedded wins
+    if "embedded" in side:
+        return ("ok", {"embedded": side["embedded"]})
+    # require all 4 paths
+    missing = [k for k in ("boundaries","shapes","cmap","H") if not side.get(k)]
+    if missing:
+        return ("skip", {"label": label, "side": side_name, "missing": missing, "error": "PARITY_SPEC_MISSING"})
+    # strict existence check
+    miss_files = [k for k in ("boundaries","shapes","cmap","H") if not _path_exists_strict(side[k])]
+    if miss_files:
+        return ("skip", {"label": label, "side": side_name, "missing": miss_files, "error": "PARITY_FILE_NOT_FOUND"})
+    return ("ok", {"paths": side})
+
+def _lane_mask_from_boundaries(boundaries_obj) -> list[int]:
+    d3 = (boundaries_obj or {}).blocks.__root__.get("3->2") or (boundaries_obj or {}).blocks.__root__.get("3")  # depending on your schema
+    if not d3: return []
+    rows, n3 = len(d3), len(d3[0])
+    return [1 if any(d3[i][j] & 1 for i in range(rows)) else 0 for j in range(n3)]
+
+def _hash_fixture_side(fx: dict) -> dict:
+    def h(x): return _hash_obj((x or {}).blocks.__root__)
+    return {
+        "boundaries": h(fx.get("boundaries")),
+        "shapes":     h(fx.get("shapes")),
+        "cmap":       h(fx.get("cmap")),
+        "H":          h(fx.get("H")),
+    }
+
+def _pair_hash(left_hashes: dict, right_hashes: dict) -> str:
+    tup = (
+        left_hashes["boundaries"], left_hashes["shapes"], left_hashes["cmap"], left_hashes["H"],
+        right_hashes["boundaries"], right_hashes["shapes"], right_hashes["cmap"], right_hashes["H"],
+    )
+    return _sha256_hex(_json.dumps(tup, separators=(",", ":"), sort_keys=False).encode("utf-8"))
+
+
 
 # -------------- Core: JSON helpers --------------
 def _ensure_parent_dir(p: Path) -> None:
@@ -3211,185 +3255,308 @@ def import_parity_pairs(
     return len(st.session_state["parity_pairs_table"])
 
 
-# ================== Parity · Quick Queue + Mini Runner (drop-in) ==================
+# ================== Parity · Run Suite (strict resolver, single decision) ==================
+def _policy_from_hint():
+    hint = st.session_state.get("parity_policy_hint") or "mirror_active"
+    rc   = st.session_state.get("run_ctx") or {}
+    if hint == "mirror_active":
+        m = rc.get("mode", "strict")
+        # normalize to our 3 modes
+        if m == "projected(auto)": return ("projected", "auto")
+        if m == "projected(file)": return ("projected", "file")
+        return ("strict", "")
+    if hint == "strict":           return ("strict", "")
+    if hint == "projected:auto":   return ("projected", "auto")
+    if hint == "projected:file":   return ("projected", "file")
+    return ("strict", "")
 
-# --- Small util to try+load one fixture side from a path bundle
-def _pp_try_load(side: dict):
-    return load_fixture_from_paths(
-        boundaries_path=side["boundaries"],
-        cmap_path=side["cmap"],
-        H_path=side["H"],
-        shapes_path=side["shapes"],
-    )
+def _short_hash(h: str) -> str:
+    return (h[:8] + "…") if h else "—"
 
-# --- Self & District queue buttons
-with st.expander("Parity · Quick Queue"):
-    c1, c2 = st.columns([1,2])
-
-    with c1:
-        if st.button("➕ Queue SELF (same fixtures)", key="pp_btn_self_v2"):
-            try:
-                fx = {
-                    "boundaries": boundaries,
-                    "cmap": cmap,
-                    "H": (st.session_state.get("overlap_H") or _load_h_local() if "overlap_H" in st.session_state else _load_h_local()),
-                    "shapes": shapes,
-                }
-                add_parity_pair(label="SELF", left_fixture=fx, right_fixture=fx)
-                st.success("Queued SELF pair.")
-            except Exception as e:
-                st.error(f"SELF queue failed: {e}")
-
-    with c2:
-        st.caption("District parity set (row₁ & row₂). Uses robust resolver; filenames can be like `H row1.json`/`H_row1.json`/`H.json`.")
-        if st.button("➕ Queue District Parity set", key="pp_btn_district_set_v2"):
-            # row₁: D2–101 ↔ D3–110 and D3–110 ↔ D4–101  (H=row₁ on each leg)
-            # row₂: D2–011 ↔ D4–011                        (H=row₂ on each leg)
-            # We keep paths flexible; resolver will fuzzy-match spaces/underscores.
-            specs = [
-                # row₁ (chain)
-                ("row₁: D2–101 ↔ D3–110",
-                 {"boundaries":"inputs/D2/boundaries.json","cmap":"inputs/D2/cmap.json","H":"inputs/D2/H row1.json","shapes":"inputs/D2/shapes.json"},
-                 {"boundaries":"inputs/D3/boundaries.json","cmap":"inputs/D3/cmap.json","H":"inputs/D3/H row1.json","shapes":"inputs/D3/shapes.json"}),
-                ("row₁: D3–110 ↔ D4–101",
-                 {"boundaries":"inputs/D3/boundaries.json","cmap":"inputs/D3/cmap.json","H":"inputs/D3/H row1.json","shapes":"inputs/D3/shapes.json"},
-                 {"boundaries":"inputs/D4/boundaries.json","cmap":"inputs/D4/cmap.json","H":"inputs/D4/H row1.json","shapes":"inputs/D4/shapes.json"}),
-                # row₂ (direct)
-                ("row₂: D2–011 ↔ D4–011",
-                 {"boundaries":"inputs/D2/boundaries.json","cmap":"inputs/D2/cmap.json","H":"inputs/D2/H row2.json","shapes":"inputs/D2/shapes.json"},
-                 {"boundaries":"inputs/D4/boundaries.json","cmap":"inputs/D4/cmap.json","H":"inputs/D4/H row2.json","shapes":"inputs/D4/shapes.json"}),
-            ]
-            ok, skipped = 0, []
-            for label, Lp, Rp in specs:
-                try:
-                    L = _pp_try_load(Lp)
-                    R = _pp_try_load(Rp)
-                    add_parity_pair(label=label, left_fixture=L, right_fixture=R)
-                    ok += 1
-                except Exception as e:
-                    skipped.append(f"{label} → {e}")
-            if ok:
-                st.success(f"Queued {ok} district parity pair(s).")
-            if skipped:
-                st.info("Some specs were skipped:\n- " + "\n- ".join(skipped))
-
-    # Small live preview
+def _path_exists_strict(p: str) -> bool:
     try:
-        pairs = st.session_state.get("parity_pairs", []) or []
-        st.caption(f"Queued pairs: {len(pairs)}")
-        if pairs:
-            import pandas as pd
-            st.dataframe(pd.DataFrame([{"Pair": p.get("label","PAIR")} for p in pairs], columns=["Pair"]),
-                         hide_index=True, use_container_width=True)
+        P = Path(p)
+        return P.exists() and P.is_file()
     except Exception:
-        pass
+        return False
 
-# --- Mini parity runner (safe). Uses strict; tries projected if your ctx/helpers exist.
-def _pp_active_projection_cfg() -> dict | None:
-    # Try to mirror your app’s “policy = projected(file)” context if available
+def _pp_load_embedded(emb: dict) -> dict:
+    # Directly parse embedded JSON blobs using your io.parse_* API
+    return {
+        "boundaries": io.parse_boundaries(emb["boundaries"]),
+        "shapes":     io.parse_shapes(emb["shapes"]),
+        "cmap":       io.parse_cmap(emb["cmap"]),
+        "H":          io.parse_cmap(emb["H"]),
+    }
+
+def _resolve_side_or_skip_exact(side: dict, *, label: str, side_name: str):
+    # Rule: embedded wins; else require all 4 path strings; no fuzzy search here.
+    if "embedded" in side:
+        try:
+            fx = _pp_load_embedded(side["embedded"])
+            return ("ok", fx)
+        except Exception as e:
+            return ("skip", {"label": label, "side": side_name, "error": f"PARITY_SCHEMA_INVALID: {e}"})
+    missing_keys = [k for k in ("boundaries","shapes","cmap","H") if not (isinstance(side.get(k), str) and side[k].strip())]
+    if missing_keys:
+        return ("skip", {"label": label, "side": side_name, "missing": missing_keys, "error": "PARITY_SPEC_MISSING"})
+    nf = [k for k in ("boundaries","shapes","cmap","H") if not _path_exists_strict(side[k])]
+    if nf:
+        return ("skip", {"label": label, "side": side_name, "missing": nf, "error": "PARITY_FILE_NOT_FOUND"})
     try:
-        rc = st.session_state.get("run_ctx") or {}
-        mode = rc.get("mode","strict")
-        if mode == "strict":
-            return None
-        # prefer your cfg builders if present
-        if "cfg_projected_base" in globals():
-            cfg = cfg_projected_base()   # type: ignore
-        else:
-            cfg = {"source":{"2":"file","3":"file"}, "projector_files":{}}
-        if mode == "projected(auto)":
-            cfg["source"]["3"] = "auto"
-            return cfg
-        if mode == "projected(file)":
-            cfg["source"]["3"] = "file"
-            pj = rc.get("projector_filename","")
-            if pj:
-                cfg.setdefault("projector_files", {})["3"] = pj
-            return cfg
-    except Exception:
-        pass
-    return None
+        return ("ok", _pp_try_load(side))
+    except Exception as e:
+        return ("skip", {"label": label, "side": side_name, "error": f"PARITY_FILE_NOT_FOUND: {e}"})
 
 def _pp_one_leg(boundaries_obj, cmap_obj, H_obj, projection_cfg: dict | None):
-    # fall back gracefully if your projection chooser isn’t available
+    # Reuse your app’s overlap check + projector plumbing if available
     try:
-        if projection_cfg is None:
-            return overlap_gate.overlap_check(boundaries_obj, cmap_obj, H_obj)  # type: ignore
-        # reuse app chooser if present (won’t throw if absent)
-        if "projector_choose_active" in globals():
-            _P, _meta = projector_choose_active(projection_cfg, boundaries_obj)  # type: ignore
         return overlap_gate.overlap_check(boundaries_obj, cmap_obj, H_obj, projection_config=projection_cfg)  # type: ignore
     except Exception as e:
-        # mark as failure in projected path
         return {"2":{"eq":False}, "3":{"eq":False}, "_err":str(e)}
 
-def _pp_and(a, b):
-    if a is None or b is None:
-        return None
-    return bool(a) and bool(b)
+def _residual_enum_from_leg(boundaries_obj, cmap_obj, H_obj, projection_cfg: dict | None):
+    # Minimal, consistent: compute residual on k=3, classify columns against lane mask
+    try:
+        B = (boundaries_obj or {}).blocks.__root__
+        C = (cmap_obj or {}).blocks.__root__
+        H = (H_obj or {}).blocks.__root__
+        d3 = B.get("3->2") or B.get("3") or []
+        H2 = H.get("2") or []
+        C3 = C.get("3") or []
+        if not (d3 and H2 and C3):
+            return "none"
+        # Projector is applied by overlap_check; residual classification here is pre-projection for strict
+        # For projected, we call again with projection_cfg
+        def _mul(A,B):
+            if not A or not B: return []
+            m,k,n = len(A), len(A[0]), len(B[0])
+            out = [[0]*n for _ in range(m)]
+            for i in range(m):
+                for t in range(k):
+                    if A[i][t] & 1:
+                        Bt = B[t]
+                        for j in range(n):
+                            out[i][j] ^= (Bt[j] & 1)
+            return out
+        def _xor(A,B):
+            if not A: return [r[:] for r in (B or [])]
+            if not B: return [r[:] for r in (A or [])]
+            m,n = len(A), len(A[0])
+            return [[(A[i][j]^B[i][j])&1 for j in range(n)] for i in range(m)]
+        I3 = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
+        R3 = _xor(_mul(H2, d3), _xor(C3, I3)) if (H2 and d3 and C3) else []
+        mask = _lane_mask_from_boundaries(boundaries_obj)
+        if not R3:
+            return "none"
+        def _nzcol(j): 
+            return any(R3[i][j] & 1 for i in range(len(R3)))
+        lanes = any(_nzcol(j) for j,m in enumerate(mask) if m)
+        ker   = any(_nzcol(j) for j,m in enumerate(mask) if not m)
+        if lanes and ker: return "mixed"
+        if lanes:         return "lanes"
+        if ker:           return "ker"
+        return "none"
+    except Exception:
+        return "error"
 
-def _pp_emoji(v):
+def _bool_and(a,b):
+    return (a is not None and b is not None and bool(a) and bool(b))
+
+def _emoji(v):
     if v is None: return "—"
     return "✅" if bool(v) else "❌"
 
 with st.expander("Parity · Run Suite"):
-    pairs = st.session_state.get("parity_pairs", []) or []
-    if not pairs:
-        st.info("No pairs queued yet. Use the Quick Queue above.")
-    # Context display (best-effort)
-    try:
+    table = st.session_state.get("parity_pairs_table") or []
+    if not table:
+        st.info("No pairs loaded. Use Import or Insert Defaults above.")
+    else:
+        # Freeze policy for this run
+        mode, submode = _policy_from_hint()  # ("strict"|"projected", ""), submode in {"","auto","file"}
         rc = st.session_state.get("run_ctx") or {}
-        policy_tag = rc.get("policy_tag") or "strict"
-        pj_hash = rc.get("projector_hash","") if rc.get("mode","").startswith("projected") else ""
-        c1,c2 = st.columns([1,1])
-        with c1: st.caption("Active policy");  st.code(policy_tag, language="text")
-        with c2: st.caption("Projector hash"); st.code((pj_hash[:12]+"…") if pj_hash else "—", language="text")
-    except Exception:
-        pass
-
-    run_disabled = not bool(pairs)
-    if st.button("▶ Run Parity Suite", key="pp_btn_run_suite_v2", disabled=run_disabled):
-        cfg_proj = _pp_active_projection_cfg()
-        report_pairs, rows_preview, errors = [], [], []
-        for row in pairs:
-            label = row.get("label","PAIR")
-            L, R = row.get("left",{}), row.get("right",{})
+        projector_filename = rc.get("projector_filename","") if (mode=="projected" and submode=="file") else ""
+        projector_hash = ""
+        if mode=="projected" and submode=="file":
+            if not projector_filename or not _path_exists_strict(projector_filename):
+                st.error("Projector FILE required but missing/invalid. (projected:file) — block run.")
+                st.stop()
             try:
-                bL,cL,hL = L["boundaries"], L["cmap"], L["H"]
-                bR,cR,hR = R["boundaries"], R["cmap"], R["H"]
-                out_L_strict = _pp_one_leg(bL,cL,hL, None)
-                out_R_strict = _pp_one_leg(bR,cR,hR, None)
-                s_k2 = _pp_and(out_L_strict.get("2",{}).get("eq"), out_R_strict.get("2",{}).get("eq"))
-                s_k3 = _pp_and(out_L_strict.get("3",{}).get("eq"), out_R_strict.get("3",{}).get("eq"))
-
-                if cfg_proj is not None:
-                    out_L_proj = _pp_one_leg(bL,cL,hL, cfg_proj)
-                    out_R_proj = _pp_one_leg(bR,cR,hR, cfg_proj)
-                    p_k2 = _pp_and(out_L_proj.get("2",{}).get("eq"), out_R_proj.get("2",{}).get("eq"))
-                    p_k3 = _pp_and(out_L_proj.get("3",{}).get("eq"), out_R_proj.get("3",{}).get("eq"))
-                else:
-                    p_k2 = p_k3 = None
-
-                report_pairs.append({
-                    "label": label,
-                    "strict":    {"k2": (None if s_k2 is None else bool(s_k2)),
-                                  "k3": (None if s_k3 is None else bool(s_k3))},
-                    "projected": {"k2": (None if p_k2 is None else bool(p_k2)),
-                                  "k3": (None if p_k3 is None else bool(p_k3))},
-                })
-                rows_preview.append([label, _pp_emoji(s_k3), _pp_emoji(p_k3)])
+                projector_hash = _sha256_hex(Path(projector_filename).read_bytes())
             except Exception as e:
-                errors.append(f"{label}: {e}")
+                st.error(f"Could not hash projector file: {e}")
+                st.stop()
 
-        st.session_state["parity_last_report_pairs"] = report_pairs
-        if errors:
-            st.warning("Some pairs had issues:\n- " + "\n- ".join(errors[:6]) + ("" if len(errors)<=6 else "\n- …"))
+        # Policy pill
+        pill = "strict" if mode=="strict" else (f"projected({submode})" + (f" · {_short_hash(projector_hash)}" if submode=="file" else ""))
+        c1,c2,c3 = st.columns([2,2,2])
+        with c1: st.caption("Policy"); st.code(pill, language="text")
+        with c2: st.caption("Pairs in table"); st.code(str(len(table)), language="text")
+        with c3:
+            nonce_src = _json.dumps({"mode":mode,"sub":submode,"pj":projector_hash,"n":len(table)}, sort_keys=True, separators=(",",":")).encode("utf-8")
+            parity_nonce = _sha256_hex(nonce_src)[:8]
+            st.caption("Run nonce"); st.code(parity_nonce, language="text")
 
-        st.caption("Summary per pair (strict_k3 / projected_k3):")
-        for r in rows_preview:
-            st.write(f"• {r[0]} → strict={r[1]} · projected={r[2]}")
+        run_disabled = False
+        if st.button("▶ Run Parity Suite", key="pp_btn_run_suite_new", disabled=run_disabled):
+            report_pairs, skipped = [], []
+            projected_green = 0
 
-# ===============================================================================
+            for r in table:
+                label = r.get("label","PAIR")
+                L_in  = r.get("left") or {}
+                R_in  = r.get("right") or {}
+
+                # Resolve sides (strict, no fuzzy)
+                okL, fxL = _resolve_side_or_skip_exact(L_in, label=label, side_name="left")
+                okR, fxR = _resolve_side_or_skip_exact(R_in, label=label, side_name="right")
+                if okL != "ok":
+                    skipped.append(fxL); continue
+                if okR != "ok":
+                    skipped.append(fxR); continue
+
+                # Lane mask SSOT from this pair’s boundaries
+                lane_mask_vec = _lane_mask_from_boundaries(fxL["boundaries"])  # left/right share the same d3 shape usually; left is fine
+                lane_mask_str = "".join("1" if int(x) else "0" for x in lane_mask_vec)
+
+                # Strict leg
+                outL_s = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], None)
+                outR_s = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], None)
+                s_k2 = _bool_and(outL_s.get("2",{}).get("eq"), outR_s.get("2",{}).get("eq"))
+                s_k3 = _bool_and(outL_s.get("3",{}).get("eq"), outR_s.get("3",{}).get("eq"))
+                res_strict = _residual_enum_from_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], None)
+
+                # Projected leg (single decision for the run)
+                proj_block = None
+                if mode=="projected":
+                    cfg = {"source":{"2":"file","3":submode}, "projector_files":{}}
+                    if submode=="file":
+                        cfg["projector_files"]["3"] = projector_filename
+                    outL_p = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], cfg)
+                    outR_p = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], cfg)
+                    p_k2 = _bool_and(outL_p.get("2",{}).get("eq"), outR_p.get("2",{}).get("eq"))
+                    p_k3 = _bool_and(outL_p.get("3",{}).get("eq"), outR_p.get("3",{}).get("eq"))
+                    res_proj = _residual_enum_from_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], cfg)
+                    proj_block = {"k2": bool(p_k2), "k3": bool(p_k3), "residual_tag": res_proj}
+                    if p_k3: projected_green += 1
+
+                # Hashes & pair_hash
+                left_hashes  = _hash_fixture_side(fxL)
+                right_hashes = _hash_fixture_side(fxR)
+                p_hash = _pair_hash(left_hashes, right_hashes)
+
+                pair_out = {
+                    "label": label,
+                    "pair_hash": p_hash,
+                    "lane_mask_k3": lane_mask_vec,
+                    "lane_mask": lane_mask_str,
+                    "left_hashes":  left_hashes,
+                    "right_hashes": right_hashes,
+                    "strict": {"k2": bool(s_k2), "k3": bool(s_k3), "residual_tag": res_strict},
+                }
+                if proj_block is not None:
+                    pair_out["projected"] = proj_block
+                report_pairs.append(pair_out)
+
+            # Build report root
+            rows_total = len(table)
+            rows_skipped = len(skipped)
+            rows_run = len(report_pairs)
+            pct = (float(projected_green)/float(rows_run)) if (mode=="projected" and rows_run) else 0.0
+            rc = st.session_state.get("run_ctx") or {}
+            policy_tag = rc.get("policy_tag") or ( "strict" if mode=="strict" else f"projected(columns@k=3,{submode})" )
+
+            report = {
+                "schema_version": "1.0.0",
+                "written_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "app_version": APP_VERSION,
+                "policy_tag": policy_tag,
+                "projector_mode": ("strict" if mode=="strict" else submode),
+                "projector_filename": (projector_filename if (mode=="projected" and submode=="file") else ""),
+                "projector_hash": projector_hash,
+                "lane_mask_note": ("AUTO uses each pair’s lane mask" if (mode=="projected" and submode=="auto") else ""),
+                "summary": {
+                    "rows_total": rows_total,
+                    "rows_skipped": rows_skipped,
+                    "rows_run": rows_run,
+                    "projected_green_count": (projected_green if mode=="projected" else 0),
+                    "pct": (pct if mode=="projected" else 0.0),
+                },
+                "pairs": report_pairs,
+                "skipped": skipped,
+            }
+            # content_hash over normalized json
+            report["content_hash"] = _sha256_hex(_json.dumps(report, sort_keys=True, separators=(",",":")).encode("utf-8"))
+
+            # Write artifacts
+            try:
+                _atomic_write_json(PARITY_JSON_PATH, report)
+            except Exception as e:
+                st.error(f"Could not write JSON: {e}")
+
+            # CSV (dedupe) — fixed columns
+            hdr = [
+                "label","policy_tag","projector_mode","projector_hash",
+                "strict_k2","strict_k3","projected_k2","projected_k3",
+                "residual_strict","residual_projected","lane_mask",
+                "lh_boundaries_hash","lh_shapes_hash","lh_cmap_hash","lh_H_hash",
+                "rh_boundaries_hash","rh_shapes_hash","rh_cmap_hash","rh_H_hash",
+                "pair_hash",
+            ]
+            dedupe = set()
+            rows_csv = []
+            for p in report_pairs:
+                key = (p["label"], p["pair_hash"], report["policy_tag"], report["projector_mode"], report["projector_hash"])
+                if key in dedupe: 
+                    continue
+                dedupe.add(key)
+                proj = p.get("projected") or {}
+                rows_csv.append([
+                    p["label"], report["policy_tag"], report["projector_mode"], report["projector_hash"],
+                    str(p["strict"]["k2"]).lower(), str(p["strict"]["k3"]).lower(),
+                    ("" if not proj else str(proj.get("k2", False)).lower()),
+                    ("" if not proj else str(proj.get("k3", False)).lower()),
+                    p["strict"].get("residual_tag",""),
+                    ("" if not proj else proj.get("residual_tag","")),
+                    p.get("lane_mask",""),
+                    p["left_hashes"]["boundaries"], p["left_hashes"]["shapes"], p["left_hashes"]["cmap"], p["left_hashes"]["H"],
+                    p["right_hashes"]["boundaries"], p["right_hashes"]["shapes"], p["right_hashes"]["cmap"], p["right_hashes"]["H"],
+                    p["pair_hash"],
+                ])
+            try:
+                tmp_csv = PARITY_CSV_PATH.with_suffix(".csv.tmp")
+                with open(tmp_csv, "w", newline="", encoding="utf-8") as f:
+                    w = csv.writer(f); w.writerow(hdr); w.writerows(rows_csv)
+                    f.flush(); os.fsync(f.fileno())
+                os.replace(tmp_csv, PARITY_CSV_PATH)
+            except Exception as e:
+                st.error(f"Could not write CSV: {e}")
+
+            # UI summary
+            st.success(f"Run complete · pairs={rows_run} · skipped={rows_skipped}" + (f" · GREEN={projected_green} ({pct:.2%})" if mode=="projected" else ""))
+            try:
+                with open(PARITY_JSON_PATH, "rb") as fj:
+                    st.download_button("Download parity_report.json", fj, file_name="parity_report.json", key="dl_parity_json_final_new")
+            except:
+                pass
+            try:
+                with open(PARITY_CSV_PATH, "rb") as fc:
+                    st.download_button("Download parity_summary.csv", fc, file_name="parity_summary.csv", key="dl_parity_csv_final_new")
+            except:
+                pass
+
+    # quick visual matrix (if last report present)
+    last = st.session_state.get("parity_last_report_pairs")
+    if last:
+        st.caption("Summary (strict_k3 / projected_k3):")
+        for p in last:
+            s = "✅" if p["strict"]["k3"] else "❌"
+            pr = "—"
+            if "projected" in p:
+                pr = "✅" if p["projected"]["k3"] else "❌"
+            st.write(f"• {p['label']} → strict={s} · projected={pr}")
+# ================================================================================ 
+
 
 
 
