@@ -3183,6 +3183,22 @@ def _ensure_json_path_str(p_str: str, default_name="parity_pairs.json") -> str:
         p = p.with_suffix(".json")
     return p.as_posix()
 
+# --- Parity queue shims (safe to re-define if missing)
+if "clear_parity_pairs" not in globals():
+    def clear_parity_pairs():
+        st.session_state["parity_pairs"] = []
+
+if "add_parity_pair" not in globals():
+    def add_parity_pair(*, label: str, left_fixture: dict, right_fixture: dict) -> int:
+        st.session_state.setdefault("parity_pairs", [])
+        st.session_state["parity_pairs"].append({
+            "label": label,
+            "left":  left_fixture,
+            "right": right_fixture,
+        })
+        return len(st.session_state["parity_pairs"])
+
+
 # ---- export helper used by the button
 def _export_pairs_to_path(path_str: str) -> str:
     p = Path(_ensure_json_path_str(path_str))
