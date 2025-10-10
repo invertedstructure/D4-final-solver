@@ -3390,294 +3390,176 @@ st.radio(
 
 
 # ================== Parity · Run Suite (strict resolver, single decision) ==================
-def _policy_from_hint():
-    """
-    Resolve parity policy with this precedence:
-    1) UI radio: st.session_state["parity_policy_choice"]
-    2) Imported hint: st.session_state["parity_policy_hint"] in
-       {"strict","projected:auto","projected:file","mirror_active"}
-    3) Mirror run_ctx.mode (strict / projected(auto) / projected(file))
-    """
-    # 1) Radio
-    choice = st.session_state.get("parity_policy_choice")
-    if choice == "strict":
-        return ("strict", "")
-    if choice == "projected(auto)":
-        return ("projected", "auto")
-    if choice == "projected(file)":
-        return ("projected", "file")
 
-    # 2) Imported hint
-    hint = (st.session_state.get("parity_policy_hint") or "mirror_active").strip()
-    if hint == "strict":
-        return ("strict", "")
-    if hint == "projected:auto":
-        return ("projected", "auto")
-    if hint == "projected:file":
-        return ("projected", "file")
-
-    # 3) Mirror app policy
-    rc = st.session_state.get("run_ctx") or {}
-    mode = rc.get("mode", "strict")
-    if mode == "strict":
-        return ("strict","")
-    if mode == "projected(auto)":
-        return ("projected","auto")
-    if mode == "projected(file)":
-        return ("projected","file")
-    return ("strict","")
-
-
-
-def _short_hash(h: str) -> str:
-    return (h[:8] + "…") if h else "—"
-
-def _path_exists_strict(p: str) -> bool:
-    try:
-        P = Path(p)
-        return P.exists() and P.is_file()
-    except Exception:
-        return False
-
-def _pp_load_embedded(emb: dict) -> dict:
-    # Directly parse embedded JSON blobs using your io.parse_* API
-    return {
-        "boundaries": io.parse_boundaries(emb["boundaries"]),
-        "shapes":     io.parse_shapes(emb["shapes"]),
-        "cmap":       io.parse_cmap(emb["cmap"]),
-        "H":          io.parse_cmap(emb["H"]),
-    }
-
-def _resolve_side_or_skip_exact(side: dict, *, label: str, side_name: str):
-    # Rule: embedded wins; else require all 4 path strings; no fuzzy search here.
-    if "embedded" in side:
-        try:
-            fx = _pp_load_embedded(side["embedded"])
-            return ("ok", fx)
-        except Exception as e:
-            return ("skip", {"label": label, "side": side_name, "error": f"PARITY_SCHEMA_INVALID: {e}"})
-    missing_keys = [k for k in ("boundaries","shapes","cmap","H") if not (isinstance(side.get(k), str) and side[k].strip())]
-    if missing_keys:
-        return ("skip", {"label": label, "side": side_name, "missing": missing_keys, "error": "PARITY_SPEC_MISSING"})
-    nf = [k for k in ("boundaries","shapes","cmap","H") if not _path_exists_strict(side[k])]
-    if nf:
-        return ("skip", {"label": label, "side": side_name, "missing": nf, "error": "PARITY_FILE_NOT_FOUND"})
-    try:
-        return ("ok", _pp_try_load(side))
-    except Exception as e:
-        return ("skip", {"label": label, "side": side_name, "error": f"PARITY_FILE_NOT_FOUND: {e}"})
-
-def _pp_one_leg(boundaries_obj, cmap_obj, H_obj, projection_cfg: dict | None):
-    # Reuse your app’s overlap check + projector plumbing if available
-    try:
-        return overlap_gate.overlap_check(boundaries_obj, cmap_obj, H_obj, projection_config=projection_cfg)  # type: ignore
-    except Exception as e:
-        return {"2":{"eq":False}, "3":{"eq":False}, "_err":str(e)}
-
-def _residual_enum_from_leg(boundaries_obj, cmap_obj, H_obj, projection_cfg: dict | None):
-    # Minimal, consistent: compute residual on k=3, classify columns against lane mask
-    try:
-        B = (boundaries_obj or {}).blocks.__root__
-        C = (cmap_obj or {}).blocks.__root__
-        H = (H_obj or {}).blocks.__root__
-        d3 = B.get("3->2") or B.get("3") or []
-        H2 = H.get("2") or []
-        C3 = C.get("3") or []
-        if not (d3 and H2 and C3):
-            return "none"
-        # Projector is applied by overlap_check; residual classification here is pre-projection for strict
-        # For projected, we call again with projection_cfg
-        def _mul(A,B):
-            if not A or not B: return []
-            m,k,n = len(A), len(A[0]), len(B[0])
-            out = [[0]*n for _ in range(m)]
-            for i in range(m):
-                for t in range(k):
-                    if A[i][t] & 1:
-                        Bt = B[t]
-                        for j in range(n):
-                            out[i][j] ^= (Bt[j] & 1)
-            return out
-        def _xor(A,B):
-            if not A: return [r[:] for r in (B or [])]
-            if not B: return [r[:] for r in (A or [])]
-            m,n = len(A), len(A[0])
-            return [[(A[i][j]^B[i][j])&1 for j in range(n)] for i in range(m)]
-        I3 = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
-        R3 = _xor(_mul(H2, d3), _xor(C3, I3)) if (H2 and d3 and C3) else []
-        mask = _lane_mask_from_boundaries(boundaries_obj)
-        if not R3:
-            return "none"
-        def _nzcol(j): 
-            return any(R3[i][j] & 1 for i in range(len(R3)))
-        lanes = any(_nzcol(j) for j,m in enumerate(mask) if m)
-        ker   = any(_nzcol(j) for j,m in enumerate(mask) if not m)
-        if lanes and ker: return "mixed"
-        if lanes:         return "lanes"
-        if ker:           return "ker"
-        return "none"
-    except Exception:
-        return "error"
-
-def _bool_and(a,b):
-    return (a is not None and b is not None and bool(a) and bool(b))
-
-def _emoji(v):
-    if v is None: return "—"
-    return "✅" if bool(v) else "❌"
-    
-
+ # ================= Parity · Run Suite (final, with AUTO/FILE guards) =================
 with st.expander("Parity · Run Suite"):
     table = st.session_state.get("parity_pairs_table") or []
     if not table:
         st.info("No pairs loaded. Use Import or Insert Defaults above.")
     else:
-        # Freeze policy for this run
-        mode, submode = _policy_from_hint()  # ("strict"|"projected", ""), submode ∈ {"","auto","file"}
+        # --- Policy decision for this suite run
+        mode, submode = _policy_from_hint()  # -> ("strict"|"projected", sub in {"","auto","file"})
         rc = st.session_state.get("run_ctx") or {}
-
         projector_filename = rc.get("projector_filename","") if (mode=="projected" and submode=="file") else ""
+
+        # --- Guard toggle: allow mismatched Π (default off)
+        allow_mismatch = st.checkbox(
+            "Allow mismatched Π (experimental; non-promotable)",
+            key="pp_allow_mismatch",
+            value=bool(st.session_state.get("pp_allow_mismatch", False)),
+            help="If off (default), FILE projector must match each pair’s lane mask; mismatches are skipped. "
+                 "If on, mismatched pairs run but are marked experimental."
+        )
+        st.session_state["pp_allow_mismatch"] = allow_mismatch
+
+        # --- Resolve FILE projector provenance (hash + diag extraction)
         projector_hash = ""
+        projector_diag = None  # list[int] or None
+
+        def _projector_diag_from_file(pth: str):
+            # Expect a JSON with blocks["3"] as an n3×n3 binary matrix
+            try:
+                obj = _json.loads(Path(pth).read_text(encoding="utf-8"))
+                M = ((obj.get("blocks") or {}).get("3") or [])
+                # basic shape & diagonal checks happen later per pair (n3 known then)
+                diag = []
+                for i, row in enumerate(M):
+                    diag.append(int(row[i]) & 1)
+                return diag
+            except Exception as e:
+                return None
+
         if mode == "projected" and submode == "file":
             if not projector_filename or not _path_exists_strict(projector_filename):
-                st.error("Projector FILE required but missing/invalid. (projected:file) — blocking run.")
+                st.error("Projector FILE required but missing/invalid. (projected:file) — block run.")
                 st.stop()
             try:
                 projector_hash = _sha256_hex(Path(projector_filename).read_bytes())
             except Exception as e:
                 st.error(f"Could not hash projector file: {e}")
                 st.stop()
+            projector_diag = _projector_diag_from_file(projector_filename)
+            if projector_diag is None:
+                st.error("P3_SHAPE: projector file unreadable or missing blocks['3'] square matrix.")
+                st.stop()
 
-                # Build report root (policy fields)
-        policy_tag = "strict" if mode == "strict" else f"projected(columns@k=3,{submode})"
-        
-        report = {
-            "schema_version": "1.0.0",
-            "written_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "app_version": APP_VERSION,
-            "policy_tag": policy_tag,
-            "projector_mode": ("strict" if mode == "strict" else submode),
-            "projector_filename": (projector_filename if (mode=="projected" and submode=="file") else ""),
-            "projector_hash": projector_hash,  # "" for strict and auto; filled for file
-            "lane_mask_note": ("AUTO uses each pair’s lane mask" if (mode=="projected" and submode=="auto") else ""),
-            # ...
-        }
-
-        # Policy pill
-        pill = "strict" if mode=="strict" else (f"projected({submode})" + (f" · {_short_hash(projector_hash)}" if submode=="file" else ""))
-        c1,c2,c3 = st.columns([2,2,2])
+        # --- Header bits
+        c1, c2, c3 = st.columns([2,2,2])
         with c1:
+            pill = "strict" if mode=="strict" else (f"projected({submode})" + (f" · {_short_hash(projector_hash)}" if submode=="file" else ""))
             st.caption("Policy"); st.code(pill, language="text")
         with c2:
             st.caption("Pairs in table"); st.code(str(len(table)), language="text")
         with c3:
-            nonce_src = _json.dumps(
-                {"mode":mode,"sub":submode,"pj":projector_hash,"n":len(table)},
-                sort_keys=True, separators=(",",":")
-            ).encode("utf-8")
+            nonce_src = _json.dumps({"mode":mode,"sub":submode,"pj":projector_hash,"n":len(table)}, sort_keys=True, separators=(",",":")).encode("utf-8")
             parity_nonce = _sha256_hex(nonce_src)[:8]
             st.caption("Run nonce"); st.code(parity_nonce, language="text")
 
-        run_disabled = False
-        if st.button("▶ Run Parity Suite", key="pp_btn_run_suite_new", disabled=run_disabled):
-            report_pairs: list[dict] = []
-            skipped: list[dict] = []
+        # --- Run button
+        if st.button("▶ Run Parity Suite", key="pp_btn_run_suite_final"):
+            report_pairs, skipped = [], []
             projected_green = 0
 
-            for r in table:
-                label = r.get("label","PAIR")
-                L_in  = r.get("left") or {}
-                R_in  = r.get("right") or {}
+            for spec in table:
+                label = spec.get("label","PAIR")
+                L_in  = spec.get("left") or {}
+                R_in  = spec.get("right") or {}
 
-                # Resolve sides (strict, no fuzzy)
+                # Resolve sides strictly (no fuzz)
                 okL, fxL = _resolve_side_or_skip_exact(L_in, label=label, side_name="left")
                 okR, fxR = _resolve_side_or_skip_exact(R_in, label=label, side_name="right")
-                if okL != "ok":
-                    skipped.append(fxL); continue
-                if okR != "ok":
-                    skipped.append(fxR); continue
+                if okL != "ok": skipped.append(fxL); continue
+                if okR != "ok": skipped.append(fxR); continue
 
-                # ---------------- STRICT leg (booleans via gate)
+                # Lane-mask SSOT from this pair’s boundaries (left is sufficient in your data model)
+                lane_mask_vec = _lane_mask_from_boundaries(fxL["boundaries"])
+                lane_mask_str = "".join("1" if int(x) else "0" for x in lane_mask_vec)
+
+                # --- STRICT leg (through overlap gate, no projection)
                 outL_s = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], None)
                 outR_s = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], None)
                 s_k2 = _bool_and(outL_s.get("2",{}).get("eq"), outR_s.get("2",{}).get("eq"))
                 s_k3 = _bool_and(outL_s.get("3",{}).get("eq"), outR_s.get("3",{}).get("eq"))
+                # residual tag (strict) — best-effort helper; force consistency rule
+                try:
+                    strict_tag = _residual_enum_from_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], None)
+                except Exception:
+                    strict_tag = "none" if bool(s_k3) else "ker"
 
-                # Strict residuals (matrix) for crisp tagging & AUTO baseline
-                R3_L = _r3_from_fixture(fxL)
-                R3_R = _r3_from_fixture(fxR)
-
-                # SSOT lane mask from THIS pair’s boundaries (robust: combine L/R)
-                lane_mask_vec = _lane_mask_pair_SSO(fxL["boundaries"], fxR["boundaries"])
-                lane_mask_str = "".join("1" if int(x) else "0" for x in lane_mask_vec)
-
-                # Classify STRICT residuals
-                strict_tag_L = _classify_residual(R3_L, lane_mask_vec)
-                strict_tag_R = _classify_residual(R3_R, lane_mask_vec)
-                # If k3 is false, tag cannot be 'none'
-                if s_k3 is False and strict_tag_L == "none" and strict_tag_R == "none":
-                    strict_tag_L = strict_tag_R = "ker"
-                strict_tag = strict_tag_L if strict_tag_L != "none" else strict_tag_R
-
-                # ---------------- PROJECTED leg
+                # --- PROJECTED leg decision & guard
                 proj_block = None
+                per_pair_proj_hash = ""
 
                 if mode == "projected":
-                    # Build single decision for the run; AUTO = per-pair Π
+                    # Build projection cfg once per pair
                     cfg = {"source":{"2":"file","3":submode}, "projector_files":{}}
                     if submode == "file":
                         cfg["projector_files"]["3"] = projector_filename
 
-                    # Call the gate for k2/k3 (keeps k2 provenance aligned with app)
+                        # FILE guard: compare diag(P) to this pair’s lane mask
+                        # If n differs or diag mismatch -> skip or mark experimental based on override.
+                        diag = projector_diag or []
+                        n3 = len(lane_mask_vec)
+                        mismatch = False
+                        reason = ""
+                        if len(diag) != n3:
+                            mismatch = True
+                            reason = "P3_SHAPE"
+                        else:
+                            if any((int(diag[j]) & 1) != (int(lane_mask_vec[j]) & 1) for j in range(n3)):
+                                mismatch = True
+                                reason = "P3_LANE_MISMATCH"
+
+                        if mismatch and not allow_mismatch:
+                            skipped.append({
+                                "label": label,
+                                "side": "both",
+                                "error": reason,
+                                "diag": diag,
+                                "mask": lane_mask_vec
+                            })
+                            continue
+
+                    # Run projected leg through the same overlap path (canonical)
                     outL_p = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], cfg)
                     outR_p = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], cfg)
-                    p_k2_gate = _bool_and(outL_p.get("2",{}).get("eq"), outR_p.get("2",{}).get("eq"))
-                    p_k3_gate = _bool_and(outL_p.get("3",{}).get("eq"), outR_p.get("3",{}).get("eq"))
+                    p_k2 = _bool_and(outL_p.get("2",{}).get("eq"), outR_p.get("2",{}).get("eq"))
+                    p_k3 = _bool_and(outL_p.get("3",{}).get("eq"), outR_p.get("3",{}).get("eq"))
+
+                    # Tag projected residuals (post-projection)
+                    try:
+                        proj_tag = _residual_enum_from_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], cfg)
+                    except Exception:
+                        proj_tag = "none" if bool(p_k3) else "ker"
 
                     if submode == "auto":
-                        # Apply Π = diag(lane_mask) to residuals (R3 @ Π)
-                        def _mul_by_diag(M, mask):
-                            if not M or not mask: return []
-                            m, n = len(M), len(M[0])
-                            out = [[0]*n for _ in range(m)]
-                            for i in range(m):
-                                for j in range(n):
-                                    out[i][j] = (M[i][j] & (mask[j] & 1))
-                            return out
-
-                        R3_L_proj = _mul_by_diag(R3_L, lane_mask_vec)
-                        R3_R_proj = _mul_by_diag(R3_R, lane_mask_vec)
-                        p_k3_calc = _all_zero_mat(R3_L_proj) and _all_zero_mat(R3_R_proj)
-
-                        # Classify PROJECTED residuals post-projection
-                        proj_tag_L = _classify_residual(R3_L_proj, lane_mask_vec)
-                        proj_tag_R = _classify_residual(R3_R_proj, lane_mask_vec)
-                        proj_tag   = proj_tag_L if proj_tag_L != "none" else proj_tag_R
-
-                        # Per-pair projector provenance (AUTO varies by pair)
+                        # Per-pair projector hash = hash of this pair’s lane mask (diag Π)
                         per_pair_proj_hash = _hash_obj(lane_mask_vec)
 
-                        proj_block = {
-                            "k2": bool(p_k2_gate),
-                            "k3": bool(p_k3_calc),
-                            "residual_tag": proj_tag,
-                            "projector_hash": per_pair_proj_hash,
+                    proj_block = {
+                        "k2": bool(p_k2),
+                        "k3": bool(p_k3),
+                        "residual_tag": proj_tag
+                    }
+                    if submode == "auto":
+                        proj_block["projector_hash"] = per_pair_proj_hash
+                        proj_block["note"] = "AUTO uses this pair’s lane mask"
+                    if submode == "file" and allow_mismatch:
+                        proj_block["experimental"] = True
+                        proj_block["mismatch_diag"] = {
+                            "diag": projector_diag or [],
+                            "mask": lane_mask_vec
                         }
-                        if p_k3_calc: projected_green += 1
-                    else:
-                        # FILE mode: trust the gate’s projected leg (single run-wide Π)
-                        proj_block = {
-                            "k2": bool(p_k2_gate),
-                            "k3": bool(p_k3_gate),
-                            "residual_tag": _classify_residual(R3_L, lane_mask_vec)  # optional
-                        }
-                        if p_k3_gate: projected_green += 1
 
-                # ---------------- Hashes & pair record
+                    if p_k3:
+                        projected_green += 1
+
+                # --- Hashes & pair_hash
                 left_hashes  = _hash_fixture_side(fxL)
                 right_hashes = _hash_fixture_side(fxR)
                 p_hash = _pair_hash(left_hashes, right_hashes)
 
+                # --- Assemble pair record
                 pair_out = {
                     "label": label,
                     "pair_hash": p_hash,
@@ -3689,48 +3571,45 @@ with st.expander("Parity · Run Suite"):
                 }
                 if proj_block is not None:
                     pair_out["projected"] = proj_block
-
                 report_pairs.append(pair_out)
 
-                            # Build report root
-                rows_total   = len(table)
-                rows_skipped = len(skipped)
-                rows_run     = len(report_pairs)
-                pct          = (float(projected_green) / float(rows_run)) if (mode == "projected" and rows_run) else 0.0
-                
-                # 👇 Force the run’s policy tag from the frozen decision (don’t mirror rc)
-                policy_tag_run = "strict" if mode == "strict" else f"projected(columns@k=3,{submode})"
-                
-                report = {
-                    "schema_version": "1.0.0",
-                    "written_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "app_version": APP_VERSION,
-                    "policy_tag": policy_tag_run,  # 👈 use the run-level tag
-                    "projector_mode": ("strict" if mode == "strict" else submode),
-                    "projector_filename": (projector_filename if (mode == "projected" and submode == "file") else ""),
-                    "projector_hash": (projector_hash if (mode == "projected" and submode == "file") else ""),
-                    "lane_mask_note": ("AUTO uses each pair’s lane mask" if (mode == "projected" and submode == "auto") else ""),
-                    "summary": {
-                        "rows_total": rows_total,
-                        "rows_skipped": rows_skipped,
-                        "rows_run": rows_run,
-                        "projected_green_count": (projected_green if mode == "projected" else 0),
-                        "pct": (pct if mode == "projected" else 0.0),
-                    },
-                    "pairs": report_pairs,
-                    "skipped": skipped,
-                }
+            # --- Report root
+            rows_total   = len(table)
+            rows_skipped = len(skipped)
+            rows_run     = len(report_pairs)
+            pct = (float(projected_green)/float(rows_run)) if (mode=="projected" and rows_run) else 0.0
+            policy_tag = rc.get("policy_tag") or ("strict" if mode=="strict" else f"projected(columns@k=3,{submode})")
 
-            # content_hash over normalized json
+            report = {
+                "schema_version": "1.0.0",
+                "written_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "app_version": APP_VERSION,
+                "policy_tag": policy_tag,
+                "projector_mode": ("strict" if mode=="strict" else submode),
+                "projector_filename": (projector_filename if (mode=="projected" and submode=="file") else ""),
+                "projector_hash": (projector_hash if (mode=="projected" and submode=="file") else ""),
+                "lane_mask_note": ("AUTO uses each pair’s lane mask" if (mode=="projected" and submode=="auto") else ""),
+                "experimental": bool(allow_mismatch and mode=="projected" and submode=="file"),
+                "summary": {
+                    "rows_total": rows_total,
+                    "rows_skipped": rows_skipped,
+                    "rows_run": rows_run,
+                    "projected_green_count": (projected_green if mode=="projected" else 0),
+                    "pct": (pct if mode=="projected" else 0.0),
+                },
+                "pairs": report_pairs,
+                "skipped": skipped,
+            }
+            # Deterministic content hash
             report["content_hash"] = _sha256_hex(_json.dumps(report, sort_keys=True, separators=(",",":")).encode("utf-8"))
 
-            # Write artifacts
+            # --- Write JSON
             try:
                 _atomic_write_json(PARITY_JSON_PATH, report)
             except Exception as e:
                 st.error(f"Could not write JSON: {e}")
 
-            # CSV (dedupe) — fixed columns
+            # --- Write CSV (dedupe)
             hdr = [
                 "label","policy_tag","projector_mode","projector_hash",
                 "strict_k2","strict_k3","projected_k2","projected_k3",
@@ -3767,32 +3646,8 @@ with st.expander("Parity · Run Suite"):
                 os.replace(tmp_csv, PARITY_CSV_PATH)
             except Exception as e:
                 st.error(f"Could not write CSV: {e}")
-
-
-            # UI summary
-            st.success(f"Run complete · pairs={rows_run} · skipped={rows_skipped}" + (f" · GREEN={projected_green} ({pct:.2%})" if mode=="projected" else ""))
-            try:
-                with open(PARITY_JSON_PATH, "rb") as fj:
-                    st.download_button("Download parity_report.json", fj, file_name="parity_report.json", key="dl_parity_json_final_new")
-            except:
-                pass
-            try:
-                with open(PARITY_CSV_PATH, "rb") as fc:
-                    st.download_button("Download parity_summary.csv", fc, file_name="parity_summary.csv", key="dl_parity_csv_final_new")
-            except:
-                pass
-                # quick visual matrix (if last report present)
-            last = st.session_state.get("parity_last_report_pairs")
-            if last:
-                st.caption("Summary (strict_k3 / projected_k3):")
-                for p in last:
-                    s = "✅" if p["strict"]["k3"] else "❌"
-                    pr = "—"
-                    if "projected" in p:
-                        pr = "✅" if p["projected"]["k3"] else "❌"
-                    st.write(f"• {p['label']} → strict={s} · projected={pr}")
-        
-                       
+# =============================================================================== 
+                      
             
 
 
