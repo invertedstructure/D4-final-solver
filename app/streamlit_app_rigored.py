@@ -2581,6 +2581,108 @@ def _hash_obj(obj) -> str:
     except Exception:
         return ""
 
+def validate_pairs_payload(payload: dict) -> tuple[list[dict], str]:
+    """
+    Validate and sanitize a parity pairs payload.
+    Returns (pairs, policy_hint) or raises ValueError("PARITY_SCHEMA_INVALID: ...").
+    - schema_version must be "1.0.0"
+    - policy_hint in {"strict","projected:auto","projected:file","mirror_active"}
+    - Each pair: {"label", "left", "right"}
+    - Each side is EITHER {"embedded": {boundaries, shapes, cmap, H}} OR {boundaries, shapes, cmap, H} (paths)
+    - If embedded present -> it wins; path keys are stripped. Unknown keys are rejected.
+    """
+    def _err(msg: str) -> ValueError:
+        return ValueError(f"PARITY_SCHEMA_INVALID: {msg}")
+
+    if not isinstance(payload, dict):
+        raise _err("root must be an object")
+
+    # --- root keys ---
+    allowed_root = {"schema_version", "policy_hint", "pairs"}
+    unknown_root = sorted(set(payload.keys()) - allowed_root)
+    if unknown_root:
+        raise _err(f"unknown root keys: {unknown_root}")
+
+    sv = payload.get("schema_version")
+    if sv != "1.0.0":
+        raise _err(f"schema_version must be '1.0.0' (got {sv!r})")
+
+    ph = payload.get("policy_hint")
+    if ph not in {"strict", "projected:auto", "projected:file", "mirror_active"}:
+        raise _err(f"policy_hint invalid (got {ph!r})")
+
+    pairs_in = payload.get("pairs")
+    if not isinstance(pairs_in, list):
+        raise _err("pairs must be an array")
+
+    def _sanitize_side(side: dict, *, where: str) -> dict:
+        if not isinstance(side, dict):
+            raise _err(f"{where} side must be an object")
+        # Whitelist for both modes
+        allowed_path = {"boundaries", "shapes", "cmap", "H"}
+        allowed_emb  = {"embedded"}
+        keys = set(side.keys())
+
+        has_emb = "embedded" in side
+        if has_emb:
+            # Embedded mode
+            unknown = sorted(keys - allowed_emb)
+            if unknown:
+                raise _err(f"{where}: unknown keys {unknown} (embedded mode)")
+            emb = side["embedded"]
+            if not isinstance(emb, dict):
+                raise _err(f"{where}: embedded must be an object")
+            required = {"boundaries", "shapes", "cmap", "H"}
+            missing = sorted(required - set(emb.keys()))
+            if missing:
+                raise _err(f"{where}: embedded missing keys {missing}")
+            # Type-check embedded objects (loose: must be dicts)
+            for k in required:
+                if not isinstance(emb[k], dict):
+                    raise _err(f"{where}: embedded.{k} must be an object")
+            # Embedded wins → return only {"embedded": normalized_emb}
+            # Also strip any accidental sibling path keys if they existed.
+            return {"embedded": {k: emb[k] for k in ("boundaries","shapes","cmap","H")}}
+        else:
+            # Path mode
+            unknown = sorted(keys - allowed_path)
+            if unknown:
+                raise _err(f"{where}: unknown keys {unknown} (path mode)")
+            missing = sorted([k for k in ("boundaries","shapes","cmap","H")
+                              if k not in side or not isinstance(side[k], str) or not side[k].strip()])
+            if missing:
+                raise _err(f"{where}: missing or empty path(s) {missing}")
+            # Normalize to exact four strings
+            return {
+                "boundaries": side["boundaries"].strip(),
+                "shapes":     side["shapes"].strip(),
+                "cmap":       side["cmap"].strip(),
+                "H":          side["H"].strip(),
+            }
+
+    out_pairs: list[dict] = []
+    for idx, p in enumerate(pairs_in):
+        if not isinstance(p, dict):
+            raise _err(f"pair[{idx}] must be an object")
+        allowed_pair = {"label", "left", "right"}
+        unknown_pair = sorted(set(p.keys()) - allowed_pair)
+        if unknown_pair:
+            raise _err(f"pair[{idx}]: unknown keys {unknown_pair}")
+
+        label = p.get("label")
+        if not isinstance(label, str) or not label.strip():
+            raise _err(f"pair[{idx}]: label must be non-empty string")
+
+        if "left" not in p or "right" not in p:
+            raise _err(f"pair[{idx}]: missing 'left' or 'right'")
+        left  = _sanitize_side(p["left"],  where=f"pair[{idx}]/left")
+        right = _sanitize_side(p["right"], where=f"pair[{idx}]/right")
+
+        out_pairs.append({"label": label.strip(), "left": left, "right": right})
+
+    return out_pairs, ph
+
+
 # -------------- Core: JSON helpers --------------
 def _ensure_parent_dir(p: Path) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -2903,6 +3005,25 @@ def run_parity_suite():
     write_parity_artifacts(results, rc, skipped, rows_total, rows_skipped, rows_run, proj_green)
     st.session_state["parity_last_report_pairs"] = results
 
+def _pp_try_load(side: dict):
+    """Load one fixture side either from embedded or from paths."""
+    if "embedded" in side:
+        emb = side["embedded"]
+        return {
+            "boundaries": io.parse_boundaries(emb["boundaries"]),
+            "shapes":     io.parse_shapes(emb["shapes"]),
+            "cmap":       io.parse_cmap(emb["cmap"]),
+            "H":          io.parse_cmap(emb["H"]),
+        }
+    # path mode
+    return load_fixture_from_paths(
+        boundaries_path=side["boundaries"],
+        cmap_path=side["cmap"],
+        H_path=side["H"],
+        shapes_path=side["shapes"],
+    )
+
+
 
 # --------- Resolver + Fixture Loader -------------------------------------------
 def _canon(s: str) -> str:
@@ -3063,35 +3184,32 @@ if "load_fixture_from_paths" not in globals():
                 return len(st.session_state["parity_pairs"])
 
 
-# ----------------- import_parity_pairs with fixes -----------------
-def import_parity_pairs(path: str | Path = DEFAULT_PARITY_PATH, *, merge=False) -> int:
+# ----------------- import_parity_pairs (validate & stash only) -----------------
+def import_parity_pairs(
+    path: str | Path = DEFAULT_PARITY_PATH,
+    *,
+    merge: bool = False,
+) -> int:
+    # 1) Parse JSON
     payload = _safe_parse_json(str(path))
-    ver = str(payload.get("schema_version", "0.0.0"))
-    if ver.split(".")[0] != "1":
-        st.warning(f"parity_pairs schema version differs (file={ver}, app=1.0.0); loading anyway.")
 
-    # Move clear first if not merging
-    if not merge:
-        clear_parity_pairs()
+    # 2) Strict schema validation + sanitization
+    pairs_sanitized, policy_hint = validate_pairs_payload(payload)
 
-    def _load_fixture_from_paths(side: dict):
-        return load_fixture_from_paths(
-            boundaries_path=side["boundaries"],
-            cmap_path=side["cmap"],
-            H_path=side["H"],
-            shapes_path=side["shapes"],
-        )
+    # 3) Stash into session state (table source for the UI editor)
+    if merge and "parity_pairs_table" in st.session_state:
+        st.session_state["parity_pairs_table"].extend(pairs_sanitized)
+    else:
+        st.session_state["parity_pairs_table"] = pairs_sanitized
 
-    for r in payload.get("pairs", []):
-        fxL = _load_fixture_from_paths(r["left"])
-        fxR = _load_fixture_from_paths(r["right"])
-        add_parity_pair(label=r.get("label", "PAIR"), left_fixture=fxL, right_fixture=fxR)
+    st.session_state["parity_policy_hint"] = policy_hint
 
-    return len(st.session_state.get("parity_pairs", []))
+    # Optional: clear legacy queue to avoid confusion with the new table-driven flow
+    st.session_state["parity_pairs"] = []
 
-# --------- Guard: _file_mode_invalid_now --------------
-if "_file_mode_invalid_now" not in globals():
-    def _file_mode_invalid_now(): return False
+    st.success(f"Imported {len(pairs_sanitized)} pair specs")
+    return len(st.session_state["parity_pairs_table"])
+
 
 # ================== Parity · Quick Queue + Mini Runner (drop-in) ==================
 
