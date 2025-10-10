@@ -2605,6 +2605,65 @@ def _hash_fixture_side(fx: dict) -> dict:
         "H":          _hash_obj(_to_hashable_plain(fx.get("H"))),
     }
 
+# --- GF(2) helpers (you already have _mul_gf2 / _xor_mat; keep those) ---
+def _all_zero_mat(M: list[list[int]]) -> bool:
+    return not M or all((x & 1) == 0 for row in M for x in row)
+
+def _I(n: int) -> list[list[int]]:
+    return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
+
+def _lane_mask_from_boundaries(boundaries_obj) -> list[int]:
+    # d3 is 2<-3 block; rows = n2, cols = n3
+    d3 = (boundaries_obj or {}).blocks.__root__.get("3") or []
+    if not d3: 
+        return []
+    rows, cols = len(d3), len(d3[0])
+    return [1 if any(d3[i][j] & 1 for i in range(rows)) else 0 for j in range(cols)]
+
+def _lane_mask_pair_SSO(L_boundaries, R_boundaries) -> list[int]:
+    # SSOT per pair: OR the left/right masks (robust if they differ)
+    Lm = _lane_mask_from_boundaries(L_boundaries)
+    Rm = _lane_mask_from_boundaries(R_boundaries)
+    if not Lm and not Rm:
+        return []
+    if not Lm: return Rm[:]
+    if not Rm: return Lm[:]
+    n = max(len(Lm), len(Rm))
+    Lm += [0]*(n-len(Lm))
+    Rm += [0]*(n-len(Rm))
+    return [1 if (Lm[j] or Rm[j]) else 0 for j in range(n)]
+
+def _diag_from_mask(mask: list[int]) -> list[list[int]]:
+    n = len(mask or [])
+    return [[(mask[i] & 1) if i == j else 0 for j in range(n)] for i in range(n)]
+
+def _r3_from_fixture(fx: dict) -> list[list[int]]:
+    # R3 = H2 @ d3 + (C3 + I3)  over GF(2)
+    B = (fx.get("boundaries") or {}).blocks.__root__
+    C = (fx.get("cmap") or {}).blocks.__root__
+    H = (fx.get("H") or {}).blocks.__root__
+    d3 = B.get("3") or []          # shape: n2 x n3
+    H2 = H.get("2") or []          # shape: n3 x n2
+    C3 = C.get("3") or []          # shape: n3 x n3
+    I3 = _I(len(C3)) if C3 else []
+    term1 = _mul_gf2(H2, d3)       # (n3 x n2) * (n2 x n3) -> (n3 x n3)
+    term2 = _xor_mat(C3, I3)       # (n3 x n3)
+    return _xor_mat(term1, term2)  # (n3 x n3)
+
+def _classify_residual(R3: list[list[int]], mask: list[int]) -> str:
+    if _all_zero_mat(R3):
+        return "none"
+    # lanes = columns with mask==1, ker = columns with mask==0
+    n3 = len(R3[0]) if R3 else 0
+    def col_has_support(j: int) -> bool:
+        return any(R3[i][j] & 1 for i in range(len(R3)))
+    lanes_support = any(col_has_support(j) for j in range(n3) if j < len(mask) and mask[j])
+    ker_support   = any(col_has_support(j) for j in range(n3) if j >= len(mask) or not mask[j])
+    if lanes_support and ker_support: return "mixed"
+    if lanes_support:                 return "lanes"
+    if ker_support:                   return "ker"
+    return "none"  # degenerate fallback
+
 
 
 
@@ -3464,61 +3523,117 @@ with st.expander("Parity · Run Suite"):
             report_pairs, skipped = [], []
             projected_green = 0
 
-            for r in table:
-                label = r.get("label","PAIR")
-                L_in  = r.get("left") or {}
-                R_in  = r.get("right") or {}
+           for r in table:
+    label = r.get("label","PAIR")
+    L_in  = r.get("left") or {}
+    R_in  = r.get("right") or {}
 
-                # Resolve sides (strict, no fuzzy)
-                okL, fxL = _resolve_side_or_skip_exact(L_in, label=label, side_name="left")
-                okR, fxR = _resolve_side_or_skip_exact(R_in, label=label, side_name="right")
-                if okL != "ok":
-                    skipped.append(fxL); continue
-                if okR != "ok":
-                    skipped.append(fxR); continue
+    # Resolve sides (strict, no fuzzy)
+    okL, fxL = _resolve_side_or_skip_exact(L_in, label=label, side_name="left")
+    okR, fxR = _resolve_side_or_skip_exact(R_in, label=label, side_name="right")
+    if okL != "ok":
+        skipped.append(fxL); continue
+    if okR != "ok":
+        skipped.append(fxR); continue
 
-                # Lane mask SSOT from this pair’s boundaries
-                lane_mask_vec = _lane_mask_from_boundaries(fxL["boundaries"])  # left/right share the same d3 shape usually; left is fine
-                lane_mask_str = "".join("1" if int(x) else "0" for x in lane_mask_vec)
+    # ---------------- STRICT leg (booleans via gate)
+    outL_s = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], None)
+    outR_s = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], None)
+    s_k2 = _bool_and(outL_s.get("2",{}).get("eq"), outR_s.get("2",{}).get("eq"))
+    s_k3 = _bool_and(outL_s.get("3",{}).get("eq"), outR_s.get("3",{}).get("eq"))
 
-                # Strict leg
-                outL_s = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], None)
-                outR_s = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], None)
-                s_k2 = _bool_and(outL_s.get("2",{}).get("eq"), outR_s.get("2",{}).get("eq"))
-                s_k3 = _bool_and(outL_s.get("3",{}).get("eq"), outR_s.get("3",{}).get("eq"))
-                res_strict = _residual_enum_from_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], None)
+    # Strict residuals (matrix) for crisp tagging & AUTO baseline
+    R3_L = _r3_from_fixture(fxL)
+    R3_R = _r3_from_fixture(fxR)
 
-                # Projected leg (single decision for the run)
-                proj_block = None
-                if mode=="projected":
-                    cfg = {"source":{"2":"file","3":submode}, "projector_files":{}}
-                    if submode=="file":
-                        cfg["projector_files"]["3"] = projector_filename
-                    outL_p = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], cfg)
-                    outR_p = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], cfg)
-                    p_k2 = _bool_and(outL_p.get("2",{}).get("eq"), outR_p.get("2",{}).get("eq"))
-                    p_k3 = _bool_and(outL_p.get("3",{}).get("eq"), outR_p.get("3",{}).get("eq"))
-                    res_proj = _residual_enum_from_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], cfg)
-                    proj_block = {"k2": bool(p_k2), "k3": bool(p_k3), "residual_tag": res_proj}
-                    if p_k3: projected_green += 1
+    # SSOT lane mask from THIS pair’s boundaries (OR left/right to be robust)
+    lane_mask_vec = _lane_mask_pair_SSO(fxL["boundaries"], fxR["boundaries"])
+    lane_mask_str = "".join("1" if int(x) else "0" for x in lane_mask_vec)
 
-                # Hashes & pair_hash
-                left_hashes  = _hash_fixture_side(fxL)
-                right_hashes = _hash_fixture_side(fxR)
-                p_hash = _pair_hash(left_hashes, right_hashes)
+    # Classify STRICT residuals
+    strict_tag_L = _classify_residual(R3_L, lane_mask_vec)
+    strict_tag_R = _classify_residual(R3_R, lane_mask_vec)
+    # Enforce consistency: if k3 is false, tag cannot be 'none'
+    if s_k3 is False and strict_tag_L == "none" and strict_tag_R == "none":
+        strict_tag_L = strict_tag_R = "ker"
+    strict_tag = strict_tag_L if strict_tag_L != "none" else strict_tag_R
 
-                pair_out = {
-                    "label": label,
-                    "pair_hash": p_hash,
-                    "lane_mask_k3": lane_mask_vec,
-                    "lane_mask": lane_mask_str,
-                    "left_hashes":  left_hashes,
-                    "right_hashes": right_hashes,
-                    "strict": {"k2": bool(s_k2), "k3": bool(s_k3), "residual_tag": res_strict},
-                }
-                if proj_block is not None:
-                    pair_out["projected"] = proj_block
-                report_pairs.append(pair_out)
+    # ---------------- PROJECTED leg
+    proj_block = None
+    per_pair_proj_hash = ""
+
+    if mode == "projected":
+        # Build a single run decision but AUTO = per-pair Π
+        cfg = {"source":{"2":"file","3":submode}, "projector_files":{}}
+        if submode == "file":
+            cfg["projector_files"]["3"] = projector_filename
+
+        # Still call your gate for k2/k3 (keeps k2 provenance identical to app)
+        outL_p = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], cfg)
+        outR_p = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], cfg)
+        p_k2_gate = _bool_and(outL_p.get("2",{}).get("eq"), outR_p.get("2",{}).get("eq"))
+        p_k3_gate = _bool_and(outL_p.get("3",{}).get("eq"), outR_p.get("3",{}).get("eq"))
+
+        # For AUTO: actually apply Π = diag(lane_mask) to residuals (R3 @ Π)
+        if submode == "auto":
+            def _mul_by_diag(M, mask):
+                if not M or not mask: return []
+                m, n = len(M), len(M[0])
+                out = [[0]*n for _ in range(m)]
+                for i in range(m):
+                    for j in range(n):
+                        out[i][j] = (M[i][j] & (mask[j] & 1))
+                return out
+
+            R3_L_proj = _mul_by_diag(R3_L, lane_mask_vec)
+            R3_R_proj = _mul_by_diag(R3_R, lane_mask_vec)
+            p_k3_calc = _all_zero_mat(R3_L_proj) and _all_zero_mat(R3_R_proj)
+
+            # Classify PROJECTED residuals post-projection
+            proj_tag_L = _classify_residual(R3_L_proj, lane_mask_vec)
+            proj_tag_R = _classify_residual(R3_R_proj, lane_mask_vec)
+            proj_tag   = proj_tag_L if proj_tag_L != "none" else proj_tag_R
+
+            # Per-pair projector provenance
+            per_pair_proj_hash = _hash_obj(lane_mask_vec)
+
+            # Final projected block (override k3 with the actual projected residual test)
+            proj_block = {
+                "k2": bool(p_k2_gate),
+                "k3": bool(p_k3_calc),
+                "residual_tag": proj_tag,
+                "projector_hash": per_pair_proj_hash,  # per-pair for AUTO
+            }
+            if p_k3_calc: projected_green += 1
+
+        else:
+            # FILE mode: trust the gate’s projected leg (single run-wide Π)
+            proj_block = {
+                "k2": bool(p_k2_gate),
+                "k3": bool(p_k3_gate),
+                "residual_tag": _classify_residual(R3_L, lane_mask_vec)  # optional: you may have a file-based tag helper
+            }
+            if p_k3_gate: projected_green += 1
+
+    # ---------------- Hashes & pair record
+    left_hashes  = _hash_fixture_side(fxL)
+    right_hashes = _hash_fixture_side(fxR)
+    p_hash = _pair_hash(left_hashes, right_hashes)
+
+    pair_out = {
+        "label": label,
+        "pair_hash": p_hash,
+        "lane_mask_k3": lane_mask_vec,
+        "lane_mask": lane_mask_str,
+        "left_hashes":  left_hashes,
+        "right_hashes": right_hashes,
+        "strict": {"k2": bool(s_k2), "k3": bool(s_k3), "residual_tag": strict_tag},
+    }
+    if proj_block is not None:
+        pair_out["projected"] = proj_block
+
+    report_pairs.append(pair_out)
+
 
             # Build report root
             rows_total = len(table)
