@@ -3781,9 +3781,9 @@ with st.expander("Parity · Run Suite"):
                 pass
         
                 #--------------------------------------PILL-----------------------------------------pill = "strict" if mode == "strict" else ( 
-                f"projected({submode})" + (f" · {_short_hash(projector_hash)}" if submode == "file" else "")
-            )
-            st.caption("Policy"); st.code(pill, language="text")
+                pill = "strict" if mode=="strict" else (f"projected({submode})" + (f" · {_short_hash(projector_hash)}" if submode=="file" else ""))
+st.caption("Policy"); st.code(pill, language="text")
+
         
             # quick visual matrix (if last report present)
             last = st.session_state.get("parity_last_report_pairs")
