@@ -3779,22 +3779,22 @@ with st.expander("Parity · Run Suite"):
                     st.download_button("Download parity_summary.csv", fc, file_name="parity_summary.csv", key="dl_parity_csv_final_new")
             except:
                 pass
-
-        #--------------------------------------PILL-----------------------------------------pill = "strict" if mode == "strict" else ( 
-        f"projected({submode})" + (f" · {_short_hash(projector_hash)}" if submode == "file" else "")
-    )
-    st.caption("Policy"); st.code(pill, language="text")
-
-    # quick visual matrix (if last report present)
-    last = st.session_state.get("parity_last_report_pairs")
-    if last:
-        st.caption("Summary (strict_k3 / projected_k3):")
-        for p in last:
-            s = "✅" if p["strict"]["k3"] else "❌"
-            pr = "—"
-            if "projected" in p:
-                pr = "✅" if p["projected"]["k3"] else "❌"
-            st.write(f"• {p['label']} → strict={s} · projected={pr}")
+        
+                #--------------------------------------PILL-----------------------------------------pill = "strict" if mode == "strict" else ( 
+                f"projected({submode})" + (f" · {_short_hash(projector_hash)}" if submode == "file" else "")
+            )
+            st.caption("Policy"); st.code(pill, language="text")
+        
+            # quick visual matrix (if last report present)
+            last = st.session_state.get("parity_last_report_pairs")
+            if last:
+                st.caption("Summary (strict_k3 / projected_k3):")
+                for p in last:
+                    s = "✅" if p["strict"]["k3"] else "❌"
+                    pr = "—"
+                    if "projected" in p:
+                        pr = "✅" if p["projected"]["k3"] else "❌"
+                    st.write(f"• {p['label']} → strict={s} · projected={pr}")
 
 
 # ================== Parity · Presets & Queue ALL valid ==================
