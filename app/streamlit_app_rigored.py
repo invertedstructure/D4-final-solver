@@ -3348,6 +3348,11 @@ if "load_fixture_from_paths" not in globals():
                 st.session_state["parity_pairs"].append({"label": label, "left": left_fixture, "right": right_fixture})
                 return len(st.session_state["parity_pairs"])
 
+        if "_short_hash" not in globals():
+            def _short_hash(h: str, n: int = 8) -> str:
+                return (h[:n] + "…") if h else ""
+
+
 
 # ----------------- import_parity_pairs (validate & stash only) -----------------
 def import_parity_pairs(
@@ -3374,10 +3379,35 @@ def import_parity_pairs(
 
     st.success(f"Imported {len(pairs_sanitized)} pair specs")
     return len(st.session_state["parity_pairs_table"])
+    # === Policy picker (source of truth for parity runs) ===
+st.radio(
+    "Policy",
+    ["strict", "projected(auto)", "projected(file)"],
+    key="parity_policy_choice",
+    horizontal=True,
+)
+
 
 
 # ================== Parity · Run Suite (strict resolver, single decision) ==================
 def _policy_from_hint():
+    """
+    Resolve parity policy with this precedence:
+    1) UI radio: st.session_state["parity_policy_choice"]
+    2) Imported hint: st.session_state["parity_policy_hint"] in
+       {"strict","projected:auto","projected:file","mirror_active"}
+    3) Mirror run_ctx.mode (strict / projected(auto) / projected(file))
+    """
+    # 1) Radio
+    choice = st.session_state.get("parity_policy_choice")
+    if choice == "strict":
+        return ("strict", "")
+    if choice == "projected(auto)":
+        return ("projected", "auto")
+    if choice == "projected(file)":
+        return ("projected", "file")
+
+    # 2) Imported hint
     hint = (st.session_state.get("parity_policy_hint") or "mirror_active").strip()
     if hint == "strict":
         return ("strict", "")
@@ -3385,7 +3415,8 @@ def _policy_from_hint():
         return ("projected", "auto")
     if hint == "projected:file":
         return ("projected", "file")
-    # mirror_active: mirror the app's current policy, but normalize
+
+    # 3) Mirror app policy
     rc = st.session_state.get("run_ctx") or {}
     mode = rc.get("mode", "strict")
     if mode == "strict":
@@ -3395,6 +3426,7 @@ def _policy_from_hint():
     if mode == "projected(file)":
         return ("projected","file")
     return ("strict","")
+
 
 
 def _short_hash(h: str) -> str:
@@ -3748,6 +3780,11 @@ with st.expander("Parity · Run Suite"):
             except:
                 pass
 
+        #--------------------------------------PILL-----------------------------------------pill = "strict" if mode == "strict" else ( 
+        f"projected({submode})" + (f" · {_short_hash(projector_hash)}" if submode == "file" else "")
+    )
+    st.caption("Policy"); st.code(pill, language="text")
+
     # quick visual matrix (if last report present)
     last = st.session_state.get("parity_last_report_pairs")
     if last:
@@ -3758,7 +3795,7 @@ with st.expander("Parity · Run Suite"):
             if "projected" in p:
                 pr = "✅" if p["projected"]["k3"] else "❌"
             st.write(f"• {p['label']} → strict={s} · projected={pr}")
-# ================================================================================ 
+
 
 # ================== Parity · Presets & Queue ALL valid ==================
 with st.expander("Parity · Presets & Queue"):
