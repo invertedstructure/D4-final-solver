@@ -2745,6 +2745,20 @@ def _safe_parse_json(path: str) -> dict:
         raise FileNotFoundError(f"No file at {path}")
     with p.open("r", encoding="utf-8") as f:
         return _json.load(f)
+
+# -------- Report paths (guard) --------
+from pathlib import Path
+
+if "REPORTS_DIR" not in globals():
+    REPORTS_DIR = Path("reports")
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+if "PARITY_JSON_PATH" not in globals():
+    PARITY_JSON_PATH = REPORTS_DIR / "parity_report.json"
+
+if "PARITY_CSV_PATH" not in globals():
+    PARITY_CSV_PATH = REPORTS_DIR / "parity_summary.csv"
+
         
 # --------- Paths & Directory init ----------
 REPORTS_DIR = Path(globals().get("REPORTS_DIR", "reports"))
