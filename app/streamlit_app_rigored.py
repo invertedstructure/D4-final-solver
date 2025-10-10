@@ -3493,6 +3493,8 @@ def _bool_and(a,b):
 def _emoji(v):
     if v is None: return "—"
     return "✅" if bool(v) else "❌"
+    pill = "strict" if mode=="strict" else (f"projected({submode})" + (f" · {_short_hash(projector_hash)}" if submode=="file" else ""))
+st.caption("Policy"); st.code(pill, language="text")
 
 with st.expander("Parity · Run Suite"):
     table = st.session_state.get("parity_pairs_table") or []
@@ -3514,6 +3516,21 @@ with st.expander("Parity · Run Suite"):
             except Exception as e:
                 st.error(f"Could not hash projector file: {e}")
                 st.stop()
+
+                # Build report root (policy fields)
+        policy_tag = "strict" if mode == "strict" else f"projected(columns@k=3,{submode})"
+        
+        report = {
+            "schema_version": "1.0.0",
+            "written_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "app_version": APP_VERSION,
+            "policy_tag": policy_tag,
+            "projector_mode": ("strict" if mode == "strict" else submode),
+            "projector_filename": (projector_filename if (mode=="projected" and submode=="file") else ""),
+            "projector_hash": projector_hash,  # "" for strict and auto; filled for file
+            "lane_mask_note": ("AUTO uses each pair’s lane mask" if (mode=="projected" and submode=="auto") else ""),
+            # ...
+        }
 
         # Policy pill
         pill = "strict" if mode=="strict" else (f"projected({submode})" + (f" · {_short_hash(projector_hash)}" if submode=="file" else ""))
