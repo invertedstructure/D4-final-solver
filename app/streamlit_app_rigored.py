@@ -3525,8 +3525,7 @@ def _bool_and(a,b):
 def _emoji(v):
     if v is None: return "—"
     return "✅" if bool(v) else "❌"
-    pill = "strict" if mode=="strict" else (f"projected({submode})" + (f" · {_short_hash(projector_hash)}" if submode=="file" else ""))
-st.caption("Policy"); st.code(pill, language="text")
+    
 
 with st.expander("Parity · Run Suite"):
     table = st.session_state.get("parity_pairs_table") or []
