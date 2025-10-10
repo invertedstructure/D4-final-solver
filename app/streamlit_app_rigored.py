@@ -3692,32 +3692,35 @@ with st.expander("Parity · Run Suite"):
 
                 report_pairs.append(pair_out)
 
-            # Build report root
-            rows_total = len(table)
-            rows_skipped = len(skipped)
-            rows_run = len(report_pairs)
-            pct = (float(projected_green)/float(rows_run)) if (mode=="projected" and rows_run) else 0.0
-            policy_tag = rc.get("policy_tag") or ("strict" if mode=="strict" else f"projected(columns@k=3,{submode})")
+                            # Build report root
+                rows_total   = len(table)
+                rows_skipped = len(skipped)
+                rows_run     = len(report_pairs)
+                pct          = (float(projected_green) / float(rows_run)) if (mode == "projected" and rows_run) else 0.0
+                
+                # 👇 Force the run’s policy tag from the frozen decision (don’t mirror rc)
+                policy_tag_run = "strict" if mode == "strict" else f"projected(columns@k=3,{submode})"
+                
+                report = {
+                    "schema_version": "1.0.0",
+                    "written_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "app_version": APP_VERSION,
+                    "policy_tag": policy_tag_run,  # 👈 use the run-level tag
+                    "projector_mode": ("strict" if mode == "strict" else submode),
+                    "projector_filename": (projector_filename if (mode == "projected" and submode == "file") else ""),
+                    "projector_hash": (projector_hash if (mode == "projected" and submode == "file") else ""),
+                    "lane_mask_note": ("AUTO uses each pair’s lane mask" if (mode == "projected" and submode == "auto") else ""),
+                    "summary": {
+                        "rows_total": rows_total,
+                        "rows_skipped": rows_skipped,
+                        "rows_run": rows_run,
+                        "projected_green_count": (projected_green if mode == "projected" else 0),
+                        "pct": (pct if mode == "projected" else 0.0),
+                    },
+                    "pairs": report_pairs,
+                    "skipped": skipped,
+                }
 
-            report = {
-                "schema_version": "1.0.0",
-                "written_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "app_version": APP_VERSION,
-                "policy_tag": policy_tag,
-                "projector_mode": ("strict" if mode=="strict" else submode),
-                "projector_filename": (projector_filename if (mode=="projected" and submode=="file") else ""),
-                "projector_hash": (projector_hash if (mode=="projected" and submode=="file") else ""),
-                "lane_mask_note": ("AUTO uses each pair’s lane mask" if (mode=="projected" and submode=="auto") else ""),
-                "summary": {
-                    "rows_total": rows_total,
-                    "rows_skipped": rows_skipped,
-                    "rows_run": rows_run,
-                    "projected_green_count": (projected_green if mode=="projected" else 0),
-                    "pct": (pct if mode=="projected" else 0.0),
-                },
-                "pairs": report_pairs,
-                "skipped": skipped,
-            }
             # content_hash over normalized json
             report["content_hash"] = _sha256_hex(_json.dumps(report, sort_keys=True, separators=(",",":")).encode("utf-8"))
 
