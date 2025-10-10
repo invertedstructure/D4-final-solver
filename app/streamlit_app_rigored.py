@@ -131,41 +131,6 @@ def _ab_is_fresh(ab: dict, *, rc: dict) -> bool:
         return (ab.get("projected") or {}).get("projector_hash","") == (rc.get("projector_hash","") or "")
     return True
 
-# --- Robust hashing helpers (drop near your other helpers)
-
-def _to_hashable_plain(x):
-    """Return a stable, JSON-serializable view of x for hashing."""
-    if x is None:
-        return None
-    # Preferred: objects with .blocks.__root__ (your Boundaries/Cmap/H)
-    try:
-        return x.blocks.__root__
-    except Exception:
-        pass
-    # Pydantic v2 models
-    try:
-        return x.model_dump()  # type: ignore[attr-defined]
-    except Exception:
-        pass
-    # Dataclasses / simple objects
-    try:
-        return dict(x.__dict__)
-    except Exception:
-        pass
-    # Already-plain types
-    if isinstance(x, (dict, list, tuple, str, int, float, bool)):
-        return x
-    # Last resort: repr (keeps us from crashing; still deterministic enough)
-    return repr(x)
-
-def _hash_fixture_side(fx: dict) -> dict:
-    """Hash each sub-object of a fixture side robustly."""
-    return {
-        "boundaries": _hash_obj(_to_hashable_plain(fx.get("boundaries"))),
-        "shapes":     _hash_obj(_to_hashable_plain(fx.get("shapes"))),
-        "cmap":       _hash_obj(_to_hashable_plain(fx.get("cmap"))),
-        "H":          _hash_obj(_to_hashable_plain(fx.get("H"))),
-    }
 
 
 # ───────── auto-clear A/B when context changes (call once per run) ─────────
