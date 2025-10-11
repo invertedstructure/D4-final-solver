@@ -3710,7 +3710,7 @@ with st.expander("Parity · Run Suite"):
             parity_nonce = _sha256_hex(nonce_src)[:8]
             st.caption("Run nonce"); st.code(parity_nonce, language="text")
 
-        [# --- Run button
+        # --- Run button
 if st.button("▶ Run Parity Suite", key="pp_btn_run_suite_final"):
     report_pairs, skipped = [], []
     projected_green = 0
