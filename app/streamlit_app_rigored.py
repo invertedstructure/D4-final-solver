@@ -3730,35 +3730,47 @@ with st.expander("Parity · Run Suite"):
                 lane_mask_vec = _lane_mask_from_boundaries(fxL["boundaries"])
                 lane_mask_str = "".join("1" if int(x) else "0" for x in lane_mask_vec)
 
-                if submode == "auto":
-                # 1) Ask the gate for booleans under AUTO (provenance matches app)
-                outL_p = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], cfg)
-                outR_p = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], cfg)
-                p_k2_gate = _bool_and(outL_p.get("2", {}).get("eq"), outR_p.get("2", {}).get("eq"))
-                p_k3_gate = _bool_and(outL_p.get("3", {}).get("eq"), outR_p.get("3", {}).get("eq"))
-            
-                # 2) Apply Π_auto = diag(lane_mask_vec) to strict residuals for k3 truth
-                R3_L_proj = _apply_diag_to_residual(R3_L, lane_mask_vec)
-                R3_R_proj = _apply_diag_to_residual(R3_R, lane_mask_vec)
-                p_k3_calc = _all_zero_mat(R3_L_proj) and _all_zero_mat(R3_R_proj)
-            
-                # 3) Classify post-projection residual (crisp)
-                proj_tag_L = _classify_residual(R3_L_proj, lane_mask_vec)
-                proj_tag_R = _classify_residual(R3_R_proj, lane_mask_vec)
-                proj_tag   = proj_tag_L if proj_tag_L != "none" else proj_tag_R
-            
-                # 4) Per-pair projector provenance (AUTO varies by pair)
-                per_pair_proj_hash = _hash_obj(lane_mask_vec)
-            
-                # 5) Final projected block (k2 from gate; k3 from projected residual)
-                proj_block = {
-                    "k2": bool(p_k2_gate),
-                    "k3": bool(p_k3_calc),
-                    "residual_tag": proj_tag,
-                    "projector_hash": per_pair_proj_hash,  # per-pair in AUTO
-                }
-                if p_k3_calc:
-                    projected_green += 1
+               if submode == "auto":
+                    # Build AUTO projection config locally (safe even if you set it elsewhere)
+                    cfg = {"source": {"2": "file", "3": "auto"}, "projector_files": {}}
+
+                    # 1) Ask the gate for booleans under AUTO (provenance matches app)
+                    outL_p = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], cfg)
+                    outR_p = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], cfg)
+                    p_k2_gate = _bool_and(outL_p.get("2", {}).get("eq"), outR_p.get("2", {}).get("eq"))
+                    _ = _bool_and(outL_p.get("3", {}).get("eq"), outR_p.get("3", {}).get("eq"))  # not used for truth
+
+                    # Ensure STRICT residuals exist (if not computed earlier in your loop)
+                    try:
+                        R3_L  # type: ignore
+                        R3_R  # type: ignore
+                    except NameError:
+                        R3_L = _r3_from_fixture(fxL)
+                        R3_R = _r3_from_fixture(fxR)
+
+                    # 2) Apply Π_auto = diag(lane_mask_vec) to STRICT residuals for k3 truth
+                    R3_L_proj = _apply_diag_to_residual(R3_L, lane_mask_vec)
+                    R3_R_proj = _apply_diag_to_residual(R3_R, lane_mask_vec)
+                    p_k3_calc = _all_zero_mat(R3_L_proj) and _all_zero_mat(R3_R_proj)
+
+                    # 3) Classify post-projection residual (crisp)
+                    proj_tag_L = _classify_residual(R3_L_proj, lane_mask_vec)
+                    proj_tag_R = _classify_residual(R3_R_proj, lane_mask_vec)
+                    proj_tag   = proj_tag_L if proj_tag_L != "none" else proj_tag_R
+
+                    # 4) Per-pair projector provenance (AUTO varies by pair)
+                    per_pair_proj_hash = _hash_obj(lane_mask_vec)
+
+                    # 5) Final projected block (k2 from gate; k3 from projected residual)
+                    proj_block = {
+                        "k2": bool(p_k2_gate),
+                        "k3": bool(p_k3_calc),
+                        "residual_tag": proj_tag,
+                        "projector_hash": per_pair_proj_hash,  # per-pair in AUTO
+                    }
+                    if p_k3_calc:
+                        projected_green += 1
+
 
                 
                 # inside AUTO branch
