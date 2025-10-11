@@ -3851,7 +3851,6 @@ with st.expander("Parity · Run Suite"):
                 "projector_filename": (projector_filename if (mode=="projected" and submode=="file") else ""),
                 "projector_hash": (projector_hash if (mode=="projected" and submode=="file") else ""),
                 "lane_mask_note": ("AUTO uses each pair’s lane mask" if (mode=="projected" and submode=="auto") else ""),
-                "experimental": bool(allow_mismatch and mode=="projected" and submode=="file"),
                 "summary": {
                     "rows_total": rows_total,
                     "rows_skipped": rows_skipped,
