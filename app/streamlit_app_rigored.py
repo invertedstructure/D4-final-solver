@@ -3928,6 +3928,12 @@ with st.expander("Parity · Run Suite"):
                         os.replace(tmp_csv, PARITY_CSV_PATH)
                     except Exception as e:
                         st.error(f"Could not write CSV: {e}")
+                        # --- Summary prelude (compute counts used by the UI + report) ---
+                        rows_total   = len(table)
+                        rows_skipped = len(skipped)
+                        rows_run     = len(report_pairs)
+                        pct = (float(projected_green) / float(rows_run)) if (mode == "projected" and rows_run) else 0.0
+
                 # --- UI summary + downloads ---
         # Always show a summary toast so you know the block executed.
         st.success(
