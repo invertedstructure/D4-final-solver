@@ -3879,6 +3879,9 @@ with st.expander("Parity · Run Suite"):
                         "pairs": report_pairs,
                         "skipped": skipped,
                     }
+                    # ... your report = { ... } just built above
+                    st.session_state["parity_last_full_report"] = report
+
             
                     # Deterministic content hash
                     report["content_hash"] = _sha256_hex(
@@ -3945,9 +3948,15 @@ with st.expander("Parity · Run Suite"):
             # Save a lightweight copy of pairs in session for the mini matrix
             st.session_state["parity_last_report_pairs"] = report_pairs
             
-            # Memory-based downloads (robust even if FS write failed)
+                       # JSON download (always from memory)
             try:
-                json_mem = _io.BytesIO(_json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"))
+                rep = st.session_state.get("parity_last_full_report")
+                if rep is None and "report" in locals():
+                    rep = report  # fallback if still in scope
+                if rep is None:
+                    raise NameError("no report available in session or locals")
+            
+                json_mem = _io.BytesIO(_json.dumps(rep, ensure_ascii=False, indent=2).encode("utf-8"))
                 st.download_button(
                     "Download parity_report.json",
                     json_mem,
@@ -3956,6 +3965,7 @@ with st.expander("Parity · Run Suite"):
                 )
             except Exception as e:
                 st.info(f"(Could not build in-memory JSON download: {e})")
+
             
             try:
                 csv_mem = _io.StringIO()
