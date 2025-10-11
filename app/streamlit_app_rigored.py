@@ -3935,53 +3935,53 @@ with st.expander("Parity · Run Suite"):
             rows_run     = len(report_pairs)
             pct = (float(projected_green) / float(rows_run)) if (mode == "projected" and rows_run) else 0.0
 
-                # --- UI summary + downloads ---
-    st.success(
-        "Run complete · "
-        f"pairs={rows_run} · skipped={rows_skipped}"
-        + (f" · GREEN={projected_green} ({pct:.2%})" if mode == "projected" else "")
-    )
-    
-    # Save a lightweight copy of pairs in session for the mini matrix
-    st.session_state["parity_last_report_pairs"] = report_pairs
-    
-    # Memory-based downloads (robust even if FS write failed)
-    try:
-        json_mem = _io.BytesIO(_json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"))
-        st.download_button(
-            "Download parity_report.json",
-            json_mem,
-            file_name="parity_report.json",
-            key="dl_parity_json_final_new",
-        )
-    except Exception as e:
-        st.info(f"(Could not build in-memory JSON download: {e})")
-    
-    try:
-        csv_mem = _io.StringIO()
-        w = csv.writer(csv_mem)
-        w.writerow(hdr)
-        w.writerows(rows_csv)
-        csv_bytes = _io.BytesIO(csv_mem.getvalue().encode("utf-8"))
-        st.download_button(
-            "Download parity_summary.csv",
-            csv_bytes,
-            file_name="parity_summary.csv",
-            key="dl_parity_csv_final_new",
-        )
-    except Exception as e:
-        st.info(f"(Could not build in-memory CSV download: {e})")
-    
-    # Compact ✓/✗ preview
-    last = st.session_state.get("parity_last_report_pairs") or []
-    if last:
-        st.caption("Summary (strict_k3 / projected_k3):")
-        for p in last:
-            s = "✅" if p["strict"]["k3"] else "❌"
-            pr = "—"
-            if "projected" in p:
-                pr = "✅" if p["projected"]["k3"] else "❌"
-        st.write(f"• {p['label']} → strict={s} · projected={pr}")
+                        # --- UI summary + downloads ---
+            st.success(
+                "Run complete · "
+                f"pairs={rows_run} · skipped={rows_skipped}"
+                + (f" · GREEN={projected_green} ({pct:.2%})" if mode == "projected" else "")
+            )
+            
+            # Save a lightweight copy of pairs in session for the mini matrix
+            st.session_state["parity_last_report_pairs"] = report_pairs
+            
+            # Memory-based downloads (robust even if FS write failed)
+            try:
+                json_mem = _io.BytesIO(_json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"))
+                st.download_button(
+                    "Download parity_report.json",
+                    json_mem,
+                    file_name="parity_report.json",
+                    key="dl_parity_json_final_new",
+                )
+            except Exception as e:
+                st.info(f"(Could not build in-memory JSON download: {e})")
+            
+            try:
+                csv_mem = _io.StringIO()
+                w = csv.writer(csv_mem)
+                w.writerow(hdr)
+                w.writerows(rows_csv)
+                csv_bytes = _io.BytesIO(csv_mem.getvalue().encode("utf-8"))
+                st.download_button(
+                    "Download parity_summary.csv",
+                    csv_bytes,
+                    file_name="parity_summary.csv",
+                    key="dl_parity_csv_final_new",
+                )
+            except Exception as e:
+                st.info(f"(Could not build in-memory CSV download: {e})")
+            
+            # Compact ✓/✗ preview
+            last = st.session_state.get("parity_last_report_pairs") or []
+            if last:
+                st.caption("Summary (strict_k3 / projected_k3):")
+                for p in last:
+                    s = "✅" if p["strict"]["k3"] else "❌"
+                    pr = "—"
+                    if "projected" in p:
+                        pr = "✅" if p["projected"]["k3"] else "❌"
+                st.write(f"• {p['label']} → strict={s} · projected={pr}")
 
 
 
