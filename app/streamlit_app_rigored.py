@@ -3786,30 +3786,30 @@ if st.button("▶ Run Parity Suite", key="pp_btn_run_suite_final"):
                 }
                 if p_k3_calc:
                     projected_green += 1
-                                # --- Hashes & pair record (do this AFTER you’ve computed s_k2/s_k3 and proj_block)
-            left_hashes  = _hash_fixture_side(fxL)
-            right_hashes = _hash_fixture_side(fxR)
-            p_hash = _pair_hash(left_hashes, right_hashes)
-
-            pair_out = {
-                "label": label,
-                "pair_hash": p_hash,
-                "lane_mask_k3": lane_mask_vec,
-                "lane_mask": lane_mask_str,
-                "left_hashes":  left_hashes,
-                "right_hashes": right_hashes,
-                "strict": {"k2": bool(s_k2), "k3": bool(s_k3), "residual_tag": strict_tag},
-            }
-            if proj_block is not None:
-                pair_out["projected"] = proj_block
-
-            # Consistency checks (now that pair_out exists)
-            if pair_out["strict"]["k3"] is False:
-                assert pair_out["strict"]["residual_tag"] in {"ker","lanes","mixed"}
-            if "projected" in pair_out and pair_out["projected"]["k3"] is False:
-                assert pair_out["projected"]["residual_tag"] in {"ker","lanes","mixed"}
-
-            report_pairs.append(pair_out)
+            # --- Hashes & pair record (do this AFTER you’ve computed s_k2/s_k3 and proj_block)
+                left_hashes  = _hash_fixture_side(fxL)
+                right_hashes = _hash_fixture_side(fxR)
+                p_hash = _pair_hash(left_hashes, right_hashes)
+    
+                pair_out = {
+                    "label": label,
+                    "pair_hash": p_hash,
+                    "lane_mask_k3": lane_mask_vec,
+                    "lane_mask": lane_mask_str,
+                    "left_hashes":  left_hashes,
+                    "right_hashes": right_hashes,
+                    "strict": {"k2": bool(s_k2), "k3": bool(s_k3), "residual_tag": strict_tag},
+                }
+                if proj_block is not None:
+                    pair_out["projected"] = proj_block
+    
+                # Consistency checks (now that pair_out exists)
+                if pair_out["strict"]["k3"] is False:
+                    assert pair_out["strict"]["residual_tag"] in {"ker","lanes","mixed"}
+                if "projected" in pair_out and pair_out["projected"]["k3"] is False:
+                    assert pair_out["projected"]["residual_tag"] in {"ker","lanes","mixed"}
+    
+                report_pairs.append(pair_out)
 
 
             else:
