@@ -3730,7 +3730,7 @@ with st.expander("Parity · Run Suite"):
                 lane_mask_vec = _lane_mask_from_boundaries(fxL["boundaries"])
                 lane_mask_str = "".join("1" if int(x) else "0" for x in lane_mask_vec)
 
-                            if submode == "auto":
+                if submode == "auto":
                 # 1) Ask the gate for booleans under AUTO (provenance matches app)
                 outL_p = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], cfg)
                 outR_p = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], cfg)
