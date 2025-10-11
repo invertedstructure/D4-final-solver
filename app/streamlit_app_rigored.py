@@ -3530,6 +3530,26 @@ def _pp_try_load(side: dict):
         shapes_path=side["shapes"],
     )
 
+# --- Single-leg runner via your canonical overlap gate
+def _pp_one_leg(boundaries_obj, cmap_obj, H_obj, projection_cfg: dict | None):
+    """
+    Runs one leg (strict if projection_cfg is None, otherwise projected)
+    through your overlap_gate.overlap_check() and returns its result dict.
+
+    Returns shape (typical):
+      {"2": {"eq": bool}, "3": {"eq": bool}, ...}
+    On error, returns a safe stub with an _err message.
+    """
+    try:
+        if projection_cfg is None:
+            return overlap_gate.overlap_check(boundaries_obj, cmap_obj, H_obj)  # type: ignore
+        return overlap_gate.overlap_check(
+            boundaries_obj, cmap_obj, H_obj, projection_config=projection_cfg  # type: ignore
+        )
+    except Exception as e:
+        return {"2": {"eq": False}, "3": {"eq": False}, "_err": str(e)}
+
+
 
 
 
