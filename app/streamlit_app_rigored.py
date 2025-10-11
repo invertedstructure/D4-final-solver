@@ -3442,16 +3442,19 @@ with st.expander("Parity · Run Suite"):
         rc = st.session_state.get("run_ctx") or {}
         projector_filename = rc.get("projector_filename","") if (mode=="projected" and submode=="file") else ""
 
-        # --- Guard toggle: allow mismatched Π (default off)
+              # Initialize the session state variable with default value
+        st.session_state.setdefault("pp_allow_mismatch", False)
+        
+        # Render the checkbox using only the key
         allow_mismatch = st.checkbox(
             "Allow mismatched Π (experimental; non-promotable)",
             key="pp_allow_mismatch",
-            value=bool(st.session_state.get("pp_allow_mismatch", False)),
             help="If off (default), FILE projector must match each pair’s lane mask; mismatches are skipped. "
                  "If on, mismatched pairs run but are marked experimental."
         )
-        st.session_state["pp_allow_mismatch"] = allow_mismatch
-
+        
+        # Read the value from session_state whenever needed
+        allow_mismatch_value = bool(st.session_state.get("pp_allow_mismatch", False))
         # --- Resolve FILE projector provenance (hash + diag extraction)
         projector_hash = ""
         projector_diag = None  # list[int] or None
