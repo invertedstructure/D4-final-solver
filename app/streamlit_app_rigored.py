@@ -3730,7 +3730,7 @@ with st.expander("Parity · Run Suite"):
                 lane_mask_vec = _lane_mask_from_boundaries(fxL["boundaries"])
                 lane_mask_str = "".join("1" if int(x) else "0" for x in lane_mask_vec)
 
-               if submode == "auto":
+                   if submode == "auto":
                     # Build AUTO projection config locally (safe even if you set it elsewhere)
                     cfg = {"source": {"2": "file", "3": "auto"}, "projector_files": {}}
 
