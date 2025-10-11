@@ -3740,6 +3740,51 @@ with st.expander("Parity · Run Suite"):
                     strict_tag = _residual_enum_from_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], None)
                 except Exception:
                     strict_tag = "none" if bool(s_k3) else "ker"
+                                    # --- STRICT leg (through overlap gate, no projection)
+                outL_s = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], None)
+                outR_s = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], None)
+                s_k2   = _bool_and(outL_s.get("2", {}).get("eq"), outR_s.get("2", {}).get("eq"))
+                s_k3   = _bool_and(outL_s.get("3", {}).get("eq"), outR_s.get("3", {}).get("eq"))
+                
+                # --- STRICT residuals baseline (used for AUTO and FILE projection)
+                try:
+                    R3_L  # noqa: F821
+                    R3_R  # noqa: F821
+                except NameError:
+                    def _r3_from_fixture(fx: dict) -> list[list[int]]:
+                        B = (fx.get("boundaries") or {}).blocks.__root__
+                        C = (fx.get("cmap") or {}).blocks.__root__
+                        H = (fx.get("H") or {}).blocks.__root__
+                        d3 = B.get("3->2") or B.get("3") or []
+                        H2 = H.get("2") or []
+                        C3 = C.get("3") or []
+                        if not (d3 and H2 and C3):
+                            return []
+                        # GF(2) matmul: H2 @ d3
+                        m, k, n = len(H2), len(H2[0]), len(d3[0])
+                        M = [[0] * n for _ in range(m)]
+                        for i in range(m):
+                            for t in range(k):
+                                if H2[i][t] & 1:
+                                    rt = d3[t]
+                                    for j in range(n):
+                                        M[i][j] ^= (rt[j] & 1)
+                        # R3 = (H2@d3) ^ (C3 ^ I3)
+                        I3 = [[1 if i == j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
+                        C3p = [[(C3[i][j] ^ I3[i][j]) & 1 for j in range(len(C3[0]))] for i in range(len(C3))] if C3 else []
+                        if not C3p:
+                            return M
+                        # XOR same shape
+                        r = len(M); c = len(M[0])
+                        R = [[0] * c for _ in range(r)]
+                        for i in range(min(r, len(C3p))):
+                            for j in range(min(c, len(C3p[0]))):
+                                R[i][j] = (M[i][j] ^ C3p[i][j]) & 1
+                        return R
+                
+                    R3_L = _r3_from_fixture(fxL)
+                    R3_R = _r3_from_fixture(fxR)
+
 
                                 # --- PROJECTED leg decision
                 proj_block = None
@@ -3813,7 +3858,9 @@ with st.expander("Parity · Run Suite"):
                             "residual_tag": proj_tag,
                         }
                         if p_k3_calc:
-                            projected_green += 1
+                            projected_green += 1                      
+                        
+
 
 
                 # --- Hashes & pair_hash
