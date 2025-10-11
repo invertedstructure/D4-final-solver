@@ -3562,6 +3562,15 @@ if "_emoji" not in globals():
         return "✅" if bool(v) else "❌"
 
 
+# --- Tiny helper: format a short hash for UI pills
+def _short_hash(h: str | None) -> str:
+    try:
+        h = (h or "").strip()
+    except Exception:
+        h = ""
+    return (h[:8] + "…") if h else "—"
+
+
 
 
  # ================= Parity · Run Suite (final, with AUTO/FILE guards) =================
