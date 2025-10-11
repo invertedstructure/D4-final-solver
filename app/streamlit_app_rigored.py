@@ -3928,42 +3928,52 @@ with st.expander("Parity · Run Suite"):
                         os.replace(tmp_csv, PARITY_CSV_PATH)
                     except Exception as e:
                         st.error(f"Could not write CSV: {e}")
-                                                        # --- UI summary + downloads ---
+                                # --- UI summary + downloads ---
+                        # Always show a summary toast so you know the block executed.
                         st.success(
                             "Run complete · "
                             f"pairs={rows_run} · skipped={rows_skipped}"
                             + (f" · GREEN={projected_green} ({pct:.2%})" if mode == "projected" else "")
                         )
                 
-                        # Save a lightweight copy of pairs in session for the mini matrix
+                        # Keep a lightweight copy for the compact preview
                         st.session_state["parity_last_report_pairs"] = report_pairs
                 
-                        # Download buttons (guarded)
+                        # --- Safer downloads (use in-memory bytes, not open file handles) ---
                         try:
-                            with open(PARITY_JSON_PATH, "rb") as fj:
-                                st.download_button(
-                                    "Download parity_report.json",
-                                    fj,
-                                    file_name="parity_report.json",
-                                    key="dl_parity_json_final_new",
-                                )
+                            json_bytes = _json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8")
+                            st.download_button(
+                                "Download parity_report.json",
+                                data=json_bytes,
+                                file_name="parity_report.json",
+                                mime="application/json",
+                                key="dl_parity_json_final_new",
+                            )
                         except Exception as e:
-                            st.info(f"(Could not open parity_report.json for download: {e})")
+                            st.info(f"(Could not build JSON for download: {e})")
                 
                         try:
-                            with open(PARITY_CSV_PATH, "rb") as fc:
+                            if PARITY_CSV_PATH.exists():
+                                csv_bytes = PARITY_CSV_PATH.read_bytes()
                                 st.download_button(
                                     "Download parity_summary.csv",
-                                    fc,
+                                    data=csv_bytes,
                                     file_name="parity_summary.csv",
+                                    mime="text/csv",
                                     key="dl_parity_csv_final_new",
                                 )
+                            else:
+                                st.info("(No CSV found to download — did any pairs run?)")
                         except Exception as e:
                             st.info(f"(Could not open parity_summary.csv for download: {e})")
                 
-                        # Compact ✓/✗ preview
+                        # --- Compact ✓/✗ preview ---
                         last = st.session_state.get("parity_last_report_pairs") or []
-                        if last:
+                        if not last:
+                            # Helpful hint if everything was skipped
+                            if rows_run == 0 and rows_skipped > 0:
+                                st.warning("All rows were skipped. Open the 'skipped' list in the report to see precise reasons.")
+                        else:
                             st.caption("Summary (strict_k3 / projected_k3):")
                             for p in last:
                                 s = "✅" if p["strict"]["k3"] else "❌"
@@ -3971,6 +3981,8 @@ with st.expander("Parity · Run Suite"):
                                 if "projected" in p:
                                     pr = "✅" if p["projected"]["k3"] else "❌"
                                 st.write(f"• {p['label']} → strict={s} · projected={pr}")
+
+                                                        
 
                     
         
