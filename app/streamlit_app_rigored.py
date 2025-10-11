@@ -3550,6 +3550,17 @@ def _pp_one_leg(boundaries_obj, cmap_obj, H_obj, projection_cfg: dict | None):
         return {"2": {"eq": False}, "3": {"eq": False}, "_err": str(e)}
 
 
+# --- tiny truth helper
+if "_bool_and" not in globals():
+    def _bool_and(a, b):
+        """Logical AND that tolerates None."""
+        return (a is not None) and (b is not None) and bool(a) and bool(b)
+
+if "_emoji" not in globals():
+    def _emoji(v):
+        if v is None: return "—"
+        return "✅" if bool(v) else "❌"
+
 
 
 
