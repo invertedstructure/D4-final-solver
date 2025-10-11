@@ -3386,6 +3386,69 @@ st.radio(
     key="parity_policy_choice",
     horizontal=True,
 )
+#---------------------------helper-------------------------------------
+
+def _resolve_side_or_skip_exact(side: dict, *, label: str, side_name: str):
+    """
+    Strict resolver for a single side of a pair.
+
+    Returns:
+        ("ok", fixture_dict)  -> fully parsed fixture (boundaries/cmap/H/shapes objects)
+        ("skip", info_dict)   -> standardized reason with fields:
+            { "label": <str>, "side": "left"|"right",
+              "missing": [<keys>]?, "error": <CODE or message> }
+
+    Rules:
+      • If 'embedded' exists, it wins. Parse it via _pp_load_embedded().
+      • Otherwise require ALL four string paths: boundaries, shapes, cmap, H.
+      • No fuzzy search here; paths must exist (checked via _path_exists_strict).
+      • On any failure, return a 'skip' record with precise reason.
+    """
+    # Validate shape of the side object quickly
+    if not isinstance(side, dict):
+        return ("skip", {
+            "label": label, "side": side_name,
+            "error": "PARITY_SCHEMA_INVALID: side must be an object"
+        })
+
+    # 1) Embedded wins
+    if "embedded" in side and side["embedded"] is not None:
+        try:
+            fx = _pp_load_embedded(side["embedded"])
+            return ("ok", fx)
+        except Exception as e:
+            return ("skip", {
+                "label": label, "side": side_name,
+                "error": f"PARITY_SCHEMA_INVALID: {e}"
+            })
+
+    # 2) Require all four paths
+    required = ("boundaries", "shapes", "cmap", "H")
+    missing_keys = [k for k in required if not (isinstance(side.get(k), str) and side[k].strip())]
+    if missing_keys:
+        return ("skip", {
+            "label": label, "side": side_name,
+            "missing": missing_keys, "error": "PARITY_SPEC_MISSING"
+        })
+
+    # 3) Paths must exist (no recursive/fuzzy)
+    not_found = [k for k in required if not _path_exists_strict(side[k])]
+    if not_found:
+        return ("skip", {
+            "label": label, "side": side_name,
+            "missing": not_found, "error": "PARITY_FILE_NOT_FOUND"
+        })
+
+    # 4) Load fixture from paths
+    try:
+        fx = _pp_try_load(side)
+        return ("ok", fx)
+    except Exception as e:
+        return ("skip", {
+            "label": label, "side": side_name,
+            "error": f"PARITY_FILE_NOT_FOUND: {e}"
+        })
+
 
 
 # --- Policy resolver used by the Parity · Run Suite block
