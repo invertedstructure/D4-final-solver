@@ -3710,311 +3710,272 @@ with st.expander("Parity · Run Suite"):
             parity_nonce = _sha256_hex(nonce_src)[:8]
             st.caption("Run nonce"); st.code(parity_nonce, language="text")
 
-        # --- Run button
-if st.button("▶ Run Parity Suite", key="pp_btn_run_suite_final"):
-    report_pairs, skipped = [], []
-    projected_green = 0
-
-    for spec in table:
-        label = spec.get("label", "PAIR")
-        L_in = spec.get("left") or {}
-        R_in = spec.get("right") or {}
-
-        # Resolve sides strictly (no fuzz)
-        okL, fxL = _resolve_side_or_skip_exact(L_in, label=label, side_name="left")
-        okR, fxR = _resolve_side_or_skip_exact(R_in, label=label, side_name="right")
-        if okL != "ok":
-            skipped.append(fxL)
-            continue
-        if okR != "ok":
-            skipped.append(fxR)
-            continue
-
-        # Lane-mask SSOT from this pair’s boundaries (left is sufficient in your data model)
-        lane_mask_vec = _lane_mask_from_boundaries(fxL["boundaries"])
-        lane_mask_str = "".join("1" if int(x) else "0" for x in lane_mask_vec)
-
-        # --- STRICT residuals (used for tagging and AUTO projection)
-        R3_L = _r3_from_fixture(fxL)
-        R3_R = _r3_from_fixture(fxR)
-
-                # --- STRICT leg (through overlap gate, no projection)
-        outL_s = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], None)
-        outR_s = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], None)
-        s_k2   = _bool_and(outL_s.get("2", {}).get("eq"), outR_s.get("2", {}).get("eq"))
-        s_k3   = _bool_and(outL_s.get("3", {}).get("eq"), outR_s.get("3", {}).get("eq"))
-
-        # --- STRICT residuals baseline (used for AUTO/FILE projection)
-        R3_L = _r3_from_fixture(fxL)
-        R3_R = _r3_from_fixture(fxR)
-
-        # strict residual tag (best-effort, keep consistent with s_k3)
-        try:
-            strict_tag = _residual_enum_from_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], None)
-        except Exception:
-            strict_tag = "none" if bool(s_k3) else "ker"
-
-        # --- PROJECTED leg (only when mode == "projected")
-        proj_block = None
-        if mode == "projected":
-            # Build projection config per pair (for gate booleans)
-            cfg = {"source": {"2": "file", "3": submode}, "projector_files": {}}
-            if submode == "file":
-                cfg["projector_files"]["3"] = projector_filename
-
-            # Gate booleans for k2/k3 under the chosen mode (keeps provenance aligned)
-            outL_p   = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], cfg)
-            outR_p   = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], cfg)
-            p_k2_gate = _bool_and(outL_p.get("2", {}).get("eq"), outR_p.get("2", {}).get("eq"))
-            p_k3_gate = _bool_and(outL_p.get("3", {}).get("eq"), outR_p.get("3", {}).get("eq"))
-
-            if submode == "auto":
-                # Π_auto = diag(lane_mask_vec) → apply to STRICT residuals
-                R3_L_proj = _apply_diag_to_residual(R3_L, lane_mask_vec)
-                R3_R_proj = _apply_diag_to_residual(R3_R, lane_mask_vec)
-                p_k3_calc = _all_zero_mat(R3_L_proj) and _all_zero_mat(R3_R_proj)
-
-                proj_tag_L = _classify_residual(R3_L_proj, lane_mask_vec)
-                proj_tag_R = _classify_residual(R3_R_proj, lane_mask_vec)
-                proj_tag   = proj_tag_L if proj_tag_L != "none" else proj_tag_R
-
-                proj_block = {
-                    "k2": bool(p_k2_gate),      # k2 from gate
-                    "k3": bool(p_k3_calc),      # k3 truth from projected residual
-                    "residual_tag": proj_tag,
-                    "projector_hash": _hash_obj(lane_mask_vec),  # per-pair provenance
-                }
-                if p_k3_calc:
-                    projected_green += 1
-            
-
-
-            else:
-                # -------- FILE mode (strict guard; no override) --------
-                diag = projector_diag or []
-                n3   = len(lane_mask_vec)
-
-                reason = None
-                if len(diag) != n3:
-                    reason = "P3_SHAPE"
-                elif any((int(diag[j]) & 1) != (int(lane_mask_vec[j]) & 1) for j in range(n3)):
-                    reason = "P3_LANE_MISMATCH"
-
-                if reason is not None:
-                    skipped.append({
+            # --- Run button
+    if st.button("▶ Run Parity Suite", key="pp_btn_run_suite_final"):
+        report_pairs, skipped = [], []
+        projected_green = 0
+    
+        for spec in table:
+            label = spec.get("label", "PAIR")
+            L_in = spec.get("left") or {}
+            R_in = spec.get("right") or {}
+    
+            # Resolve sides strictly (no fuzz)
+            okL, fxL = _resolve_side_or_skip_exact(L_in, label=label, side_name="left")
+            okR, fxR = _resolve_side_or_skip_exact(R_in, label=label, side_name="right")
+            if okL != "ok":
+                skipped.append(fxL)
+                continue
+            if okR != "ok":
+                skipped.append(fxR)
+                continue
+    
+            # Lane-mask SSOT from this pair’s boundaries (left is sufficient in your data model)
+            lane_mask_vec = _lane_mask_from_boundaries(fxL["boundaries"])
+            lane_mask_str = "".join("1" if int(x) else "0" for x in lane_mask_vec)
+    
+            # --- STRICT residuals (used for tagging and AUTO projection)
+            R3_L = _r3_from_fixture(fxL)
+            R3_R = _r3_from_fixture(fxR)
+    
+                    # --- STRICT leg (through overlap gate, no projection)
+            outL_s = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], None)
+            outR_s = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], None)
+            s_k2   = _bool_and(outL_s.get("2", {}).get("eq"), outR_s.get("2", {}).get("eq"))
+            s_k3   = _bool_and(outL_s.get("3", {}).get("eq"), outR_s.get("3", {}).get("eq"))
+    
+            # --- STRICT residuals baseline (used for AUTO/FILE projection)
+            R3_L = _r3_from_fixture(fxL)
+            R3_R = _r3_from_fixture(fxR)
+    
+            # strict residual tag (best-effort, keep consistent with s_k3)
+            try:
+                strict_tag = _residual_enum_from_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], None)
+            except Exception:
+                strict_tag = "none" if bool(s_k3) else "ker"
+    
+            # --- PROJECTED leg (only when mode == "projected")
+            proj_block = None
+            if mode == "projected":
+                # Build projection config per pair (for gate booleans)
+                cfg = {"source": {"2": "file", "3": submode}, "projector_files": {}}
+                if submode == "file":
+                    cfg["projector_files"]["3"] = projector_filename
+    
+                # Gate booleans for k2/k3 under the chosen mode (keeps provenance aligned)
+                outL_p   = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], cfg)
+                outR_p   = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], cfg)
+                p_k2_gate = _bool_and(outL_p.get("2", {}).get("eq"), outR_p.get("2", {}).get("eq"))
+                p_k3_gate = _bool_and(outL_p.get("3", {}).get("eq"), outR_p.get("3", {}).get("eq"))
+    
+                if submode == "auto":
+                    # Π_auto = diag(lane_mask_vec) → apply to STRICT residuals
+                    R3_L_proj = _apply_diag_to_residual(R3_L, lane_mask_vec)
+                    R3_R_proj = _apply_diag_to_residual(R3_R, lane_mask_vec)
+                    p_k3_calc = _all_zero_mat(R3_L_proj) and _all_zero_mat(R3_R_proj)
+    
+                    proj_tag_L = _classify_residual(R3_L_proj, lane_mask_vec)
+                    proj_tag_R = _classify_residual(R3_R_proj, lane_mask_vec)
+                    proj_tag   = proj_tag_L if proj_tag_L != "none" else proj_tag_R
+    
+                    proj_block = {
+                        "k2": bool(p_k2_gate),      # k2 from gate
+                        "k3": bool(p_k3_calc),      # k3 truth from projected residual
+                        "residual_tag": proj_tag,
+                        "projector_hash": _hash_obj(lane_mask_vec),  # per-pair provenance
+                    }
+                    if p_k3_calc:
+                        projected_green += 1
+                
+    
+    
+                else:
+                    # -------- FILE mode (strict guard; no override) --------
+                    diag = projector_diag or []
+                    n3   = len(lane_mask_vec)
+    
+                    reason = None
+                    if len(diag) != n3:
+                        reason = "P3_SHAPE"
+                    elif any((int(diag[j]) & 1) != (int(lane_mask_vec[j]) & 1) for j in range(n3)):
+                        reason = "P3_LANE_MISMATCH"
+    
+                    if reason is not None:
+                        skipped.append({
+                            "label": label,
+                            "side": "both",
+                            "error": reason,
+                            "diag": diag,
+                            "mask": lane_mask_vec,
+                        })
+                        continue  # skip this pair due to mismatch
+    
+                    # Apply FILE projector diag(P) to STRICT residuals for k3 truth
+                    R3_L_proj = _apply_diag_to_residual(R3_L, diag)
+                    R3_R_proj = _apply_diag_to_residual(R3_R, diag)
+                    p_k3_calc = _all_zero_mat(R3_L_proj) and _all_zero_mat(R3_R_proj)
+    
+                    proj_tag_L = _classify_residual(R3_L_proj, lane_mask_vec)
+                    proj_tag_R = _classify_residual(R3_R_proj, lane_mask_vec)
+                    proj_tag   = proj_tag_L if proj_tag_L != "none" else proj_tag_R
+    
+                    proj_block = {
+                        "k2": bool(p_k2_gate),      # k2 from gate
+                        "k3": bool(p_k3_calc),      # k3 truth from projected residual
+                        "residual_tag": proj_tag,
+                    }
+                    if p_k3_calc:
+                        projected_green += 1
+                        # --- Hashes & pair record (do this AFTER you’ve computed s_k2/s_k3 and proj_block)
+                    left_hashes  = _hash_fixture_side(fxL)
+                    right_hashes = _hash_fixture_side(fxR)
+                    p_hash = _pair_hash(left_hashes, right_hashes)
+        
+                    pair_out = {
                         "label": label,
-                        "side": "both",
-                        "error": reason,
-                        "diag": diag,
-                        "mask": lane_mask_vec,
-                    })
-                    continue  # skip this pair due to mismatch
-
-                # Apply FILE projector diag(P) to STRICT residuals for k3 truth
-                R3_L_proj = _apply_diag_to_residual(R3_L, diag)
-                R3_R_proj = _apply_diag_to_residual(R3_R, diag)
-                p_k3_calc = _all_zero_mat(R3_L_proj) and _all_zero_mat(R3_R_proj)
-
-                proj_tag_L = _classify_residual(R3_L_proj, lane_mask_vec)
-                proj_tag_R = _classify_residual(R3_R_proj, lane_mask_vec)
-                proj_tag   = proj_tag_L if proj_tag_L != "none" else proj_tag_R
-
-                proj_block = {
-                    "k2": bool(p_k2_gate),      # k2 from gate
-                    "k3": bool(p_k3_calc),      # k3 truth from projected residual
-                    "residual_tag": proj_tag,
-                }
-                if p_k3_calc:
-                    projected_green += 1
-                    # --- Hashes & pair record (do this AFTER you’ve computed s_k2/s_k3 and proj_block)
-                left_hashes  = _hash_fixture_side(fxL)
-                right_hashes = _hash_fixture_side(fxR)
-                p_hash = _pair_hash(left_hashes, right_hashes)
-    
-                pair_out = {
-                    "label": label,
-                    "pair_hash": p_hash,
-                    "lane_mask_k3": lane_mask_vec,
-                    "lane_mask": lane_mask_str,
-                    "left_hashes":  left_hashes,
-                    "right_hashes": right_hashes,
-                    "strict": {"k2": bool(s_k2), "k3": bool(s_k3), "residual_tag": strict_tag},
-                }
-                if proj_block is not None:
-                    pair_out["projected"] = proj_block
-    
-                # Consistency checks (now that pair_out exists)
-                if pair_out["strict"]["k3"] is False:
-                    assert pair_out["strict"]["residual_tag"] in {"ker","lanes","mixed"}
-                if "projected" in pair_out and pair_out["projected"]["k3"] is False:
-                    assert pair_out["projected"]["residual_tag"] in {"ker","lanes","mixed"}
-    
-                report_pairs.append(pair_out)
-                
-                                    # --- Build report root (after the loop finishes)
-                rows_total   = len(table)
-                rows_skipped = len(skipped)
-                rows_run     = len(report_pairs)
-                pct = (float(projected_green)/float(rows_run)) if (mode=="projected" and rows_run) else 0.0
+                        "pair_hash": p_hash,
+                        "lane_mask_k3": lane_mask_vec,
+                        "lane_mask": lane_mask_str,
+                        "left_hashes":  left_hashes,
+                        "right_hashes": right_hashes,
+                        "strict": {"k2": bool(s_k2), "k3": bool(s_k3), "residual_tag": strict_tag},
+                    }
+                    if proj_block is not None:
+                        pair_out["projected"] = proj_block
         
-                # Freeze the run-level tag from mode/submode ONLY
-                policy_tag_run = "strict" if mode=="strict" else f"projected(columns@k=3,{submode})"
+                    # Consistency checks (now that pair_out exists)
+                    if pair_out["strict"]["k3"] is False:
+                        assert pair_out["strict"]["residual_tag"] in {"ker","lanes","mixed"}
+                    if "projected" in pair_out and pair_out["projected"]["k3"] is False:
+                        assert pair_out["projected"]["residual_tag"] in {"ker","lanes","mixed"}
         
-                report = {
-                    "schema_version": "1.0.0",
-                    "written_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                    "app_version": APP_VERSION,
-                    "policy_tag": policy_tag_run,                      # <- frozen tag
-                    "projector_mode": ("strict" if mode=="strict" else submode),
-                    "projector_filename": (projector_filename if (mode=="projected" and submode=="file") else ""),
-                    "projector_hash": (projector_hash if (mode=="projected" and submode=="file") else ""),
-                    "lane_mask_note": ("AUTO uses each pair’s lane mask" if (mode=="projected" and submode=="auto") else ""),
-                    "summary": {
-                        "rows_total": rows_total,
-                        "rows_skipped": rows_skipped,
-                        "rows_run": rows_run,
-                        "projected_green_count": (projected_green if mode=="projected" else 0),
-                        "pct": (pct if mode=="projected" else 0.0),
-                    },
-                    "pairs": report_pairs,
-                    "skipped": skipped,
-                }
-        
-                # Deterministic content hash
-                report["content_hash"] = _sha256_hex(
-                    _json.dumps(report, sort_keys=True, separators=(",",":")).encode("utf-8")
-                )
-        
-                # --- Write JSON
-                try:
-                    _atomic_write_json(PARITY_JSON_PATH, report)
-                except Exception as e:
-                    st.error(f"Could not write JSON: {e}")
-        
-                # --- Write CSV (dedupe)
-                hdr = [
-                    "label","policy_tag","projector_mode","projector_hash",
-                    "strict_k2","strict_k3","projected_k2","projected_k3",
-                    "residual_strict","residual_projected","lane_mask",
-                    "lh_boundaries_hash","lh_shapes_hash","lh_cmap_hash","lh_H_hash",
-                    "rh_boundaries_hash","rh_shapes_hash","rh_cmap_hash","rh_H_hash",
-                    "pair_hash",
-                ]
-                dedupe = set()
-                rows_csv = []
-                for p in report_pairs:
-                    key = (p["label"], p["pair_hash"], report["policy_tag"], report["projector_mode"], report["projector_hash"])
-                    if key in dedupe:
-                        continue
-                    dedupe.add(key)
-                    proj = p.get("projected") or {}
-                    rows_csv.append([
-                        p["label"], report["policy_tag"], report["projector_mode"], report["projector_hash"],
-                        str(p["strict"]["k2"]).lower(), str(p["strict"]["k3"]).lower(),
-                        ("" if not proj else str(proj.get("k2", False)).lower()),
-                        ("" if not proj else str(proj.get("k3", False)).lower()),
-                        p["strict"].get("residual_tag",""),
-                        ("" if not proj else proj.get("residual_tag","")),
-                        p.get("lane_mask",""),
-                        p["left_hashes"]["boundaries"], p["left_hashes"]["shapes"], p["left_hashes"]["cmap"], p["left_hashes"]["H"],
-                        p["right_hashes"]["boundaries"], p["right_hashes"]["shapes"], p["right_hashes"]["cmap"], p["right_hashes"]["H"],
-                        p["pair_hash"],
-                    ])
-                try:
-                    tmp_csv = PARITY_CSV_PATH.with_suffix(".csv.tmp")
-                    with open(tmp_csv, "w", newline="", encoding="utf-8") as f:
-                        w = csv.writer(f); w.writerow(hdr); w.writerows(rows_csv)
-                        f.flush(); os.fsync(f.fileno())
-                    os.replace(tmp_csv, PARITY_CSV_PATH)
-                except Exception as e:
-                    st.error(f"Could not write CSV: {e}")
-        
-                # --- UI summary + downloads ---
-                st.success(
-                    "Run complete · "
-                    f"pairs={rows_run} · skipped={rows_skipped}"
-                    + (f" · GREEN={projected_green} ({pct:.2%})" if mode == "projected" else "")
-                )
-        
-                # Save a lightweight copy of pairs in session for the mini matrix
-                st.session_state["parity_last_report_pairs"] = report_pairs
-        
-                # Download buttons (guarded)
-                try:
-                    with open(PARITY_JSON_PATH, "rb") as fj:
-                        st.download_button(
-                            "Download parity_report.json",
-                            fj,
-                            file_name="parity_report.json",
-                            key="dl_parity_json_final_new",
-                        )
-                except Exception as e:
-                    st.info(f"(Could not open parity_report.json for download: {e})")
-        
-                try:
-                    with open(PARITY_CSV_PATH, "rb") as fc:
-                        st.download_button(
-                            "Download parity_summary.csv",
-                            fc,
-                            file_name="parity_summary.csv",
-                            key="dl_parity_csv_final_new",
-                        )
-                except Exception as e:
-                    st.info(f"(Could not open parity_summary.csv for download: {e})")
-        
-                # Compact ✓/✗ preview
-                last = st.session_state.get("parity_last_report_pairs") or []
-                if last:
-                    st.caption("Summary (strict_k3 / projected_k3):")
-                    for p in last:
-                        s = "✅" if p["strict"]["k3"] else "❌"
-                        pr = "—"
-                        if "projected" in p:
-                            pr = "✅" if p["projected"]["k3"] else "❌"
-                        st.write(f"• {p['label']} → strict={s} · projected={pr}")
+                    report_pairs.append(pair_out)
+                    
+                                        # --- Build report root (after the loop finishes)
+                    rows_total   = len(table)
+                    rows_skipped = len(skipped)
+                    rows_run     = len(report_pairs)
+                    pct = (float(projected_green)/float(rows_run)) if (mode=="projected" and rows_run) else 0.0
+            
+                    # Freeze the run-level tag from mode/submode ONLY
+                    policy_tag_run = "strict" if mode=="strict" else f"projected(columns@k=3,{submode})"
+            
+                    report = {
+                        "schema_version": "1.0.0",
+                        "written_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "app_version": APP_VERSION,
+                        "policy_tag": policy_tag_run,                      # <- frozen tag
+                        "projector_mode": ("strict" if mode=="strict" else submode),
+                        "projector_filename": (projector_filename if (mode=="projected" and submode=="file") else ""),
+                        "projector_hash": (projector_hash if (mode=="projected" and submode=="file") else ""),
+                        "lane_mask_note": ("AUTO uses each pair’s lane mask" if (mode=="projected" and submode=="auto") else ""),
+                        "summary": {
+                            "rows_total": rows_total,
+                            "rows_skipped": rows_skipped,
+                            "rows_run": rows_run,
+                            "projected_green_count": (projected_green if mode=="projected" else 0),
+                            "pct": (pct if mode=="projected" else 0.0),
+                        },
+                        "pairs": report_pairs,
+                        "skipped": skipped,
+                    }
+            
+                    # Deterministic content hash
+                    report["content_hash"] = _sha256_hex(
+                        _json.dumps(report, sort_keys=True, separators=(",",":")).encode("utf-8")
+                    )
+            
+                    # --- Write JSON
+                    try:
+                        _atomic_write_json(PARITY_JSON_PATH, report)
+                    except Exception as e:
+                        st.error(f"Could not write JSON: {e}")
+            
+                    # --- Write CSV (dedupe)
+                    hdr = [
+                        "label","policy_tag","projector_mode","projector_hash",
+                        "strict_k2","strict_k3","projected_k2","projected_k3",
+                        "residual_strict","residual_projected","lane_mask",
+                        "lh_boundaries_hash","lh_shapes_hash","lh_cmap_hash","lh_H_hash",
+                        "rh_boundaries_hash","rh_shapes_hash","rh_cmap_hash","rh_H_hash",
+                        "pair_hash",
+                    ]
+                    dedupe = set()
+                    rows_csv = []
+                    for p in report_pairs:
+                        key = (p["label"], p["pair_hash"], report["policy_tag"], report["projector_mode"], report["projector_hash"])
+                        if key in dedupe:
+                            continue
+                        dedupe.add(key)
+                        proj = p.get("projected") or {}
+                        rows_csv.append([
+                            p["label"], report["policy_tag"], report["projector_mode"], report["projector_hash"],
+                            str(p["strict"]["k2"]).lower(), str(p["strict"]["k3"]).lower(),
+                            ("" if not proj else str(proj.get("k2", False)).lower()),
+                            ("" if not proj else str(proj.get("k3", False)).lower()),
+                            p["strict"].get("residual_tag",""),
+                            ("" if not proj else proj.get("residual_tag","")),
+                            p.get("lane_mask",""),
+                            p["left_hashes"]["boundaries"], p["left_hashes"]["shapes"], p["left_hashes"]["cmap"], p["left_hashes"]["H"],
+                            p["right_hashes"]["boundaries"], p["right_hashes"]["shapes"], p["right_hashes"]["cmap"], p["right_hashes"]["H"],
+                            p["pair_hash"],
+                        ])
+                    try:
+                        tmp_csv = PARITY_CSV_PATH.with_suffix(".csv.tmp")
+                        with open(tmp_csv, "w", newline="", encoding="utf-8") as f:
+                            w = csv.writer(f); w.writerow(hdr); w.writerows(rows_csv)
+                            f.flush(); os.fsync(f.fileno())
+                        os.replace(tmp_csv, PARITY_CSV_PATH)
+                    except Exception as e:
+                        st.error(f"Could not write CSV: {e}")
                                         # --- UI summary + downloads ---
-                st.success(
-                    "Run complete · "
-                    f"pairs={rows_run} · skipped={rows_skipped}"
-                    + (f" · GREEN={projected_green} ({pct:.2%})" if mode == "projected" else "")
-                )
-                
-                # Save a lightweight copy of pairs in session for the mini matrix
-                st.session_state["parity_last_report_pairs"] = report_pairs
-                
-                # Download buttons (guarded)
-                try:
-                    with open(PARITY_JSON_PATH, "rb") as fj:
-                        st.download_button(
-                            "Download parity_report.json",
-                            fj,
-                            file_name="parity_report.json",
-                            key="dl_parity_json_final_new",
-                        )
-                except Exception as e:
-                    st.info(f"(Could not open parity_report.json for download: {e})")
-                
-                try:
-                    with open(PARITY_CSV_PATH, "rb") as fc:
-                        st.download_button(
-                            "Download parity_summary.csv",
-                            fc,
-                            file_name="parity_summary.csv",
-                            key="dl_parity_csv_final_new",
-                        )
-                except Exception as e:
-                    st.info(f"(Could not open parity_summary.csv for download: {e})")
-                
-                # Compact ✓/✗ preview
-                last = st.session_state.get("parity_last_report_pairs") or []
-                if last:
-                    st.caption("Summary (strict_k3 / projected_k3):")
-                    for p in last:
-                        s = "✅" if p["strict"]["k3"] else "❌"
-                        pr = "—"
-                        if "projected" in p:
-                            pr = "✅" if p["projected"]["k3"] else "❌"
-                        st.write(f"• {p['label']} → strict={s} · projected={pr}")
+                    st.success(
+                        "Run complete · "
+                        f"pairs={rows_run} · skipped={rows_skipped}"
+                        + (f" · GREEN={projected_green} ({pct:.2%})" if mode == "projected" else "")
+                    )
+                    
+                    # Save a lightweight copy of pairs in session for the mini matrix
+                    st.session_state["parity_last_report_pairs"] = report_pairs
+                    
+                    # Download buttons (guarded)
+                    try:
+                        with open(PARITY_JSON_PATH, "rb") as fj:
+                            st.download_button(
+                                "Download parity_report.json",
+                                fj,
+                                file_name="parity_report.json",
+                                key="dl_parity_json_final_new",
+                            )
+                    except Exception as e:
+                        st.info(f"(Could not open parity_report.json for download: {e})")
+                    
+                    try:
+                        with open(PARITY_CSV_PATH, "rb") as fc:
+                            st.download_button(
+                                "Download parity_summary.csv",
+                                fc,
+                                file_name="parity_summary.csv",
+                                key="dl_parity_csv_final_new",
+                            )
+                    except Exception as e:
+                        st.info(f"(Could not open parity_summary.csv for download: {e})")
+                    
+                    # Compact ✓/✗ preview
+                    last = st.session_state.get("parity_last_report_pairs") or []
+                    if last:
+                        st.caption("Summary (strict_k3 / projected_k3):")
+                        for p in last:
+                            s = "✅" if p["strict"]["k3"] else "❌"
+                            pr = "—"
+                            if "projected" in p:
+                                pr = "✅" if p["projected"]["k3"] else "❌"
+                            st.write(f"• {p['label']} → strict={s} · projected={pr}")
+
+                    
+        
+               
+                                        
 
 
 
