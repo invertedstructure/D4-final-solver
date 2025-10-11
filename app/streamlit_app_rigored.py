@@ -3932,30 +3932,72 @@ with st.expander("Parity · Run Suite"):
             except Exception as e:
                 st.error(f"Could not write CSV: {e}")
 
-            # --- Summary prelude (must be OUTSIDE the except above) ---
+                        # --- AFTER the for spec in table: loop finishes ------------------------------
+            
+            # 1) Run summary numbers
             rows_total   = len(table)
             rows_skipped = len(skipped)
             rows_run     = len(report_pairs)
             pct = (float(projected_green) / float(rows_run)) if (mode == "projected" and rows_run) else 0.0
-
-                        # --- UI summary + downloads ---
+            
+            # 2) Build the run-level policy tag
+            policy_tag_run = "strict" if mode == "strict" else f"projected(columns@k=3,{submode})"
+            
+            # 3) Assemble the report object
+            report = {
+                "schema_version": "1.0.0",
+                "written_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "app_version": APP_VERSION,
+                "policy_tag": policy_tag_run,
+                "projector_mode": ("strict" if mode == "strict" else submode),
+                "projector_filename": (projector_filename if (mode == "projected" and submode == "file") else ""),
+                "projector_hash": (projector_hash if (mode == "projected" and submode == "file") else ""),
+                "lane_mask_note": ("AUTO uses each pair’s lane mask" if (mode == "projected" and submode == "auto") else ""),
+                "summary": {
+                    "rows_total": rows_total,
+                    "rows_skipped": rows_skipped,
+                    "rows_run": rows_run,
+                    "projected_green_count": (projected_green if mode == "projected" else 0),
+                    "pct": (pct if mode == "projected" else 0.0),
+                },
+                "pairs": report_pairs,
+                "skipped": skipped,
+            }
+            
+            # 4) Deterministic content hash
+            report["content_hash"] = _sha256_hex(
+                _json.dumps(report, sort_keys=True, separators=(",", ":")).encode("utf-8")
+            )
+            
+            # 5) Persist in session so reruns can still download
+            st.session_state["parity_last_full_report"] = report
+            st.session_state["parity_last_report_pairs"] = report_pairs
+            
+            # 6) Write JSON file (optional but nice to have)
+            try:
+                _atomic_write_json(PARITY_JSON_PATH, report)
+            except Exception as e:
+                st.info(f"(Could not write parity_report.json to disk: {e})")
+            
+            # 7) Write CSV file (optional): if you already wrote it above, you can skip this.
+            # If you need it here, rebuild rows quickly from report_pairs.
+            # (If you keep your existing CSV writer above, you can delete this whole CSV block.)
+            
+            # 8) UI summary + download buttons
             st.success(
                 "Run complete · "
                 f"pairs={rows_run} · skipped={rows_skipped}"
                 + (f" · GREEN={projected_green} ({pct:.2%})" if mode == "projected" else "")
             )
             
-            # Save a lightweight copy of pairs in session for the mini matrix
-            st.session_state["parity_last_report_pairs"] = report_pairs
-            
-                       # JSON download (always from memory)
+            # JSON download (always from in-memory session; fallback to file if present)
             try:
                 rep = st.session_state.get("parity_last_full_report")
-                if rep is None and "report" in locals():
-                    rep = report  # fallback if still in scope
+                if rep is None and PARITY_JSON_PATH.exists():
+                    with open(PARITY_JSON_PATH, "r", encoding="utf-8") as f:
+                        rep = _json.load(f)
                 if rep is None:
-                    raise NameError("no report available in session or locals")
-            
+                    raise NameError("no report available in session or file")
                 json_mem = _io.BytesIO(_json.dumps(rep, ensure_ascii=False, indent=2).encode("utf-8"))
                 st.download_button(
                     "Download parity_report.json",
