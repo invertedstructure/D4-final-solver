@@ -3826,11 +3826,11 @@ with st.expander("Parity · Run Suite"):
                     }
                     if p_k3_calc:
                         projected_green += 1
-                        # --- Hashes & pair record (do this AFTER you’ve computed s_k2/s_k3 and proj_block)
+                                            # --- Hashes & pair record (AFTER s_k2/s_k3, strict_tag, proj_block)
                     left_hashes  = _hash_fixture_side(fxL)
                     right_hashes = _hash_fixture_side(fxR)
-                    p_hash = _pair_hash(left_hashes, right_hashes)
-        
+                    p_hash       = _pair_hash(left_hashes, right_hashes)
+                    
                     pair_out = {
                         "label": label,
                         "pair_hash": p_hash,
@@ -3840,8 +3840,12 @@ with st.expander("Parity · Run Suite"):
                         "right_hashes": right_hashes,
                         "strict": {"k2": bool(s_k2), "k3": bool(s_k3), "residual_tag": strict_tag},
                     }
-                    if proj_block is not None:
+                    if mode == "projected" and proj_block is not None:
                         pair_out["projected"] = proj_block
+                    
+                    # ALWAYS append (strict and projected)
+                    report_pairs.append(pair_out)
+
         
                     # Consistency checks (now that pair_out exists)
                     if pair_out["strict"]["k3"] is False:
@@ -3881,6 +3885,36 @@ with st.expander("Parity · Run Suite"):
                     }
                     # ... your report = { ... } just built above
                     st.session_state["parity_last_full_report"] = report
+
+                                        # Add a human-facing run_note
+                    report["run_note"] = (
+                        "Projected leg omitted in strict mode."
+                        if mode == "strict"
+                        else ("AUTO projector uses each pair’s lane mask" if submode == "auto"
+                              else "FILE projector applied to all pairs.")
+                    )
+                    
+                    # Deterministic content hash
+                    report["content_hash"] = _sha256_hex(
+                        _json.dumps(report, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                    )
+                    
+                    # Per-run filename: parity_report__{policy_tag}__{hash12}.json
+                    safe_tag = (
+                        ( "strict" if mode=="strict" else f"projected(columns@k=3,{submode})" )
+                        .replace("(", "_").replace(")", "").replace(",", "-").replace(" ", "")
+                    )
+                    hash12 = report["content_hash"][:12]
+                    json_name = f"parity_report__{safe_tag}__{hash12}.json"
+                    json_path = REPORTS_DIR / json_name  # ensure REPORTS_DIR = Path("reports")
+                    
+                    # Write JSON (and remember path for convenience)
+                    try:
+                        _atomic_write_json(json_path, report)
+                        st.session_state["parity_last_report_path"] = str(json_path)
+                    except Exception as e:
+                        st.error(f"Could not write JSON: {e}")
+
 
             
                     # Deterministic content hash
