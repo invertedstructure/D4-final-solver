@@ -3492,6 +3492,45 @@ def _policy_from_hint():
     return ("strict","")  # safe default
 
 
+# --- Filesystem guard (strict, no fuzzy)
+def _path_exists_strict(p: str) -> bool:
+    try:
+        P = Path(p)
+        return P.exists() and P.is_file()
+    except Exception:
+        return False
+
+# --- Embedded loader (inline preset → fixture objects)
+def _pp_load_embedded(emb: dict) -> dict:
+    """
+    Parse embedded JSON blobs using your io.parse_* API.
+    Accepts shapes in either form:
+      {"n": {"2": 2, "3": 3}}  or  {"n2": 2, "n3": 3}
+    We pass through to io.parse_shapes which already handles your schema.
+    """
+    if not isinstance(emb, dict):
+        raise ValueError("embedded must be an object")
+    return {
+        "boundaries": io.parse_boundaries(emb["boundaries"]),
+        "shapes":     io.parse_shapes(emb["shapes"]),
+        "cmap":       io.parse_cmap(emb["cmap"]),
+        "H":          io.parse_cmap(emb["H"]),
+    }
+
+# --- Path-bundle loader (path mode → fixture objects)
+def _pp_try_load(side: dict):
+    """
+    Load a fixture side from exact paths (no fuzzy). 
+    Expects keys: boundaries, cmap, H, shapes.
+    """
+    return load_fixture_from_paths(
+        boundaries_path=side["boundaries"],
+        cmap_path=side["cmap"],
+        H_path=side["H"],
+        shapes_path=side["shapes"],
+    )
+
+
 
 
  # ================= Parity · Run Suite (final, with AUTO/FILE guards) =================
