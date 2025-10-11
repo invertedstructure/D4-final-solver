@@ -3710,226 +3710,121 @@ with st.expander("Parity · Run Suite"):
             parity_nonce = _sha256_hex(nonce_src)[:8]
             st.caption("Run nonce"); st.code(parity_nonce, language="text")
 
-        # --- Run button
-        if st.button("▶ Run Parity Suite", key="pp_btn_run_suite_final"):
-            report_pairs, skipped = [], []
-            projected_green = 0
+        [# --- Run button
+if st.button("▶ Run Parity Suite", key="pp_btn_run_suite_final"):
+    report_pairs, skipped = [], []
+    projected_green = 0
 
-            for spec in table:
-                label = spec.get("label","PAIR")
-                L_in  = spec.get("left") or {}
-                R_in  = spec.get("right") or {}
+    for spec in table:
+        label = spec.get("label", "PAIR")
+        L_in = spec.get("left") or {}
+        R_in = spec.get("right") or {}
 
-                # Resolve sides strictly (no fuzz)
-                okL, fxL = _resolve_side_or_skip_exact(L_in, label=label, side_name="left")
-                okR, fxR = _resolve_side_or_skip_exact(R_in, label=label, side_name="right")
-                if okL != "ok": skipped.append(fxL); continue
-                if okR != "ok": skipped.append(fxR); continue
+        # Resolve sides strictly (no fuzz)
+        okL, fxL = _resolve_side_or_skip_exact(L_in, label=label, side_name="left")
+        okR, fxR = _resolve_side_or_skip_exact(R_in, label=label, side_name="right")
+        if okL != "ok":
+            skipped.append(fxL)
+            continue
+        if okR != "ok":
+            skipped.append(fxR)
+            continue
 
-                # Lane-mask SSOT from this pair’s boundaries (left is sufficient in your data model)
-                lane_mask_vec = _lane_mask_from_boundaries(fxL["boundaries"])
-                lane_mask_str = "".join("1" if int(x) else "0" for x in lane_mask_vec)
+        # Lane-mask SSOT from this pair’s boundaries (left is sufficient in your data model)
+        lane_mask_vec = _lane_mask_from_boundaries(fxL["boundaries"])
+        lane_mask_str = "".join("1" if int(x) else "0" for x in lane_mask_vec)
 
-                           # --- STRICT residuals (used for tagging and AUTO projection)
-            R3_L = _r3_from_fixture(fxL)
-            R3_R = _r3_from_fixture(fxR)
-
-            # --- PROJECTED leg (only when mode == "projected")
-            proj_block = None
-            if mode == "projected":
-                # Build projection config once per pair
-                cfg = {"source": {"2": "file", "3": submode}, "projector_files": {}}
-                if submode == "file":
-                    cfg["projector_files"]["3"] = projector_filename
-
-                if submode == "auto":
-                    # 1) Ask the gate for booleans under AUTO (provenance matches app)
-                    outL_p = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], cfg)
-                    outR_p = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], cfg)
-                    p_k2_gate = _bool_and(outL_p.get("2", {}).get("eq"), outR_p.get("2", {}).get("eq"))
-                    _ = _bool_and(outL_p.get("3", {}).get("eq"), outR_p.get("3", {}).get("eq"))  # not used for truth
-
-                    # 2) Apply Π_auto = diag(lane_mask_vec) to STRICT residuals for k3 truth
-                    R3_L_proj = _apply_diag_to_residual(R3_L, lane_mask_vec)
-                    R3_R_proj = _apply_diag_to_residual(R3_R, lane_mask_vec)
-                    p_k3_calc = _all_zero_mat(R3_L_proj) and _all_zero_mat(R3_R_proj)
-
-                    # 3) Classify post-projection residual (crisp)
-                    proj_tag_L = _classify_residual(R3_L_proj, lane_mask_vec)
-                    proj_tag_R = _classify_residual(R3_R_proj, lane_mask_vec)
-                    proj_tag   = proj_tag_L if proj_tag_L != "none" else proj_tag_R
-
-                    # 4) Per-pair projector provenance (AUTO varies by pair)
-                    per_pair_proj_hash = _hash_obj(lane_mask_vec)
-
-                    # 5) Final projected block (k2 from gate; k3 from projected residual)
-                    proj_block = {
-                        "k2": bool(p_k2_gate),
-                        "k3": bool(p_k3_calc),
-                        "residual_tag": proj_tag,
-                        "projector_hash": per_pair_proj_hash,  # per-pair in AUTO
-                    }
-                    if p_k3_calc:
-                        projected_green += 1
-
-                else:
-                    # FILE mode: ask the gate for projected booleans
-                    outL_p = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], cfg)
-                    outR_p = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], cfg)
-                    p_k2_gate = _bool_and(outL_p.get("2", {}).get("eq"), outR_p.get("2", {}).get("eq"))
-                    p_k3_gate = _bool_and(outL_p.get("3", {}).get("eq"), outR_p.get("3", {}).get("eq"))
-
-                    proj_block = {
-                        "k2": bool(p_k2_gate),
-                        "k3": bool(p_k3_gate),
-                        # You can keep strict-based tagging or compute a file-projected residual tag if you add a helper
-                        "residual_tag": _classify_residual(R3_L, lane_mask_vec),
-                    }
-                    if p_k3_gate:
-                        projected_green += 1
-
-
-
-                
-                # inside AUTO branch
-                per_pair_proj_hash = _hash_obj(lane_mask_vec)
-                proj_block = {
-                    "k2": bool(p_k2_gate),
-                    "k3": bool(p_k3_calc),
-                    "residual_tag": proj_tag,
-                    "projector_hash": per_pair_proj_hash,  # per-pair in AUTO
-                }
-
+        # --- STRICT residuals (used for tagging and AUTO projection)
+        R3_L = _r3_from_fixture(fxL)
+        R3_R = _r3_from_fixture(fxR)
 
                 # --- STRICT leg (through overlap gate, no projection)
-                outL_s = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], None)
-                outR_s = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], None)
-                s_k2 = _bool_and(outL_s.get("2",{}).get("eq"), outR_s.get("2",{}).get("eq"))
-                s_k3 = _bool_and(outL_s.get("3",{}).get("eq"), outR_s.get("3",{}).get("eq"))
-                # residual tag (strict) — best-effort helper; force consistency rule
-                try:
-                    strict_tag = _residual_enum_from_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], None)
-                except Exception:
-                    strict_tag = "none" if bool(s_k3) else "ker"
-                                    # --- STRICT leg (through overlap gate, no projection)
-                outL_s = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], None)
-                outR_s = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], None)
-                s_k2   = _bool_and(outL_s.get("2", {}).get("eq"), outR_s.get("2", {}).get("eq"))
-                s_k3   = _bool_and(outL_s.get("3", {}).get("eq"), outR_s.get("3", {}).get("eq"))
-                
-                # --- STRICT residuals baseline (used for AUTO and FILE projection)
-                try:
-                    R3_L  # noqa: F821
-                    R3_R  # noqa: F821
-                except NameError:
-                    def _r3_from_fixture(fx: dict) -> list[list[int]]:
-                        B = (fx.get("boundaries") or {}).blocks.__root__
-                        C = (fx.get("cmap") or {}).blocks.__root__
-                        H = (fx.get("H") or {}).blocks.__root__
-                        d3 = B.get("3->2") or B.get("3") or []
-                        H2 = H.get("2") or []
-                        C3 = C.get("3") or []
-                        if not (d3 and H2 and C3):
-                            return []
-                        # GF(2) matmul: H2 @ d3
-                        m, k, n = len(H2), len(H2[0]), len(d3[0])
-                        M = [[0] * n for _ in range(m)]
-                        for i in range(m):
-                            for t in range(k):
-                                if H2[i][t] & 1:
-                                    rt = d3[t]
-                                    for j in range(n):
-                                        M[i][j] ^= (rt[j] & 1)
-                        # R3 = (H2@d3) ^ (C3 ^ I3)
-                        I3 = [[1 if i == j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
-                        C3p = [[(C3[i][j] ^ I3[i][j]) & 1 for j in range(len(C3[0]))] for i in range(len(C3))] if C3 else []
-                        if not C3p:
-                            return M
-                        # XOR same shape
-                        r = len(M); c = len(M[0])
-                        R = [[0] * c for _ in range(r)]
-                        for i in range(min(r, len(C3p))):
-                            for j in range(min(c, len(C3p[0]))):
-                                R[i][j] = (M[i][j] ^ C3p[i][j]) & 1
-                        return R
-                
-                    R3_L = _r3_from_fixture(fxL)
-                    R3_R = _r3_from_fixture(fxR)
+        outL_s = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], None)
+        outR_s = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], None)
+        s_k2   = _bool_and(outL_s.get("2", {}).get("eq"), outR_s.get("2", {}).get("eq"))
+        s_k3   = _bool_and(outL_s.get("3", {}).get("eq"), outR_s.get("3", {}).get("eq"))
 
+        # --- STRICT residuals baseline (used for AUTO/FILE projection)
+        R3_L = _r3_from_fixture(fxL)
+        R3_R = _r3_from_fixture(fxR)
 
-                                # --- PROJECTED leg decision
-                proj_block = None
-                
-                if mode == "projected":
-                    # Build projection cfg per pair (keeps k2 provenance aligned with your gate)
-                    cfg = {"source": {"2": "file", "3": submode}, "projector_files": {}}
-                    if submode == "file":
-                        cfg["projector_files"]["3"] = projector_filename
-                
-                    # Gate booleans for k2 / k3 (we'll still compute projected k3 ourselves for FILE)
-                    outL_p = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], cfg)
-                    outR_p = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], cfg)
-                    p_k2_gate = _bool_and(outL_p.get("2", {}).get("eq"), outR_p.get("2", {}).get("eq"))
-                    p_k3_gate = _bool_and(outL_p.get("3", {}).get("eq"), outR_p.get("3", {}).get("eq"))
-                
-                    if submode == "auto":
-                        # Π_auto = diag(lane_mask_vec)
-                        R3_L_proj = _apply_diag_to_residual(R3_L, lane_mask_vec)
-                        R3_R_proj = _apply_diag_to_residual(R3_R, lane_mask_vec)
-                        p_k3_calc = _all_zero_mat(R3_L_proj) and _all_zero_mat(R3_R_proj)
-                
-                        proj_tag_L = _classify_residual(R3_L_proj, lane_mask_vec)
-                        proj_tag_R = _classify_residual(R3_R_proj, lane_mask_vec)
-                        proj_tag   = proj_tag_L if proj_tag_L != "none" else proj_tag_R
-                
-                        proj_block = {
-                            "k2": bool(p_k2_gate),
-                            "k3": bool(p_k3_calc),
-                            "residual_tag": proj_tag,
-                        }
-                        if p_k3_calc:
-                            projected_green += 1
-                
-                    else:
-                        # -------- FILE mode (strict guard; no override) --------
-                        diag = projector_diag or []
-                        n3   = len(lane_mask_vec)
-                
-                        # Guard: shape & lane match per pair (skip on mismatch)
-                        reason = None
-                        if len(diag) != n3:
-                            reason = "P3_SHAPE"
-                        else:
-                            if any((int(diag[j]) & 1) != (int(lane_mask_vec[j]) & 1) for j in range(n3)):
-                                reason = "P3_LANE_MISMATCH"
-                
-                        if reason is not None:
-                            skipped.append({
-                                "label": label,
-                                "side": "both",
-                                "error": reason,
-                                "diag": diag,
-                                "mask": lane_mask_vec,
-                            })
-                            # Do not run this pair under mismatched Π
-                            continue
-                    
-                            # Apply FILE projector to residuals, compute projected k3 off R3 @ Π
-                            R3_L_proj = _apply_diag_to_residual(R3_L, diag)
-                            R3_R_proj = _apply_diag_to_residual(R3_R, diag)
-                            p_k3_calc = _all_zero_mat(R3_L_proj) and _all_zero_mat(R3_R_proj)
-                    
-                            proj_tag_L = _classify_residual(R3_L_proj, lane_mask_vec)
-                            proj_tag_R = _classify_residual(R3_R_proj, lane_mask_vec)
-                            proj_tag   = proj_tag_L if proj_tag_L != "none" else proj_tag_R
-                    
-                            proj_block = {
-                                "k2": bool(p_k2_gate),   # keep k2 source identical to the app path
-                                "k3": bool(p_k3_calc),   # but force projected k3 from post-projection residual
-                                "residual_tag": proj_tag,
-                            }
-                            if p_k3_calc:
-                                projected_green += 1                      
+        # strict residual tag (best-effort, keep consistent with s_k3)
+        try:
+            strict_tag = _residual_enum_from_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], None)
+        except Exception:
+            strict_tag = "none" if bool(s_k3) else "ker"
+
+        # --- PROJECTED leg (only when mode == "projected")
+        proj_block = None
+        if mode == "projected":
+            # Build projection config per pair (for gate booleans)
+            cfg = {"source": {"2": "file", "3": submode}, "projector_files": {}}
+            if submode == "file":
+                cfg["projector_files"]["3"] = projector_filename
+
+            # Gate booleans for k2/k3 under the chosen mode (keeps provenance aligned)
+            outL_p   = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], cfg)
+            outR_p   = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], cfg)
+            p_k2_gate = _bool_and(outL_p.get("2", {}).get("eq"), outR_p.get("2", {}).get("eq"))
+            p_k3_gate = _bool_and(outL_p.get("3", {}).get("eq"), outR_p.get("3", {}).get("eq"))
+
+            if submode == "auto":
+                # Π_auto = diag(lane_mask_vec) → apply to STRICT residuals
+                R3_L_proj = _apply_diag_to_residual(R3_L, lane_mask_vec)
+                R3_R_proj = _apply_diag_to_residual(R3_R, lane_mask_vec)
+                p_k3_calc = _all_zero_mat(R3_L_proj) and _all_zero_mat(R3_R_proj)
+
+                proj_tag_L = _classify_residual(R3_L_proj, lane_mask_vec)
+                proj_tag_R = _classify_residual(R3_R_proj, lane_mask_vec)
+                proj_tag   = proj_tag_L if proj_tag_L != "none" else proj_tag_R
+
+                proj_block = {
+                    "k2": bool(p_k2_gate),      # k2 from gate
+                    "k3": bool(p_k3_calc),      # k3 truth from projected residual
+                    "residual_tag": proj_tag,
+                    "projector_hash": _hash_obj(lane_mask_vec),  # per-pair provenance
+                }
+                if p_k3_calc:
+                    projected_green += 1
+
+            else:
+                # -------- FILE mode (strict guard; no override) --------
+                diag = projector_diag or []
+                n3   = len(lane_mask_vec)
+
+                reason = None
+                if len(diag) != n3:
+                    reason = "P3_SHAPE"
+                elif any((int(diag[j]) & 1) != (int(lane_mask_vec[j]) & 1) for j in range(n3)):
+                    reason = "P3_LANE_MISMATCH"
+
+                if reason is not None:
+                    skipped.append({
+                        "label": label,
+                        "side": "both",
+                        "error": reason,
+                        "diag": diag,
+                        "mask": lane_mask_vec,
+                    })
+                    continue  # skip this pair due to mismatch
+
+                # Apply FILE projector diag(P) to STRICT residuals for k3 truth
+                R3_L_proj = _apply_diag_to_residual(R3_L, diag)
+                R3_R_proj = _apply_diag_to_residual(R3_R, diag)
+                p_k3_calc = _all_zero_mat(R3_L_proj) and _all_zero_mat(R3_R_proj)
+
+                proj_tag_L = _classify_residual(R3_L_proj, lane_mask_vec)
+                proj_tag_R = _classify_residual(R3_R_proj, lane_mask_vec)
+                proj_tag   = proj_tag_L if proj_tag_L != "none" else proj_tag_R
+
+                proj_block = {
+                    "k2": bool(p_k2_gate),      # k2 from gate
+                    "k3": bool(p_k3_calc),      # k3 truth from projected residual
+                    "residual_tag": proj_tag,
+                }
+                if p_k3_calc:
+                    projected_green += 1
+
                         
 
 
