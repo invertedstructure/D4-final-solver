@@ -3989,7 +3989,8 @@ with st.expander("Parity · Run Suite"):
                 f"pairs={rows_run} · skipped={rows_skipped}"
                 + (f" · GREEN={projected_green} ({pct:.2%})" if mode == "projected" else "")
             )
-            
+            # Save a lightweight copy of pairs in session for the mini matrix
+            st.session_state["parity_last_report_pairs"] = report_pairs
             # JSON download (always from in-memory session; fallback to file if present)
             try:
                 rep = st.session_state.get("parity_last_full_report")
