@@ -3729,6 +3729,15 @@ with st.expander("Parity · Run Suite"):
                 # Lane-mask SSOT from this pair’s boundaries (left is sufficient in your data model)
                 lane_mask_vec = _lane_mask_from_boundaries(fxL["boundaries"])
                 lane_mask_str = "".join("1" if int(x) else "0" for x in lane_mask_vec)
+                                # inside AUTO branch
+                per_pair_proj_hash = _hash_obj(lane_mask_vec)
+                proj_block = {
+                    "k2": bool(p_k2_gate),
+                    "k3": bool(p_k3_calc),
+                    "residual_tag": proj_tag,
+                    "projector_hash": per_pair_proj_hash,  # per-pair in AUTO
+                }
+
 
                 # --- STRICT leg (through overlap gate, no projection)
                 outL_s = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], None)
@@ -3867,6 +3876,14 @@ with st.expander("Parity · Run Suite"):
                 left_hashes  = _hash_fixture_side(fxL)
                 right_hashes = _hash_fixture_side(fxR)
                 p_hash = _pair_hash(left_hashes, right_hashes)
+                                # strict consistency
+                if pair_out["strict"]["k3"] is False:
+                    assert pair_out["strict"]["residual_tag"] in {"ker","lanes","mixed"}
+                
+                # projected consistency when present
+                if proj_block is not None and proj_block["k3"] is False:
+                    assert proj_block["residual_tag"] in {"ker","lanes","mixed"}
+
 
                 # --- Assemble pair record
                 pair_out = {
@@ -3882,32 +3899,35 @@ with st.expander("Parity · Run Suite"):
                     pair_out["projected"] = proj_block
                 report_pairs.append(pair_out)
 
-            # --- Report root
-            rows_total   = len(table)
-            rows_skipped = len(skipped)
-            rows_run     = len(report_pairs)
-            pct = (float(projected_green)/float(rows_run)) if (mode=="projected" and rows_run) else 0.0
-            policy_tag = rc.get("policy_tag") or ("strict" if mode=="strict" else f"projected(columns@k=3,{submode})")
+                            # Build report root (after the loop finishes)
+                rows_total   = len(table)
+                rows_skipped = len(skipped)
+                rows_run     = len(report_pairs)
+                pct = (float(projected_green)/float(rows_run)) if (mode=="projected" and rows_run) else 0.0
+                
+                # Freeze the run-level tag from mode/submode ONLY
+                policy_tag_run = "strict" if mode=="strict" else f"projected(columns@k=3,{submode})"
+                
+                report = {
+                    "schema_version": "1.0.0",
+                    "written_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "app_version": APP_VERSION,
+                    "policy_tag": policy_tag_run,                      # <- use frozen tag
+                    "projector_mode": ("strict" if mode=="strict" else submode),
+                    "projector_filename": (projector_filename if (mode=="projected" and submode=="file") else ""),
+                    "projector_hash": (projector_hash if (mode=="projected" and submode=="file") else ""),
+                    "lane_mask_note": ("AUTO uses each pair’s lane mask" if (mode=="projected" and submode=="auto") else ""),
+                    "summary": {
+                        "rows_total": rows_total,
+                        "rows_skipped": rows_skipped,
+                        "rows_run": rows_run,
+                        "projected_green_count": (projected_green if mode=="projected" else 0),
+                        "pct": (pct if mode=="projected" else 0.0),
+                    },
+                    "pairs": report_pairs,
+                    "skipped": skipped,
+                }
 
-            report = {
-                "schema_version": "1.0.0",
-                "written_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-                "app_version": APP_VERSION,
-                "policy_tag": policy_tag,
-                "projector_mode": ("strict" if mode=="strict" else submode),
-                "projector_filename": (projector_filename if (mode=="projected" and submode=="file") else ""),
-                "projector_hash": (projector_hash if (mode=="projected" and submode=="file") else ""),
-                "lane_mask_note": ("AUTO uses each pair’s lane mask" if (mode=="projected" and submode=="auto") else ""),
-                "summary": {
-                    "rows_total": rows_total,
-                    "rows_skipped": rows_skipped,
-                    "rows_run": rows_run,
-                    "projected_green_count": (projected_green if mode=="projected" else 0),
-                    "pct": (pct if mode=="projected" else 0.0),
-                },
-                "pairs": report_pairs,
-                "skipped": skipped,
-            }
             # Deterministic content hash
             report["content_hash"] = _sha256_hex(_json.dumps(report, sort_keys=True, separators=(",",":")).encode("utf-8"))
 
