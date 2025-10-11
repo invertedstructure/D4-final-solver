@@ -3891,102 +3891,91 @@ with st.expander("Parity · Run Suite"):
                     except Exception as e:
                         st.error(f"Could not write JSON: {e}")
             
-                    # --- Write CSV (dedupe)
-                    hdr = [
-                        "label","policy_tag","projector_mode","projector_hash",
-                        "strict_k2","strict_k3","projected_k2","projected_k3",
-                        "residual_strict","residual_projected","lane_mask",
-                        "lh_boundaries_hash","lh_shapes_hash","lh_cmap_hash","lh_H_hash",
-                        "rh_boundaries_hash","rh_shapes_hash","rh_cmap_hash","rh_H_hash",
-                        "pair_hash",
-                    ]
-                    dedupe = set()
-                    rows_csv = []
-                    for p in report_pairs:
-                        key = (p["label"], p["pair_hash"], report["policy_tag"], report["projector_mode"], report["projector_hash"])
-                        if key in dedupe:
-                            continue
-                        dedupe.add(key)
-                        proj = p.get("projected") or {}
-                        rows_csv.append([
-                            p["label"], report["policy_tag"], report["projector_mode"], report["projector_hash"],
-                            str(p["strict"]["k2"]).lower(), str(p["strict"]["k3"]).lower(),
-                            ("" if not proj else str(proj.get("k2", False)).lower()),
-                            ("" if not proj else str(proj.get("k3", False)).lower()),
-                            p["strict"].get("residual_tag",""),
-                            ("" if not proj else proj.get("residual_tag","")),
-                            p.get("lane_mask",""),
-                            p["left_hashes"]["boundaries"], p["left_hashes"]["shapes"], p["left_hashes"]["cmap"], p["left_hashes"]["H"],
-                            p["right_hashes"]["boundaries"], p["right_hashes"]["shapes"], p["right_hashes"]["cmap"], p["right_hashes"]["H"],
-                            p["pair_hash"],
-                        ])
-                    try:
-                        tmp_csv = PARITY_CSV_PATH.with_suffix(".csv.tmp")
-                        with open(tmp_csv, "w", newline="", encoding="utf-8") as f:
-                            w = csv.writer(f); w.writerow(hdr); w.writerows(rows_csv)
-                            f.flush(); os.fsync(f.fileno())
-                        os.replace(tmp_csv, PARITY_CSV_PATH)
-                    except Exception as e:
-                        st.error(f"Could not write CSV: {e}")
-                        # --- Summary prelude (compute counts used by the UI + report) ---
-                        rows_total   = len(table)
-                        rows_skipped = len(skipped)
-                        rows_run     = len(report_pairs)
-                        pct = (float(projected_green) / float(rows_run)) if (mode == "projected" and rows_run) else 0.0
+                                # --- Write CSV (dedupe)
+            hdr = [
+                "label","policy_tag","projector_mode","projector_hash",
+                "strict_k2","strict_k3","projected_k2","projected_k3",
+                "residual_strict","residual_projected","lane_mask",
+                "lh_boundaries_hash","lh_shapes_hash","lh_cmap_hash","lh_H_hash",
+                "rh_boundaries_hash","rh_shapes_hash","rh_cmap_hash","rh_H_hash",
+                "pair_hash",
+            ]
+            dedupe = set()
+            rows_csv = []
+            for p in report_pairs:
+                key = (p["label"], p["pair_hash"], report["policy_tag"], report["projector_mode"], report["projector_hash"])
+                if key in dedupe:
+                    continue
+                dedupe.add(key)
+                proj = p.get("projected") or {}
+                rows_csv.append([
+                    p["label"], report["policy_tag"], report["projector_mode"], report["projector_hash"],
+                    str(p["strict"]["k2"]).lower(), str(p["strict"]["k3"]).lower(),
+                    ("" if not proj else str(proj.get("k2", False)).lower()),
+                    ("" if not proj else str(proj.get("k3", False)).lower()),
+                    p["strict"].get("residual_tag",""),
+                    ("" if not proj else proj.get("residual_tag","")),
+                    p.get("lane_mask",""),
+                    p["left_hashes"]["boundaries"], p["left_hashes"]["shapes"], p["left_hashes"]["cmap"], p["left_hashes"]["H"],
+                    p["right_hashes"]["boundaries"], p["right_hashes"]["shapes"], p["right_hashes"]["cmap"], p["right_hashes"]["H"],
+                    p["pair_hash"],
+                ])
+            try:
+                tmp_csv = PARITY_CSV_PATH.with_suffix(".csv.tmp")
+                with open(tmp_csv, "w", newline="", encoding="utf-8") as f:
+                    w = csv.writer(f); w.writerow(hdr); w.writerows(rows_csv)
+                    f.flush(); os.fsync(f.fileno())
+                os.replace(tmp_csv, PARITY_CSV_PATH)
+            except Exception as e:
+                st.error(f"Could not write CSV: {e}")
 
-                # --- UI summary + downloads ---
-        # Always show a summary toast so you know the block executed.
-        st.success(
-            "Run complete · "
-            f"pairs={rows_run} · skipped={rows_skipped}"
-            + (f" · GREEN={projected_green} ({pct:.2%})" if mode == "projected" else "")
-        )
+            # --- Summary prelude (must be OUTSIDE the except above) ---
+            rows_total   = len(table)
+            rows_skipped = len(skipped)
+            rows_run     = len(report_pairs)
+            pct = (float(projected_green) / float(rows_run)) if (mode == "projected" and rows_run) else 0.0
 
-        # Keep a lightweight copy for the compact preview
-        st.session_state["parity_last_report_pairs"] = report_pairs
-
-        # --- Safer downloads (use in-memory bytes, not open file handles) ---
-        try:
-            json_bytes = _json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8")
-            st.download_button(
-                "Download parity_report.json",
-                data=json_bytes,
-                file_name="parity_report.json",
-                mime="application/json",
-                key="dl_parity_json_final_new",
+            # --- UI summary + downloads ---
+            st.success(
+                "Run complete · "
+                f"pairs={rows_run} · skipped={rows_skipped}"
+                + (f" · GREEN={projected_green} ({pct:.2%})" if mode == "projected" else "")
             )
-        except Exception as e:
-            st.info(f"(Could not build JSON for download: {e})")
 
-        try:
-            if PARITY_CSV_PATH.exists():
-                csv_bytes = PARITY_CSV_PATH.read_bytes()
-                st.download_button(
-                    "Download parity_summary.csv",
-                    data=csv_bytes,
-                    file_name="parity_summary.csv",
-                    mime="text/csv",
-                    key="dl_parity_csv_final_new",
-                )
-            else:
-                st.info("(No CSV found to download — did any pairs run?)")
-        except Exception as e:
-            st.info(f"(Could not open parity_summary.csv for download: {e})")
+            st.session_state["parity_last_report_pairs"] = report_pairs
 
-        # --- Compact ✓/✗ preview ---
-        last = st.session_state.get("parity_last_report_pairs") or []
-        if not last:
-            # Helpful hint if everything was skipped
-            if rows_run == 0 and rows_skipped > 0:
-                st.warning("All rows were skipped. Open the 'skipped' list in the report to see precise reasons.")
-        else:
-            st.caption("Summary (strict_k3 / projected_k3):")
-            for p in last:
-                s = "✅" if p["strict"]["k3"] else "❌"
-                pr = "—"
-                if "projected" in p:
-                    pr = "✅" if p["projected"]["k3"] else "❌"
-                st.write(f"• {p['label']} → strict={s} · projected={pr}")
+            try:
+                with open(PARITY_JSON_PATH, "rb") as fj:
+                    st.download_button(
+                        "Download parity_report.json",
+                        fj,
+                        file_name="parity_report.json",
+                        key="dl_parity_json_final_new",
+                    )
+            except Exception as e:
+                st.info(f"(Could not open parity_report.json for download: {e})")
+
+            try:
+                with open(PARITY_CSV_PATH, "rb") as fc:
+                    st.download_button(
+                        "Download parity_summary.csv",
+                        fc,
+                        file_name="parity_summary.csv",
+                        key="dl_parity_csv_final_new",
+                    )
+            except Exception as e:
+                st.info(f"(Could not open parity_summary.csv for download: {e})")
+
+            last = st.session_state.get("parity_last_report_pairs") or []
+            if last:
+                st.caption("Summary (strict_k3 / projected_k3):")
+                for p in last:
+                    s = "✅" if p["strict"]["k3"] else "❌"
+                    pr = "—"
+                    if "projected" in p:
+                        pr = "✅" if p["projected"]["k3"] else "❌"
+                    st.write(f"• {p['label']} → strict={s} · projected={pr}")
+
 
                                                         
 
