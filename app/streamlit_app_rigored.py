@@ -3571,6 +3571,91 @@ def _short_hash(h: str | None) -> str:
     return (h[:8] + "…") if h else "—"
 
 
+# --- Read a diagonal from a projector file (accepts {diag:[...]} or a 3x3 block)
+def _projector_diag_from_file(path: str) -> list[int]:
+    try:
+        with open(Path(path), "r", encoding="utf-8") as f:
+            pj = _json.load(f)
+    except Exception as e:
+        raise RuntimeError(f"P3_FILE_READ: {e}")
+
+    # Common shapes we support:
+    #  1) {"diag":[1,1,0]}
+    #  2) {"blocks":{"3":[[1,0,0],[0,1,0],[0,0,0]]}}
+    #  3) {"3":[[...]]}
+    if isinstance(pj, dict) and "diag" in pj:
+        diag = pj["diag"]
+        if not (isinstance(diag, list) and all(int(x) in (0,1) for x in diag)):
+            raise RuntimeError("P3_BAD_DIAG: diag must be a 0/1 list")
+        return [int(x) for x in diag]
+
+    # Try blocks["3"] or top-level "3"
+    M = None
+    if isinstance(pj, dict) and "blocks" in pj and isinstance(pj["blocks"], dict) and "3" in pj["blocks"]:
+        M = pj["blocks"]["3"]
+    elif isinstance(pj, dict) and "3" in pj:
+        M = pj["3"]
+
+    if M is None:
+        raise RuntimeError("P3_NOT_FOUND: expected 'diag' or blocks['3'] / '3'")
+
+    # Verify diagonal and extract its diagonal as diag list
+    if not (isinstance(M, list) and M and all(isinstance(row, list) and len(row) == len(M) for row in M)):
+        raise RuntimeError("P3_SHAPE: 3x3 (square) matrix required")
+    n = len(M)
+    # check diagonal + idempotent over GF(2)
+    # diagonal:
+    for i in range(n):
+        for j in range(n):
+            v = int(M[i][j]) & 1
+            if (i == j and v not in (0,1)) or (i != j and v != 0):
+                raise RuntimeError("P3_DIAGONAL: off-diagonal entries must be 0")
+    # idempotent: M^2 == M over GF(2) -> for diagonal with 0/1 it holds; we already enforced diagonal
+    return [int(M[i][i]) & 1 for i in range(n)]
+
+
+# --- Apply a diagonal projector to a residual matrix: R_proj = R @ diag(mask)
+def _apply_diag_to_residual(R: list[list[int]], diag_bits: list[int]) -> list[list[int]]:
+    if not R or not diag_bits:
+        return []
+    m, n = len(R), len(R[0])
+    if n != len(diag_bits):
+        raise RuntimeError(f"P3_SHAPE_MISMATCH: residual n={n} vs diag n={len(diag_bits)}")
+    out = [[0]*n for _ in range(m)]
+    for i in range(m):
+        Ri = R[i]
+        for j in range(n):
+            out[i][j] = (int(Ri[j]) & 1) * (int(diag_bits[j]) & 1)
+    return out
+
+
+# --- Quick all-zero check for matrices over GF(2)
+def _all_zero_mat(M: list[list[int]]) -> bool:
+    if not M:
+        return True
+    return all((int(x) & 1) == 0 for row in M for x in row)
+
+
+# --- Strict FILE provenance (no experimental override anywhere)
+projector_hash = ""
+projector_diag = None  # will be a list[int] only for projected(file)
+
+if mode == "projected" and submode == "file":
+    # Require a valid file
+    if not projector_filename or not _path_exists_strict(projector_filename):
+        st.error("Projector FILE required but missing/invalid. (projected:file) — blocking run.")
+        st.stop()
+    try:
+        projector_hash = _sha256_hex(Path(projector_filename).read_bytes())
+        projector_diag = _projector_diag_from_file(projector_filename)  # list[int]
+        if not isinstance(projector_diag, list) or not projector_diag:
+            st.error("P3_FILE_INVALID: empty or bad projector diag.")
+            st.stop()
+    except Exception as e:
+        st.error(f"Projector FILE invalid: {e}")
+        st.stop()
+
+
 
 
  # ================= Parity · Run Suite (final, with AUTO/FILE guards) =================
@@ -3584,22 +3669,7 @@ with st.expander("Parity · Run Suite"):
         rc = st.session_state.get("run_ctx") or {}
         projector_filename = rc.get("projector_filename","") if (mode=="projected" and submode=="file") else ""
 
-              # Initialize the session state variable with default value
-        st.session_state.setdefault("pp_allow_mismatch", False)
-        
-        # Render the checkbox using only the key
-        allow_mismatch = st.checkbox(
-            "Allow mismatched Π (experimental; non-promotable)",
-            key="pp_allow_mismatch",
-            help="If off (default), FILE projector must match each pair’s lane mask; mismatches are skipped. "
-                 "If on, mismatched pairs run but are marked experimental."
-        )
-        
-        # Read the value from session_state whenever needed
-        allow_mismatch_value = bool(st.session_state.get("pp_allow_mismatch", False))
-        # --- Resolve FILE projector provenance (hash + diag extraction)
-        projector_hash = ""
-        projector_diag = None  # list[int] or None
+              
 
         def _projector_diag_from_file(pth: str):
             # Expect a JSON with blocks["3"] as an n3×n3 binary matrix
@@ -3671,73 +3741,80 @@ with st.expander("Parity · Run Suite"):
                 except Exception:
                     strict_tag = "none" if bool(s_k3) else "ker"
 
-                # --- PROJECTED leg decision & guard
+                                # --- PROJECTED leg decision
                 proj_block = None
-                per_pair_proj_hash = ""
-
+                
                 if mode == "projected":
-                    # Build projection cfg once per pair
-                    cfg = {"source":{"2":"file","3":submode}, "projector_files":{}}
+                    # Build projection cfg per pair (keeps k2 provenance aligned with your gate)
+                    cfg = {"source": {"2": "file", "3": submode}, "projector_files": {}}
                     if submode == "file":
                         cfg["projector_files"]["3"] = projector_filename
-
-                        # FILE guard: compare diag(P) to this pair’s lane mask
-                        # If n differs or diag mismatch -> skip or mark experimental based on override.
+                
+                    # Gate booleans for k2 / k3 (we'll still compute projected k3 ourselves for FILE)
+                    outL_p = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], cfg)
+                    outR_p = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], cfg)
+                    p_k2_gate = _bool_and(outL_p.get("2", {}).get("eq"), outR_p.get("2", {}).get("eq"))
+                    p_k3_gate = _bool_and(outL_p.get("3", {}).get("eq"), outR_p.get("3", {}).get("eq"))
+                
+                    if submode == "auto":
+                        # Π_auto = diag(lane_mask_vec)
+                        R3_L_proj = _apply_diag_to_residual(R3_L, lane_mask_vec)
+                        R3_R_proj = _apply_diag_to_residual(R3_R, lane_mask_vec)
+                        p_k3_calc = _all_zero_mat(R3_L_proj) and _all_zero_mat(R3_R_proj)
+                
+                        proj_tag_L = _classify_residual(R3_L_proj, lane_mask_vec)
+                        proj_tag_R = _classify_residual(R3_R_proj, lane_mask_vec)
+                        proj_tag   = proj_tag_L if proj_tag_L != "none" else proj_tag_R
+                
+                        proj_block = {
+                            "k2": bool(p_k2_gate),
+                            "k3": bool(p_k3_calc),
+                            "residual_tag": proj_tag,
+                        }
+                        if p_k3_calc:
+                            projected_green += 1
+                
+                    else:
+                        # -------- FILE mode (strict guard; no override) --------
                         diag = projector_diag or []
-                        n3 = len(lane_mask_vec)
-                        mismatch = False
-                        reason = ""
+                        n3   = len(lane_mask_vec)
+                
+                        # Guard: shape & lane match per pair (skip on mismatch)
+                        reason = None
                         if len(diag) != n3:
-                            mismatch = True
                             reason = "P3_SHAPE"
                         else:
                             if any((int(diag[j]) & 1) != (int(lane_mask_vec[j]) & 1) for j in range(n3)):
-                                mismatch = True
                                 reason = "P3_LANE_MISMATCH"
-
-                        if mismatch and not allow_mismatch:
+                
+                        if reason is not None:
                             skipped.append({
                                 "label": label,
                                 "side": "both",
                                 "error": reason,
                                 "diag": diag,
-                                "mask": lane_mask_vec
+                                "mask": lane_mask_vec,
                             })
+                            # Do not run this pair under mismatched Π
                             continue
-
-                    # Run projected leg through the same overlap path (canonical)
-                    outL_p = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], cfg)
-                    outR_p = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], cfg)
-                    p_k2 = _bool_and(outL_p.get("2",{}).get("eq"), outR_p.get("2",{}).get("eq"))
-                    p_k3 = _bool_and(outL_p.get("3",{}).get("eq"), outR_p.get("3",{}).get("eq"))
-
-                    # Tag projected residuals (post-projection)
-                    try:
-                        proj_tag = _residual_enum_from_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], cfg)
-                    except Exception:
-                        proj_tag = "none" if bool(p_k3) else "ker"
-
-                    if submode == "auto":
-                        # Per-pair projector hash = hash of this pair’s lane mask (diag Π)
-                        per_pair_proj_hash = _hash_obj(lane_mask_vec)
-
-                    proj_block = {
-                        "k2": bool(p_k2),
-                        "k3": bool(p_k3),
-                        "residual_tag": proj_tag
-                    }
-                    if submode == "auto":
-                        proj_block["projector_hash"] = per_pair_proj_hash
-                        proj_block["note"] = "AUTO uses this pair’s lane mask"
-                    if submode == "file" and allow_mismatch:
-                        proj_block["experimental"] = True
-                        proj_block["mismatch_diag"] = {
-                            "diag": projector_diag or [],
-                            "mask": lane_mask_vec
+                
+                        # Apply FILE projector to residuals, compute projected k3 off R3 @ Π
+                        R3_L_proj = _apply_diag_to_residual(R3_L, diag)
+                        R3_R_proj = _apply_diag_to_residual(R3_R, diag)
+                        p_k3_calc = _all_zero_mat(R3_L_proj) and _all_zero_mat(R3_R_proj)
+                
+                        proj_tag_L = _classify_residual(R3_L_proj, lane_mask_vec)
+                        proj_tag_R = _classify_residual(R3_R_proj, lane_mask_vec)
+                        proj_tag   = proj_tag_L if proj_tag_L != "none" else proj_tag_R
+                
+                        proj_block = {
+                            "k2": bool(p_k2_gate),   # keep k2 source identical to the app path
+                            "k3": bool(p_k3_calc),   # but force projected k3 from post-projection residual
+                            "residual_tag": proj_tag,
                         }
+                        if p_k3_calc:
+                            projected_green += 1
 
-                    if p_k3:
-                        projected_green += 1
 
                 # --- Hashes & pair_hash
                 left_hashes  = _hash_fixture_side(fxL)
