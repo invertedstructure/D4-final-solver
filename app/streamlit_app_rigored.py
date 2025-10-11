@@ -3913,23 +3913,23 @@ with st.expander("Parity · Run Suite"):
                             })
                             # Do not run this pair under mismatched Π
                             continue
-                
-                        # Apply FILE projector to residuals, compute projected k3 off R3 @ Π
-                        R3_L_proj = _apply_diag_to_residual(R3_L, diag)
-                        R3_R_proj = _apply_diag_to_residual(R3_R, diag)
-                        p_k3_calc = _all_zero_mat(R3_L_proj) and _all_zero_mat(R3_R_proj)
-                
-                        proj_tag_L = _classify_residual(R3_L_proj, lane_mask_vec)
-                        proj_tag_R = _classify_residual(R3_R_proj, lane_mask_vec)
-                        proj_tag   = proj_tag_L if proj_tag_L != "none" else proj_tag_R
-                
-                        proj_block = {
-                            "k2": bool(p_k2_gate),   # keep k2 source identical to the app path
-                            "k3": bool(p_k3_calc),   # but force projected k3 from post-projection residual
-                            "residual_tag": proj_tag,
-                        }
-                        if p_k3_calc:
-                            projected_green += 1                      
+                    
+                            # Apply FILE projector to residuals, compute projected k3 off R3 @ Π
+                            R3_L_proj = _apply_diag_to_residual(R3_L, diag)
+                            R3_R_proj = _apply_diag_to_residual(R3_R, diag)
+                            p_k3_calc = _all_zero_mat(R3_L_proj) and _all_zero_mat(R3_R_proj)
+                    
+                            proj_tag_L = _classify_residual(R3_L_proj, lane_mask_vec)
+                            proj_tag_R = _classify_residual(R3_R_proj, lane_mask_vec)
+                            proj_tag   = proj_tag_L if proj_tag_L != "none" else proj_tag_R
+                    
+                            proj_block = {
+                                "k2": bool(p_k2_gate),   # keep k2 source identical to the app path
+                                "k3": bool(p_k3_calc),   # but force projected k3 from post-projection residual
+                                "residual_tag": proj_tag,
+                            }
+                            if p_k3_calc:
+                                projected_green += 1                      
                         
 
 
