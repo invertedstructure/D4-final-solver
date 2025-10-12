@@ -1897,9 +1897,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
         try:
             # Baseline (no mutation)
             lm0, tag_s0, eq_s0, tag_p0, eq_p0 = _sig_tag_eq(B0, C0, H0, P_active)
-            if (rc or {}).get("mode") != "strict":
-            st.warning("Perturbation runs under strict only. Switch policy to strict and try again.")
-            st.stop()
+            
 
 
             # Deterministic flips (on d3 for PS)
@@ -1916,6 +1914,9 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
             drift_witnessed = False
 
             # --- Perturbation sanity: flip d3 bits, detect grammar drift
+            if (rc or {}).get("mode") != "strict":
+            st.warning("Perturbation runs under strict only. Switch policy to strict and try again.")
+            st.stop()
             for (r, c, k) in _flip_targets(n2, n3, int(max_flips), seed_txt):
                 if not (n2 and n3):
                     rows.append([k, 0, "grammar", "empty fixture"])
@@ -1969,6 +1970,71 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
             ]
             _atomic_write_csv(PERTURB_OUT_PATH, header, rows, meta)
             st.success(f"Perturbation sanity saved → {PERTURB_OUT_PATH}")
+                        # ---- JSON companion for Perturbation Sanity ----
+            try:
+                rc_ps = require_fresh_run_ctx()
+            except Exception:
+                rc_ps = st.session_state.get("run_ctx") or {}
+            
+            policy_ps = _policy_block_from_run_ctx(rc_ps)
+            inputs_ps = _inputs_block_from_session()
+            
+            # Build JSON results mirroring your CSV
+            # CSV 'rows' you built: [flip_id, guard_tripped, expected_guard, note]
+            matches = 0
+            mismatches = 0
+            results_ps = []
+            for flip_id, guard_tripped, expected_guard, note in rows:
+                ok = (bool(guard_tripped) == True)  # grammar drift expected in your current logic
+                matches += int(ok)
+                mismatches += int(not ok)
+                # flip coordinates: you log them in note; keep flip_id only if coords aren’t tracked
+                results_ps.append({
+                    "flip_id": int(flip_id),
+                    "guard_tripped": ("grammar" if guard_tripped else "none"),
+                    "expected_guard": str(expected_guard),
+                    "note": str(note or "")
+                })
+            
+            perturb_json = {
+                "schema_version": PERTURB_SCHEMA_VERSION,
+                "written_at_utc": _utc_iso_z(),
+                "app_version": APP_VER,
+                "identity": {
+                    "run_id": (rc_ps.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
+                    "fixture_nonce": rc_ps.get("fixture_nonce", ""),
+                },
+                "policy": policy_ps,  # strict
+                "inputs": inputs_ps,  # hashes + dims
+                "anchor": {
+                    "id": rc_ps.get("fixture_nonce", ""),
+                    "lane_mask_k3": rc_ps.get("lane_mask_k3") or [],
+                },
+                "run": {
+                    "max_flips": int(max_flips),
+                    "flip_domain": "lanes-only",
+                    "ker_guard": "enforced",
+                    "seed": str(seed_txt),
+                },
+                "results": results_ps,
+                "summary": {
+                    "matches": int(matches),
+                    "mismatches": int(mismatches),
+                },
+                "integrity": {"content_hash": ""},
+            }
+            
+            perturb_json["integrity"]["content_hash"] = _hash_json(perturb_json)
+            perturb_json_path = REPORTS_DIR / "perturbation_sanity.json"
+            _atomic_write_json(perturb_json_path, perturb_json)
+            
+            st.session_state.setdefault("last_report_paths", {})["perturbation_sanity"] = {
+                "csv": str(PERTURB_OUT_PATH),
+                "json": str(perturb_json_path),
+            }
+            
+            st.info(f"perturbation: matches={matches} · mismatches={mismatches} · {_badge_ok()}")
+
 
             # --- Fence stress: perturb U (carrier) if hooks available; otherwise fall back to H2 tweak
             if run_fence:
@@ -2058,70 +2124,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 _atomic_write_csv(FENCE_OUT_PATH, fence_header, rows_fs, fence_meta)
                 st.success(f"Fence stress saved → {FENCE_OUT_PATH}")
                 
-                                       # ---- JSON companion for Perturbation Sanity ----
-                try:
-                    rc_ps = require_fresh_run_ctx()
-                except Exception:
-                    rc_ps = st.session_state.get("run_ctx") or {}
-                
-                policy_ps = _policy_block_from_run_ctx(rc_ps)
-                inputs_ps = _inputs_block_from_session()
-                
-                # Build JSON results mirroring your CSV
-                # CSV 'rows' you built: [flip_id, guard_tripped, expected_guard, note]
-                matches = 0
-                mismatches = 0
-                results_ps = []
-                for flip_id, guard_tripped, expected_guard, note in rows:
-                    ok = (bool(guard_tripped) == True)  # grammar drift expected in your current logic
-                    matches += int(ok)
-                    mismatches += int(not ok)
-                    # flip coordinates: you log them in note; keep flip_id only if coords aren’t tracked
-                    results_ps.append({
-                        "flip_id": int(flip_id),
-                        "guard_tripped": ("grammar" if guard_tripped else "none"),
-                        "expected_guard": str(expected_guard),
-                        "note": str(note or "")
-                    })
-                
-                perturb_json = {
-                    "schema_version": PERTURB_SCHEMA_VERSION,
-                    "written_at_utc": _utc_iso_z(),
-                    "app_version": APP_VER,
-                    "identity": {
-                        "run_id": (rc_ps.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
-                        "fixture_nonce": rc_ps.get("fixture_nonce", ""),
-                    },
-                    "policy": policy_ps,  # strict
-                    "inputs": inputs_ps,  # hashes + dims
-                    "anchor": {
-                        "id": rc_ps.get("fixture_nonce", ""),
-                        "lane_mask_k3": rc_ps.get("lane_mask_k3") or [],
-                    },
-                    "run": {
-                        "max_flips": int(max_flips),
-                        "flip_domain": "lanes-only",
-                        "ker_guard": "enforced",
-                        "seed": str(seed_txt),
-                    },
-                    "results": results_ps,
-                    "summary": {
-                        "matches": int(matches),
-                        "mismatches": int(mismatches),
-                    },
-                    "integrity": {"content_hash": ""},
-                }
-                
-                perturb_json["integrity"]["content_hash"] = _hash_json(perturb_json)
-                perturb_json_path = REPORTS_DIR / "perturbation_sanity.json"
-                _atomic_write_json(perturb_json_path, perturb_json)
-                
-                st.session_state.setdefault("last_report_paths", {})["perturbation_sanity"] = {
-                    "csv": str(PERTURB_OUT_PATH),
-                    "json": str(perturb_json_path),
-                }
-                
-                st.info(f"perturbation: matches={matches} · mismatches={mismatches} · {_badge_ok()}")
+                                     
                                 # ---- JSON companion for Fence Stress ----
                 try:
                     rc_fs = require_fresh_run_ctx()
