@@ -3703,6 +3703,20 @@ with st.expander("Parity · Run Suite"):
                 st.error("P3_SHAPE: projector file unreadable or missing blocks['3'] square matrix.")
                 st.stop()
 
+        def _dims_from_boundaries(boundaries_obj) -> dict:
+            """
+            Return {"n2": rows, "n3": cols} from the pair's D3 incidence (3→2) matrix.
+            Falls back to zeros if unavailable.
+            """
+            try:
+                B  = (boundaries_obj or {}).blocks.__root__
+                d3 = B.get("3->2") or B.get("3") or []
+                if d3 and d3[0]:
+                    return {"n2": len(d3), "n3": len(d3[0])}
+            except Exception:
+                pass
+            return {"n2": 0, "n3": 0}
+
         # --- Header bits
         c1, c2, c3 = st.columns([2,2,2])
         with c1:
@@ -3714,6 +3728,8 @@ with st.expander("Parity · Run Suite"):
             nonce_src = _json.dumps({"mode":mode,"sub":submode,"pj":projector_hash,"n":len(table)}, sort_keys=True, separators=(",",":")).encode("utf-8")
             parity_nonce = _sha256_hex(nonce_src)[:8]
             st.caption("Run nonce"); st.code(parity_nonce, language="text")
+        
+
             
 # --- Run button (clean, self-contained) --------------------------------------
 if st.button("▶ Run Parity Suite", key="pp_btn_run_suite_final"):
@@ -3840,6 +3856,7 @@ if st.button("▶ Run Parity Suite", key="pp_btn_run_suite_final"):
             "pair_hash": p_hash,
             "lane_mask_k3": lane_mask_vec,
             "lane_mask": lane_mask_str,
+            "dims": _dims_from_boundaries(fxL["boundaries"]),
             "left_hashes":  left_hashes,
             "right_hashes": right_hashes,
             "strict": {"k2": bool(s_k2), "k3": bool(s_k3), "residual_tag": strict_tag},
@@ -3880,6 +3897,7 @@ if st.button("▶ Run Parity Suite", key="pp_btn_run_suite_final"):
         "projector_hash": (projector_hash if (mode == "projected" and submode == "file") else ""),
         "lane_mask_note": (lane_mask_note if lane_mask_note else ""),
         "run_note": run_note,
+        "residual_method": "R3 strict vs R3·Π (lanes/ker/mixed)",
         "summary": {
             "rows_total": rows_total,
             "rows_skipped": rows_skipped,
@@ -3980,10 +3998,9 @@ if st.button("▶ Run Parity Suite", key="pp_btn_run_suite_final"):
 
 
                                                         
-
-                    
-        
-               
+                
+      
+              
                                         
 
 
@@ -3991,8 +4008,6 @@ if st.button("▶ Run Parity Suite", key="pp_btn_run_suite_final"):
 
 
                         
-
-
 
             
 
