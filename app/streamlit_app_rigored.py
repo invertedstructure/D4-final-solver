@@ -1809,6 +1809,15 @@ def _copy_mat(M): return [row[:] for row in (M or [])]
 def _is_zero(M):
     return (not M) or all(all((x & 1) == 0 for x in row) for row in M)
 
+# ── small global helpers (safe if re-imported) ─────────────────────────────
+import json as _json
+import hashlib as _hashlib
+
+if "_sha256_hex" not in globals():
+    def _sha256_hex(b: bytes) -> str:
+        return _hashlib.sha256(b).hexdigest()
+
+
 # Safe XOR fallback if not present
 if "_xor_mat" not in globals():
     def _xor_mat(A, B):
