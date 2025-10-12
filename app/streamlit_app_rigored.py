@@ -3863,7 +3863,6 @@ with st.expander("Parity · Run Suite"):
                     # ALWAYS append (strict and projected)
                     report_pairs.append(pair_out)
 
-        
                     # Consistency checks (now that pair_out exists)
                     if pair_out["strict"]["k3"] is False:
                         assert pair_out["strict"]["residual_tag"] in {"ker","lanes","mixed"}
@@ -3882,9 +3881,7 @@ with st.expander("Parity · Run Suite"):
                     if mode=="strict"
                     else (lane_mask_note if submode=="auto" else ""))
                     
-                    # in the report:
-                    "run_note": run_note,
-
+                    
             
                     # Freeze the run-level tag from mode/submode ONLY
                     policy_tag_run = "strict" if mode=="strict" else f"projected(columns@k=3,{submode})"
@@ -3902,6 +3899,7 @@ with st.expander("Parity · Run Suite"):
                             "rows_total": rows_total,
                             "rows_skipped": rows_skipped,
                             "rows_run": rows_run,
+                            "run_note": run_note,
                             "projected_green_count": (projected_green if mode=="projected" else 0),
                             "pct": (pct if mode=="projected" else 0.0),
                         },
