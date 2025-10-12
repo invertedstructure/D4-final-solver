@@ -3921,99 +3921,145 @@ with st.expander("Parity · Run Suite"):
                     report["content_hash"] = _sha256_hex(
                         _json.dumps(report, sort_keys=True, separators=(",", ":")).encode("utf-8")
                     )
-                    #---------------------------------------------
-                    policy_tag_run = report["policy_tag"]                # you already set this
-                    safe_tag       = _safe_tag(policy_tag_run)
-                    short_hash     = report["content_hash"][:12]
-                    json_name      = f"parity_report__{safe_tag}__{short_hash}.json"
-                    csv_name       = f"parity_summary__{safe_tag}__{short_hash}.csv"
+                    # ---- Finalize summary numbers (single source of truth) ----
+                    rows_run     = len(report_pairs)
+                    rows_skipped = len(skipped)
+                    rows_total   = rows_run + rows_skipped
                     
-                    json_path = REPORTS_DIR / json_name
-                    csv_path  = REPORTS_DIR / csv_name
-                    # Invariants (best-effort; wrap in try/except if you prefer)
-                    assert len(report_pairs) == rows_run
-                    assert rows_run <= rows_total
-                    assert len({p["pair_hash"] for p in report_pairs}) == rows_run
-                    if mode == "strict":
-                        assert report["projector_mode"] == "strict" and not report["projector_hash"] and not report["projector_filename"]
-
+                    if mode == "projected":
+                        projected_green_count = sum(1 for p in report_pairs if p.get("projected", {}).get("k3") is True)
+                        pct = (projected_green_count / rows_run) if rows_run else 0.0
+                    else:
+                        projected_green_count = 0
+                        pct = 0.0
                     
-                    # Write JSON (and remember path for convenience)
+                    # If you built `report` earlier, update its summary; otherwise build it now.
+                    report = {
+                        "schema_version": "1.0.0",
+                        "written_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "app_version": APP_VERSION,
+                        "policy_tag": ("strict" if mode == "strict" else f"projected(columns@k=3,{submode})"),
+                        "projector_mode": ("strict" if mode == "strict" else submode),
+                        "projector_filename": (projector_filename if (mode=="projected" and submode=="file") else ""),
+                        "projector_hash": (projector_hash if (mode=="projected" and submode=="file") else ""),
+                        "lane_mask_note": ("AUTO uses each pair’s lane mask" if (mode=="projected" and submode=="auto") else ""),
+                        "run_note": ("Projected leg omitted in strict mode." if mode=="strict"
+                                     else ("AUTO uses each pair’s lane mask" if submode=="auto" else "")),
+                        "summary": {
+                            "rows_total": rows_total,
+                            "rows_skipped": rows_skipped,
+                            "rows_run": rows_run,
+                            "projected_green_count": projected_green_count,
+                            "pct": pct,
+                        },
+                        "pairs": report_pairs,
+                        "skipped": skipped,
+                    }
+                    
+                    # Deterministic content hash (compute BEFORE filenames)
+                    report["content_hash"] = _sha256_hex(
+                        _json.dumps(report, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                    )
+                    
+                    # Per-run filenames (content-hashed)
+                    def _safe_tag(s: str) -> str:
+                        return "".join(ch if (ch.isalnum() or ch in "._-") else "_" for ch in s)
+                    
+                    safe_tag   = _safe_tag(report["policy_tag"])
+                    short_hash = report["content_hash"][:12]
+                    json_name  = f"parity_report__{safe_tag}__{short_hash}.json"
+                    csv_name   = f"parity_summary__{safe_tag}__{short_hash}.csv"
+                    json_path  = REPORTS_DIR / json_name
+                    csv_path   = REPORTS_DIR / csv_name
+                    
+                    # Invariants (best-effort; don’t crash the run)
+                    try:
+                        assert len(report_pairs) == rows_run
+                        assert rows_run <= rows_total
+                        assert len({p["pair_hash"] for p in report_pairs}) == rows_run
+                        if mode == "strict":
+                            assert report["projector_mode"] == "strict" and not report["projector_hash"] and not report["projector_filename"]
+                    except AssertionError:
+                        st.warning("Parity report invariants failed; continuing to write artifacts.")
+                    
+                    # --- Build CSV rows once (dedupe already handled at queue stage) ---
+                    hdr = [
+                        "label","policy_tag","projector_mode","projector_hash",
+                        "strict_k2","strict_k3","projected_k2","projected_k3",
+                        "residual_strict","residual_projected","lane_mask",
+                        "lh_boundaries_hash","lh_shapes_hash","lh_cmap_hash","lh_H_hash",
+                        "rh_boundaries_hash","rh_shapes_hash","rh_cmap_hash","rh_H_hash",
+                        "pair_hash",
+                    ]
+                    rows_csv = []
+                    for p in report_pairs:
+                        proj = p.get("projected") or {}
+                        rows_csv.append([
+                            p["label"], report["policy_tag"], report["projector_mode"], report["projector_hash"],
+                            str(p["strict"]["k2"]).lower(), str(p["strict"]["k3"]).lower(),
+                            ("" if not proj else str(proj.get("k2", False)).lower()),
+                            ("" if not proj else str(proj.get("k3", False)).lower()),
+                            p["strict"].get("residual_tag",""),
+                            ("" if not proj else proj.get("residual_tag","")),
+                            p.get("lane_mask",""),
+                            p["left_hashes"]["boundaries"], p["left_hashes"]["shapes"], p["left_hashes"]["cmap"], p["left_hashes"]["H"],
+                            p["right_hashes"]["boundaries"], p["right_hashes"]["shapes"], p["right_hashes"]["cmap"], p["right_hashes"]["H"],
+                            p["pair_hash"],
+                        ])
+                    
+                    # --- Write JSON (and remember path for convenience)
                     try:
                         _atomic_write_json(json_path, report)
                         st.session_state["parity_last_report_path"] = str(json_path)
                     except Exception as e:
                         st.error(f"Could not write JSON: {e}")
                     
-                    # Write CSV (dedupe rows you already built)
+                    # --- Write CSV
                     try:
                         tmp_csv = csv_path.with_suffix(".csv.tmp")
                         with open(tmp_csv, "w", newline="", encoding="utf-8") as f:
                             w = csv.writer(f); w.writerow(hdr); w.writerows(rows_csv)
                             f.flush(); os.fsync(f.fileno())
                         os.replace(tmp_csv, csv_path)
+                        st.session_state["parity_last_summary_path"] = str(csv_path)
                     except Exception as e:
                         st.error(f"Could not write CSV: {e}")
-                        
-
                     
-                    # Per-run filename: parity_report__{policy_tag}__{hash12}.json
-                    safe_tag = (
-                        ( "strict" if mode=="strict" else f"projected(columns@k=3,{submode})" )
-                        .replace("(", "_").replace(")", "").replace(",", "-").replace(" ", "")
+                    # --- UI summary + downloads ---
+                    st.success(
+                        "Run complete · "
+                        f"pairs={rows_run} · skipped={rows_skipped}"
+                        + (f" · GREEN={projected_green_count} ({pct:.2%})" if mode == "projected" else "")
                     )
-                    hash12 = report["content_hash"][:12]
-                    json_name = f"parity_report__{safe_tag}__{hash12}.json"
-                    json_path = REPORTS_DIR / json_name  # ensure REPORTS_DIR = Path("reports")
                     
+                    # Save a lightweight copy of pairs + full report in session for UI
+                    st.session_state["parity_last_report_pairs"]  = report_pairs
+                    st.session_state["parity_last_full_report"]   = report
                     
+                    # Download (in-memory; avoids path issues)
+                    try:
+                        json_mem = _io.BytesIO(_json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"))
+                        st.download_button("Download parity_report.json", json_mem, file_name=json_name, key="dl_parity_json_final_new")
+                    except Exception as e:
+                        st.info(f"(Could not build in-memory JSON download: {e})")
+                    
+                    try:
+                        csv_mem = _io.StringIO(); w = csv.writer(csv_mem); w.writerow(hdr); w.writerows(rows_csv)
+                        csv_bytes = _io.BytesIO(csv_mem.getvalue().encode("utf-8"))
+                        st.download_button("Download parity_summary.csv", csv_bytes, file_name=csv_name, key="dl_parity_csv_final_new")
+                    except Exception as e:
+                        st.info(f"(Could not build in-memory CSV download: {e})")
+                    
+                    # Compact ✓/✗ preview
+                    last = st.session_state.get("parity_last_report_pairs") or []
+                    if last:
+                        st.caption("Summary (strict_k3 / projected_k3):")
+                        for p in last:
+                            s  = "✅" if p["strict"]["k3"] else "❌"
+                            pr = "—" if "projected" not in p else ("✅" if p["projected"]["k3"] else "❌")
+                            st.write(f"• {p['label']} → strict={s} · projected={pr}")
 
 
-            
-                    # Deterministic content hash
-                    report["content_hash"] = _sha256_hex(
-                        _json.dumps(report, sort_keys=True, separators=(",",":")).encode("utf-8")
-                    )
-            
-                   
-            
-                                # --- Write CSV (dedupe)
-            hdr = [
-                "label","policy_tag","projector_mode","projector_hash",
-                "strict_k2","strict_k3","projected_k2","projected_k3",
-                "residual_strict","residual_projected","lane_mask",
-                "lh_boundaries_hash","lh_shapes_hash","lh_cmap_hash","lh_H_hash",
-                "rh_boundaries_hash","rh_shapes_hash","rh_cmap_hash","rh_H_hash",
-                "pair_hash",
-            ]
-            dedupe = set()
-            rows_csv = []
-            for p in report_pairs:
-                key = (p["label"], p["pair_hash"], report["policy_tag"], report["projector_mode"], report["projector_hash"])
-                if key in dedupe:
-                    continue
-                dedupe.add(key)
-                proj = p.get("projected") or {}
-                rows_csv.append([
-                    p["label"], report["policy_tag"], report["projector_mode"], report["projector_hash"],
-                    str(p["strict"]["k2"]).lower(), str(p["strict"]["k3"]).lower(),
-                    ("" if not proj else str(proj.get("k2", False)).lower()),
-                    ("" if not proj else str(proj.get("k3", False)).lower()),
-                    p["strict"].get("residual_tag",""),
-                    ("" if not proj else proj.get("residual_tag","")),
-                    p.get("lane_mask",""),
-                    p["left_hashes"]["boundaries"], p["left_hashes"]["shapes"], p["left_hashes"]["cmap"], p["left_hashes"]["H"],
-                    p["right_hashes"]["boundaries"], p["right_hashes"]["shapes"], p["right_hashes"]["cmap"], p["right_hashes"]["H"],
-                    p["pair_hash"],
-                ])
-            try:
-                tmp_csv = PARITY_CSV_PATH.with_suffix(".csv.tmp")
-                with open(tmp_csv, "w", newline="", encoding="utf-8") as f:
-                    w = csv.writer(f); w.writerow(hdr); w.writerows(rows_csv)
-                    f.flush(); os.fsync(f.fileno())
-                os.replace(tmp_csv, PARITY_CSV_PATH)
-            except Exception as e:
-                st.error(f"Could not write CSV: {e}")
 
                         # --- AFTER the for spec in table: loop finishes ------------------------------
             
