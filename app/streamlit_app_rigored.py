@@ -3570,6 +3570,11 @@ def _short_hash(h: str | None) -> str:
         h = ""
     return (h[:8] + "…") if h else "—"
 
+def _safe_tag(s: str) -> str:
+    # Keep [A-Za-z0-9_.-], replace the rest with '_'
+    return "".join(ch if (ch.isalnum() or ch in "._-") else "_" for ch in s)
+
+
 
 # --- Read a diagonal from a projector file (accepts {diag:[...]} or a 3x3 block)
 def _projector_diag_from_file(path: str) -> list[int]:
@@ -3714,6 +3719,8 @@ with st.expander("Parity · Run Suite"):
     if st.button("▶ Run Parity Suite", key="pp_btn_run_suite_final"):
         report_pairs, skipped = [], []
         projected_green = 0
+        seen_pair_hashes: set[str] = set()
+
     
         for spec in table:
             label = spec.get("label", "PAIR")
@@ -3729,6 +3736,16 @@ with st.expander("Parity · Run Suite"):
             if okR != "ok":
                 skipped.append(fxR)
                 continue
+                            # --- Precompute hashes & dedupe by pair_hash (inputs-level)
+            left_hashes  = _hash_fixture_side(fxL)
+            right_hashes = _hash_fixture_side(fxR)
+            p_hash       = _pair_hash(left_hashes, right_hashes)
+            
+            if p_hash in seen_pair_hashes:
+                skipped.append({"label": label, "side":"both", "error":"DUP_PAIR", "pair_hash": p_hash})
+                continue
+            seen_pair_hashes.add(p_hash)
+
     
             # Lane-mask SSOT from this pair’s boundaries (left is sufficient in your data model)
             lane_mask_vec = _lane_mask_from_boundaries(fxL["boundaries"])
@@ -3860,10 +3877,18 @@ with st.expander("Parity · Run Suite"):
                     rows_skipped = len(skipped)
                     rows_run     = len(report_pairs)
                     pct = (float(projected_green)/float(rows_run)) if (mode=="projected" and rows_run) else 0.0
+
+                    run_note = ("Projected leg omitted in strict mode."
+                    if mode=="strict"
+                    else (lane_mask_note if submode=="auto" else ""))
+                    
+                    # in the report:
+                    "run_note": run_note,
+
             
                     # Freeze the run-level tag from mode/submode ONLY
                     policy_tag_run = "strict" if mode=="strict" else f"projected(columns@k=3,{submode})"
-            
+                                
                     report = {
                         "schema_version": "1.0.0",
                         "written_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -3898,6 +3923,41 @@ with st.expander("Parity · Run Suite"):
                     report["content_hash"] = _sha256_hex(
                         _json.dumps(report, sort_keys=True, separators=(",", ":")).encode("utf-8")
                     )
+                    #---------------------------------------------
+                    policy_tag_run = report["policy_tag"]                # you already set this
+                    safe_tag       = _safe_tag(policy_tag_run)
+                    short_hash     = report["content_hash"][:12]
+                    json_name      = f"parity_report__{safe_tag}__{short_hash}.json"
+                    csv_name       = f"parity_summary__{safe_tag}__{short_hash}.csv"
+                    
+                    json_path = REPORTS_DIR / json_name
+                    csv_path  = REPORTS_DIR / csv_name
+                    # Invariants (best-effort; wrap in try/except if you prefer)
+                    assert len(report_pairs) == rows_run
+                    assert rows_run <= rows_total
+                    assert len({p["pair_hash"] for p in report_pairs}) == rows_run
+                    if mode == "strict":
+                        assert report["projector_mode"] == "strict" and not report["projector_hash"] and not report["projector_filename"]
+
+                    
+                    # Write JSON (and remember path for convenience)
+                    try:
+                        _atomic_write_json(json_path, report)
+                        st.session_state["parity_last_report_path"] = str(json_path)
+                    except Exception as e:
+                        st.error(f"Could not write JSON: {e}")
+                    
+                    # Write CSV (dedupe rows you already built)
+                    try:
+                        tmp_csv = csv_path.with_suffix(".csv.tmp")
+                        with open(tmp_csv, "w", newline="", encoding="utf-8") as f:
+                            w = csv.writer(f); w.writerow(hdr); w.writerows(rows_csv)
+                            f.flush(); os.fsync(f.fileno())
+                        os.replace(tmp_csv, csv_path)
+                    except Exception as e:
+                        st.error(f"Could not write CSV: {e}")
+                        
+
                     
                     # Per-run filename: parity_report__{policy_tag}__{hash12}.json
                     safe_tag = (
@@ -3908,12 +3968,7 @@ with st.expander("Parity · Run Suite"):
                     json_name = f"parity_report__{safe_tag}__{hash12}.json"
                     json_path = REPORTS_DIR / json_name  # ensure REPORTS_DIR = Path("reports")
                     
-                    # Write JSON (and remember path for convenience)
-                    try:
-                        _atomic_write_json(json_path, report)
-                        st.session_state["parity_last_report_path"] = str(json_path)
-                    except Exception as e:
-                        st.error(f"Could not write JSON: {e}")
+                    
 
 
             
@@ -3922,11 +3977,7 @@ with st.expander("Parity · Run Suite"):
                         _json.dumps(report, sort_keys=True, separators=(",",":")).encode("utf-8")
                     )
             
-                    # --- Write JSON
-                    try:
-                        _atomic_write_json(PARITY_JSON_PATH, report)
-                    except Exception as e:
-                        st.error(f"Could not write JSON: {e}")
+                   
             
                                 # --- Write CSV (dedupe)
             hdr = [
@@ -3976,7 +4027,18 @@ with st.expander("Parity · Run Suite"):
             
             # 2) Build the run-level policy tag
             policy_tag_run = "strict" if mode == "strict" else f"projected(columns@k=3,{submode})"
+           #-----------------------------------------------------------------
+            rows_run     = len(report_pairs)
+            rows_skipped = len(skipped)
+            rows_total   = rows_run + rows_skipped
             
+            if mode == "projected":
+                projected_green_count = sum(1 for p in report_pairs if p.get("projected",{}).get("k3") is True)
+                pct = (projected_green_count / rows_run) if rows_run else 0.0
+            else:
+                projected_green_count = 0
+                pct = 0.0
+
             # 3) Assemble the report object
             report = {
                 "schema_version": "1.0.0",
@@ -4042,6 +4104,19 @@ with st.expander("Parity · Run Suite"):
                 )
             except Exception as e:
                 st.info(f"(Could not build in-memory JSON download: {e})")
+                # File-based downloads (optional, since you already have in-memory)
+                try:
+                    with open(json_path, "rb") as fj:
+                        st.download_button("Download parity_report.json", fj, file_name=json_name, key="dl_parity_json_final")
+                except Exception:
+                    pass
+                
+                try:
+                    with open(csv_path, "rb") as fc:
+                        st.download_button("Download parity_summary.csv", fc, file_name=csv_name, key="dl_parity_csv_final")
+                except Exception:
+                    pass
+
 
             
             try:
