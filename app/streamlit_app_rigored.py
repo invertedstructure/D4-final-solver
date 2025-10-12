@@ -1809,9 +1809,28 @@ def _copy_mat(M): return [row[:] for row in (M or [])]
 def _is_zero(M):
     return (not M) or all(all((x & 1) == 0 for x in row) for row in M)
 
+# Safe XOR fallback if not present
+if "_xor_mat" not in globals():
+    def _xor_mat(A, B):
+        if not A: return [row[:] for row in (B or [])]
+        if not B: return [row[:] for row in (A or [])]
+        r = min(len(A), len(B))
+        c = min(len(A[0]) if A and A[0] else 0, len(B[0]) if B and B[0] else 0)
+        out = [[0]*c for _ in range(r)]
+        for i in range(r):
+            for j in range(c):
+                out[i][j] = (int(A[i][j]) ^ int(B[i][j])) & 1
+        return out
+
 def _strict_R3(H2, d3, C3):
-    I3 = eye(len(C3)) if C3 else []
+    """
+    R3(strict) = (H2 @ d3) XOR (C3 XOR I_{n3})
+    where I_{n3} is n3×n3 identity (n3 = number of columns of C3).
+    """
+    n3 = len(C3[0]) if (C3 and C3[0]) else 0
+    I3 = [[1 if i == j else 0 for j in range(n3)] for i in range(n3)] if n3 else []
     return _xor_mat(mul(H2, d3), _xor_mat(C3, I3)) if (H2 and d3 and C3) else []
+
 
 def _projected_R3(R3_strict, P_active):
     return mul(R3_strict, P_active) if (R3_strict and P_active) else []
