@@ -1913,29 +1913,31 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
             rows = []
             drift_witnessed = False
 
-            # --- Perturbation sanity: flip d3 bits, detect grammar drift
+                        # --- Perturbation sanity: flip d3 bits, detect grammar drift
+            # Add the strict-only guard here
             if (rc or {}).get("mode") != "strict":
-            st.warning("Perturbation runs under strict only. Switch policy to strict and try again.")
-            st.stop()
+                st.warning("Perturbation runs under strict only. Switch policy to strict and try again.")
+                st.stop()
+            
             for (r, c, k) in _flip_targets(n2, n3, int(max_flips), seed_txt):
                 if not (n2 and n3):
                     rows.append([k, 0, "grammar", "empty fixture"])
                     continue
-
+            
                 d3_mut = _copy_mat(d3_base)
                 d3_mut[r][c] ^= 1  # GF(2) flip
-
+            
                 dB = B0.dict() if hasattr(B0, "dict") else {"blocks": {}}
                 dB = json.loads(json.dumps(dB))
                 dB.setdefault("blocks", {})["3"] = d3_mut
                 Bk = io.parse_boundaries(dB)
-
+            
                 lmK, tag_sK, eq_sK, tag_pK, eq_pK = _sig_tag_eq(Bk, C0, H0, P_active)
-
+            
                 guard_tripped = int(lmK != lm0)   # grammar drift = lane mask change
                 expected_guard = "grammar"        # consistent guard name
                 note = ""
-
+            
                 if guard_tripped and not drift_witnessed:
                     drift_witnessed = True
                     cert_like = st.session_state.get("cert_payload")
@@ -1952,7 +1954,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                             note = "lane_mask_changed (witness append failed)"
                     else:
                         note = "lane_mask_changed"
-
+            
                 rows.append([k, guard_tripped, expected_guard, note])
 
             # Emit CSV for Perturbation Sanity (3c header)
