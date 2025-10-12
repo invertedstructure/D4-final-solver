@@ -2586,6 +2586,103 @@ with st.expander("Coverage Sampling"):
             last_paths["coverage_sampling"] = {"csv": str(COVERAGE_CSV_PATH), "json": str(cov_json_path)}
             
             st.info(f"coverage: {len(results_cov)} signatures · {_badge_ok()}")
+                        # ---- JSON companion for Coverage Sampling ----
+            try:
+                # Try to get a fresh run_ctx; fall back to session snapshot
+                try:
+                    rc_cov = require_fresh_run_ctx()
+                except Exception:
+                    rc_cov = st.session_state.get("run_ctx") or {}
+            
+                policy_cov = _policy_block_from_run_ctx(rc_cov) if "_policy_block_from_run_ctx" in globals() else {
+                    "policy_tag": rc_cov.get("policy_tag") or rc_cov.get("mode") or "",
+                    "projector_mode": ("strict" if rc_cov.get("mode") == "strict"
+                                       else ("auto" if "auto" in str(rc_cov.get("mode","")) else
+                                             ("file" if "file" in str(rc_cov.get("mode","")) else ""))),
+                    "projector_filename": rc_cov.get("projector_filename","") or "",
+                    "projector_hash": rc_cov.get("projector_hash","") or "",
+                }
+                inputs_cov = _inputs_block_from_session() if "_inputs_block_from_session" in globals() else {
+                    "filenames": {
+                        "boundaries": (rc_cov.get("boundaries_path") or ""),
+                        "cmap":       (rc_cov.get("cmap_path") or ""),
+                        "H":          (rc_cov.get("H_path") or ""),
+                        "shapes":     (rc_cov.get("shapes_path") or ""),
+                    },
+                    "hashes": {
+                        "boundaries_hash": (rc_cov.get("boundaries_hash") or ""),
+                        "c_hash":          (rc_cov.get("c_hash") or ""),
+                        "h_hash":          (rc_cov.get("h_hash") or ""),
+                        "u_hash":          (rc_cov.get("u_hash") or ""),
+                        "shapes_hash":     (rc_cov.get("shapes_hash") or ""),
+                    },
+                    "dims": {"n2": int(n2), "n3": int(n3)},
+                }
+            
+                # Rebuild the results in sorted order to mirror CSV
+                results_cov = []
+                for sig, cnt in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+                    in_d = _in_district_guess(sig, current_lane_pattern=lane_pattern)
+                    pct  = 0.0 if float(num_samples) <= 0 else round(100.0 * (cnt / float(num_samples)), 2)
+                    results_cov.append({
+                        "signature": sig,
+                        "count": int(cnt),
+                        "in_district": bool(in_d),
+                        "pct": pct,
+                    })
+            
+                coverage_json = {
+                    "schema_version": SCHEMA_VERSION,
+                    "written_at_utc": _utc_iso_z(),
+                    "app_version": APP_VERSION,
+                    "identity": {
+                        "run_id": (rc_cov.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
+                        "fixture_nonce": rc_cov.get("fixture_nonce",""),
+                    },
+                    "policy": policy_cov,
+                    "inputs": inputs_cov,
+                    "sampling": {
+                        "num_samples": int(num_samples),
+                        "bit_density": float(bit_density),
+                        "n2": int(n2),
+                        "n3": int(n3),
+                        "seed": str(seed_txt),
+                    },
+                    "results": results_cov,
+                    "summary": {
+                        "total": int(num_samples),
+                        "distinct_signatures": int(len(results_cov)),
+                    },
+                    "integrity": {"content_hash": ""},
+                }
+                # Stable hash
+                if "_hash_json" in globals():
+                    coverage_json["integrity"]["content_hash"] = _hash_json(coverage_json)
+                else:
+                    _canon = _json.dumps(coverage_json, sort_keys=True, separators=(",",":")).encode("utf-8")
+                    coverage_json["integrity"]["content_hash"] = _sha256_hex(_canon)
+            
+                cov_json_path = REPORTS_DIR / "coverage_sampling.json"
+                _atomic_write_json(cov_json_path, coverage_json)
+            
+                # Remember paths for snapshotters
+                st.session_state.setdefault("last_report_paths", {})["coverage_sampling"] = {
+                    "csv": str(COVERAGE_CSV_PATH), "json": str(cov_json_path)
+                }
+            
+                # Download button (unique key from hash)
+                import io as _io
+                h8 = coverage_json["integrity"]["content_hash"][:8]
+                mem = _io.BytesIO(_json.dumps(coverage_json, ensure_ascii=False, indent=2).encode("utf-8"))
+                st.download_button(
+                    "Download coverage_sampling.json",
+                    mem,
+                    file_name="coverage_sampling.json",
+                    key=f"dl_coverage_json_{h8}",
+                )
+            except Exception as e:
+                st.info(f"(Could not build coverage JSON/download: {e})")
+
 
 
 
