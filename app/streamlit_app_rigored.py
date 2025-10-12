@@ -4035,20 +4035,36 @@ with st.expander("Parity · Run Suite"):
                     # Save a lightweight copy of pairs + full report in session for UI
                     st.session_state["parity_last_report_pairs"]  = report_pairs
                     st.session_state["parity_last_full_report"]   = report
+                    # ------------------- pre fix unique
+                    prefix = "strict" if mode=="strict" else f"proj_{submode}"
+                    json_dl_key = f"{prefix}_json_{short_hash}"
+                    csv_dl_key  = f"{prefix}_csv_{short_hash}"
+
                     
-                    # Download (in-memory; avoids path issues)
-                    try:
-                        json_mem = _io.BytesIO(_json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"))
-                        st.download_button("Download parity_report.json", json_mem, file_name=json_name, key="dl_parity_json_final_new")
-                    except Exception as e:
-                        st.info(f"(Could not build in-memory JSON download: {e})")
+                                        # Unique keys derived from the report content hash
+                    short_hash   = report["content_hash"][:12]
+                    json_dl_key  = f"dl_parity_json_{short_hash}"
+                    csv_dl_key   = f"dl_parity_csv_{short_hash}"
                     
-                    try:
-                        csv_mem = _io.StringIO(); w = csv.writer(csv_mem); w.writerow(hdr); w.writerows(rows_csv)
-                        csv_bytes = _io.BytesIO(csv_mem.getvalue().encode("utf-8"))
-                        st.download_button("Download parity_summary.csv", csv_bytes, file_name=csv_name, key="dl_parity_csv_final_new")
-                    except Exception as e:
-                        st.info(f"(Could not build in-memory CSV download: {e})")
+                    # JSON download (in-memory)
+                    json_mem = _io.BytesIO(_json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"))
+                    st.download_button(
+                        "Download parity_report.json",
+                        json_mem,
+                        file_name=json_name,   # you already set this to include policy/hash
+                        key=json_dl_key,
+                    )
+                    
+                    # CSV download (in-memory)
+                    csv_mem = _io.StringIO(); w = csv.writer(csv_mem); w.writerow(hdr); w.writerows(rows_csv)
+                    csv_bytes = _io.BytesIO(csv_mem.getvalue().encode("utf-8"))
+                    st.download_button(
+                        "Download parity_summary.csv",
+                        csv_bytes,
+                        file_name=csv_name,
+                        key=csv_dl_key,
+                    )
+
                     
                     # Compact ✓/✗ preview
                     last = st.session_state.get("parity_last_report_pairs") or []
