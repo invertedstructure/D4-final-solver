@@ -2096,7 +2096,6 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
             st.info(f"perturbation: matches={matches} · mismatches={mismatches} · {_badge_ok()}")
            
             try:
-                import io as _io
                 h8 = perturb_json["integrity"]["content_hash"][:8]
                 mem = _io.BytesIO(_json.dumps(perturb_json, ensure_ascii=False, indent=2).encode("utf-8"))
                 st.download_button(
@@ -2342,7 +2341,6 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                                 
                 st.info(f"fence: {len(results_fs)} actions · {_badge_ok()}")
                 try:
-                import io as _io
                 h8 = fence_json["integrity"]["content_hash"][:8]
                 mem = _io.BytesIO(_json.dumps(fence_json, ensure_ascii=False, indent=2).encode("utf-8"))
                 st.download_button(
