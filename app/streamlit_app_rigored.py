@@ -2034,7 +2034,65 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 "csv": str(PERTURB_OUT_PATH),
                 "json": str(perturb_json_path),
             }
+                        # ---- JSON companion for Perturbation Sanity (robust) ----
+            try:
+                rc_ps = require_fresh_run_ctx()
+            except Exception:
+                rc_ps = st.session_state.get("run_ctx") or {}
             
+            policy_ps = _policy_block_from_run_ctx(rc_ps)
+            inputs_ps = _inputs_block_from_session()
+            
+            matches = 0
+            mismatches = 0
+            results_ps = []
+            for row in rows:
+                flip_id        = int(row[0]) if len(row) > 0 else -1
+                guard_tripped  = int(row[1]) if len(row) > 1 else 0
+                expected_guard = str(row[2]) if len(row) > 2 else "grammar"
+                note           = str(row[3]) if len(row) > 3 else ""
+                ok = bool(guard_tripped)  # grammar drift expected → guard_tripped==1
+                matches    += int(ok)
+                mismatches += int(not ok)
+                results_ps.append({
+                    "flip_id": flip_id,
+                    "guard_tripped": ("grammar" if guard_tripped else "none"),
+                    "expected_guard": expected_guard,
+                    "note": note,
+                })
+            
+            perturb_json = {
+                "schema_version": PERTURB_SCHEMA_VERSION,
+                "written_at_utc": _utc_iso_z(),
+                "app_version": APP_VER,
+                "identity": {
+                    "run_id": (rc_ps.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
+                    "fixture_nonce": rc_ps.get("fixture_nonce", ""),
+                },
+                "policy": policy_ps,
+                "inputs": inputs_ps,
+                "anchor": {
+                    "id": rc_ps.get("fixture_nonce", ""),
+                    "lane_mask_k3": rc_ps.get("lane_mask_k3") or [],
+                },
+                "run": {
+                    "max_flips": int(max_flips),
+                    "flip_domain": "lanes-only",
+                    "ker_guard": "enforced",
+                    "seed": str(seed_txt),
+                },
+                "results": results_ps,
+                "summary": {"matches": matches, "mismatches": mismatches},
+                "integrity": {"content_hash": ""},
+            }
+            perturb_json["integrity"]["content_hash"] = _hash_json(perturb_json)
+            perturb_json_path = REPORTS_DIR / "perturbation_sanity.json"
+            _atomic_write_json(perturb_json_path, perturb_json)
+            st.session_state.setdefault("last_report_paths", {})["perturbation_sanity"] = {
+                "csv": str(PERTURB_OUT_PATH), "json": str(perturb_json_path)
+            }
+            
+                        
             st.info(f"perturbation: matches={matches} · mismatches={mismatches} · {_badge_ok()}")
 
 
