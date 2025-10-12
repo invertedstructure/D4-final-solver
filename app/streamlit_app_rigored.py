@@ -2094,6 +2094,20 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
             
                         
             st.info(f"perturbation: matches={matches} · mismatches={mismatches} · {_badge_ok()}")
+           
+            try:
+                import io as _io
+                h8 = perturb_json["integrity"]["content_hash"][:8]
+                mem = _io.BytesIO(_json.dumps(perturb_json, ensure_ascii=False, indent=2).encode("utf-8"))
+                st.download_button(
+                    "Download perturbation_sanity.json",
+                    mem,
+                    file_name="perturbation_sanity.json",
+                    key=f"dl_ps_json_{h8}",
+                )
+            except Exception as e:
+                st.info(f"(Could not build perturbation JSON download: {e})")
+
 
 
             # --- Fence stress: perturb U (carrier) if hooks available; otherwise fall back to H2 tweak
@@ -2255,9 +2269,91 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     "csv": str(FENCE_OUT_PATH),
                     "json": str(fence_json_path),
                 }
+                # ---- JSON companion for Fence Stress (robust) ----
+                try:
+                    rc_fs = require_fresh_run_ctx()
+                except Exception:
+                    rc_fs = st.session_state.get("run_ctx") or {}
                 
+                policy_fs = _policy_block_from_run_ctx(rc_fs)
+                inputs_fs = _inputs_block_from_session()
+                
+                def _parse_pass_vec(text: str) -> tuple[bool,bool]:
+                    try:
+                        t = (text or "").strip()
+                        if t.startswith("[") and t.endswith("]"):
+                            parts = [p.strip() for p in t[1:-1].split(",")]
+                        else:
+                            parts = [p.strip() for p in t.split(",")]
+                        k2v = bool(int(parts[0])) if len(parts) > 0 else False
+                        k3v = bool(int(parts[1])) if len(parts) > 1 else False
+                        return k2v, k3v
+                    except Exception:
+                        return False, False
+                
+                results_fs = []
+                for row in rows_fs:
+                    U_class = str(row[0]) if len(row) > 0 else "unknown"
+                    pv_text = str(row[1]) if len(row) > 1 else ""
+                    note    = str(row[2]) if len(row) > 2 else ""
+                    k2v, k3v = _parse_pass_vec(pv_text)
+                
+                    entry = {
+                        "U_class": ("shrink" if "shrink" in U_class else ("plus" if "plus" in U_class else U_class)),
+                        "pass_vec": [k2v, k3v],
+                        "note": note,
+                    }
+                    if "|U|" in note:
+                        try:
+                            seg = note.split("|U|:", 1)[1]
+                            a_str, b_str = seg.split("→", 1)
+                            a = int("".join(ch for ch in a_str if ch.isdigit()))
+                            b = int("".join(ch for ch in b_str if ch.isdigit()))
+                            entry["mask_delta"] = {"removed": max(0, a - b), "added": max(0, b - a)}
+                        except Exception:
+                            pass
+                
+                    results_fs.append(entry)
+                
+                fence_json = {
+                    "schema_version": FENCE_SCHEMA_VERSION,
+                    "written_at_utc": _utc_iso_z(),
+                    "app_version": APP_VER,
+                    "identity": {
+                        "run_id": (rc_fs.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
+                        "fixture_nonce": rc_fs.get("fixture_nonce", ""),
+                    },
+                    "policy": policy_fs,
+                    "inputs": inputs_fs,
+                    "exemplar": {
+                        "fixture_id": rc_fs.get("fixture_nonce", ""),
+                        "lane_mask_k3": rc_fs.get("lane_mask_k3") or [],
+                    },
+                    "results": results_fs,
+                    "integrity": {"content_hash": ""},
+                }
+                fence_json["integrity"]["content_hash"] = _hash_json(fence_json)
+                fence_json_path = REPORTS_DIR / "fence_stress.json"
+                _atomic_write_json(fence_json_path, fence_json)
+                st.session_state.setdefault("last_report_paths", {})["fence_stress"] = {
+                    "csv": str(FENCE_OUT_PATH), "json": str(fence_json_path)
+                }
+                
+                                
                 st.info(f"fence: {len(results_fs)} actions · {_badge_ok()}")
-                
+                try:
+                import io as _io
+                h8 = fence_json["integrity"]["content_hash"][:8]
+                mem = _io.BytesIO(_json.dumps(fence_json, ensure_ascii=False, indent=2).encode("utf-8"))
+                st.download_button(
+                    "Download fence_stress.json",
+                    mem,
+                    file_name="fence_stress.json",
+                    key=f"dl_fence_json_{h8}",
+                )
+            except Exception as e:
+                st.info(f"(Could not build fence JSON download: {e})")
+
                                 
         
 
