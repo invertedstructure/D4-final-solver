@@ -1719,6 +1719,67 @@ with safe_expander("A/B compare (strict vs active projected)"):
 
 
 
+# ===== Shared helpers for Coverage / Perturbation / Fence =====
+
+def _hash_json(obj: dict) -> str:
+    try:
+        s = _json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    except NameError:
+        import json as _json
+        s = _json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    import hashlib as _hashlib
+    return _hashlib.sha256(s).hexdigest()
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        _json.dump(payload, f, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+def _policy_block_from_run_ctx(rc: dict) -> dict:
+    # rc fields expected: mode ∈ {"strict","projected(auto)","projected(file)"},
+    # projector_filename?, projector_hash?, lane_mask_k3?
+    mode = str(rc.get("mode", "strict"))
+    if mode == "strict":
+        return {
+            "policy_tag": "strict",
+            "projector_mode": "strict",
+            "projector_filename": "",
+            "projector_hash": "",
+        }
+    if mode == "projected(auto)":
+        # diag from per-run lane mask; keep empty filename
+        diag_hash = _sha256_hex(_json.dumps(rc.get("lane_mask_k3") or [], separators=(",", ":"), sort_keys=True).encode("utf-8"))
+        return {
+            "policy_tag": "projected(columns@k=3,auto)",
+            "projector_mode": "auto",
+            "projector_filename": "",
+            "projector_hash": diag_hash,
+        }
+    # projected(file)
+    return {
+        "policy_tag": "projected(columns@k=3,file)",
+        "projector_mode": "file",
+        "projector_filename": rc.get("projector_filename", "") or "",
+        "projector_hash": rc.get("projector_hash", "") or "",
+    }
+
+def _inputs_block_from_session() -> dict:
+    # Pull your SSOT; fall back safely if not present.
+    ib = st.session_state.get("_inputs_block") or {}
+    dims = {"n2": int(ib.get("dims", {}).get("n2") or 0),
+            "n3": int(ib.get("dims", {}).get("n3") or 0)}
+    hashes = ib.get("hashes") or {}
+    # Normalize keys you care about; leave extras intact.
+    keep = {k: hashes.get(k, "") for k in (
+        "boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"
+    )}
+    return {"hashes": keep, "dims": dims}
+
+def _badge_ok() -> str:
+    return "CSV + JSON ✓"
 
 
 
@@ -1836,6 +1897,10 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
         try:
             # Baseline (no mutation)
             lm0, tag_s0, eq_s0, tag_p0, eq_p0 = _sig_tag_eq(B0, C0, H0, P_active)
+            if (rc or {}).get("mode") != "strict":
+            st.warning("Perturbation runs under strict only. Switch policy to strict and try again.")
+            st.stop()
+
 
             # Deterministic flips (on d3 for PS)
             def _flip_targets(n2_, n3_, budget, seed_str):
@@ -1992,6 +2057,146 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
 
                 _atomic_write_csv(FENCE_OUT_PATH, fence_header, rows_fs, fence_meta)
                 st.success(f"Fence stress saved → {FENCE_OUT_PATH}")
+                
+                                       # ---- JSON companion for Perturbation Sanity ----
+                try:
+                    rc_ps = require_fresh_run_ctx()
+                except Exception:
+                    rc_ps = st.session_state.get("run_ctx") or {}
+                
+                policy_ps = _policy_block_from_run_ctx(rc_ps)
+                inputs_ps = _inputs_block_from_session()
+                
+                # Build JSON results mirroring your CSV
+                # CSV 'rows' you built: [flip_id, guard_tripped, expected_guard, note]
+                matches = 0
+                mismatches = 0
+                results_ps = []
+                for flip_id, guard_tripped, expected_guard, note in rows:
+                    ok = (bool(guard_tripped) == True)  # grammar drift expected in your current logic
+                    matches += int(ok)
+                    mismatches += int(not ok)
+                    # flip coordinates: you log them in note; keep flip_id only if coords aren’t tracked
+                    results_ps.append({
+                        "flip_id": int(flip_id),
+                        "guard_tripped": ("grammar" if guard_tripped else "none"),
+                        "expected_guard": str(expected_guard),
+                        "note": str(note or "")
+                    })
+                
+                perturb_json = {
+                    "schema_version": PERTURB_SCHEMA_VERSION,
+                    "written_at_utc": _utc_iso_z(),
+                    "app_version": APP_VER,
+                    "identity": {
+                        "run_id": (rc_ps.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
+                        "fixture_nonce": rc_ps.get("fixture_nonce", ""),
+                    },
+                    "policy": policy_ps,  # strict
+                    "inputs": inputs_ps,  # hashes + dims
+                    "anchor": {
+                        "id": rc_ps.get("fixture_nonce", ""),
+                        "lane_mask_k3": rc_ps.get("lane_mask_k3") or [],
+                    },
+                    "run": {
+                        "max_flips": int(max_flips),
+                        "flip_domain": "lanes-only",
+                        "ker_guard": "enforced",
+                        "seed": str(seed_txt),
+                    },
+                    "results": results_ps,
+                    "summary": {
+                        "matches": int(matches),
+                        "mismatches": int(mismatches),
+                    },
+                    "integrity": {"content_hash": ""},
+                }
+                
+                perturb_json["integrity"]["content_hash"] = _hash_json(perturb_json)
+                perturb_json_path = REPORTS_DIR / "perturbation_sanity.json"
+                _atomic_write_json(perturb_json_path, perturb_json)
+                
+                st.session_state.setdefault("last_report_paths", {})["perturbation_sanity"] = {
+                    "csv": str(PERTURB_OUT_PATH),
+                    "json": str(perturb_json_path),
+                }
+                
+                st.info(f"perturbation: matches={matches} · mismatches={mismatches} · {_badge_ok()}")
+                                # ---- JSON companion for Fence Stress ----
+                try:
+                    rc_fs = require_fresh_run_ctx()
+                except Exception:
+                    rc_fs = st.session_state.get("run_ctx") or {}
+                
+                policy_fs = _policy_block_from_run_ctx(rc_fs)
+                inputs_fs = _inputs_block_from_session()
+                
+                results_fs = []
+                # rows_fs entries you create look like:
+                #   ["U_shrink", "[k2,k3]", "|U|:old→new"]  (or fallback H2_* rows)
+                for row in rows_fs:
+                    U_class = str(row[0])
+                    pv_text = str(row[1])        # like "[1,0]" or "[1,1]"
+                    note    = str(row[2]) if len(row) > 2 else ""
+                
+                    # parse pass_vec robustly
+                    k2_k3 = (pv_text.strip().lstrip("[").rstrip("]").split(",") if pv_text else [])
+                    try:
+                        k2v = bool(int(k2_k3[0])) if len(k2_k3) > 0 else False
+                        k3v = bool(int(k2_k3[1])) if len(k2_k3) > 1 else False
+                    except Exception:
+                        k2v, k3v = False, False
+                
+                    entry = {
+                        "U_class": ("shrink" if "shrink" in U_class else ("plus" if "plus" in U_class else U_class)),
+                        "pass_vec": [k2v, k3v],
+                        "note": note,
+                    }
+                
+                    # Optional: extract |U| deltas when present in note: "|U|:a→b"
+                    if "|U|" in note:
+                        try:
+                            seg = note.split("|U|:", 1)[1]
+                            a_str, b_str = seg.split("→", 1)
+                            a = int("".join(ch for ch in a_str if ch.isdigit()))
+                            b = int("".join(ch for ch in b_str if ch.isdigit()))
+                            entry["mask_delta"] = {"removed": max(0, a - b), "added": max(0, b - a)}
+                        except Exception:
+                            pass
+                
+                    results_fs.append(entry)
+                
+                fence_json = {
+                    "schema_version": FENCE_SCHEMA_VERSION,
+                    "written_at_utc": _utc_iso_z(),
+                    "app_version": APP_VER,
+                    "identity": {
+                        "run_id": (rc_fs.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
+                        "fixture_nonce": rc_fs.get("fixture_nonce", ""),
+                    },
+                    "policy": policy_fs,   # strict OR projected (<- provenance included)
+                    "inputs": inputs_fs,   # hashes + dims
+                    "exemplar": {
+                        "fixture_id": rc_fs.get("fixture_nonce", ""),
+                        "lane_mask_k3": rc_fs.get("lane_mask_k3") or [],
+                    },
+                    "results": results_fs,
+                    "integrity": {"content_hash": ""},
+                }
+                
+                fence_json["integrity"]["content_hash"] = _hash_json(fence_json)
+                fence_json_path = REPORTS_DIR / "fence_stress.json"
+                _atomic_write_json(fence_json_path, fence_json)
+                
+                st.session_state.setdefault("last_report_paths", {})["fence_stress"] = {
+                    "csv": str(FENCE_OUT_PATH),
+                    "json": str(fence_json_path),
+                }
+                
+                st.info(f"fence: {len(results_fs)} actions · {_badge_ok()}")
+                
+                                
+        
 
             # Quick downloads
             try:
@@ -2174,6 +2379,55 @@ with st.expander("Coverage Sampling"):
                                        key="dl_coverage_csv")
             except Exception:
                 pass
+                            # ---- JSON companion for Coverage Sampling ----
+            try:
+                rc_cov = require_fresh_run_ctx()  # safe: you already guarded above
+            except Exception:
+                rc_cov = st.session_state.get("run_ctx") or {}
+            
+            policy_cov = _policy_block_from_run_ctx(rc_cov)
+            inputs_cov = _inputs_block_from_session()
+            
+            # Build JSON rows from the CSV rows you just computed
+            results_cov = []
+            for sig, cnt in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+                in_d = _in_district_guess(sig, current_lane_pattern=lane_pattern)
+                pctv = 0.0 if num_samples <= 0 else (cnt / float(num_samples))
+                results_cov.append({"signature": sig, "count": int(cnt), "in_district": bool(in_d), "pct": float(pctv)})
+            
+            coverage_json = {
+                "schema_version": SCHEMA_VERSION,
+                "written_at_utc": _utc_iso_z(),
+                "app_version": APP_VERSION,
+                "identity": {
+                    "run_id": (rc_cov.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
+                    "fixture_nonce": rc_cov.get("fixture_nonce", ""),
+                },
+                "policy": policy_cov,
+                "inputs": inputs_cov,
+                "sampling": {
+                    "num_samples": int(num_samples),
+                    "bit_density": float(bit_density),
+                    "seed": str(seed_txt),
+                },
+                "results": results_cov,
+                "summary": {
+                    "total": int(num_samples),
+                    "distinct_signatures": int(len(results_cov)),
+                },
+                "integrity": {"content_hash": ""},
+            }
+            
+            coverage_json["integrity"]["content_hash"] = _hash_json(coverage_json)
+            cov_json_path = REPORTS_DIR / "coverage_sampling.json"
+            _atomic_write_json(cov_json_path, coverage_json)
+            
+            # Session pointer for snapshotters
+            last_paths = st.session_state.setdefault("last_report_paths", {})
+            last_paths["coverage_sampling"] = {"csv": str(COVERAGE_CSV_PATH), "json": str(cov_json_path)}
+            
+            st.info(f"coverage: {len(results_cov)} signatures · {_badge_ok()}")
+
 
 
 
