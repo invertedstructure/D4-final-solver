@@ -2445,6 +2445,15 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
 
 # =============================== Coverage Sampling (non-blocking) ==============================
 # Standalone: no open try/except should be above this line.
+# -- Ensure REPORTS_DIR exists for coverage block (defensive bootstrap) --
+from pathlib import Path
+
+if "REPORTS_DIR" not in globals() or REPORTS_DIR is None:
+    REPORTS_DIR = Path("reports")
+else:
+    REPORTS_DIR = Path(REPORTS_DIR)
+
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 COVERAGE_CSV_PATH = REPORTS_DIR / "coverage_sampling.csv"
 COVERAGE_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
