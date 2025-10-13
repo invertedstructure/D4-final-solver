@@ -2287,11 +2287,59 @@ def _sig_tag_eq(boundaries_obj, cmap_obj, H_used_obj, P_active=None):
     return lm, tag_s, bool(eq_s), tag_p, (None if eq_p is None else bool(eq_p))
 
 
-# -------- optional carrier (U) mutation hooks ----------
+# -------- optional carrier (U) mutation hooks (fallback implementation) --------
+# If your project already defines get_carrier_mask / set_carrier_mask, this block is a no-op.
+
+if "get_carrier_mask" not in globals():
+    def get_carrier_mask(U_obj=None):
+        """
+        Return an n3×n2 0/1 mask. Fallback: all-ones mask (every lane in U).
+        Prefers H2 shape (n3×n2); falls back to d3 (n2×n3) if H2 missing.
+        Allows an override via st.session_state["_u_mask_override"].
+        """
+        # explicit override (used by Fence variants)
+        override = st.session_state.get("_u_mask_override")
+        if isinstance(override, list) and override and isinstance(override[0], list):
+            return override
+
+        # 1) try H2 (shape n3×n2)
+        try:
+            H_local = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
+            H2 = (H_local.blocks.__root__.get("2") or [])
+            n3 = len(H2)
+            n2 = len(H2[0]) if (H2 and H2[0]) else 0
+        except Exception:
+            n2 = n3 = 0
+
+        # 2) fallback to d3 (shape n2×n3) → infer n2,n3
+        if n3 <= 0 or n2 <= 0:
+            try:
+                B = st.session_state.get("boundaries")
+                d3 = (B.blocks.__root__.get("3") or []) if B else []
+                n2 = len(d3)
+                n3 = len(d3[0]) if (d3 and d3[0]) else 0
+            except Exception:
+                n2 = n3 = 0
+
+        if n3 <= 0 or n2 <= 0:
+            # unknown dims → empty mask (Fence will no-op gracefully)
+            return []
+
+        # default: everything in-carrier
+        return [[1] * n2 for _ in range(n3)]
+
+if "set_carrier_mask" not in globals():
+    def set_carrier_mask(U_obj, mask):
+        """Store a session-scoped override U-mask (used by Fence variants)."""
+        st.session_state["_u_mask_override"] = mask
+        return True
+
+# Recompute HAS_U_HOOKS after possible fallback injection
 HAS_U_HOOKS = (
     "get_carrier_mask" in globals() and "set_carrier_mask" in globals()
     and callable(globals()["get_carrier_mask"]) and callable(globals()["set_carrier_mask"])
 )
+
 
 # ============================ Reports: Perturbation & Fence ============================
 def _publish_ssot_if_pending():
