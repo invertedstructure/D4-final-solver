@@ -1881,6 +1881,18 @@ def _inputs_block_from_session(strict_dims: tuple[int,int] | None = None) -> dic
 
     lane_mask = [int(x) & 1 for x in (rc.get("lane_mask_k3") or [])]
     return {"hashes": hashes, "dims": {"n2": n2, "n3": n3}, "lane_mask_k3": lane_mask}
+    # Normalize projector info in run_ctx
+try:
+    mode, sub, fname, pj_hash, pj_diag = _resolve_projector_from_rc()
+    rc_here = st.session_state.get("run_ctx") or {}
+    if pj_hash:
+        rc_here["projector_hash"] = pj_hash
+        if fname: rc_here["projector_filename"] = fname
+    st.session_state["run_ctx"] = rc_here
+except Exception as e:
+    # keep errors explicit; projected(file) will auto-disable via file_validation_failed()
+    st.caption(f"Π normalize: {e}")
+
 
 # 6) Policy block from run_ctx (strict / projected(auto|file))
 def _policy_block_from_run_ctx(rc: dict) -> dict:
