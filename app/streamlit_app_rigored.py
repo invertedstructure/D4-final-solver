@@ -1195,8 +1195,22 @@ def _xor_mat(A, B):
 def _bottom_row(M):
     return M[-1] if (M and len(M)) else []
 
-def _stable_hash(obj):
-    return hashlib.sha256(_json.dumps(obj, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+import hashlib, copy as _copy
+
+def _deep_intify(o):
+    if isinstance(o, bool): return 1 if o else 0
+    if isinstance(o, list): return [_deep_intify(x) for x in o]
+    if isinstance(o, dict): return {k: _deep_intify(v) for k, v in o.items()}
+    return o
+
+def _hash_json(obj) -> str:
+    canon = _deep_intify(_copy.deepcopy(obj))
+    s = _json.dumps(canon, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    return hashlib.sha256(s).hexdigest()
+
+def _sha256_hex(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()
+
 
 def _load_h_local():
     try:
