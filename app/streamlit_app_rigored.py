@@ -2792,316 +2792,316 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
 
 
 
-# ---- Coverage helpers (idempotent; safe to re-declare if missing) ----
-import random as _random
-
-if "_rand_gf2_matrix" not in globals():
-    def _rand_gf2_matrix(rows: int, cols: int, density: float, rng: _random.Random) -> list[list[int]]:
-        density = max(0.0, min(1.0, float(density)))
-        return [[1 if rng.random() < density else 0 for _ in range(int(cols))] for _ in range(int(rows))]
-
-if "_gf2_rank" not in globals():
-    def _gf2_rank(M: list[list[int]]) -> int:
-        if not M: return 0
-        A = [row[:] for row in M]
-        m, n = len(A), len(A[0])
-        r = c = 0
-        while r < m and c < n:
-            pivot = next((i for i in range(r, m) if A[i][c] & 1), None)
-            if pivot is None: c += 1; continue
-            if pivot != r: A[r], A[pivot] = A[pivot], A[r]
-            for i in range(r+1, m):
-                if A[i][c] & 1:
-                    A[i] = [(A[i][j] ^ A[r][j]) for j in range(n)]
-            r += 1; c += 1
-        return r
-
-if "_col_support_pattern" not in globals():
-    def _col_support_pattern(M: list[list[int]]) -> list[str]:
-        if not M: return []
-        rows, cols = len(M), len(M[0])
-        cols_bits = []
-        for j in range(cols):
-            bits = ''.join('1' if (M[i][j] & 1) else '0' for i in range(rows))
-            cols_bits.append(bits)
-        cols_bits.sort()
-        return cols_bits
-
-if "_coverage_signature" not in globals():
-    def _coverage_signature(d_k1: list[list[int]], n_k: int) -> str:
-        rk = _gf2_rank(d_k1)
-        ker = max(0, int(n_k) - rk)
-        patt = _col_support_pattern(d_k1)
-        return f"rk={rk};ker={ker};pattern=[{','.join(patt)}]"
-
-if "_lane_pattern_from_mask" not in globals():
-    def _lane_pattern_from_mask(mask: list[int]) -> str:
-        return ''.join('1' if (int(x) & 1) else '0' for x in (mask or []))
-
-if "_in_district_guess" not in globals():
-    def _in_district_guess(signature: str, *, current_lane_pattern: str) -> int:
-        try:
-            bracket = signature.split("pattern=[", 1)[1].split("]", 1)[0]
-            col_bitstrings = [s.strip() for s in bracket.split(",") if s.strip()]
-            return int(any(bs == current_lane_pattern for bs in col_bitstrings))
-        except Exception:
-            return 0
-
-
-# =============================== Coverage Sampling (non-blocking) ==============================
-COVERAGE_CSV_PATH = Path(st.session_state.get("REPORTS_DIR", "reports")) / "coverage_sampling.csv"
-COVERAGE_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-with st.expander("Coverage Sampling"):
-    # Display-only preflight (no exceptions)
-    ok_pj, pj_tag = _projector_status()
-    h_tag = _hashes_status()
-    st.caption(f"Evidence preflight → Π: {pj_tag} · hashes: {h_tag}")
-
-    # Freshness — do not stop the render if missing
-    rc = None
-    try:
-        rc = require_fresh_run_ctx()
-        rc = rectify_run_ctx_mask_from_d3()
-    except Exception as e:
-        st.warning(str(e))
-
-    # Defaults (safe even if rc is None)
-    n3_default = int((rc or {}).get("n3") or 0)
-    try:
-        H_local = st.session_state.get("overlap_H") or _load_h_local()
-        H2_rows = len((H_local.blocks.__root__.get("2") or []))
-    except Exception:
-        H2_rows = 0
-    n2_default = H2_rows
-
-    c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
-    with c1:
-        num_samples = st.number_input("Samples", min_value=1, max_value=10000,
-                                      value=250, step=50, key="cov_nsamples")
-    with c2:
-        bit_density = st.slider("Bit density", min_value=0.0, max_value=1.0,
-                                value=0.25, step=0.05, key="cov_density")
-    with c3:
-        n2 = st.number_input("Rows (n₂)", min_value=0, max_value=2048,
-                             value=n2_default, step=1, key="cov_n2")
-    with c4:
-        n3 = st.number_input("Cols (n₃)", min_value=0, max_value=2048,
-                             value=n3_default, step=1, key="cov_n3")
-
-    seed_txt = st.text_input("Seed (any string/hex)", value="cov-seed-0001", key="cov_seed")
-
-    # Disabled state (no exceptions)
-    file_bad = file_validation_failed()
-    cov_disabled = file_bad or (rc is None) or (n2_default <= 0) or (n3_default <= 0)
-    tips = []
-    if rc is None: tips.append("Run Overlap first.")
-    if n2_default <= 0 or n3_default <= 0: tips.append("Fixture dims unresolved (n₂/n₃).")
-    if file_bad: tips.append("Projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π.")
-    cov_help = " ".join(tips) or "Generate coverage_sampling.csv with meta header."
-
-    if st.button("Coverage Sample", key="btn_coverage_sample",
-                 disabled=cov_disabled, help=cov_help):
-
-        # publish SSOT (idempotent) + ensure hashes
-        if "_publish_ssot_if_pending" in globals():
-            _publish_ssot_if_pending()
-        if "_ensure_inputs_hashes" in globals():
-            _ensure_inputs_hashes()
-
-        try:
-            # evidence-only guards (CLICK-TIME)
-            _require_inputs_hashes_strict_for_run()
-            _require_lane_mask_for_run()
-            _disallow_auto_for_evidence()
-            _require_projected_file_allowed_for_run()
-
-            # require a non-empty canonical baseline
-            try:
-                rc_cov = require_fresh_run_ctx()
-            except Exception:
-                rc_cov = st.session_state.get("run_ctx") or {}
-            known_signatures = (rc_cov.get("known_signatures") or [])
-            if not known_signatures:
-                st.error("COVERAGE_CONFIG_EMPTY: no canonical signatures loaded. Load phase-U baseline before sampling.")
-                st.stop()
-
-            if n3 <= 0 or n2 <= 0:
-                st.warning("Please ensure n₂ and n₃ are both > 0.")
-            else:
-                import csv, tempfile, os, random, uuid, io as _io, json as _json
-                rng = random.Random(); rng.seed(seed_txt)
-
-                # Stamp a run_id (non-destructive)
-                run_id = (st.session_state.get("run_ctx") or {}).get("run_id") or str(uuid.uuid4())
-                st.session_state.setdefault("run_ctx", {})["run_id"] = run_id
-
-                counts: dict[str, int] = {}
-
-                # lane_pattern used for quick in_district guess (bitstring)
-                inputs_cov_tmp = _inputs_block_from_session((int(n2), int(n3)))
-                lane_mask_bits = "".join("1" if int(x) else "0" for x in (inputs_cov_tmp.get("lane_mask_k3") or []))
-
-                for _ in range(int(num_samples)):
-                    d_k1 = _rand_gf2_matrix(int(n2), int(n3), float(bit_density), rng)
-                    sig = _coverage_signature(d_k1, n_k=int(n3))
-                    counts[sig] = counts.get(sig, 0) + 1
-
-                total = float(num_samples)
-                rows = []
-                for sig, cnt in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
-                    in_d = _in_district_guess(sig, current_lane_pattern=lane_mask_bits)
-                    pct = 0.0 if total <= 0 else round(100.0 * (cnt / total), 2)
-                    rows.append([sig, cnt, in_d, pct])
-
-                # CSV meta header
-                meta_lines = [
-                    f"schema_version={SCHEMA_VERSION}",
-                    f"saved_at={_utc_iso_z()}",
-                    f"run_id={(st.session_state.get('run_ctx') or {}).get('run_id','')}",
-                    f"app_version={APP_VERSION}",
-                    f"seed={seed_txt}",
-                    f"bit_density={bit_density}",
-                    f"n2={n2}",
-                    f"n3={n3}",
-                ]
-                header = ["signature", "count", "in_district", "pct"]
-
-                # Write CSV (atomic)
-                try:
-                    _atomic_write_csv(COVERAGE_CSV_PATH, header, rows, meta_lines)
-                except Exception:
-                    with tempfile.NamedTemporaryFile("w", delete=False, dir=COVERAGE_CSV_PATH.parent,
-                                                     encoding="utf-8", newline="") as tmp:
-                        for line in meta_lines:
-                            tmp.write(f"# {line}\n")
-                        w = csv.writer(tmp); w.writerow(header); w.writerows(rows)
-                        tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
-                    os.replace(tmp_name, COVERAGE_CSV_PATH)
-
-                st.success(f"Coverage CSV saved → {COVERAGE_CSV_PATH}")
-
-                # Preview
-                try:
-                    import pandas as pd
-                    preview = pd.DataFrame(rows[:30], columns=header)
-                    st.dataframe(preview, use_container_width=True, hide_index=True)
-                except Exception:
-                    pass
-
-                # Build JSON payload
-                try:
-                    rc_cov = require_fresh_run_ctx()
-                except Exception:
-                    rc_cov = st.session_state.get("run_ctx") or {}
-
-                if "normalize_projector_into_run_ctx" in globals():
-                    normalize_projector_into_run_ctx()
-
-                policy_cov = _policy_block_from_run_ctx(rc_cov)
-                inputs_cov = _inputs_block_from_session((int(n2), int(n3)))
-
-                lm_bits_cov = "".join("1" if int(x) else "0" for x in inputs_cov.get("lane_mask_k3", []))
-                if lm_bits_cov and len(lm_bits_cov) != int(n3):
-                    st.caption(f"⚠︎ lane_mask_k3 has {len(lm_bits_cov)} bits but n₃={n3}")
-
-                residual_method = "R3 strict vs R3·Π (lanes/ker/mixed)"
-
-                results_cov = []
-                for sig, cnt, in_d, pctv in rows:
-                    results_cov.append({
-                        "signature": sig,
-                        "signature_canonical": sig,
-                        "count": int(cnt),
-                        "pct": float(pctv),
-                        "in_district": bool(int(in_d)),
-                        "lane_pattern": lm_bits_cov,
-                        "dims": {"n2": int(n2), "n3": int(n3)},
-                    })
-
-                payload_cov = {
-                    "schema_version": SCHEMA_VERSION,
-                    "written_at_utc": _utc_iso_z(),
-                    "app_version": APP_VERSION,
-                    "field": FIELD,
-                    "identity": {
-                        "run_id": (rc_cov.get("run_id") or ""),
-                        "district_id": rc_cov.get("district_id","D3"),
-                    },
-                    "policy": policy_cov,
-                    "inputs": inputs_cov,                    # includes hashes from SSOT
-                    "lane_mask_k3": inputs_cov.get("lane_mask_k3", []),
-                    "known_signatures": known_signatures,
-                    "residual_method": residual_method,
-                    "sampling": {
-                        "num_samples": int(num_samples),
-                        "bit_density": float(bit_density),
-                        "seed": str(seed_txt),
-                        "canonicalization": {
-                            "columns": "top-to-bottom bits",
-                            "sort": "lexicographic",
-                            "domain": "d3 support",
-                        },
-                    },
-                    "results": results_cov,
-                    "summary": {
-                        "N": int(num_samples),
-                        "unique_signatures": int(len(results_cov)),
-                        "in_district_hits": int(sum(1 for r in results_cov if r["in_district"])),
-                        "pct_in_district": (
-                            100.0 * sum(1 for r in results_cov if r["in_district"]) / float(len(results_cov))
-                        ) if len(results_cov) else 0.0,
-                        "top_signatures": [
-                            {"signature": s, "count": int(c), "pct": float(p)}
-                            for (s, c, _, p) in sorted(rows, key=lambda r: (-int(r[1]), r[0]))[:3]
-                        ],
-                    },
-                    "integrity": {"content_hash": ""},
-                }
-
-                payload_cov["integrity"]["content_hash"] = _hash_json(payload_cov)
-                hash12_cov = payload_cov["integrity"]["content_hash"][:12]
-                hash8_cov  = payload_cov["integrity"]["content_hash"][:8]
-                cov_json_name = f"coverage_sampling__{hash12_cov}.json"
-                cov_json_path = COVERAGE_CSV_PATH.parent / cov_json_name
-
-                try:
-                    _atomic_write_json(cov_json_path, payload_cov)
-                    st.session_state.setdefault("last_report_paths", {})["coverage_sampling"] = {
-                        "csv": str(COVERAGE_CSV_PATH), "json": str(cov_json_path)
-                    }
-                except Exception as e:
-                    st.warning(f"(Could not write coverage JSON: {e})")
-
-                # Downloads
-                try:
-                    with open(COVERAGE_CSV_PATH, "rb") as fcsv:
-                        st.download_button(
-                            "Download coverage_sampling.csv",
-                            fcsv,
-                            file_name=f"coverage_sampling__{hash12_cov}.csv",
-                            key=f"dl_cov_csv_{hash8_cov}",
-                        )
-                except Exception:
-                    pass
-
-                try:
-                    mem = _io.BytesIO(_json.dumps(payload_cov, ensure_ascii=False, indent=2).encode("utf-8"))
-                    st.download_button(
-                        "Download coverage_sampling.json",
-                        mem,
-                        file_name=cov_json_name,
-                        key=f"dl_cov_json_{hash8_cov}",
-                    )
-                except Exception as e:
-                    st.info(f"(Could not build coverage JSON download: {e})")
-
-                # Badges
-                st.info(f"wrote JSON ✓ · hash: {hash12_cov} · saved as {cov_json_name}")
-                st.info(f"N={payload_cov['summary']['N']} · unique={payload_cov['summary']['unique_signatures']} · in-district={payload_cov['summary']['pct_in_district']:.2f}%")
-
-        except Exception as e:
-            st.error(f"Coverage sampling failed: {e}")
+                    # ---- Coverage helpers (idempotent; safe to re-declare if missing) ----
+                    import random as _random
+                    
+                    if "_rand_gf2_matrix" not in globals():
+                        def _rand_gf2_matrix(rows: int, cols: int, density: float, rng: _random.Random) -> list[list[int]]:
+                            density = max(0.0, min(1.0, float(density)))
+                            return [[1 if rng.random() < density else 0 for _ in range(int(cols))] for _ in range(int(rows))]
+                    
+                    if "_gf2_rank" not in globals():
+                        def _gf2_rank(M: list[list[int]]) -> int:
+                            if not M: return 0
+                            A = [row[:] for row in M]
+                            m, n = len(A), len(A[0])
+                            r = c = 0
+                            while r < m and c < n:
+                                pivot = next((i for i in range(r, m) if A[i][c] & 1), None)
+                                if pivot is None: c += 1; continue
+                                if pivot != r: A[r], A[pivot] = A[pivot], A[r]
+                                for i in range(r+1, m):
+                                    if A[i][c] & 1:
+                                        A[i] = [(A[i][j] ^ A[r][j]) for j in range(n)]
+                                r += 1; c += 1
+                            return r
+                    
+                    if "_col_support_pattern" not in globals():
+                        def _col_support_pattern(M: list[list[int]]) -> list[str]:
+                            if not M: return []
+                            rows, cols = len(M), len(M[0])
+                            cols_bits = []
+                            for j in range(cols):
+                                bits = ''.join('1' if (M[i][j] & 1) else '0' for i in range(rows))
+                                cols_bits.append(bits)
+                            cols_bits.sort()
+                            return cols_bits
+                    
+                    if "_coverage_signature" not in globals():
+                        def _coverage_signature(d_k1: list[list[int]], n_k: int) -> str:
+                            rk = _gf2_rank(d_k1)
+                            ker = max(0, int(n_k) - rk)
+                            patt = _col_support_pattern(d_k1)
+                            return f"rk={rk};ker={ker};pattern=[{','.join(patt)}]"
+                    
+                    if "_lane_pattern_from_mask" not in globals():
+                        def _lane_pattern_from_mask(mask: list[int]) -> str:
+                            return ''.join('1' if (int(x) & 1) else '0' for x in (mask or []))
+                    
+                    if "_in_district_guess" not in globals():
+                        def _in_district_guess(signature: str, *, current_lane_pattern: str) -> int:
+                            try:
+                                bracket = signature.split("pattern=[", 1)[1].split("]", 1)[0]
+                                col_bitstrings = [s.strip() for s in bracket.split(",") if s.strip()]
+                                return int(any(bs == current_lane_pattern for bs in col_bitstrings))
+                            except Exception:
+                                return 0
+                    
+                    
+                    # =============================== Coverage Sampling (non-blocking) ==============================
+                    COVERAGE_CSV_PATH = Path(st.session_state.get("REPORTS_DIR", "reports")) / "coverage_sampling.csv"
+                    COVERAGE_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
+                    
+                    with st.expander("Coverage Sampling"):
+                        # Display-only preflight (no exceptions)
+                        ok_pj, pj_tag = _projector_status()
+                        h_tag = _hashes_status()
+                        st.caption(f"Evidence preflight → Π: {pj_tag} · hashes: {h_tag}")
+                    
+                        # Freshness — do not stop the render if missing
+                        rc = None
+                        try:
+                            rc = require_fresh_run_ctx()
+                            rc = rectify_run_ctx_mask_from_d3()
+                        except Exception as e:
+                            st.warning(str(e))
+                    
+                        # Defaults (safe even if rc is None)
+                        n3_default = int((rc or {}).get("n3") or 0)
+                        try:
+                            H_local = st.session_state.get("overlap_H") or _load_h_local()
+                            H2_rows = len((H_local.blocks.__root__.get("2") or []))
+                        except Exception:
+                            H2_rows = 0
+                        n2_default = H2_rows
+                    
+                        c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
+                        with c1:
+                            num_samples = st.number_input("Samples", min_value=1, max_value=10000,
+                                                          value=250, step=50, key="cov_nsamples")
+                        with c2:
+                            bit_density = st.slider("Bit density", min_value=0.0, max_value=1.0,
+                                                    value=0.25, step=0.05, key="cov_density")
+                        with c3:
+                            n2 = st.number_input("Rows (n₂)", min_value=0, max_value=2048,
+                                                 value=n2_default, step=1, key="cov_n2")
+                        with c4:
+                            n3 = st.number_input("Cols (n₃)", min_value=0, max_value=2048,
+                                                 value=n3_default, step=1, key="cov_n3")
+                    
+                        seed_txt = st.text_input("Seed (any string/hex)", value="cov-seed-0001", key="cov_seed")
+                    
+                        # Disabled state (no exceptions)
+                        file_bad = file_validation_failed()
+                        cov_disabled = file_bad or (rc is None) or (n2_default <= 0) or (n3_default <= 0)
+                        tips = []
+                        if rc is None: tips.append("Run Overlap first.")
+                        if n2_default <= 0 or n3_default <= 0: tips.append("Fixture dims unresolved (n₂/n₃).")
+                        if file_bad: tips.append("Projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π.")
+                        cov_help = " ".join(tips) or "Generate coverage_sampling.csv with meta header."
+                    
+                        if st.button("Coverage Sample", key="btn_coverage_sample",
+                                     disabled=cov_disabled, help=cov_help):
+                    
+                            # publish SSOT (idempotent) + ensure hashes
+                            if "_publish_ssot_if_pending" in globals():
+                                _publish_ssot_if_pending()
+                            if "_ensure_inputs_hashes" in globals():
+                                _ensure_inputs_hashes()
+                    
+                            try:
+                                # evidence-only guards (CLICK-TIME)
+                                _require_inputs_hashes_strict_for_run()
+                                _require_lane_mask_for_run()
+                                _disallow_auto_for_evidence()
+                                _require_projected_file_allowed_for_run()
+                    
+                                # require a non-empty canonical baseline
+                                try:
+                                    rc_cov = require_fresh_run_ctx()
+                                except Exception:
+                                    rc_cov = st.session_state.get("run_ctx") or {}
+                                known_signatures = (rc_cov.get("known_signatures") or [])
+                                if not known_signatures:
+                                    st.error("COVERAGE_CONFIG_EMPTY: no canonical signatures loaded. Load phase-U baseline before sampling.")
+                                    st.stop()
+                    
+                                if n3 <= 0 or n2 <= 0:
+                                    st.warning("Please ensure n₂ and n₃ are both > 0.")
+                                else:
+                                    import csv, tempfile, os, random, uuid, io as _io, json as _json
+                                    rng = random.Random(); rng.seed(seed_txt)
+                    
+                                    # Stamp a run_id (non-destructive)
+                                    run_id = (st.session_state.get("run_ctx") or {}).get("run_id") or str(uuid.uuid4())
+                                    st.session_state.setdefault("run_ctx", {})["run_id"] = run_id
+                    
+                                    counts: dict[str, int] = {}
+                    
+                                    # lane_pattern used for quick in_district guess (bitstring)
+                                    inputs_cov_tmp = _inputs_block_from_session((int(n2), int(n3)))
+                                    lane_mask_bits = "".join("1" if int(x) else "0" for x in (inputs_cov_tmp.get("lane_mask_k3") or []))
+                    
+                                    for _ in range(int(num_samples)):
+                                        d_k1 = _rand_gf2_matrix(int(n2), int(n3), float(bit_density), rng)
+                                        sig = _coverage_signature(d_k1, n_k=int(n3))
+                                        counts[sig] = counts.get(sig, 0) + 1
+                    
+                                    total = float(num_samples)
+                                    rows = []
+                                    for sig, cnt in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
+                                        in_d = _in_district_guess(sig, current_lane_pattern=lane_mask_bits)
+                                        pct = 0.0 if total <= 0 else round(100.0 * (cnt / total), 2)
+                                        rows.append([sig, cnt, in_d, pct])
+                    
+                                    # CSV meta header
+                                    meta_lines = [
+                                        f"schema_version={SCHEMA_VERSION}",
+                                        f"saved_at={_utc_iso_z()}",
+                                        f"run_id={(st.session_state.get('run_ctx') or {}).get('run_id','')}",
+                                        f"app_version={APP_VERSION}",
+                                        f"seed={seed_txt}",
+                                        f"bit_density={bit_density}",
+                                        f"n2={n2}",
+                                        f"n3={n3}",
+                                    ]
+                                    header = ["signature", "count", "in_district", "pct"]
+                    
+                                    # Write CSV (atomic)
+                                    try:
+                                        _atomic_write_csv(COVERAGE_CSV_PATH, header, rows, meta_lines)
+                                    except Exception:
+                                        with tempfile.NamedTemporaryFile("w", delete=False, dir=COVERAGE_CSV_PATH.parent,
+                                                                         encoding="utf-8", newline="") as tmp:
+                                            for line in meta_lines:
+                                                tmp.write(f"# {line}\n")
+                                            w = csv.writer(tmp); w.writerow(header); w.writerows(rows)
+                                            tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
+                                        os.replace(tmp_name, COVERAGE_CSV_PATH)
+                    
+                                    st.success(f"Coverage CSV saved → {COVERAGE_CSV_PATH}")
+                    
+                                    # Preview
+                                    try:
+                                        import pandas as pd
+                                        preview = pd.DataFrame(rows[:30], columns=header)
+                                        st.dataframe(preview, use_container_width=True, hide_index=True)
+                                    except Exception:
+                                        pass
+                    
+                                    # Build JSON payload
+                                    try:
+                                        rc_cov = require_fresh_run_ctx()
+                                    except Exception:
+                                        rc_cov = st.session_state.get("run_ctx") or {}
+                    
+                                    if "normalize_projector_into_run_ctx" in globals():
+                                        normalize_projector_into_run_ctx()
+                    
+                                    policy_cov = _policy_block_from_run_ctx(rc_cov)
+                                    inputs_cov = _inputs_block_from_session((int(n2), int(n3)))
+                    
+                                    lm_bits_cov = "".join("1" if int(x) else "0" for x in inputs_cov.get("lane_mask_k3", []))
+                                    if lm_bits_cov and len(lm_bits_cov) != int(n3):
+                                        st.caption(f"⚠︎ lane_mask_k3 has {len(lm_bits_cov)} bits but n₃={n3}")
+                    
+                                    residual_method = "R3 strict vs R3·Π (lanes/ker/mixed)"
+                    
+                                    results_cov = []
+                                    for sig, cnt, in_d, pctv in rows:
+                                        results_cov.append({
+                                            "signature": sig,
+                                            "signature_canonical": sig,
+                                            "count": int(cnt),
+                                            "pct": float(pctv),
+                                            "in_district": bool(int(in_d)),
+                                            "lane_pattern": lm_bits_cov,
+                                            "dims": {"n2": int(n2), "n3": int(n3)},
+                                        })
+                    
+                                    payload_cov = {
+                                        "schema_version": SCHEMA_VERSION,
+                                        "written_at_utc": _utc_iso_z(),
+                                        "app_version": APP_VERSION,
+                                        "field": FIELD,
+                                        "identity": {
+                                            "run_id": (rc_cov.get("run_id") or ""),
+                                            "district_id": rc_cov.get("district_id","D3"),
+                                        },
+                                        "policy": policy_cov,
+                                        "inputs": inputs_cov,                    # includes hashes from SSOT
+                                        "lane_mask_k3": inputs_cov.get("lane_mask_k3", []),
+                                        "known_signatures": known_signatures,
+                                        "residual_method": residual_method,
+                                        "sampling": {
+                                            "num_samples": int(num_samples),
+                                            "bit_density": float(bit_density),
+                                            "seed": str(seed_txt),
+                                            "canonicalization": {
+                                                "columns": "top-to-bottom bits",
+                                                "sort": "lexicographic",
+                                                "domain": "d3 support",
+                                            },
+                                        },
+                                        "results": results_cov,
+                                        "summary": {
+                                            "N": int(num_samples),
+                                            "unique_signatures": int(len(results_cov)),
+                                            "in_district_hits": int(sum(1 for r in results_cov if r["in_district"])),
+                                            "pct_in_district": (
+                                                100.0 * sum(1 for r in results_cov if r["in_district"]) / float(len(results_cov))
+                                            ) if len(results_cov) else 0.0,
+                                            "top_signatures": [
+                                                {"signature": s, "count": int(c), "pct": float(p)}
+                                                for (s, c, _, p) in sorted(rows, key=lambda r: (-int(r[1]), r[0]))[:3]
+                                            ],
+                                        },
+                                        "integrity": {"content_hash": ""},
+                                    }
+                    
+                                    payload_cov["integrity"]["content_hash"] = _hash_json(payload_cov)
+                                    hash12_cov = payload_cov["integrity"]["content_hash"][:12]
+                                    hash8_cov  = payload_cov["integrity"]["content_hash"][:8]
+                                    cov_json_name = f"coverage_sampling__{hash12_cov}.json"
+                                    cov_json_path = COVERAGE_CSV_PATH.parent / cov_json_name
+                    
+                                    try:
+                                        _atomic_write_json(cov_json_path, payload_cov)
+                                        st.session_state.setdefault("last_report_paths", {})["coverage_sampling"] = {
+                                            "csv": str(COVERAGE_CSV_PATH), "json": str(cov_json_path)
+                                        }
+                                    except Exception as e:
+                                        st.warning(f"(Could not write coverage JSON: {e})")
+                    
+                                    # Downloads
+                                    try:
+                                        with open(COVERAGE_CSV_PATH, "rb") as fcsv:
+                                            st.download_button(
+                                                "Download coverage_sampling.csv",
+                                                fcsv,
+                                                file_name=f"coverage_sampling__{hash12_cov}.csv",
+                                                key=f"dl_cov_csv_{hash8_cov}",
+                                            )
+                                    except Exception:
+                                        pass
+                    
+                                    try:
+                                        mem = _io.BytesIO(_json.dumps(payload_cov, ensure_ascii=False, indent=2).encode("utf-8"))
+                                        st.download_button(
+                                            "Download coverage_sampling.json",
+                                            mem,
+                                            file_name=cov_json_name,
+                                            key=f"dl_cov_json_{hash8_cov}",
+                                        )
+                                    except Exception as e:
+                                        st.info(f"(Could not build coverage JSON download: {e})")
+                    
+                                    # Badges
+                                    st.info(f"wrote JSON ✓ · hash: {hash12_cov} · saved as {cov_json_name}")
+                                    st.info(f"N={payload_cov['summary']['N']} · unique={payload_cov['summary']['unique_signatures']} · in-district={payload_cov['summary']['pct_in_district']:.2f}%")
+                    
+                            except Exception as e:
+                                st.error(f"Coverage sampling failed: {e}")
 
 
 
