@@ -1913,27 +1913,43 @@ if "_sha256_hex" not in globals():
         return _hashlib.sha256(b).hexdigest()
 
 
-# Safe XOR fallback if not present
-if "_xor_mat" not in globals():
-    def _xor_mat(A, B):
-        if not A: return [row[:] for row in (B or [])]
-        if not B: return [row[:] for row in (A or [])]
-        r = min(len(A), len(B))
-        c = min(len(A[0]) if A and A[0] else 0, len(B[0]) if B and B[0] else 0)
-        out = [[0]*c for _ in range(r)]
-        for i in range(r):
-            for j in range(c):
-                out[i][j] = (int(A[i][j]) ^ int(B[i][j])) & 1
-        return out
+def _xor_overlap(A: list[list[int]], B: list[list[int]]) -> list[list[int]]:
+    """XOR two matrices over their common (min) shape; return result with A's shape
+    where A-only region (if any) is copied through unchanged."""
+    if not A and not B:
+        return []
+    if not A:
+        # return B copy
+        return [row[:] for row in B]
+    if not B:
+        # return A copy
+        return [row[:] for row in A]
 
-def _strict_R3(H2, d3, C3):
-    """
-    R3(strict) = (H2 @ d3) XOR (C3 XOR I_{n3})
-    where I_{n3} is n3×n3 identity (n3 = number of columns of C3).
-    """
+    rA, cA = len(A), len(A[0]) if A[0] else 0
+    rB, cB = len(B), len(B[0]) if B[0] else 0
+    rO, cO = min(rA, rB), min(cA, cB)
+
+    # start from A copy, XOR the overlap
+    R = [row[:] for row in A]
+    for i in range(rO):
+        for j in range(cO):
+            R[i][j] = (A[i][j] ^ B[i][j]) & 1
+    return R
+
+def _strict_R3(H2: list[list[int]], d3: list[list[int]], C3: list[list[int]]) -> list[list[int]]:
+    """Compute R3 = (H2 @ d3) XOR (C3 XOR I3), tolerating shape mismatches."""
+    if not (H2 and d3):
+        return []
+    # M = H2 @ d3  (shape: m × n3)
+    M = mul(H2, d3) if "mul" in globals() else _xor_mat([], [])  # fallback keeps type
+    # C3p = C3 XOR I3  (shape: n3 × n3)
     n3 = len(C3[0]) if (C3 and C3[0]) else 0
     I3 = [[1 if i == j else 0 for j in range(n3)] for i in range(n3)] if n3 else []
-    return _xor_mat(mul(H2, d3), _xor_mat(C3, I3)) if (H2 and d3 and C3) else []
+    C3p = _xor_overlap(C3, I3) if (C3 or I3) else []
+
+    # If no C3p, R3 = M. Otherwise XOR over the overlap.
+    return _xor_overlap(M, C3p) if C3p else M
+
 
 
 def _projected_R3(R3_strict, P_active):
