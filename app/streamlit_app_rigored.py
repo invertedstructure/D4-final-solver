@@ -2486,9 +2486,13 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
             policy_ps = _policy_block_from_run_ctx(rc_ps)
             inputs_ps = _inputs_block_from_session(strict_dims=(n2, n3))
 
-            hobj_ps = inputs_ps.get("hashes", {})
-            if not any(hobj_ps.values()):
-                raise RuntimeError("INPUT_HASHES_MISSING: SSOT input hashes are empty; aborting perturbation write.")
+                       # accept either a nested `hashes` dict or top-level five fields
+            _hash_fields = ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")
+            hobj_ps = inputs_ps.get("hashes") or {k: inputs_ps.get(k, "") for k in _hash_fields}
+            if not all(hobj_ps.get(k, "") for k in _hash_fields):
+                missing = [k for k in _hash_fields if not hobj_ps.get(k, "")]
+                raise RuntimeError(f"INPUT_HASHES_MISSING: wire SSOT from Cert/Overlap; backfill disabled (missing: {', '.join(missing)})")
+
 
             lm_bits_ps = "".join("1" if int(x) else "0" for x in inputs_ps.get("lane_mask_k3", []))
             if lm_bits_ps and len(lm_bits_ps) != int(n3):
@@ -2640,9 +2644,15 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                         normalize_projector_into_run_ctx()
 
                     inputs_fs = _inputs_block_from_session(strict_dims=(n2, n3))
-                    hobj_fs = inputs_fs.get("hashes", {})
-                    if not any(hobj_fs.values()):
-                        raise RuntimeError("INPUT_HASHES_MISSING: SSOT input hashes are empty; aborting fence write.")
+                    # accept either nested `hashes` or top-level five fields
+                    _hash_fields = ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")
+                    hobj_fs = inputs_fs.get("hashes") or {k: inputs_fs.get(k, "") for k in _hash_fields}
+                    if not all(hobj_fs.get(k, "") for k in _hash_fields):
+                        missing = [k for k in _hash_fields if not hobj_fs.get(k, "")]
+                        raise RuntimeError(
+                            f"INPUT_HASHES_MISSING: wire SSOT from Cert/Overlap; backfill disabled (missing: {', '.join(missing)})"
+                        )
+                    
 
                     policy_fs = _policy_block_from_run_ctx(rc_fs)
                     summary_fs = {
