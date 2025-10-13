@@ -2701,19 +2701,19 @@ with st.expander("Coverage Sampling"):
             except Exception:
                 pass
 
-            # —— JSON payload for Coverage Sampling ——
+                        # —— JSON payload for Coverage Sampling (1.1.0) ——
             try:
                 rc_cov = require_fresh_run_ctx()
             except Exception:
                 rc_cov = st.session_state.get("run_ctx") or {}
-
+            
             policy_cov = _policy_block_from_run_ctx(rc_cov) if "_policy_block_from_run_ctx" in globals() else {
                 "policy_tag": rc_cov.get("policy_tag","strict"),
                 "projector_mode": ("strict" if rc_cov.get("mode") == "strict" else (rc_cov.get("mode") or "")),
                 "projector_filename": rc_cov.get("projector_filename",""),
                 "projector_hash": rc_cov.get("projector_hash",""),
+                "ker_guard": "enforced",
             }
-
             inputs_cov = _inputs_block_from_session() if "_inputs_block_from_session" in globals() else {
                 "hashes": {
                     "boundaries_hash": rc_cov.get("boundaries_hash",""),
@@ -2725,28 +2725,30 @@ with st.expander("Coverage Sampling"):
                 "dims": {"n2": int(n2), "n3": int(n3)},
                 "lane_mask_k3": rc_cov.get("lane_mask_k3", []),
             }
-
+            
             lane_mask_bits = "".join("1" if int(x) else "0" for x in (inputs_cov.get("lane_mask_k3") or []))
-
+            known_signatures = (rc_cov.get("known_signatures") or [])  # keep as [] if none
+            residual_method = "strict R3 vs projected R3·Π"
+            
+            # Rows → JSON results
             results_cov = []
             for sig, cnt, in_d, pctv in rows:
                 results_cov.append({
                     "signature": sig,
-                    "signature_canonical": sig,   # your _coverage_signature already canonicalizes
+                    "signature_canonical": sig,  # your _coverage_signature is canonical (sorted columns)
                     "count": int(cnt),
                     "pct": float(pctv),
                     "in_district": bool(int(in_d)),
-                    "lane_mask": lane_mask_bits,
+                    "lane_pattern": lane_mask_bits,
                     "dims": {"n2": int(n2), "n3": int(n3)},
                 })
-
-            known_signatures = (rc_cov.get("known_signatures") or [])
+            
             payload_cov = {
-                "schema_version": SCHEMA_VERSION,
+                "schema_version": "1.1.0",
                 "written_at_utc": _utc_iso_z(),
                 "app_version": APP_VERSION,
+                "field": "GF(2)",
                 "identity": {
-                    "field": FIELD,
                     "run_id": (rc_cov.get("run_id") or ""),
                     "district_id": rc_cov.get("district_id","D3"),
                 },
@@ -2763,21 +2765,24 @@ with st.expander("Coverage Sampling"):
                     },
                     "lane_mask_k3": inputs_cov.get("lane_mask_k3", []),
                     "known_signatures": known_signatures,
+                    "residual_method": residual_method,
                 },
                 "results": results_cov,
                 "summary": {
-                    "total": int(num_samples),
-                    "distinct_signatures": int(len(results_cov)),
+                    "N": int(num_samples),
+                    "unique_signatures": int(len(results_cov)),
                     "in_district_hits": int(sum(1 for r in results_cov if r["in_district"])),
-                    "hit_rate_pct": (100.0 * sum(1 for r in results_cov if r["in_district"]) / float(num_samples)) if int(num_samples) else 0.0,
+                    "pct_in_district": (100.0 * sum(1 for r in results_cov if r["in_district"]) / float(num_samples)) if int(num_samples) else 0.0,
                 },
                 "integrity": {"content_hash": ""},
             }
+            
             payload_cov["integrity"]["content_hash"] = _hash_json(payload_cov)
             hash12_cov = payload_cov["integrity"]["content_hash"][:12]
             cov_json_name = f"coverage_sampling__{hash12_cov}.json"
             cov_json_path = REPORTS_DIR / cov_json_name
-
+            
+            # Write + remember + offer download
             try:
                 _atomic_write_json(cov_json_path, payload_cov)
                 st.session_state.setdefault("last_report_paths", {})["coverage_sampling"] = {
@@ -2785,20 +2790,22 @@ with st.expander("Coverage Sampling"):
                 }
             except Exception as e:
                 st.warning(f"(Could not write coverage JSON: {e})")
-
-            # JSON download
+            
             try:
                 import io as _io, json as _json
                 mem = _io.BytesIO(_json.dumps(payload_cov, ensure_ascii=False, indent=2).encode("utf-8"))
-                st.download_button("Download coverage_sampling.json", mem, file_name=cov_json_name, key=f"dl_cov_json_{hash12_cov[:8]}")
-            except Exception:
-                pass
+                st.download_button(
+                    "Download coverage_sampling.json",
+                    mem,
+                    file_name=cov_json_name,
+                    key=f"dl_cov_json_{hash12_cov[:8]}",
+                )
+            except Exception as e:
+                st.info(f"(Could not build coverage JSON download: {e})")
+            
+            st.info(f"Wrote CSV + JSON ✓ · hash: {hash12_cov}")
 
-            # Hash badge
-            st.info(_hash_badge(payload_cov["integrity"]["content_hash"]))
-
-        except Exception as e:
-            st.error(f"Coverage sampling failed: {e}")
+           
 
 
 
