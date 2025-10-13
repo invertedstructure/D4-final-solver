@@ -2488,7 +2488,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                         pass
                     except Exception as e:
                 # ←← This closes the try: so the interpreter is NOT inside a try when it reaches Coverage.
-                st.error(f"Perturbation/Fence run failed: {e}")
+                        st.error(f"Perturbation/Fence run failed: {e}")
 
             
 
