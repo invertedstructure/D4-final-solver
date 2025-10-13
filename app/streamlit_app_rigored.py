@@ -1843,6 +1843,39 @@ def _residual_tag_strict(R3: list[list[int]], lane_mask: list[int]) -> str:
     return "none"
 
 
+def _resolve_projector_from_rc():
+    """
+    Returns: (mode, submode, projector_filename, projector_hash, projector_diag or None)
+    mode ∈ {"strict","projected"}
+    submode ∈ {"","auto","file"}
+    Raises RuntimeError with a clear message when the FILE projector is missing/invalid.
+    """
+    rc = st.session_state.get("run_ctx") or {}
+    m  = rc.get("mode", "strict")
+
+    mode, submode = ("strict", "")
+    if m == "projected(auto)":
+        mode, submode = ("projected", "auto")
+    elif m == "projected(file)":
+        mode, submode = ("projected", "file")
+
+    filename = rc.get("projector_filename", "") if (mode == "projected" and submode == "file") else ""
+    pj_hash, pj_diag = "", None
+
+    if mode == "projected" and submode == "file":
+        if not filename or not _path_exists_strict(filename):
+            raise RuntimeError("P3_FILE_MISSING: Projector FILE required but missing/invalid.")
+        try:
+            pj_hash = _sha256_hex(Path(filename).read_bytes())
+            pj_diag = _projector_diag_from_file(filename)  # list[int]
+            if not isinstance(pj_diag, list) or not pj_diag:
+                raise RuntimeError("P3_FILE_INVALID: empty/bad projector diag.")
+        except Exception as e:
+            raise RuntimeError(f"P3_FILE_INVALID: {e}") from e
+
+    return mode, submode, filename, pj_hash, pj_diag
+
+
 
 
 
@@ -3918,7 +3951,7 @@ if "load_fixture_from_paths" not in globals():
             "H": io.parse_cmap(dH),
             "shapes": io.parse_shapes(dU),
         }
-
+    
         if "clear_parity_pairs" not in globals():
             def clear_parity_pairs():
                 st.session_state["parity_pairs"] = []
@@ -3928,7 +3961,7 @@ if "load_fixture_from_paths" not in globals():
                 st.session_state.setdefault("parity_pairs", [])
                 st.session_state["parity_pairs"].append({"label": label, "left": left_fixture, "right": right_fixture})
                 return len(st.session_state["parity_pairs"])
-
+    
         if "_short_hash" not in globals():
             def _short_hash(h: str, n: int = 8) -> str:
                 return (h[:n] + "…") if h else ""
@@ -4223,23 +4256,12 @@ def _all_zero_mat(M: list[list[int]]) -> bool:
 
 
 # --- Strict FILE provenance (no experimental override anywhere)
-projector_hash = ""
-projector_diag = None  # will be a list[int] only for projected(file)
+try:
+    mode, submode, projector_filename, projector_hash, projector_diag = _resolve_projector_from_rc()
+except RuntimeError as e:
+    st.error(str(e))
+    st.stop()
 
-if mode == "projected" and submode == "file":
-    # Require a valid file
-    if not projector_filename or not _path_exists_strict(projector_filename):
-        st.error("Projector FILE required but missing/invalid. (projected:file) — blocking run.")
-        st.stop()
-    try:
-        projector_hash = _sha256_hex(Path(projector_filename).read_bytes())
-        projector_diag = _projector_diag_from_file(projector_filename)  # list[int]
-        if not isinstance(projector_diag, list) or not projector_diag:
-            st.error("P3_FILE_INVALID: empty or bad projector diag.")
-            st.stop()
-    except Exception as e:
-        st.error(f"Projector FILE invalid: {e}")
-        st.stop()
 
 
 
