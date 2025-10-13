@@ -2639,26 +2639,31 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 st.info(f"lanes-only flips: {in_domain_flips}/{total_flips} · mismatches: {mismatches}")
             except Exception as e:
                 st.info(f"(Perturbation JSON/Downloads issue: {e})")
-
-            # ───────────────────── Fence stress (baseline + U-variants; U-only) ─────────────────────
+            
+                        # ───────────────────── Fence stress (baseline + U-variants; U-only) ─────────────────────
             if run_fence:
                 # publish again (idempotent) + guard
-                _publish_ssot_if_pending()
+                if "_publish_ssot_if_pending" in globals():
+                    _publish_ssot_if_pending()
                 if "_ensure_inputs_hashes" in globals():
                     _ensure_inputs_hashes()
                 _require_inputs_hashes_strict_for_run()
                 _require_lane_mask_for_run()
                 _disallow_auto_for_evidence()
                 _require_projected_file_allowed_for_run()
-
+            
                 if not HAS_U_HOOKS:
                     st.warning("Fence stress skipped: U hooks unavailable (no carrier mutation API).")
                 else:
+                    # Pull fixture blocks
                     d3 = (B0.blocks.__root__.get("3") or [])
                     H2 = (H0.blocks.__root__.get("2") or [])
                     C3 = (C0.blocks.__root__.get("3") or [])
-                    _validate_shapes_or_raise(H2, d3, C3)  # raises R3_SHAPE on mismatch
-
+            
+                    # Strict preflight — fast fail, no partial writes
+                    _validate_shapes_or_raise(H2, d3, C3)
+            
+                    # Helpers
                     def _count1(M): return sum(int(x & 1) for row in (M or []) for x in row)
                     def _apply_U_to_H2(H2_in, U_mask):
                         H2_out = [row[:] for row in H2_in]
@@ -2670,20 +2675,26 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                             if not in_U:
                                 H2_out[j] = [0] * len(H2_out[j])
                         return H2_out
-
+            
+                    # Clear any stale override and normalize mask to H2.shape (n3×n2)
+                    st.session_state.pop("_u_mask_override", None)
                     U_mask_base = get_carrier_mask(U0)
+                    U_mask_base = _validate_U_shape_or_default(H2, U_mask_base)
+                    st.caption(f"U-mask shape: {len(U_mask_base)}×{(len(U_mask_base[0]) if U_mask_base else 0)} (expected n₃×n₂)")
+            
+                    # Baseline (no change)
                     R3_base = _strict_R3(H2, d3, C3)
                     k2_base, k3_base = True, ((not R3_base) or all(all((x & 1) == 0 for x in row) for row in R3_base))
-
                     rows_fs = []
                     rows_fs.append(["U_min", f"[{int(k2_base)},{int(k3_base)}]", "baseline"])
-
+            
+                    # U_shrink: chop 1-cell border off U (shape preserved)
                     U_shrink = [row[:] for row in U_mask_base]
                     rU = len(U_shrink); cU = len(U_shrink[0]) if (U_shrink and U_shrink[0]) else 0
                     if rU and cU:
                         for j in range(cU): U_shrink[0][j] = 0; U_shrink[-1][j] = 0
                         for i in range(rU): U_shrink[i][0] = 0; U_shrink[i][-1] = 0
-
+            
                     H2_shrink = _apply_U_to_H2(H2, U_shrink)
                     _validate_shapes_or_raise(H2_shrink, d3, C3)
                     R3_shrink = _strict_R3(H2_shrink, d3, C3)
@@ -2697,12 +2708,13 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                             "size_after": int(_count1(U_shrink)),
                         }}, separators=(",", ":"))
                     ])
-
+            
+                    # U_plus: add 1-cell border to U (shape preserved)
                     U_plus = [row[:] for row in U_mask_base]
                     if rU and cU:
                         for j in range(cU): U_plus[0][j]  = 1; U_plus[-1][j] = 1
                         for i in range(rU): U_plus[i][0]  = 1; U_plus[i][-1] = 1
-
+            
                     H2_plus = _apply_U_to_H2(H2, U_plus)
                     _validate_shapes_or_raise(H2_plus, d3, C3)
                     R3_plus = _strict_R3(H2_plus, d3, C3)
@@ -2716,14 +2728,15 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                             "size_after": int(_count1(U_plus)),
                         }}, separators=(",", ":"))
                     ])
-
+            
+                    # Build + validate inputs (must have SSOT hashes)
                     try:
                         rc_fs = require_fresh_run_ctx()
                     except Exception:
                         rc_fs = st.session_state.get("run_ctx") or {}
                     if "normalize_projector_into_run_ctx" in globals():
                         normalize_projector_into_run_ctx()
-
+            
                     inputs_fs = _inputs_block_from_session(strict_dims=(n2, n3))
                     _hash_fields = ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")
                     hobj_fs = inputs_fs.get("hashes") or {k: inputs_fs.get(k, "") for k in _hash_fields}
@@ -2732,16 +2745,14 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                         raise RuntimeError(
                             f"INPUT_HASHES_MISSING: wire SSOT from Cert/Overlap; backfill disabled (missing: {', '.join(missing)})"
                         )
-
-                    
-
+            
                     policy_fs = _policy_block_from_run_ctx(rc_fs)
                     summary_fs = {
                         "baseline_pass_vec": [bool(k2_base), bool(k3_base)],
                         "U_shrink_pass_vec": [bool(k2_s), bool(k3_s)],
                         "U_plus_pass_vec":   [bool(k2_p), bool(k3_p)],
                     }
-
+            
                     results_fs_json = []
                     for rcls, pvec, note in rows_fs:
                         pv = pvec.strip("[]").split(",")
@@ -2753,7 +2764,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                         except Exception:
                             item["note"] = note
                         results_fs_json.append(item)
-
+            
                     fence_json = {
                         "schema_version": SCHEMA_VERSION,
                         "written_at_utc": _utc_iso_z(),
@@ -2778,13 +2789,13 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                         "integrity": {"content_hash": ""},
                     }
                     fence_json["integrity"]["content_hash"] = _hash_json(fence_json)
-
+            
                     h12 = fence_json["integrity"]["content_hash"][:12]; h8 = fence_json["integrity"]["content_hash"][:8]
                     basename = f"fence_stress__{h12}.json"
                     fence_json_path = REPORTS_DIR / basename
                     _atomic_write_json(fence_json_path, fence_json)
                     st.session_state.setdefault("last_report_paths", {})["fence_stress"] = {"json": str(fence_json_path)}
-
+            
                     import io as _io
                     mem = _io.BytesIO(_json.dumps(fence_json, ensure_ascii=False, indent=2).encode("utf-8"))
                     st.download_button("Download fence_stress.json", mem, file_name=basename, key=f"dl_fs_json_{h8}")
@@ -2792,8 +2803,6 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     st.info(f"U-mode · baseline [k2,k3]=[{int(k2_base)},{int(k3_base)}] → "
                             f"shrink [{int(k2_s)},{int(k3_s)}] · U⁺ [{int(k2_p)},{int(k3_p)}]")
 
-        except Exception as e:
-            st.error(f"Perturbation/Fence run failed: {e}")
 
 
 # ---- Coverage helpers (idempotent; safe to re-declare if missing) ----
@@ -2905,29 +2914,45 @@ with st.expander("Coverage Sampling"):
     cov_help = " ".join(tips) or "Generate coverage_sampling.csv with meta header."
 
     if st.button("Coverage Sample", key="btn_coverage_sample",
-                 disabled=cov_disabled, help=cov_help):
-                   # make sure SSOT hashes are published (copy-only; no recompute)
-        if "_ensure_inputs_hashes" in globals():
-            _ensure_inputs_hashes()
-  
+             disabled=cov_disabled, help=cov_help):
+
+    # publish SSOT (idempotent) + ensure hashes
+    if "_publish_ssot_if_pending" in globals():
+        _publish_ssot_if_pending()
+    if "_ensure_inputs_hashes" in globals():
+        _ensure_inputs_hashes()
+
+    try:
+        # evidence-only guards (CLICK-TIME)
+        _require_inputs_hashes_strict_for_run()
+        _require_lane_mask_for_run()
+        _disallow_auto_for_evidence()
+        _require_projected_file_allowed_for_run()
+
+        # require a non-empty canonical baseline
         try:
-            # evidence-only guards (CLICK-TIME)
-            _require_inputs_hashes_strict_for_run()
-            _require_lane_mask_for_run()
-            _disallow_auto_for_evidence()
-            _require_projected_file_allowed_for_run()
+            rc_cov = require_fresh_run_ctx()
+        except Exception:
+            rc_cov = st.session_state.get("run_ctx") or {}
+        known_signatures = (rc_cov.get("known_signatures") or [])
+        if not known_signatures:
+            st.error("COVERAGE_CONFIG_EMPTY: no canonical signatures loaded. Load phase-U baseline before sampling.")
+            st.stop()
 
-            if n3 <= 0 or n2 <= 0:
-                st.warning("Please ensure n₂ and n₃ are both > 0.")
-            else:
-                import csv, tempfile, os, random, uuid
-                rng = random.Random(); rng.seed(seed_txt)
+        if n3 <= 0 or n2 <= 0:
+            st.warning("Please ensure n₂ and n₃ are both > 0.")
+        else:
+            import csv, tempfile, os, random, uuid
+            rng = random.Random(); rng.seed(seed_txt)
 
-                # Stamp a run_id (non-destructive)
-                run_id = (st.session_state.get("run_ctx") or {}).get("run_id") or str(uuid.uuid4())
-                st.session_state.setdefault("run_ctx", {})["run_id"] = run_id
+            # Stamp a run_id (non-destructive)
+            run_id = (st.session_state.get("run_ctx") or {}).get("run_id") or str(uuid.uuid4())
+            st.session_state.setdefault("run_ctx", {})["run_id"] = run_id
 
-                counts: dict[str, int] = {}
+            # ... (your existing sampling/counting/writes continue here) ...
+
+
+            
 
                 # lane_pattern used for quick in_district guess (bitstring)
                 inputs_cov_tmp = _inputs_block_from_session((int(n2), int(n3)))
