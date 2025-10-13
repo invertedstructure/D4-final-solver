@@ -2911,2956 +2911,2956 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
 
 
 
-# -------------------------- FREEZER HELPERS -------------------------------------------
-
-PROJECTORS_DIR = Path("projectors")
-PROJECTORS_DIR.mkdir(parents=True, exist_ok=True)
-PJ_REG_PATH = PROJECTORS_DIR / "projector_registry.jsonl"
-
-def _utc_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-def _sha256_bytes(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
-
-def _atomic_write_json(path: Path, payload: dict):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    blob = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    with tempfile.NamedTemporaryFile("wb", delete=False, dir=path.parent) as tmp:
-        tmp.write(blob); tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
-    os.replace(tmp_name, path)
-    return _sha256_bytes(blob), len(blob)
-
-def _append_registry_row(row: dict) -> bool:
-    # in-session dedupe based on (district, projector_hash)
-    key = (row.get("district", ""), row.get("projector_hash", ""))
-    seen = st.session_state.setdefault("_pj_registry_keys", set())
-    if key in seen:
-        return False
-    seen.add(key)
-    PROJECTORS_DIR.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", delete=False, dir=PROJECTORS_DIR, encoding="utf-8") as tmp:
-        tmp.write(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n")
-        tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
-    with open(PJ_REG_PATH, "a", encoding="utf-8") as final, open(tmp_name, "r", encoding="utf-8") as src:
-        shutil.copyfileobj(src, final)
-    os.remove(tmp_name)
-    return True
-
-def _diag_projector_from_lane_mask(lm: list[int]) -> list[list[int]]:
-    n = len(lm or [])
-    return [[1 if (i == j and int(lm[j]) == 1) else 0 for j in range(n)] for i in range(n)]
-
-def _freeze_projector(*, district_id: str, lane_mask_k3: list[int], filename_hint: str | None = None) -> dict:
-    if not lane_mask_k3:
-        raise ValueError("No lane mask available (run Overlap first).")
-    P3 = _diag_projector_from_lane_mask(lane_mask_k3)
-    name = filename_hint or f"projector_{district_id or 'UNKNOWN'}.json"
-    pj_path = PROJECTORS_DIR / name
-    payload = {"schema_version": "1.0.0", "written_at_utc": _utc_iso(), "blocks": {"3": P3}}
-    pj_hash, pj_size = _atomic_write_json(pj_path, payload)
-    return {"path": str(pj_path), "projector_hash": pj_hash, "bytes": pj_size, "lane_mask_k3": lane_mask_k3[:]}
-
-def _validate_projector_file(pj_path: str) -> dict:
-    # Use same validator used by overlap (raises ValueError with P3_* on fail)
-    cfg_file = _cfg_from_policy("projected(file)", pj_path)
-    _, meta = projector_choose_active(cfg_file, boundaries)
-    return meta
-
-def _simulate_overlap_with_cfg(cfg_forced: dict):
-    """
-    Run a FILE overlap without touching the policy widget. Populates:
-      run_ctx, overlap_out, residual_tags, overlap_policy_label
-    """
-    P_active, meta = projector_choose_active(cfg_forced, boundaries)
-
-    # Context
-    d3 = meta.get("d3") if "d3" in meta else (boundaries.blocks.__root__.get("3") or [])
-    n3 = meta.get("n3") if "n3" in meta else (len(d3[0]) if (d3 and d3[0]) else 0)
-    lane_mask = meta.get("lane_mask", [])
-    mode = meta.get("mode", "projected(file)")
-
-    # Compute strict residual R3 = H2 @ d3 XOR (C3 XOR I3)
-    H_used = st.session_state.get("overlap_H") or _load_h_local()
-    H2 = (H_used.blocks.__root__.get("2") or [])
-    C3 = (cmap.blocks.__root__.get("3") or [])
-    I3 = eye(len(C3)) if C3 else []
-
-    def _xor(A, B):
-        if not A: return [r[:] for r in (B or [])]
-        if not B: return [r[:] for r in (A or [])]
-        r, c = len(A), len(A[0])
-        return [[(A[i][j] ^ B[i][j]) & 1 for j in range(c)] for i in range(r)]
-
-    def _is_zero(M): return (not M) or all(all((x & 1) == 0 for x in row) for row in M)
-
-    R3_strict = _xor(mul(H2, d3), _xor(C3, I3)) if (H2 and d3 and C3) else []
-    R3_proj   = mul(R3_strict, P_active) if (R3_strict and P_active) else []
-
-    def _residual_tag(R, lm):
-        if not R or not lm: return "none"
-        rows = len(R)
-        lanes_idx = [j for j, m in enumerate(lm) if m]
-        ker_idx   = [j for j, m in enumerate(lm) if not m]
-        def _col_nz(j): return any(R[i][j] & 1 for i in range(rows))
-        lanes = any(_col_nz(j) for j in lanes_idx) if lanes_idx else False
-        ker   = any(_col_nz(j) for j in ker_idx)   if ker_idx   else False
-        if not lanes and not ker: return "none"
-        if lanes and not ker:     return "lanes"
-        if ker and not lanes:     return "ker"
-        return "mixed"
-
-    tag_strict = _residual_tag(R3_strict, lane_mask)
-    tag_proj   = _residual_tag(R3_proj,   lane_mask)
-
-    out = {"3": {"eq": bool(_is_zero(R3_proj)), "n_k": n3}, "2": {"eq": True}}
-
-    st.session_state["overlap_out"] = out
-    st.session_state["residual_tags"] = {"strict": tag_strict, "projected": tag_proj}
-    st.session_state["overlap_cfg"] = cfg_forced
-    st.session_state["overlap_policy_label"] = policy_label_from_cfg(cfg_forced)
-    st.session_state["run_ctx"] = {
-        "policy_tag": policy_label_from_cfg(cfg_forced),
-        "mode": mode,
-        "d3": d3, "n3": n3, "lane_mask_k3": lane_mask,
-        "P_active": P_active,
-        "projector_filename": meta.get("projector_filename", ""),
-        "projector_hash": meta.get("projector_hash", ""),
-        "projector_consistent_with_d": meta.get("projector_consistent_with_d", None),
-        "errors": [],
-    }
-
-# ---------------------------- Projector Freezer (AUTO → FILE, no UI flip) ----------------------------
-with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
-    _ss = st.session_state
-    _di = _ss.get("_district_info") or {}
-    district_id = _di.get("district_id", "UNKNOWN")
-
-    # Freshness + rectifier (stops if stale)
-    _rectify_run_ctx_mask_from_d3_or_stop()
-    rc = _ss.get("run_ctx") or {}  # fetch AFTER rectifier
-    n3 = int(rc.get("n3") or 0)
-    lm = list(rc.get("lane_mask_k3") or [])
-    if n3 <= 0 or len(lm) != n3:
-        st.warning("Context invalid (n3/mask mismatch). Click Run Overlap and try again.")
-        st.stop()
-
-    # Eligibility: AUTO mode + k=3 green + SSOT present
-    k3_green = bool(((_ss.get("overlap_out") or {}).get("3", {}) or {}).get("eq", False))
-    elig_freeze = (rc.get("mode") == "projected(auto)" and bool(rc.get("d3")) and bool(lm) and k3_green)
-
-    st.caption("Freeze current AUTO Π → file, switch to FILE, re-run Overlap, and force a cert write.")
-
-    # Inputs
-    pj_basename   = st.text_input("Filename", value=f"projector_{district_id or 'UNKNOWN'}.json",
-                                  key="pj_freeze_name_final2")
-    overwrite_ok  = st.checkbox("Overwrite if exists", value=False, key="pj_freeze_overwrite_final2")
-
-    # Global FILE Π invalid gate (as requested)
-    fm_bad  = file_validation_failed()
-    help_txt = "Disabled because projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π."
-
-    # Final disabled state + tooltip
-    disabled = fm_bad or (not elig_freeze)
-    tip = help_txt if fm_bad else (None if elig_freeze else "Enabled when current run is projected(auto) and k=3 is green.")
-
-    # --- Button: Freeze Π → FILE & re-run ---
-    if st.button("Freeze Π → FILE & re-run",
-                 key="btn_freeze_final2",
-                 disabled=disabled,
-                 help=(tip or "Freeze AUTO to FILE and re-run")):
-        try:
-            # Freshness + rectifier again
-            _rectify_run_ctx_mask_from_d3_or_stop()
-            rc = _ss.get("run_ctx") or {}
-            n3 = int(rc.get("n3") or 0)
-            lm = list(rc.get("lane_mask_k3") or [])
-            if n3 <= 0 or len(lm) != n3:
-                st.warning("Context invalid (n3/mask mismatch). Click Run Overlap and try again.")
-                st.stop()
-
-            # Build Π from SSOT lane mask
-            P_freeze = [[1 if (i == j and lm[j]) else 0 for j in range(n3)] for i in range(n3)]
-
-            # Validate strictly
-            validate_projector_file_strict(P_freeze, n3=n3, lane_mask=lm)
-
-            # Save projector (atomic)
-            pj_path = PROJECTORS_DIR / pj_basename
-            if pj_path.exists() and not overwrite_ok:
-                st.warning("Projector file already exists. Enable 'Overwrite if exists' or choose a new name.")
-                st.stop()
-            payload = {"schema_version": "1.0.0", "blocks": {"3": P_freeze}}
-            pj_hash, _ = _atomic_write_json(pj_path, payload)
-
-            # Switch policy to FILE (k=3) and mark fixtures changed (nonce bump)
-            cfg_active.setdefault("source", {})["3"] = "file"
-            cfg_active.setdefault("projector_files", {})["3"] = pj_path.as_posix()
-            if "_mark_fixtures_changed" in globals():
-                _mark_fixtures_changed()
-            else:
-                _ss["_fixture_nonce"] = int(_ss.get("_fixture_nonce", 0)) + 1
-                for k in ("overlap_out", "residual_tags", "overlap_cfg", "overlap_policy_label"):
-                    _ss.pop(k, None)
-
-            # Optional: append registry row
-            try:
-                _append_registry_row({
-                    "schema_version": "1.0.0",
-                    "written_at_utc": _utc_iso(),
-                    "app_version": APP_VERSION,
-                    "district": district_id,
-                    "lane_mask_k3": lm,
-                    "filename": pj_path.as_posix(),
-                    "projector_hash": pj_hash,
-                })
-            except Exception:
-                pass
-
-            # Re-run Overlap immediately (fresh FILE mode)
-            if "_soft_reset_before_overlap" in globals():
-                _soft_reset_before_overlap()
-            run_overlap()
-
-            # Force cert write this pass (bypass debounce)
-            _ss["should_write_cert"] = True
-            _ss.pop("_last_cert_write_key", None)
-
-            st.success(f"Π saved → {pj_path.name} · {pj_hash[:12]}… and switched to FILE.")
-        except Exception as e:
-            st.error(f"Freeze failed: {e}")
-
-
-# ----------------- IMPORTS -----------------
-import io as _io
-import csv
-import uuid
-import os
-import tempfile
-import hashlib
-from datetime import datetime, timezone
-import re
-import json as _json
-from pathlib import Path
-
-# -------------- FIXTURE STASH --------------
-FIXTURE_STASH_DIR = Path(globals().get("FIXTURE_STASH_DIR", "inputs/fixtures"))
-FIXTURE_STASH_DIR.mkdir(parents=True, exist_ok=True)
-
-# --------- Define eye() if missing --------
-if "eye" not in globals():
-    def eye(n: int):
-        return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
-
-# --- Robust hashing helpers (drop near your other helpers)
-
-def _to_hashable_plain(x):
-    """Return a stable, JSON-serializable view of x for hashing."""
-    if x is None:
-        return None
-    # Preferred: objects with .blocks.__root__ (your Boundaries/Cmap/H)
-    try:
-        return x.blocks.__root__
-    except Exception:
-        pass
-    # Pydantic v2 models
-    try:
-        return x.model_dump()  # type: ignore[attr-defined]
-    except Exception:
-        pass
-    # Dataclasses / simple objects
-    try:
-        return dict(x.__dict__)
-    except Exception:
-        pass
-    # Already-plain types
-    if isinstance(x, (dict, list, tuple, str, int, float, bool)):
-        return x
-    # Last resort: repr (keeps us from crashing; still deterministic enough)
-    return repr(x)
-
-def _hash_fixture_side(fx: dict) -> dict:
-    """Hash each sub-object of a fixture side robustly."""
-    return {
-        "boundaries": _hash_obj(_to_hashable_plain(fx.get("boundaries"))),
-        "shapes":     _hash_obj(_to_hashable_plain(fx.get("shapes"))),
-        "cmap":       _hash_obj(_to_hashable_plain(fx.get("cmap"))),
-        "H":          _hash_obj(_to_hashable_plain(fx.get("H"))),
-    }
-
-# --- GF(2) helpers (you already have _mul_gf2 / _xor_mat; keep those) ---
-def _all_zero_mat(M: list[list[int]]) -> bool:
-    return not M or all((x & 1) == 0 for row in M for x in row)
-
-def _I(n: int) -> list[list[int]]:
-    return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
-
-def _lane_mask_from_boundaries(boundaries_obj) -> list[int]:
-    # d3 is 2<-3 block; rows = n2, cols = n3
-    d3 = (boundaries_obj or {}).blocks.__root__.get("3") or []
-    if not d3: 
-        return []
-    rows, cols = len(d3), len(d3[0])
-    return [1 if any(d3[i][j] & 1 for i in range(rows)) else 0 for j in range(cols)]
-
-def _lane_mask_pair_SSO(L_boundaries, R_boundaries) -> list[int]:
-    # SSOT per pair: OR the left/right masks (robust if they differ)
-    Lm = _lane_mask_from_boundaries(L_boundaries)
-    Rm = _lane_mask_from_boundaries(R_boundaries)
-    if not Lm and not Rm:
-        return []
-    if not Lm: return Rm[:]
-    if not Rm: return Lm[:]
-    n = max(len(Lm), len(Rm))
-    Lm += [0]*(n-len(Lm))
-    Rm += [0]*(n-len(Rm))
-    return [1 if (Lm[j] or Rm[j]) else 0 for j in range(n)]
-
-def _diag_from_mask(mask: list[int]) -> list[list[int]]:
-    n = len(mask or [])
-    return [[(mask[i] & 1) if i == j else 0 for j in range(n)] for i in range(n)]
-
-def _r3_from_fixture(fx: dict) -> list[list[int]]:
-    # R3 = H2 @ d3 + (C3 + I3)  over GF(2)
-    B = (fx.get("boundaries") or {}).blocks.__root__
-    C = (fx.get("cmap") or {}).blocks.__root__
-    H = (fx.get("H") or {}).blocks.__root__
-    d3 = B.get("3") or []          # shape: n2 x n3
-    H2 = H.get("2") or []          # shape: n3 x n2
-    C3 = C.get("3") or []          # shape: n3 x n3
-    I3 = _I(len(C3)) if C3 else []
-    term1 = _mul_gf2(H2, d3)       # (n3 x n2) * (n2 x n3) -> (n3 x n3)
-    term2 = _xor_mat(C3, I3)       # (n3 x n3)
-    return _xor_mat(term1, term2)  # (n3 x n3)
-
-def _classify_residual(R3: list[list[int]], mask: list[int]) -> str:
-    if _all_zero_mat(R3):
-        return "none"
-    # lanes = columns with mask==1, ker = columns with mask==0
-    n3 = len(R3[0]) if R3 else 0
-    def col_has_support(j: int) -> bool:
-        return any(R3[i][j] & 1 for i in range(len(R3)))
-    lanes_support = any(col_has_support(j) for j in range(n3) if j < len(mask) and mask[j])
-    ker_support   = any(col_has_support(j) for j in range(n3) if j >= len(mask) or not mask[j])
-    if lanes_support and ker_support: return "mixed"
-    if lanes_support:                 return "lanes"
-    if ker_support:                   return "ker"
-    return "none"  # degenerate fallback
-
-
-
-
-
-# -------------- Helper: _hash_obj --------------
-def _sha256_hex(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
-
-def _hash_obj(obj) -> str:
-    try:
-        blob = _json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-        return _sha256_hex(blob)
-    except Exception:
-        return ""
-
-def validate_pairs_payload(payload: dict) -> tuple[list[dict], str]:
-    """
-    Validate and sanitize a parity pairs payload.
-    Returns (pairs, policy_hint) or raises ValueError("PARITY_SCHEMA_INVALID: ...").
-    - schema_version must be "1.0.0"
-    - policy_hint in {"strict","projected:auto","projected:file","mirror_active"}
-    - Each pair: {"label", "left", "right"}
-    - Each side is EITHER {"embedded": {boundaries, shapes, cmap, H}} OR {boundaries, shapes, cmap, H} (paths)
-    - If embedded present -> it wins; path keys are stripped. Unknown keys are rejected.
-    """
-    def _err(msg: str) -> ValueError:
-        return ValueError(f"PARITY_SCHEMA_INVALID: {msg}")
-
-    if not isinstance(payload, dict):
-        raise _err("root must be an object")
-
-    # --- root keys ---
-    allowed_root = {"schema_version", "policy_hint", "pairs"}
-    unknown_root = sorted(set(payload.keys()) - allowed_root)
-    if unknown_root:
-        raise _err(f"unknown root keys: {unknown_root}")
-
-    sv = payload.get("schema_version")
-    if sv != "1.0.0":
-        raise _err(f"schema_version must be '1.0.0' (got {sv!r})")
-
-    ph = payload.get("policy_hint")
-    if ph not in {"strict", "projected:auto", "projected:file", "mirror_active"}:
-        raise _err(f"policy_hint invalid (got {ph!r})")
-
-    pairs_in = payload.get("pairs")
-    if not isinstance(pairs_in, list):
-        raise _err("pairs must be an array")
-
-    def _sanitize_side(side: dict, *, where: str) -> dict:
-        if not isinstance(side, dict):
-            raise _err(f"{where} side must be an object")
-        # Whitelist for both modes
-        allowed_path = {"boundaries", "shapes", "cmap", "H"}
-        allowed_emb  = {"embedded"}
-        keys = set(side.keys())
-
-        has_emb = "embedded" in side
-        if has_emb:
-            # Embedded mode
-            unknown = sorted(keys - allowed_emb)
-            if unknown:
-                raise _err(f"{where}: unknown keys {unknown} (embedded mode)")
-            emb = side["embedded"]
-            if not isinstance(emb, dict):
-                raise _err(f"{where}: embedded must be an object")
-            required = {"boundaries", "shapes", "cmap", "H"}
-            missing = sorted(required - set(emb.keys()))
-            if missing:
-                raise _err(f"{where}: embedded missing keys {missing}")
-            # Type-check embedded objects (loose: must be dicts)
-            for k in required:
-                if not isinstance(emb[k], dict):
-                    raise _err(f"{where}: embedded.{k} must be an object")
-            # Embedded wins → return only {"embedded": normalized_emb}
-            # Also strip any accidental sibling path keys if they existed.
-            return {"embedded": {k: emb[k] for k in ("boundaries","shapes","cmap","H")}}
-        else:
-            # Path mode
-            unknown = sorted(keys - allowed_path)
-            if unknown:
-                raise _err(f"{where}: unknown keys {unknown} (path mode)")
-            missing = sorted([k for k in ("boundaries","shapes","cmap","H")
-                              if k not in side or not isinstance(side[k], str) or not side[k].strip()])
-            if missing:
-                raise _err(f"{where}: missing or empty path(s) {missing}")
-            # Normalize to exact four strings
-            return {
-                "boundaries": side["boundaries"].strip(),
-                "shapes":     side["shapes"].strip(),
-                "cmap":       side["cmap"].strip(),
-                "H":          side["H"].strip(),
-            }
-
-    out_pairs: list[dict] = []
-    for idx, p in enumerate(pairs_in):
-        if not isinstance(p, dict):
-            raise _err(f"pair[{idx}] must be an object")
-        allowed_pair = {"label", "left", "right"}
-        unknown_pair = sorted(set(p.keys()) - allowed_pair)
-        if unknown_pair:
-            raise _err(f"pair[{idx}]: unknown keys {unknown_pair}")
-
-        label = p.get("label")
-        if not isinstance(label, str) or not label.strip():
-            raise _err(f"pair[{idx}]: label must be non-empty string")
-
-        if "left" not in p or "right" not in p:
-            raise _err(f"pair[{idx}]: missing 'left' or 'right'")
-        left  = _sanitize_side(p["left"],  where=f"pair[{idx}]/left")
-        right = _sanitize_side(p["right"], where=f"pair[{idx}]/right")
-
-        out_pairs.append({"label": label.strip(), "left": left, "right": right})
-
-    return out_pairs, ph
-
-#------------------------------------------------------------
-def _path_exists_strict(p: str) -> bool:
-    try:
-        return Path(p).exists() and Path(p).is_file()
-    except Exception:
-        return False
-
-def _pp_resolve_side_or_skip(side: dict, *, label: str, side_name: str):
-    # embedded wins
-    if "embedded" in side:
-        return ("ok", {"embedded": side["embedded"]})
-    # require all 4 paths
-    missing = [k for k in ("boundaries","shapes","cmap","H") if not side.get(k)]
-    if missing:
-        return ("skip", {"label": label, "side": side_name, "missing": missing, "error": "PARITY_SPEC_MISSING"})
-    # strict existence check
-    miss_files = [k for k in ("boundaries","shapes","cmap","H") if not _path_exists_strict(side[k])]
-    if miss_files:
-        return ("skip", {"label": label, "side": side_name, "missing": miss_files, "error": "PARITY_FILE_NOT_FOUND"})
-    return ("ok", {"paths": side})
-
-def _lane_mask_from_boundaries(boundaries_obj) -> list[int]:
-    d3 = (boundaries_obj or {}).blocks.__root__.get("3->2") or (boundaries_obj or {}).blocks.__root__.get("3")  # depending on your schema
-    if not d3: return []
-    rows, n3 = len(d3), len(d3[0])
-    return [1 if any(d3[i][j] & 1 for i in range(rows)) else 0 for j in range(n3)]
-
-
-
-def _pair_hash(left_hashes: dict, right_hashes: dict) -> str:
-    tup = (
-        left_hashes["boundaries"], left_hashes["shapes"], left_hashes["cmap"], left_hashes["H"],
-        right_hashes["boundaries"], right_hashes["shapes"], right_hashes["cmap"], right_hashes["H"],
-    )
-    return _sha256_hex(_json.dumps(tup, separators=(",", ":"), sort_keys=False).encode("utf-8"))
-
-
-
-# -------------- Core: JSON helpers --------------
-def _ensure_parent_dir(p: Path) -> None:
-    p.parent.mkdir(parents=True, exist_ok=True)
-
-def _atomic_write_json(path: Path, payload: dict) -> None:
-    _ensure_parent_dir(path)
-    with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as tmp:
-        _json.dump(payload, tmp, ensure_ascii=False, indent=2)
-        tmp.flush()
-        os.fsync(tmp.fileno())
-        os.replace(tmp.name, path)
-
-def _safe_parse_json(path: str) -> dict:
-    p = Path(path)
-    if not p.exists():
-        raise FileNotFoundError(f"No file at {path}")
-    with p.open("r", encoding="utf-8") as f:
-        return _json.load(f)
-
-# -------- Report paths (guard) --------
-from pathlib import Path
-
-if "REPORTS_DIR" not in globals():
-    REPORTS_DIR = Path("reports")
-REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-
-if "PARITY_JSON_PATH" not in globals():
-    PARITY_JSON_PATH = REPORTS_DIR / "parity_report.json"
-
-if "PARITY_CSV_PATH" not in globals():
-    PARITY_CSV_PATH = REPORTS_DIR / "parity_summary.csv"
-
-        
-# --------- Paths & Directory init ----------
-REPORTS_DIR = Path(globals().get("REPORTS_DIR", "reports"))
-REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-
-if "PARITY_REPORT_PATH" not in globals():
-    PARITY_REPORT_PATH = REPORTS_DIR / "parity_report.json"
-if "PARITY_SUMMARY_CSV" not in globals():
-    PARITY_SUMMARY_CSV = REPORTS_DIR / "parity_summary.csv"
-
-PARITY_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-LOGS_DIR = Path("logs")
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
-
-if "DEFAULT_PARITY_PATH" not in globals():
-    DEFAULT_PARITY_PATH = LOGS_DIR / "parity_pairs.json"
-
-# --------- Helper: time & session -------------
-def __pp_now_z():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-def __pp_current_input_filenames():
-    ib = st.session_state.get("_inputs_block") or {}
-    fns = ib.get("filenames") or {}
-    return {
-        "boundaries": fns.get("boundaries", "inputs/boundaries.json"),
-        "cmap": fns.get("C", "inputs/cmap.json"),
-        "H": fns.get("H", "inputs/H.json"),
-        "shapes": fns.get("U", "inputs/shapes.json"),
-    }
-
-# --------- Universal adapter: capture old _paths_from_fixture_or_current ----------
-# Capture the existing function once, outside the new definition
-_OLD_PFFC = globals().get("_paths_from_fixture_or_current", None)
-
-def _paths_from_fixture_or_current(*args):
-    # Use the captured old function to avoid recursion issues
-    if "residual_tag" not in globals():
-        def residual_tag(matrix, mask):
-            return "unknown"
-
-    # Extract fx from args
-    if len(args) == 1 and isinstance(args[0], dict):
-        fx = args[0]
-    elif len(args) >= 2 and isinstance(args[1], dict):
-        fx = args[1]
-    elif _OLD_PFFC:
-        return _OLD_PFFC(*args)
-    else:
-        raise TypeError("_paths_from_fixture_or_current(): expected (fx) or (side_name, fx)")
-
-    # Fill paths, prefer explicit *_path, else keys, fallback SSOT filenames
-    out = {}
-    for k in ("boundaries", "cmap", "H", "shapes"):
-        v = fx.get(f"{k}_path")
-        if not v and isinstance(fx.get(k), str):
-            v = fx.get(k)
-        out[k] = v or ""
-
-    # Fill missing with SSOT filenames
-    ib = st.session_state.get("_inputs_block") or {}
-    fns = ib.get("filenames") or {}
-    default_paths = {
-        "boundaries": fns.get("boundaries", "inputs/boundaries.json"),
-        "cmap": fns.get("C", "inputs/cmap.json"),
-        "H": fns.get("H", "inputs/H.json"),
-        "shapes": fns.get("U", "inputs/shapes.json"),
-    }
-    for k in ("boundaries", "cmap", "H", "shapes"):
-        out.setdefault(k, default_paths[k])
-
-    return out
-
-# ---- Parity types & state ----
-from typing import TypedDict, Optional, Literal
-
-class Side(TypedDict, total=False):
-    embedded: dict
-    boundaries: str
-    shapes: str
-    cmap: str
-    H: str
-
-class PairSpec(TypedDict):
-    label: str
-    left: Side
-    right: Side
-
-class SkippedSpec(TypedDict, total=False):
-    label: str
-    side: Literal["left","right"]
-    missing: list[str]
-    error: str
-
-class RunCtx(TypedDict, total=False):
-    policy_hint: Literal["strict","projected:auto","projected:file","mirror_active"]
-    projector_mode: Literal["strict","auto","file"]
-    projector_filename: Optional[str]
-    projector_hash: str
-    lane_mask_note: Optional[str]
-
-def _ensure_state():
-    st.session_state.setdefault("parity_pairs_table", [])   # editable table rows (PairSpec-like)
-    st.session_state.setdefault("parity_pairs_queue", [])   # validated runnable pairs
-    st.session_state.setdefault("parity_skipped_specs", []) # skipped reasons (SkippedSpec)
-    st.session_state.setdefault("parity_run_ctx", {})       # RunCtx
-    st.session_state.setdefault("parity_last_report_pairs", None)  # results cache
-
-
-def resolve_side(side: Side) -> dict:
-    if "embedded" in side:
-        return parse_embedded(side["embedded"])  # your existing io.parse_* over objects
-    missing = [k for k in ("boundaries","shapes","cmap","H") if not side.get(k)]
-    if missing:
-        raise KeyError(f"PARITY_SPEC_MISSING:{missing}")
-    for k in ("boundaries","shapes","cmap","H"):
-        p = Path(side[k])
-        if not (p.exists() and p.is_file()):
-            raise FileNotFoundError(f"PARITY_FILE_NOT_FOUND:{k}={side[k]}")
-    return parse_from_paths(
-        boundaries_path=side["boundaries"], shapes_path=side["shapes"],
-        cmap_path=side["cmap"], H_path=side["H"]
-    )
-
-def lane_mask_k3_from_boundaries(boundaries) -> tuple[list[int], str]:
-    d3 = (boundaries.blocks.__root__.get("3->2") 
-          or boundaries.blocks.__root__.get("3")  # if your format uses "3" for 3→2
-          or [])
-    if not d3: return [], ""
-    cols = len(d3[0])
-    mask = [1 if any(row[j] & 1 for row in d3) else 0 for j in range(cols)]
-    return mask, "".join("1" if b else "0" for b in mask)
-
-def run_pair(spec: PairSpec, run_ctx: RunCtx) -> dict:
-    label = spec["label"]
-    try:
-        L = resolve_side(spec["left"])
-    except Exception as e:
-        raise RuntimeError(f"SKIP:left:{e}")
-    try:
-        R = resolve_side(spec["right"])
-    except Exception as e:
-        raise RuntimeError(f"SKIP:right:{e}")
-
-    # lane mask from THIS pair’s boundaries
-    mask_vec, mask_str = lane_mask_k3_from_boundaries(L["boundaries"])  # boundaries object
-    # (optionally assert R yields same mask; not required)
-
-    # strict leg
-    sL = run_leg_strict(L)  # returns {"k2":bool,"k3":bool,"residual":"none|lanes|ker|mixed|error"}
-    sR = run_leg_strict(R)
-    strict = {"k2": bool(sL["k2"] and sR["k2"]),
-              "k3": bool(sL["k3"] and sR["k3"]),
-              "residual_tag": combine_residuals(sL["residual"], sR["residual"])}
-
-    # projected leg?
-    projected = None
-    if run_ctx["projector_mode"] == "auto":
-        Pi = projector_from_lane_mask(mask_vec)  # diag(mask)
-        pL = run_leg_projected(L, Pi)
-        pR = run_leg_projected(R, Pi)
-        projected = {"k2": bool(pL["k2"] and pR["k2"]),
-                     "k3": bool(pL["k3"] and pR["k3"]),
-                     "residual_tag": combine_residuals(pL["residual"], pR["residual"])}
-    elif run_ctx["projector_mode"] == "file":
-        Pi = get_frozen_projector()  # set once during compute_run_ctx / validation
-        # Optionally enforce lane compatibility and hard-error:
-        if not diag_matches_mask_if_required(Pi, mask_vec):
-            raise RuntimeError(f"P3_LANE_MISMATCH: diag(P) != lane_mask(d3) : {diag_to_str(Pi)} vs {mask_str}")
-        pL = run_leg_projected(L, Pi)
-        pR = run_leg_projected(R, Pi)
-        projected = {"k2": bool(pL["k2"] and pR["k2"]),
-                     "k3": bool(pL["k3"] and pR["k3"]),
-                     "residual_tag": combine_residuals(pL["residual"], pR["residual"])}
-
-    # hashes
-    Lh = hashes_for_fixture(L)  # {"boundaries":"…","shapes":"…","cmap":"…","H":"…"}
-    Rh = hashes_for_fixture(R)
-    pair_hash = sha256_tuple(Lh, Rh)
-
-    return {
-        "label": label,
-        "pair_hash": pair_hash,
-        "lane_mask_k3": mask_vec,
-        "lane_mask": mask_str,
-        "left_hashes": Lh,
-        "right_hashes": Rh,
-        "strict": strict,
-        **({"projected": projected} if projected is not None else {}),
-    }
-
-def queue_all_valid_from_table():
-    _ensure_state()
-    st.session_state["parity_pairs_queue"].clear()
-    st.session_state["parity_skipped_specs"].clear()
-
-    rows = st.session_state["parity_pairs_table"]
-    for row in rows:
-        spec: PairSpec = {"label": row["label"], "left": row["left"], "right": row["right"]}
-        # lightweight check: embedded or all 4 fields for each side
-        misses = []
-        for side_name in ("left","right"):
-            s = spec[side_name]
-            if "embedded" in s: 
-                continue
-            miss = [k for k in ("boundaries","shapes","cmap","H") if not s.get(k)]
-            if miss:
-                st.session_state["parity_skipped_specs"].append({"label": spec["label"], "side": side_name, "missing": miss})
-                break
-        else:
-            st.session_state["parity_pairs_queue"].append(spec)
-
-
-def run_parity_suite():
-    _ensure_state()
-    queue = st.session_state["parity_pairs_queue"]
-    skipped = st.session_state["parity_skipped_specs"]
-    if not queue:
-        st.info("Queued pairs: 0 — nothing to run.")
-        return
-
-    # Freeze decision
-    rc_in = st.session_state.get("parity_run_ctx") or {}
-    try:
-        rc = compute_run_ctx(rc_in.get("policy_hint","mirror_active"), rc_in.get("projector_filename"))
-    except Exception as e:
-        st.error(str(e))  # e.g., PARITY_SCHEMA_INVALID or projector invalid
-        return
-    st.session_state["parity_run_ctx"] = rc  # freeze for this run
-
-    # Optional: if file mode, set global frozen projector (Pi) once here.
-
-    results = []
-    proj_green = 0
-    rows_total = len(queue)
-    rows_skipped = len(skipped)
-    rows_run = 0
-
-    for spec in queue:
-        try:
-            out = run_pair(spec, rc)
-            results.append(out)
-            rows_run += 1
-            if rc["projector_mode"] != "strict" and out.get("projected",{}).get("k3") is True:
-                proj_green += 1
-        except RuntimeError as e:
-            # convert into skipped entry and continue
-            parts = str(e).split(":", 2)
-            if parts and parts[0].startswith("SKIP"):
-                side = parts[1] if len(parts) > 1 else ""
-                skipped.append({"label": spec["label"], "side": side, "error": parts[-1]})
-            else:
-                st.error(str(e))
-                return  # hard abort if it’s a non-skip fatal
-
-    # Write artifacts (next step)
-    write_parity_artifacts(results, rc, skipped, rows_total, rows_skipped, rows_run, proj_green)
-    st.session_state["parity_last_report_pairs"] = results
-def run_parity_suite():
-    _ensure_state()
-    queue = st.session_state["parity_pairs_queue"]
-    skipped = st.session_state["parity_skipped_specs"]
-    if not queue:
-        st.info("Queued pairs: 0 — nothing to run.")
-        return
-
-    # Freeze decision
-    rc_in = st.session_state.get("parity_run_ctx") or {}
-    try:
-        rc = compute_run_ctx(rc_in.get("policy_hint","mirror_active"), rc_in.get("projector_filename"))
-    except Exception as e:
-        st.error(str(e))  # e.g., PARITY_SCHEMA_INVALID or projector invalid
-        return
-    st.session_state["parity_run_ctx"] = rc  # freeze for this run
-
-    # Optional: if file mode, set global frozen projector (Pi) once here.
-
-    results = []
-    proj_green = 0
-    rows_total = len(queue)
-    rows_skipped = len(skipped)
-    rows_run = 0
-
-    for spec in queue:
-        try:
-            out = run_pair(spec, rc)
-            results.append(out)
-            rows_run += 1
-            if rc["projector_mode"] != "strict" and out.get("projected",{}).get("k3") is True:
-                proj_green += 1
-        except RuntimeError as e:
-            # convert into skipped entry and continue
-            parts = str(e).split(":", 2)
-            if parts and parts[0].startswith("SKIP"):
-                side = parts[1] if len(parts) > 1 else ""
-                skipped.append({"label": spec["label"], "side": side, "error": parts[-1]})
-            else:
-                st.error(str(e))
-                return  # hard abort if it’s a non-skip fatal
-
-    # Write artifacts (next step)
-    write_parity_artifacts(results, rc, skipped, rows_total, rows_skipped, rows_run, proj_green)
-    st.session_state["parity_last_report_pairs"] = results
-
-def _pp_try_load(side: dict):
-    """Load one fixture side either from embedded or from paths."""
-    if "embedded" in side:
-        emb = side["embedded"]
-        return {
-            "boundaries": io.parse_boundaries(emb["boundaries"]),
-            "shapes":     io.parse_shapes(emb["shapes"]),
-            "cmap":       io.parse_cmap(emb["cmap"]),
-            "H":          io.parse_cmap(emb["H"]),
-        }
-    # path mode
-    return load_fixture_from_paths(
-        boundaries_path=side["boundaries"],
-        cmap_path=side["cmap"],
-        H_path=side["H"],
-        shapes_path=side["shapes"],
-    )
-
-
-
-# --------- Resolver + Fixture Loader -------------------------------------------
-def _canon(s: str) -> str:
-    return re.sub(r"[^a-z0-9.]+", "", (s or "").lower())
-
-def _resolve_fixture_path(p: str) -> str:
-    """
-    Resolve fixture filenames like 'boundaries D2.json' under various roots.
-    """
-    p = (p or "").strip()
-    if not p:
-        raise FileNotFoundError("Empty fixture path")
-    roots = [Path("."), Path("inputs"), Path("/mnt/data"), FIXTURE_STASH_DIR]  # include stash dir
-    tried = []
-
-    # 1) as-is
-    cand = Path(p)
-    tried.append(cand.as_posix())
-    if cand.exists() and cand.is_file():
-        return cand.as_posix()
-
-    # 2) under roots
-    for r in roots:
-        cand = r / p
-        tried.append(cand.as_posix())
-        if cand.exists() and cand.is_file():
-            return cand.as_posix()
-
-    # 3) recursive fuzzy search
-    target = _canon(Path(p).name)
-    for r in roots:
-        if not r.exists():
-            continue
-        for q in r.rglob("*"):
-            if q.is_file():
-                if _canon(q.name) == target or _canon(q.stem) == _canon(Path(p).stem):
-                    return q.as_posix()
-
-    raise FileNotFoundError(
-        f"Fixture file not found for '{p}'. Tried: " + " | ".join(tried[:10]) +
-        " (also searched recursively under ./, inputs/, /mnt/data with fuzzy match)"
-    )
-
-def load_fixture_from_paths(*, boundaries_path, cmap_path, H_path, shapes_path):
-    """
-    Resolve paths then parse fixtures via io.parse_*.
-    """
-    def _read_json(p):
-        with open(p, "r", encoding="utf-8") as f:
-            return _json.load(f)
-
-    b_path = _resolve_fixture_path(boundaries_path)
-    c_path = _resolve_fixture_path(cmap_path)
-    h_path = _resolve_fixture_path(H_path)
-    u_path = _resolve_fixture_path(shapes_path)
-
-    return {
-        "boundaries": io.parse_boundaries(_read_json(b_path)),
-        "cmap": io.parse_cmap(_read_json(c_path)),
-        "H": io.parse_cmap(_read_json(h_path)),
-        "shapes": io.parse_shapes(_read_json(u_path)),
-    }
-
-# ---- queue → portable JSON payload
-def __pp_pairs_payload_from_queue(pairs: list[dict]) -> dict:
-    def _paths_anyshape(fx: dict) -> dict:
-        # prefer your universal adapter; fallback to SSOT file names
-        try:
-            return _paths_from_fixture_or_current(fx)
-        except Exception:
-            ib = st.session_state.get("_inputs_block") or {}
-            fns = ib.get("filenames") or {}
-            return {
-                "boundaries": fx.get("boundaries", fns.get("boundaries", "inputs/boundaries.json")),
-                "cmap":       fx.get("cmap",       fns.get("C",          "inputs/cmap.json")),
-                "H":          fx.get("H",          fns.get("H",          "inputs/H.json")),
-                "shapes":     fx.get("shapes",     fns.get("U",          "inputs/shapes.json")),
-            }
-    rows = []
-    for row in (pairs or []):
-        rows.append({
-            "label": row.get("label","PAIR"),
-            "left":  _paths_anyshape(row.get("left", {})  or {}),
-            "right": _paths_anyshape(row.get("right", {}) or {}),
-        })
-    return {
-        "schema_version": "1.0.0",
-        "saved_at": __pp_now_z(),
-        "count": len(rows),
-        "pairs": rows,
-    }
-
-# ---- path normalization for text inputs
-def _ensure_json_path_str(p_str: str, default_name="parity_pairs.json") -> str:
-    p = Path((p_str or "").strip() or default_name)
-    if p.is_dir() or str(p).endswith(("/", "\\")) or p.name == "":
-        p = p / default_name
-    if p.suffix.lower() != ".json":
-        p = p.with_suffix(".json")
-    return p.as_posix()
-
-# --- Parity queue shims (safe to re-define if missing)
-if "clear_parity_pairs" not in globals():
-    def clear_parity_pairs():
-        st.session_state["parity_pairs"] = []
-
-if "add_parity_pair" not in globals():
-    def add_parity_pair(*, label: str, left_fixture: dict, right_fixture: dict) -> int:
-        st.session_state.setdefault("parity_pairs", [])
-        st.session_state["parity_pairs"].append({
-            "label": label,
-            "left":  left_fixture,
-            "right": right_fixture,
-        })
-        return len(st.session_state["parity_pairs"])
-
-
-# ---- export helper used by the button
-def _export_pairs_to_path(path_str: str) -> str:
-    p = Path(_ensure_json_path_str(path_str))
-    p.parent.mkdir(parents=True, exist_ok=True)
-    payload = __pp_pairs_payload_from_queue(st.session_state.get("parity_pairs", []) or [])
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        _json.dump(payload, f, ensure_ascii=False, indent=2)
-        f.flush(); os.fsync(f.fileno())
-    os.replace(tmp, p)
-    return p.as_posix()
-
-# ---- import helper for the uploader (payload-based)
-def _import_pairs_from_payload(payload: dict, *, merge: bool) -> int:
-    if not merge:
-        clear_parity_pairs()
-    for r in (payload.get("pairs") or []):
-        L, R = r.get("left") or {}, r.get("right") or {}
-        fxL = load_fixture_from_paths(boundaries_path=L["boundaries"], cmap_path=L["cmap"], H_path=L["H"], shapes_path=L["shapes"])
-        fxR = load_fixture_from_paths(boundaries_path=R["boundaries"], cmap_path=R["cmap"], H_path=R["H"], shapes_path=R["shapes"])
-        add_parity_pair(label=r.get("label","PAIR"), left_fixture=fxL, right_fixture=fxR)
-    return len(st.session_state.get("parity_pairs", []))
-
-
-# -------------- Loader shim for parity import -----------------
-if "load_fixture_from_paths" not in globals():
-    def load_fixture_from_paths(*, boundaries_path, cmap_path, H_path, shapes_path):
-        try:
-            _ = (io.parse_boundaries, io.parse_cmap, io.parse_shapes)
-        except Exception:
-            raise RuntimeError(
-                "Project parsing module `io` missing or shadowed. "
-                "Ensure your project imports `io` with parse_* functions."
-            )
-        def _read(p):
-            with open(Path(p), "r", encoding="utf-8") as f:
-                return _json.load(f)
-        dB = _read(boundaries_path)
-        dC = _read(cmap_path)
-        dH = _read(H_path)
-        dU = _read(shapes_path)
-        return {
-            "boundaries": io.parse_boundaries(dB),
-            "cmap": io.parse_cmap(dC),
-            "H": io.parse_cmap(dH),
-            "shapes": io.parse_shapes(dU),
-        }
-
-        if "clear_parity_pairs" not in globals():
-            def clear_parity_pairs():
-                st.session_state["parity_pairs"] = []
-        
-        if "add_parity_pair" not in globals():
-            def add_parity_pair(*, label: str, left_fixture: dict, right_fixture: dict) -> int:
-                st.session_state.setdefault("parity_pairs", [])
-                st.session_state["parity_pairs"].append({"label": label, "left": left_fixture, "right": right_fixture})
-                return len(st.session_state["parity_pairs"])
-
-        if "_short_hash" not in globals():
-            def _short_hash(h: str, n: int = 8) -> str:
-                return (h[:n] + "…") if h else ""
-
-
-
-# ----------------- import_parity_pairs (validate & stash only) -----------------
-def import_parity_pairs(
-    path: str | Path = DEFAULT_PARITY_PATH,
-    *,
-    merge: bool = False,
-) -> int:
-    # 1) Parse JSON
-    payload = _safe_parse_json(str(path))
-
-    # 2) Strict schema validation + sanitization
-    pairs_sanitized, policy_hint = validate_pairs_payload(payload)
-
-    # 3) Stash into session state (table source for the UI editor)
-    if merge and "parity_pairs_table" in st.session_state:
-        st.session_state["parity_pairs_table"].extend(pairs_sanitized)
-    else:
-        st.session_state["parity_pairs_table"] = pairs_sanitized
-
-    st.session_state["parity_policy_hint"] = policy_hint
-
-    # Optional: clear legacy queue to avoid confusion with the new table-driven flow
-    st.session_state["parity_pairs"] = []
-
-    st.success(f"Imported {len(pairs_sanitized)} pair specs")
-    return len(st.session_state["parity_pairs_table"])
-    # === Policy picker (source of truth for parity runs) ===
-st.radio(
-    "Policy",
-    ["strict", "projected(auto)", "projected(file)"],
-    key="parity_policy_choice",
-    horizontal=True,
-)
-#---------------------------helper-------------------------------------
-
-def _resolve_side_or_skip_exact(side: dict, *, label: str, side_name: str):
-    """
-    Strict resolver for a single side of a pair.
-
-    Returns:
-        ("ok", fixture_dict)  -> fully parsed fixture (boundaries/cmap/H/shapes objects)
-        ("skip", info_dict)   -> standardized reason with fields:
-            { "label": <str>, "side": "left"|"right",
-              "missing": [<keys>]?, "error": <CODE or message> }
-
-    Rules:
-      • If 'embedded' exists, it wins. Parse it via _pp_load_embedded().
-      • Otherwise require ALL four string paths: boundaries, shapes, cmap, H.
-      • No fuzzy search here; paths must exist (checked via _path_exists_strict).
-      • On any failure, return a 'skip' record with precise reason.
-    """
-    # Validate shape of the side object quickly
-    if not isinstance(side, dict):
-        return ("skip", {
-            "label": label, "side": side_name,
-            "error": "PARITY_SCHEMA_INVALID: side must be an object"
-        })
-
-    # 1) Embedded wins
-    if "embedded" in side and side["embedded"] is not None:
-        try:
-            fx = _pp_load_embedded(side["embedded"])
-            return ("ok", fx)
-        except Exception as e:
-            return ("skip", {
-                "label": label, "side": side_name,
-                "error": f"PARITY_SCHEMA_INVALID: {e}"
-            })
-
-    # 2) Require all four paths
-    required = ("boundaries", "shapes", "cmap", "H")
-    missing_keys = [k for k in required if not (isinstance(side.get(k), str) and side[k].strip())]
-    if missing_keys:
-        return ("skip", {
-            "label": label, "side": side_name,
-            "missing": missing_keys, "error": "PARITY_SPEC_MISSING"
-        })
-
-    # 3) Paths must exist (no recursive/fuzzy)
-    not_found = [k for k in required if not _path_exists_strict(side[k])]
-    if not_found:
-        return ("skip", {
-            "label": label, "side": side_name,
-            "missing": not_found, "error": "PARITY_FILE_NOT_FOUND"
-        })
-
-    # 4) Load fixture from paths
-    try:
-        fx = _pp_try_load(side)
-        return ("ok", fx)
-    except Exception as e:
-        return ("skip", {
-            "label": label, "side": side_name,
-            "error": f"PARITY_FILE_NOT_FOUND: {e}"
-        })
-
-
-
-# --- Policy resolver used by the Parity · Run Suite block
-def _policy_from_hint():
-    """
-    Resolve parity policy with this precedence:
-    1) UI radio: st.session_state["parity_policy_choice"]
-    2) Imported hint: st.session_state["parity_policy_hint"] in
-       {"strict","projected:auto","projected:file","mirror_active"}
-    3) Mirror app run_ctx.mode ("strict" / "projected(auto)" / "projected(file)")
-    Returns: (mode, submode) where mode in {"strict","projected"} and submode in {"","auto","file"}.
-    """
-    # 1) UI radio (if you have one)
-    choice = st.session_state.get("parity_policy_choice")
-    if choice == "strict":
-        return ("strict", "")
-    if choice == "projected(auto)":
-        return ("projected", "auto")
-    if choice == "projected(file)":
-        return ("projected", "file")
-
-    # 2) Imported hint (from the pairs payload)
-    hint = (st.session_state.get("parity_policy_hint") or "mirror_active").strip()
-    if hint == "strict":
-        return ("strict", "")
-    if hint == "projected:auto":
-        return ("projected", "auto")
-    if hint == "projected:file":
-        return ("projected", "file")
-
-    # 3) Mirror the app's current policy
-    rc = st.session_state.get("run_ctx") or {}
-    mode = rc.get("mode", "strict")
-    if mode == "strict":
-        return ("strict","")
-    if mode == "projected(auto)":
-        return ("projected","auto")
-    if mode == "projected(file)":
-        return ("projected","file")
-
-    return ("strict","")  # safe default
-
-
-# --- Filesystem guard (strict, no fuzzy)
-def _path_exists_strict(p: str) -> bool:
-    try:
-        P = Path(p)
-        return P.exists() and P.is_file()
-    except Exception:
-        return False
-
-# --- Embedded loader (inline preset → fixture objects)
-def _pp_load_embedded(emb: dict) -> dict:
-    """
-    Parse embedded JSON blobs using your io.parse_* API.
-    Accepts shapes in either form:
-      {"n": {"2": 2, "3": 3}}  or  {"n2": 2, "n3": 3}
-    We pass through to io.parse_shapes which already handles your schema.
-    """
-    if not isinstance(emb, dict):
-        raise ValueError("embedded must be an object")
-    return {
-        "boundaries": io.parse_boundaries(emb["boundaries"]),
-        "shapes":     io.parse_shapes(emb["shapes"]),
-        "cmap":       io.parse_cmap(emb["cmap"]),
-        "H":          io.parse_cmap(emb["H"]),
-    }
-
-# --- Path-bundle loader (path mode → fixture objects)
-def _pp_try_load(side: dict):
-    """
-    Load a fixture side from exact paths (no fuzzy). 
-    Expects keys: boundaries, cmap, H, shapes.
-    """
-    return load_fixture_from_paths(
-        boundaries_path=side["boundaries"],
-        cmap_path=side["cmap"],
-        H_path=side["H"],
-        shapes_path=side["shapes"],
-    )
-
-# --- Single-leg runner via your canonical overlap gate
-def _pp_one_leg(boundaries_obj, cmap_obj, H_obj, projection_cfg: dict | None):
-    """
-    Runs one leg (strict if projection_cfg is None, otherwise projected)
-    through your overlap_gate.overlap_check() and returns its result dict.
-
-    Returns shape (typical):
-      {"2": {"eq": bool}, "3": {"eq": bool}, ...}
-    On error, returns a safe stub with an _err message.
-    """
-    try:
-        if projection_cfg is None:
-            return overlap_gate.overlap_check(boundaries_obj, cmap_obj, H_obj)  # type: ignore
-        return overlap_gate.overlap_check(
-            boundaries_obj, cmap_obj, H_obj, projection_config=projection_cfg  # type: ignore
-        )
-    except Exception as e:
-        return {"2": {"eq": False}, "3": {"eq": False}, "_err": str(e)}
-
-
-# --- tiny truth helper
-if "_bool_and" not in globals():
-    def _bool_and(a, b):
-        """Logical AND that tolerates None."""
-        return (a is not None) and (b is not None) and bool(a) and bool(b)
-
-if "_emoji" not in globals():
-    def _emoji(v):
-        if v is None: return "—"
-        return "✅" if bool(v) else "❌"
-
-
-# --- Tiny helper: format a short hash for UI pills
-def _short_hash(h: str | None) -> str:
-    try:
-        h = (h or "").strip()
-    except Exception:
-        h = ""
-    return (h[:8] + "…") if h else "—"
-
-def _safe_tag(s: str) -> str:
-    # Keep [A-Za-z0-9_.-], replace the rest with '_'
-    return "".join(ch if (ch.isalnum() or ch in "._-") else "_" for ch in s)
-
-
-
-# --- Read a diagonal from a projector file (accepts {diag:[...]} or a 3x3 block)
-def _projector_diag_from_file(path: str) -> list[int]:
-    try:
-        with open(Path(path), "r", encoding="utf-8") as f:
-            pj = _json.load(f)
-    except Exception as e:
-        raise RuntimeError(f"P3_FILE_READ: {e}")
-
-    # Common shapes we support:
-    #  1) {"diag":[1,1,0]}
-    #  2) {"blocks":{"3":[[1,0,0],[0,1,0],[0,0,0]]}}
-    #  3) {"3":[[...]]}
-    if isinstance(pj, dict) and "diag" in pj:
-        diag = pj["diag"]
-        if not (isinstance(diag, list) and all(int(x) in (0,1) for x in diag)):
-            raise RuntimeError("P3_BAD_DIAG: diag must be a 0/1 list")
-        return [int(x) for x in diag]
-
-    # Try blocks["3"] or top-level "3"
-    M = None
-    if isinstance(pj, dict) and "blocks" in pj and isinstance(pj["blocks"], dict) and "3" in pj["blocks"]:
-        M = pj["blocks"]["3"]
-    elif isinstance(pj, dict) and "3" in pj:
-        M = pj["3"]
-
-    if M is None:
-        raise RuntimeError("P3_NOT_FOUND: expected 'diag' or blocks['3'] / '3'")
-
-    # Verify diagonal and extract its diagonal as diag list
-    if not (isinstance(M, list) and M and all(isinstance(row, list) and len(row) == len(M) for row in M)):
-        raise RuntimeError("P3_SHAPE: 3x3 (square) matrix required")
-    n = len(M)
-    # check diagonal + idempotent over GF(2)
-    # diagonal:
-    for i in range(n):
-        for j in range(n):
-            v = int(M[i][j]) & 1
-            if (i == j and v not in (0,1)) or (i != j and v != 0):
-                raise RuntimeError("P3_DIAGONAL: off-diagonal entries must be 0")
-    # idempotent: M^2 == M over GF(2) -> for diagonal with 0/1 it holds; we already enforced diagonal
-    return [int(M[i][i]) & 1 for i in range(n)]
-
-
-# --- Apply a diagonal projector to a residual matrix: R_proj = R @ diag(mask)
-def _apply_diag_to_residual(R: list[list[int]], diag_bits: list[int]) -> list[list[int]]:
-    if not R or not diag_bits:
-        return []
-    m, n = len(R), len(R[0])
-    if n != len(diag_bits):
-        raise RuntimeError(f"P3_SHAPE_MISMATCH: residual n={n} vs diag n={len(diag_bits)}")
-    out = [[0]*n for _ in range(m)]
-    for i in range(m):
-        Ri = R[i]
-        for j in range(n):
-            out[i][j] = (int(Ri[j]) & 1) * (int(diag_bits[j]) & 1)
-    return out
-
-
-# --- Quick all-zero check for matrices over GF(2)
-def _all_zero_mat(M: list[list[int]]) -> bool:
-    if not M:
-        return True
-    return all((int(x) & 1) == 0 for row in M for x in row)
-
-
-# --- Strict FILE provenance (no experimental override anywhere)
-projector_hash = ""
-projector_diag = None  # will be a list[int] only for projected(file)
-
-if mode == "projected" and submode == "file":
-    # Require a valid file
-    if not projector_filename or not _path_exists_strict(projector_filename):
-        st.error("Projector FILE required but missing/invalid. (projected:file) — blocking run.")
-        st.stop()
-    try:
-        projector_hash = _sha256_hex(Path(projector_filename).read_bytes())
-        projector_diag = _projector_diag_from_file(projector_filename)  # list[int]
-        if not isinstance(projector_diag, list) or not projector_diag:
-            st.error("P3_FILE_INVALID: empty or bad projector diag.")
-            st.stop()
-    except Exception as e:
-        st.error(f"Projector FILE invalid: {e}")
-        st.stop()
-
-
-
-
- # ================= Parity · Run Suite (final, with AUTO/FILE guards) =================
-with st.expander("Parity · Run Suite"):
-    table = st.session_state.get("parity_pairs_table") or []
-    if not table:
-        st.info("No pairs loaded. Use Import or Insert Defaults above.")
-    else:
-        # --- Policy decision for this suite run
-        mode, submode = _policy_from_hint()  # -> ("strict"|"projected", sub in {"","auto","file"})
-        rc = st.session_state.get("run_ctx") or {}
-        projector_filename = rc.get("projector_filename","") if (mode=="projected" and submode=="file") else ""
-
-              
-
-        def _projector_diag_from_file(pth: str):
-            # Expect a JSON with blocks["3"] as an n3×n3 binary matrix
-            try:
-                obj = _json.loads(Path(pth).read_text(encoding="utf-8"))
-                M = ((obj.get("blocks") or {}).get("3") or [])
-                # basic shape & diagonal checks happen later per pair (n3 known then)
-                diag = []
-                for i, row in enumerate(M):
-                    diag.append(int(row[i]) & 1)
-                return diag
-            except Exception as e:
-                return None
-
-        if mode == "projected" and submode == "file":
-            if not projector_filename or not _path_exists_strict(projector_filename):
-                st.error("Projector FILE required but missing/invalid. (projected:file) — block run.")
-                st.stop()
-            try:
-                projector_hash = _sha256_hex(Path(projector_filename).read_bytes())
-            except Exception as e:
-                st.error(f"Could not hash projector file: {e}")
-                st.stop()
-            projector_diag = _projector_diag_from_file(projector_filename)
-            if projector_diag is None:
-                st.error("P3_SHAPE: projector file unreadable or missing blocks['3'] square matrix.")
-                st.stop()
-
-        def _dims_from_boundaries(boundaries_obj) -> dict:
-            """
-            Return {"n2": rows, "n3": cols} from the pair's D3 incidence (3→2) matrix.
-            Falls back to zeros if unavailable.
-            """
-            try:
-                B  = (boundaries_obj or {}).blocks.__root__
-                d3 = B.get("3->2") or B.get("3") or []
-                if d3 and d3[0]:
-                    return {"n2": len(d3), "n3": len(d3[0])}
-            except Exception:
-                pass
-            return {"n2": 0, "n3": 0}
-
-        # --- Header bits
-        c1, c2, c3 = st.columns([2,2,2])
-        with c1:
-            pill = "strict" if mode=="strict" else (f"projected({submode})" + (f" · {_short_hash(projector_hash)}" if submode=="file" else ""))
-            st.caption("Policy"); st.code(pill, language="text")
-        with c2:
-            st.caption("Pairs in table"); st.code(str(len(table)), language="text")
-        with c3:
-            nonce_src = _json.dumps({"mode":mode,"sub":submode,"pj":projector_hash,"n":len(table)}, sort_keys=True, separators=(",",":")).encode("utf-8")
-            parity_nonce = _sha256_hex(nonce_src)[:8]
-            st.caption("Run nonce"); st.code(parity_nonce, language="text")
-        
-
-            
-# --- Run button (clean, self-contained) --------------------------------------
-if st.button("▶ Run Parity Suite", key="pp_btn_run_suite_final"):
-    report_pairs: list[dict] = []
-    skipped: list[dict] = []
-    projected_green_count = 0
-    seen_pair_hashes: set[str] = set()
-
-    # Helper for safe tags in filenames
-    def _safe_tag(s: str) -> str:
-        return "".join(ch if (ch.isalnum() or ch in "._-") else "_" for ch in s)
-
-    # Iterate specs
-    for spec in table:
-        label = spec.get("label", "PAIR")
-        L_in  = spec.get("left")  or {}
-        R_in  = spec.get("right") or {}
-
-        # Resolve sides (no fuzzy)
-        okL, fxL = _resolve_side_or_skip_exact(L_in, label=label, side_name="left")
-        okR, fxR = _resolve_side_or_skip_exact(R_in, label=label, side_name="right")
-        if okL != "ok":
-            skipped.append(fxL); continue
-        if okR != "ok":
-            skipped.append(fxR); continue
-
-        # Pre-hash & dedupe by pair inputs (LH/RH × boundaries,shapes,cmap,H)
-        left_hashes  = _hash_fixture_side(fxL)
-        right_hashes = _hash_fixture_side(fxR)
-        p_hash       = _pair_hash(left_hashes, right_hashes)
-        if p_hash in seen_pair_hashes:
-            skipped.append({"label": label, "side": "both", "error": "DUP_PAIR", "pair_hash": p_hash})
-            continue
-        seen_pair_hashes.add(p_hash)
-
-        # Lane mask from this pair (left is sufficient for your model)
-        lane_mask_vec = _lane_mask_from_boundaries(fxL["boundaries"])
-        lane_mask_str = "".join("1" if int(x) else "0" for x in lane_mask_vec)
-
-        # STRICT leg (booleans via gate)
-        outL_s = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], None)
-        outR_s = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], None)
-        s_k2   = _bool_and(outL_s.get("2", {}).get("eq"), outR_s.get("2", {}).get("eq"))
-        s_k3   = _bool_and(outL_s.get("3", {}).get("eq"), outR_s.get("3", {}).get("eq"))
-
-        # STRICT residual (used for tagging and as baseline for AUTO/FILE projection)
-        R3_L = _r3_from_fixture(fxL)
-        R3_R = _r3_from_fixture(fxR)
-        try:
-            strict_tag = _residual_enum_from_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], None)
-        except Exception:
-            strict_tag = "none" if bool(s_k3) else "ker"
-        if s_k3 is False and strict_tag == "none":
-            strict_tag = "ker"  # enforce consistency (never "none" when eq=false)
-
-        # PROJECTED leg (only when mode == "projected")
-        proj_block = None
-        if mode == "projected":
-            cfg = {"source": {"2": "file", "3": submode}, "projector_files": {}}
-            if submode == "file":
-                cfg["projector_files"]["3"] = projector_filename
-
-            # Gate booleans under selected projector policy (keeps provenance)
-            outL_p   = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], cfg)
-            outR_p   = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], cfg)
-            p_k2_gate = _bool_and(outL_p.get("2", {}).get("eq"), outR_p.get("2", {}).get("eq"))
-            p_k3_gate = _bool_and(outL_p.get("3", {}).get("eq"), outR_p.get("3", {}).get("eq"))
-
-            if submode == "auto":
-                # Π_auto = diag(lane_mask) applied to STRICT residual
-                R3_L_proj = _apply_diag_to_residual(R3_L, lane_mask_vec)
-                R3_R_proj = _apply_diag_to_residual(R3_R, lane_mask_vec)
-                p_k3_calc = _all_zero_mat(R3_L_proj) and _all_zero_mat(R3_R_proj)
-
-                proj_tag_L = _classify_residual(R3_L_proj, lane_mask_vec)
-                proj_tag_R = _classify_residual(R3_R_proj, lane_mask_vec)
-                proj_tag   = proj_tag_L if proj_tag_L != "none" else proj_tag_R
-
-                proj_block = {
-                    "k2": bool(p_k2_gate),
-                    "k3": bool(p_k3_calc),
-                    "residual_tag": proj_tag,
-                    "projector_hash": _hash_obj(lane_mask_vec),  # per-pair provenance
-                }
-                if p_k3_calc:
-                    projected_green_count += 1
-
-            else:
-                # FILE mode: require diag(P) to match lane_mask; skip on mismatch
-                diag = projector_diag or []
-                n3   = len(lane_mask_vec)
-                reason = None
-                if len(diag) != n3:
-                    reason = "P3_SHAPE"
-                elif any((int(diag[j]) & 1) != (int(lane_mask_vec[j]) & 1) for j in range(n3)):
-                    reason = "P3_LANE_MISMATCH"
-                if reason is not None:
-                    skipped.append({
-                        "label": label, "side": "both", "error": reason,
-                        "diag": diag, "mask": lane_mask_vec
-                    })
-                    continue  # do not run this pair
-
-                # Truth for projected k3 from post-projection residual (R3 @ Π)
-                R3_L_proj = _apply_diag_to_residual(R3_L, diag)
-                R3_R_proj = _apply_diag_to_residual(R3_R, diag)
-                p_k3_calc = _all_zero_mat(R3_L_proj) and _all_zero_mat(R3_R_proj)
-
-                proj_tag_L = _classify_residual(R3_L_proj, lane_mask_vec)
-                proj_tag_R = _classify_residual(R3_R_proj, lane_mask_vec)
-                proj_tag   = proj_tag_L if proj_tag_L != "none" else proj_tag_R
-
-                proj_block = {
-                    "k2": bool(p_k2_gate),   # keep k2 provenance from gate
-                    "k3": bool(p_k3_calc),   # k3 truth from projected residual
-                    "residual_tag": proj_tag,
-                }
-                if p_k3_calc:
-                    projected_green_count += 1
-
-        # Assemble pair record
-        pair_out = {
-            "label": label,
-            "pair_hash": p_hash,
-            "lane_mask_k3": lane_mask_vec,
-            "lane_mask": lane_mask_str,
-            "dims": _dims_from_boundaries(fxL["boundaries"]),
-            "left_hashes":  left_hashes,
-            "right_hashes": right_hashes,
-            "strict": {"k2": bool(s_k2), "k3": bool(s_k3), "residual_tag": strict_tag},
-        }
-        if proj_block is not None:
-            pair_out["projected"] = proj_block
-
-        # Consistency guards (don’t crash; just ensure shape)
-        if pair_out["strict"]["k3"] is False:
-            if pair_out["strict"]["residual_tag"] == "none":
-                pair_out["strict"]["residual_tag"] = "ker"
-        if "projected" in pair_out and pair_out["projected"]["k3"] is False:
-            if pair_out["projected"]["residual_tag"] == "none":
-                pair_out["projected"]["residual_tag"] = "ker"
-
-        report_pairs.append(pair_out)
-
-    # ---- Build report root ---------------------------------------------------
-    rows_total   = len(table)              # input queue size
-    rows_run     = len(report_pairs)       # executed, unique by hash
-    rows_skipped = len(skipped)
-    if mode == "projected":
-        pct = (projected_green_count / rows_run) if rows_run else 0.0
-    else:
-        pct = 0.0
-
-    policy_tag_run = "strict" if mode == "strict" else f"projected(columns@k=3,{submode})"
-    lane_mask_note = ("AUTO projector uses each pair’s lane mask" if (mode == "projected" and submode == "auto") else "")
-    run_note = ("Projected leg omitted in strict mode." if mode == "strict" else lane_mask_note)
-
-    report = {
-        "schema_version": "1.0.0",
-        "written_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "app_version": APP_VERSION,
-        "policy_tag": policy_tag_run,
-        "projector_mode": ("strict" if mode == "strict" else submode),
-        "projector_filename": (projector_filename if (mode == "projected" and submode == "file") else ""),
-        "projector_hash": (projector_hash if (mode == "projected" and submode == "file") else ""),
-        "lane_mask_note": (lane_mask_note if lane_mask_note else ""),
-        "run_note": run_note,
-        "residual_method": "R3 strict vs R3·Π (lanes/ker/mixed)",
-        "summary": {
-            "rows_total": rows_total,
-            "rows_skipped": rows_skipped,
-            "rows_run": rows_run,
-            "projected_green_count": (projected_green_count if mode == "projected" else 0),
-            "pct": (pct if mode == "projected" else 0.0),
-        },
-        "pairs": report_pairs,
-        "skipped": skipped,
-    }
-
-    # Deterministic content hash (BEFORE filenames)
-    report["content_hash"] = _sha256_hex(
-        _json.dumps(report, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    )
-
-    # Per-run filenames (content-hashed)
-    safe_tag   = _safe_tag(report["policy_tag"])
-    short_hash = report["content_hash"][:12]
-    json_name  = f"parity_report__{safe_tag}__{short_hash}.json"
-    csv_name   = f"parity_summary__{safe_tag}__{short_hash}.csv"
-    json_path  = REPORTS_DIR / json_name
-    csv_path   = REPORTS_DIR / csv_name
-
-    # --- Build CSV rows once (no duplicates—the loop deduped by pair_hash)
-    hdr = [
-        "label","policy_tag","projector_mode","projector_hash",
-        "strict_k2","strict_k3","projected_k2","projected_k3",
-        "residual_strict","residual_projected","lane_mask",
-        "lh_boundaries_hash","lh_shapes_hash","lh_cmap_hash","lh_H_hash",
-        "rh_boundaries_hash","rh_shapes_hash","rh_cmap_hash","rh_H_hash",
-        "pair_hash",
-    ]
-    rows_csv = []
-    for p in report_pairs:
-        proj = p.get("projected") or {}
-        rows_csv.append([
-            p["label"], report["policy_tag"], report["projector_mode"], report["projector_hash"],
-            str(p["strict"]["k2"]).lower(), str(p["strict"]["k3"]).lower(),
-            ("" if not proj else str(proj.get("k2", False)).lower()),
-            ("" if not proj else str(proj.get("k3", False)).lower()),
-            p["strict"].get("residual_tag",""),
-            ("" if not proj else proj.get("residual_tag","")),
-            p.get("lane_mask",""),
-            p["left_hashes"]["boundaries"], p["left_hashes"]["shapes"], p["left_hashes"]["cmap"], p["left_hashes"]["H"],
-            p["right_hashes"]["boundaries"], p["right_hashes"]["shapes"], p["right_hashes"]["cmap"], p["right_hashes"]["H"],
-            p["pair_hash"],
-        ])
-
-    # Persist to session for UI
-    st.session_state["parity_last_full_report"]  = report
-    st.session_state["parity_last_report_pairs"] = report_pairs
-    st.session_state["parity_last_report_path"]  = str(json_path)
-    st.session_state["parity_last_summary_path"] = str(csv_path)
-
-    # Write JSON (best-effort)
-    try:
-        _atomic_write_json(json_path, report)
-    except Exception as e:
-        st.info(f"(Could not write {json_name}: {e})")
-
-    # Write CSV (best-effort)
-    try:
-        tmp_csv = csv_path.with_suffix(".csv.tmp")
-        with open(tmp_csv, "w", newline="", encoding="utf-8") as f:
-            w = csv.writer(f); w.writerow(hdr); w.writerows(rows_csv)
-            f.flush(); os.fsync(f.fileno())
-        os.replace(tmp_csv, csv_path)
-    except Exception as e:
-        st.info(f"(Could not write {csv_name}: {e})")
-
-    # --- UI summary + downloads
-    st.success(
-        "Run complete · "
-        f"pairs={rows_run} · skipped={rows_skipped}"
-        + (f" · GREEN={projected_green_count} ({pct:.2%})" if mode == "projected" else "")
-    )
-
-    # In-memory downloads with unique keys
-    json_mem = _io.BytesIO(_json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"))
-    csv_mem  = _io.StringIO(); w = csv.writer(csv_mem); w.writerow(hdr); w.writerows(rows_csv)
-    csv_bytes = _io.BytesIO(csv_mem.getvalue().encode("utf-8"))
-
-    dl_prefix = "strict" if mode == "strict" else f"proj_{submode}"
-    st.download_button("Download parity_report.json",  json_mem, file_name=json_name, key=f"{dl_prefix}_json_{short_hash}")
-    st.download_button("Download parity_summary.csv", csv_bytes, file_name=csv_name, key=f"{dl_prefix}_csv_{short_hash}")
-
-    # Compact ✓/✗ preview
-    if report_pairs:
-        st.caption("Summary (strict_k3 / projected_k3):")
-        for p in report_pairs:
-            s  = "✅" if p["strict"]["k3"] else "❌"
-            pr = "—" if "projected" not in p else ("✅" if p["projected"]["k3"] else "❌")
-            st.write(f"• {p['label']} → strict={s} · projected={pr}")
-
-          
-
-
-
+                # -------------------------- FREEZER HELPERS -------------------------------------------
+                
+                PROJECTORS_DIR = Path("projectors")
+                PROJECTORS_DIR.mkdir(parents=True, exist_ok=True)
+                PJ_REG_PATH = PROJECTORS_DIR / "projector_registry.jsonl"
+                
+                def _utc_iso() -> str:
+                    return datetime.now(timezone.utc).isoformat()
+                
+                def _sha256_bytes(b: bytes) -> str:
+                    return hashlib.sha256(b).hexdigest()
+                
+                def _atomic_write_json(path: Path, payload: dict):
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    blob = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+                    with tempfile.NamedTemporaryFile("wb", delete=False, dir=path.parent) as tmp:
+                        tmp.write(blob); tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
+                    os.replace(tmp_name, path)
+                    return _sha256_bytes(blob), len(blob)
+                
+                def _append_registry_row(row: dict) -> bool:
+                    # in-session dedupe based on (district, projector_hash)
+                    key = (row.get("district", ""), row.get("projector_hash", ""))
+                    seen = st.session_state.setdefault("_pj_registry_keys", set())
+                    if key in seen:
+                        return False
+                    seen.add(key)
+                    PROJECTORS_DIR.mkdir(parents=True, exist_ok=True)
+                    with tempfile.NamedTemporaryFile("w", delete=False, dir=PROJECTORS_DIR, encoding="utf-8") as tmp:
+                        tmp.write(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n")
+                        tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
+                    with open(PJ_REG_PATH, "a", encoding="utf-8") as final, open(tmp_name, "r", encoding="utf-8") as src:
+                        shutil.copyfileobj(src, final)
+                    os.remove(tmp_name)
+                    return True
+                
+                def _diag_projector_from_lane_mask(lm: list[int]) -> list[list[int]]:
+                    n = len(lm or [])
+                    return [[1 if (i == j and int(lm[j]) == 1) else 0 for j in range(n)] for i in range(n)]
+                
+                def _freeze_projector(*, district_id: str, lane_mask_k3: list[int], filename_hint: str | None = None) -> dict:
+                    if not lane_mask_k3:
+                        raise ValueError("No lane mask available (run Overlap first).")
+                    P3 = _diag_projector_from_lane_mask(lane_mask_k3)
+                    name = filename_hint or f"projector_{district_id or 'UNKNOWN'}.json"
+                    pj_path = PROJECTORS_DIR / name
+                    payload = {"schema_version": "1.0.0", "written_at_utc": _utc_iso(), "blocks": {"3": P3}}
+                    pj_hash, pj_size = _atomic_write_json(pj_path, payload)
+                    return {"path": str(pj_path), "projector_hash": pj_hash, "bytes": pj_size, "lane_mask_k3": lane_mask_k3[:]}
+                
+                def _validate_projector_file(pj_path: str) -> dict:
+                    # Use same validator used by overlap (raises ValueError with P3_* on fail)
+                    cfg_file = _cfg_from_policy("projected(file)", pj_path)
+                    _, meta = projector_choose_active(cfg_file, boundaries)
+                    return meta
+                
+                def _simulate_overlap_with_cfg(cfg_forced: dict):
+                    """
+                    Run a FILE overlap without touching the policy widget. Populates:
+                      run_ctx, overlap_out, residual_tags, overlap_policy_label
+                    """
+                    P_active, meta = projector_choose_active(cfg_forced, boundaries)
+                
+                    # Context
+                    d3 = meta.get("d3") if "d3" in meta else (boundaries.blocks.__root__.get("3") or [])
+                    n3 = meta.get("n3") if "n3" in meta else (len(d3[0]) if (d3 and d3[0]) else 0)
+                    lane_mask = meta.get("lane_mask", [])
+                    mode = meta.get("mode", "projected(file)")
+                
+                    # Compute strict residual R3 = H2 @ d3 XOR (C3 XOR I3)
+                    H_used = st.session_state.get("overlap_H") or _load_h_local()
+                    H2 = (H_used.blocks.__root__.get("2") or [])
+                    C3 = (cmap.blocks.__root__.get("3") or [])
+                    I3 = eye(len(C3)) if C3 else []
+                
+                    def _xor(A, B):
+                        if not A: return [r[:] for r in (B or [])]
+                        if not B: return [r[:] for r in (A or [])]
+                        r, c = len(A), len(A[0])
+                        return [[(A[i][j] ^ B[i][j]) & 1 for j in range(c)] for i in range(r)]
+                
+                    def _is_zero(M): return (not M) or all(all((x & 1) == 0 for x in row) for row in M)
+                
+                    R3_strict = _xor(mul(H2, d3), _xor(C3, I3)) if (H2 and d3 and C3) else []
+                    R3_proj   = mul(R3_strict, P_active) if (R3_strict and P_active) else []
+                
+                    def _residual_tag(R, lm):
+                        if not R or not lm: return "none"
+                        rows = len(R)
+                        lanes_idx = [j for j, m in enumerate(lm) if m]
+                        ker_idx   = [j for j, m in enumerate(lm) if not m]
+                        def _col_nz(j): return any(R[i][j] & 1 for i in range(rows))
+                        lanes = any(_col_nz(j) for j in lanes_idx) if lanes_idx else False
+                        ker   = any(_col_nz(j) for j in ker_idx)   if ker_idx   else False
+                        if not lanes and not ker: return "none"
+                        if lanes and not ker:     return "lanes"
+                        if ker and not lanes:     return "ker"
+                        return "mixed"
+                
+                    tag_strict = _residual_tag(R3_strict, lane_mask)
+                    tag_proj   = _residual_tag(R3_proj,   lane_mask)
+                
+                    out = {"3": {"eq": bool(_is_zero(R3_proj)), "n_k": n3}, "2": {"eq": True}}
+                
+                    st.session_state["overlap_out"] = out
+                    st.session_state["residual_tags"] = {"strict": tag_strict, "projected": tag_proj}
+                    st.session_state["overlap_cfg"] = cfg_forced
+                    st.session_state["overlap_policy_label"] = policy_label_from_cfg(cfg_forced)
+                    st.session_state["run_ctx"] = {
+                        "policy_tag": policy_label_from_cfg(cfg_forced),
+                        "mode": mode,
+                        "d3": d3, "n3": n3, "lane_mask_k3": lane_mask,
+                        "P_active": P_active,
+                        "projector_filename": meta.get("projector_filename", ""),
+                        "projector_hash": meta.get("projector_hash", ""),
+                        "projector_consistent_with_d": meta.get("projector_consistent_with_d", None),
+                        "errors": [],
+                    }
+                
+                # ---------------------------- Projector Freezer (AUTO → FILE, no UI flip) ----------------------------
+                with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
+                    _ss = st.session_state
+                    _di = _ss.get("_district_info") or {}
+                    district_id = _di.get("district_id", "UNKNOWN")
+                
+                    # Freshness + rectifier (stops if stale)
+                    _rectify_run_ctx_mask_from_d3_or_stop()
+                    rc = _ss.get("run_ctx") or {}  # fetch AFTER rectifier
+                    n3 = int(rc.get("n3") or 0)
+                    lm = list(rc.get("lane_mask_k3") or [])
+                    if n3 <= 0 or len(lm) != n3:
+                        st.warning("Context invalid (n3/mask mismatch). Click Run Overlap and try again.")
+                        st.stop()
+                
+                    # Eligibility: AUTO mode + k=3 green + SSOT present
+                    k3_green = bool(((_ss.get("overlap_out") or {}).get("3", {}) or {}).get("eq", False))
+                    elig_freeze = (rc.get("mode") == "projected(auto)" and bool(rc.get("d3")) and bool(lm) and k3_green)
+                
+                    st.caption("Freeze current AUTO Π → file, switch to FILE, re-run Overlap, and force a cert write.")
+                
+                    # Inputs
+                    pj_basename   = st.text_input("Filename", value=f"projector_{district_id or 'UNKNOWN'}.json",
+                                                  key="pj_freeze_name_final2")
+                    overwrite_ok  = st.checkbox("Overwrite if exists", value=False, key="pj_freeze_overwrite_final2")
+                
+                    # Global FILE Π invalid gate (as requested)
+                    fm_bad  = file_validation_failed()
+                    help_txt = "Disabled because projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π."
+                
+                    # Final disabled state + tooltip
+                    disabled = fm_bad or (not elig_freeze)
+                    tip = help_txt if fm_bad else (None if elig_freeze else "Enabled when current run is projected(auto) and k=3 is green.")
+                
+                    # --- Button: Freeze Π → FILE & re-run ---
+                    if st.button("Freeze Π → FILE & re-run",
+                                 key="btn_freeze_final2",
+                                 disabled=disabled,
+                                 help=(tip or "Freeze AUTO to FILE and re-run")):
+                        try:
+                            # Freshness + rectifier again
+                            _rectify_run_ctx_mask_from_d3_or_stop()
+                            rc = _ss.get("run_ctx") or {}
+                            n3 = int(rc.get("n3") or 0)
+                            lm = list(rc.get("lane_mask_k3") or [])
+                            if n3 <= 0 or len(lm) != n3:
+                                st.warning("Context invalid (n3/mask mismatch). Click Run Overlap and try again.")
+                                st.stop()
+                
+                            # Build Π from SSOT lane mask
+                            P_freeze = [[1 if (i == j and lm[j]) else 0 for j in range(n3)] for i in range(n3)]
+                
+                            # Validate strictly
+                            validate_projector_file_strict(P_freeze, n3=n3, lane_mask=lm)
+                
+                            # Save projector (atomic)
+                            pj_path = PROJECTORS_DIR / pj_basename
+                            if pj_path.exists() and not overwrite_ok:
+                                st.warning("Projector file already exists. Enable 'Overwrite if exists' or choose a new name.")
+                                st.stop()
+                            payload = {"schema_version": "1.0.0", "blocks": {"3": P_freeze}}
+                            pj_hash, _ = _atomic_write_json(pj_path, payload)
+                
+                            # Switch policy to FILE (k=3) and mark fixtures changed (nonce bump)
+                            cfg_active.setdefault("source", {})["3"] = "file"
+                            cfg_active.setdefault("projector_files", {})["3"] = pj_path.as_posix()
+                            if "_mark_fixtures_changed" in globals():
+                                _mark_fixtures_changed()
+                            else:
+                                _ss["_fixture_nonce"] = int(_ss.get("_fixture_nonce", 0)) + 1
+                                for k in ("overlap_out", "residual_tags", "overlap_cfg", "overlap_policy_label"):
+                                    _ss.pop(k, None)
+                
+                            # Optional: append registry row
+                            try:
+                                _append_registry_row({
+                                    "schema_version": "1.0.0",
+                                    "written_at_utc": _utc_iso(),
+                                    "app_version": APP_VERSION,
+                                    "district": district_id,
+                                    "lane_mask_k3": lm,
+                                    "filename": pj_path.as_posix(),
+                                    "projector_hash": pj_hash,
+                                })
+                            except Exception:
+                                pass
+                
+                            # Re-run Overlap immediately (fresh FILE mode)
+                            if "_soft_reset_before_overlap" in globals():
+                                _soft_reset_before_overlap()
+                            run_overlap()
+                
+                            # Force cert write this pass (bypass debounce)
+                            _ss["should_write_cert"] = True
+                            _ss.pop("_last_cert_write_key", None)
+                
+                            st.success(f"Π saved → {pj_path.name} · {pj_hash[:12]}… and switched to FILE.")
+                        except Exception as e:
+                            st.error(f"Freeze failed: {e}")
+                
+                
+                # ----------------- IMPORTS -----------------
+                import io as _io
+                import csv
+                import uuid
+                import os
+                import tempfile
+                import hashlib
+                from datetime import datetime, timezone
+                import re
+                import json as _json
+                from pathlib import Path
+                
+                # -------------- FIXTURE STASH --------------
+                FIXTURE_STASH_DIR = Path(globals().get("FIXTURE_STASH_DIR", "inputs/fixtures"))
+                FIXTURE_STASH_DIR.mkdir(parents=True, exist_ok=True)
+                
+                # --------- Define eye() if missing --------
+                if "eye" not in globals():
+                    def eye(n: int):
+                        return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
+                
+                # --- Robust hashing helpers (drop near your other helpers)
+                
+                def _to_hashable_plain(x):
+                    """Return a stable, JSON-serializable view of x for hashing."""
+                    if x is None:
+                        return None
+                    # Preferred: objects with .blocks.__root__ (your Boundaries/Cmap/H)
+                    try:
+                        return x.blocks.__root__
+                    except Exception:
+                        pass
+                    # Pydantic v2 models
+                    try:
+                        return x.model_dump()  # type: ignore[attr-defined]
+                    except Exception:
+                        pass
+                    # Dataclasses / simple objects
+                    try:
+                        return dict(x.__dict__)
+                    except Exception:
+                        pass
+                    # Already-plain types
+                    if isinstance(x, (dict, list, tuple, str, int, float, bool)):
+                        return x
+                    # Last resort: repr (keeps us from crashing; still deterministic enough)
+                    return repr(x)
+                
+                def _hash_fixture_side(fx: dict) -> dict:
+                    """Hash each sub-object of a fixture side robustly."""
+                    return {
+                        "boundaries": _hash_obj(_to_hashable_plain(fx.get("boundaries"))),
+                        "shapes":     _hash_obj(_to_hashable_plain(fx.get("shapes"))),
+                        "cmap":       _hash_obj(_to_hashable_plain(fx.get("cmap"))),
+                        "H":          _hash_obj(_to_hashable_plain(fx.get("H"))),
+                    }
+                
+                # --- GF(2) helpers (you already have _mul_gf2 / _xor_mat; keep those) ---
+                def _all_zero_mat(M: list[list[int]]) -> bool:
+                    return not M or all((x & 1) == 0 for row in M for x in row)
+                
+                def _I(n: int) -> list[list[int]]:
+                    return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
+                
+                def _lane_mask_from_boundaries(boundaries_obj) -> list[int]:
+                    # d3 is 2<-3 block; rows = n2, cols = n3
+                    d3 = (boundaries_obj or {}).blocks.__root__.get("3") or []
+                    if not d3: 
+                        return []
+                    rows, cols = len(d3), len(d3[0])
+                    return [1 if any(d3[i][j] & 1 for i in range(rows)) else 0 for j in range(cols)]
+                
+                def _lane_mask_pair_SSO(L_boundaries, R_boundaries) -> list[int]:
+                    # SSOT per pair: OR the left/right masks (robust if they differ)
+                    Lm = _lane_mask_from_boundaries(L_boundaries)
+                    Rm = _lane_mask_from_boundaries(R_boundaries)
+                    if not Lm and not Rm:
+                        return []
+                    if not Lm: return Rm[:]
+                    if not Rm: return Lm[:]
+                    n = max(len(Lm), len(Rm))
+                    Lm += [0]*(n-len(Lm))
+                    Rm += [0]*(n-len(Rm))
+                    return [1 if (Lm[j] or Rm[j]) else 0 for j in range(n)]
+                
+                def _diag_from_mask(mask: list[int]) -> list[list[int]]:
+                    n = len(mask or [])
+                    return [[(mask[i] & 1) if i == j else 0 for j in range(n)] for i in range(n)]
+                
+                def _r3_from_fixture(fx: dict) -> list[list[int]]:
+                    # R3 = H2 @ d3 + (C3 + I3)  over GF(2)
+                    B = (fx.get("boundaries") or {}).blocks.__root__
+                    C = (fx.get("cmap") or {}).blocks.__root__
+                    H = (fx.get("H") or {}).blocks.__root__
+                    d3 = B.get("3") or []          # shape: n2 x n3
+                    H2 = H.get("2") or []          # shape: n3 x n2
+                    C3 = C.get("3") or []          # shape: n3 x n3
+                    I3 = _I(len(C3)) if C3 else []
+                    term1 = _mul_gf2(H2, d3)       # (n3 x n2) * (n2 x n3) -> (n3 x n3)
+                    term2 = _xor_mat(C3, I3)       # (n3 x n3)
+                    return _xor_mat(term1, term2)  # (n3 x n3)
+                
+                def _classify_residual(R3: list[list[int]], mask: list[int]) -> str:
+                    if _all_zero_mat(R3):
+                        return "none"
+                    # lanes = columns with mask==1, ker = columns with mask==0
+                    n3 = len(R3[0]) if R3 else 0
+                    def col_has_support(j: int) -> bool:
+                        return any(R3[i][j] & 1 for i in range(len(R3)))
+                    lanes_support = any(col_has_support(j) for j in range(n3) if j < len(mask) and mask[j])
+                    ker_support   = any(col_has_support(j) for j in range(n3) if j >= len(mask) or not mask[j])
+                    if lanes_support and ker_support: return "mixed"
+                    if lanes_support:                 return "lanes"
+                    if ker_support:                   return "ker"
+                    return "none"  # degenerate fallback
+                
+                
+                
+                
+                
+                # -------------- Helper: _hash_obj --------------
+                def _sha256_hex(b: bytes) -> str:
+                    return hashlib.sha256(b).hexdigest()
+                
+                def _hash_obj(obj) -> str:
+                    try:
+                        blob = _json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+                        return _sha256_hex(blob)
+                    except Exception:
+                        return ""
+                
+                def validate_pairs_payload(payload: dict) -> tuple[list[dict], str]:
+                    """
+                    Validate and sanitize a parity pairs payload.
+                    Returns (pairs, policy_hint) or raises ValueError("PARITY_SCHEMA_INVALID: ...").
+                    - schema_version must be "1.0.0"
+                    - policy_hint in {"strict","projected:auto","projected:file","mirror_active"}
+                    - Each pair: {"label", "left", "right"}
+                    - Each side is EITHER {"embedded": {boundaries, shapes, cmap, H}} OR {boundaries, shapes, cmap, H} (paths)
+                    - If embedded present -> it wins; path keys are stripped. Unknown keys are rejected.
+                    """
+                    def _err(msg: str) -> ValueError:
+                        return ValueError(f"PARITY_SCHEMA_INVALID: {msg}")
+                
+                    if not isinstance(payload, dict):
+                        raise _err("root must be an object")
+                
+                    # --- root keys ---
+                    allowed_root = {"schema_version", "policy_hint", "pairs"}
+                    unknown_root = sorted(set(payload.keys()) - allowed_root)
+                    if unknown_root:
+                        raise _err(f"unknown root keys: {unknown_root}")
+                
+                    sv = payload.get("schema_version")
+                    if sv != "1.0.0":
+                        raise _err(f"schema_version must be '1.0.0' (got {sv!r})")
+                
+                    ph = payload.get("policy_hint")
+                    if ph not in {"strict", "projected:auto", "projected:file", "mirror_active"}:
+                        raise _err(f"policy_hint invalid (got {ph!r})")
+                
+                    pairs_in = payload.get("pairs")
+                    if not isinstance(pairs_in, list):
+                        raise _err("pairs must be an array")
+                
+                    def _sanitize_side(side: dict, *, where: str) -> dict:
+                        if not isinstance(side, dict):
+                            raise _err(f"{where} side must be an object")
+                        # Whitelist for both modes
+                        allowed_path = {"boundaries", "shapes", "cmap", "H"}
+                        allowed_emb  = {"embedded"}
+                        keys = set(side.keys())
+                
+                        has_emb = "embedded" in side
+                        if has_emb:
+                            # Embedded mode
+                            unknown = sorted(keys - allowed_emb)
+                            if unknown:
+                                raise _err(f"{where}: unknown keys {unknown} (embedded mode)")
+                            emb = side["embedded"]
+                            if not isinstance(emb, dict):
+                                raise _err(f"{where}: embedded must be an object")
+                            required = {"boundaries", "shapes", "cmap", "H"}
+                            missing = sorted(required - set(emb.keys()))
+                            if missing:
+                                raise _err(f"{where}: embedded missing keys {missing}")
+                            # Type-check embedded objects (loose: must be dicts)
+                            for k in required:
+                                if not isinstance(emb[k], dict):
+                                    raise _err(f"{where}: embedded.{k} must be an object")
+                            # Embedded wins → return only {"embedded": normalized_emb}
+                            # Also strip any accidental sibling path keys if they existed.
+                            return {"embedded": {k: emb[k] for k in ("boundaries","shapes","cmap","H")}}
+                        else:
+                            # Path mode
+                            unknown = sorted(keys - allowed_path)
+                            if unknown:
+                                raise _err(f"{where}: unknown keys {unknown} (path mode)")
+                            missing = sorted([k for k in ("boundaries","shapes","cmap","H")
+                                              if k not in side or not isinstance(side[k], str) or not side[k].strip()])
+                            if missing:
+                                raise _err(f"{where}: missing or empty path(s) {missing}")
+                            # Normalize to exact four strings
+                            return {
+                                "boundaries": side["boundaries"].strip(),
+                                "shapes":     side["shapes"].strip(),
+                                "cmap":       side["cmap"].strip(),
+                                "H":          side["H"].strip(),
+                            }
+                
+                    out_pairs: list[dict] = []
+                    for idx, p in enumerate(pairs_in):
+                        if not isinstance(p, dict):
+                            raise _err(f"pair[{idx}] must be an object")
+                        allowed_pair = {"label", "left", "right"}
+                        unknown_pair = sorted(set(p.keys()) - allowed_pair)
+                        if unknown_pair:
+                            raise _err(f"pair[{idx}]: unknown keys {unknown_pair}")
+                
+                        label = p.get("label")
+                        if not isinstance(label, str) or not label.strip():
+                            raise _err(f"pair[{idx}]: label must be non-empty string")
+                
+                        if "left" not in p or "right" not in p:
+                            raise _err(f"pair[{idx}]: missing 'left' or 'right'")
+                        left  = _sanitize_side(p["left"],  where=f"pair[{idx}]/left")
+                        right = _sanitize_side(p["right"], where=f"pair[{idx}]/right")
+                
+                        out_pairs.append({"label": label.strip(), "left": left, "right": right})
+                
+                    return out_pairs, ph
+                
+                #------------------------------------------------------------
+                def _path_exists_strict(p: str) -> bool:
+                    try:
+                        return Path(p).exists() and Path(p).is_file()
+                    except Exception:
+                        return False
+                
+                def _pp_resolve_side_or_skip(side: dict, *, label: str, side_name: str):
+                    # embedded wins
+                    if "embedded" in side:
+                        return ("ok", {"embedded": side["embedded"]})
+                    # require all 4 paths
+                    missing = [k for k in ("boundaries","shapes","cmap","H") if not side.get(k)]
+                    if missing:
+                        return ("skip", {"label": label, "side": side_name, "missing": missing, "error": "PARITY_SPEC_MISSING"})
+                    # strict existence check
+                    miss_files = [k for k in ("boundaries","shapes","cmap","H") if not _path_exists_strict(side[k])]
+                    if miss_files:
+                        return ("skip", {"label": label, "side": side_name, "missing": miss_files, "error": "PARITY_FILE_NOT_FOUND"})
+                    return ("ok", {"paths": side})
+                
+                def _lane_mask_from_boundaries(boundaries_obj) -> list[int]:
+                    d3 = (boundaries_obj or {}).blocks.__root__.get("3->2") or (boundaries_obj or {}).blocks.__root__.get("3")  # depending on your schema
+                    if not d3: return []
+                    rows, n3 = len(d3), len(d3[0])
+                    return [1 if any(d3[i][j] & 1 for i in range(rows)) else 0 for j in range(n3)]
+                
+                
+                
+                def _pair_hash(left_hashes: dict, right_hashes: dict) -> str:
+                    tup = (
+                        left_hashes["boundaries"], left_hashes["shapes"], left_hashes["cmap"], left_hashes["H"],
+                        right_hashes["boundaries"], right_hashes["shapes"], right_hashes["cmap"], right_hashes["H"],
+                    )
+                    return _sha256_hex(_json.dumps(tup, separators=(",", ":"), sort_keys=False).encode("utf-8"))
+                
+                
+                
+                # -------------- Core: JSON helpers --------------
+                def _ensure_parent_dir(p: Path) -> None:
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                
+                def _atomic_write_json(path: Path, payload: dict) -> None:
+                    _ensure_parent_dir(path)
+                    with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as tmp:
+                        _json.dump(payload, tmp, ensure_ascii=False, indent=2)
+                        tmp.flush()
+                        os.fsync(tmp.fileno())
+                        os.replace(tmp.name, path)
+                
+                def _safe_parse_json(path: str) -> dict:
+                    p = Path(path)
+                    if not p.exists():
+                        raise FileNotFoundError(f"No file at {path}")
+                    with p.open("r", encoding="utf-8") as f:
+                        return _json.load(f)
+                
+                # -------- Report paths (guard) --------
+                from pathlib import Path
+                
+                if "REPORTS_DIR" not in globals():
+                    REPORTS_DIR = Path("reports")
+                REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+                
+                if "PARITY_JSON_PATH" not in globals():
+                    PARITY_JSON_PATH = REPORTS_DIR / "parity_report.json"
+                
+                if "PARITY_CSV_PATH" not in globals():
+                    PARITY_CSV_PATH = REPORTS_DIR / "parity_summary.csv"
+                
+                        
+                # --------- Paths & Directory init ----------
+                REPORTS_DIR = Path(globals().get("REPORTS_DIR", "reports"))
+                REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+                
+                if "PARITY_REPORT_PATH" not in globals():
+                    PARITY_REPORT_PATH = REPORTS_DIR / "parity_report.json"
+                if "PARITY_SUMMARY_CSV" not in globals():
+                    PARITY_SUMMARY_CSV = REPORTS_DIR / "parity_summary.csv"
+                
+                PARITY_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
+                LOGS_DIR = Path("logs")
+                LOGS_DIR.mkdir(parents=True, exist_ok=True)
+                
+                if "DEFAULT_PARITY_PATH" not in globals():
+                    DEFAULT_PARITY_PATH = LOGS_DIR / "parity_pairs.json"
+                
+                # --------- Helper: time & session -------------
+                def __pp_now_z():
+                    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                
+                def __pp_current_input_filenames():
+                    ib = st.session_state.get("_inputs_block") or {}
+                    fns = ib.get("filenames") or {}
+                    return {
+                        "boundaries": fns.get("boundaries", "inputs/boundaries.json"),
+                        "cmap": fns.get("C", "inputs/cmap.json"),
+                        "H": fns.get("H", "inputs/H.json"),
+                        "shapes": fns.get("U", "inputs/shapes.json"),
+                    }
+                
+                # --------- Universal adapter: capture old _paths_from_fixture_or_current ----------
+                # Capture the existing function once, outside the new definition
+                _OLD_PFFC = globals().get("_paths_from_fixture_or_current", None)
+                
+                def _paths_from_fixture_or_current(*args):
+                    # Use the captured old function to avoid recursion issues
+                    if "residual_tag" not in globals():
+                        def residual_tag(matrix, mask):
+                            return "unknown"
+                
+                    # Extract fx from args
+                    if len(args) == 1 and isinstance(args[0], dict):
+                        fx = args[0]
+                    elif len(args) >= 2 and isinstance(args[1], dict):
+                        fx = args[1]
+                    elif _OLD_PFFC:
+                        return _OLD_PFFC(*args)
+                    else:
+                        raise TypeError("_paths_from_fixture_or_current(): expected (fx) or (side_name, fx)")
+                
+                    # Fill paths, prefer explicit *_path, else keys, fallback SSOT filenames
+                    out = {}
+                    for k in ("boundaries", "cmap", "H", "shapes"):
+                        v = fx.get(f"{k}_path")
+                        if not v and isinstance(fx.get(k), str):
+                            v = fx.get(k)
+                        out[k] = v or ""
+                
+                    # Fill missing with SSOT filenames
+                    ib = st.session_state.get("_inputs_block") or {}
+                    fns = ib.get("filenames") or {}
+                    default_paths = {
+                        "boundaries": fns.get("boundaries", "inputs/boundaries.json"),
+                        "cmap": fns.get("C", "inputs/cmap.json"),
+                        "H": fns.get("H", "inputs/H.json"),
+                        "shapes": fns.get("U", "inputs/shapes.json"),
+                    }
+                    for k in ("boundaries", "cmap", "H", "shapes"):
+                        out.setdefault(k, default_paths[k])
+                
+                    return out
+                
+                # ---- Parity types & state ----
+                from typing import TypedDict, Optional, Literal
+                
+                class Side(TypedDict, total=False):
+                    embedded: dict
+                    boundaries: str
+                    shapes: str
+                    cmap: str
+                    H: str
+                
+                class PairSpec(TypedDict):
+                    label: str
+                    left: Side
+                    right: Side
+                
+                class SkippedSpec(TypedDict, total=False):
+                    label: str
+                    side: Literal["left","right"]
+                    missing: list[str]
+                    error: str
+                
+                class RunCtx(TypedDict, total=False):
+                    policy_hint: Literal["strict","projected:auto","projected:file","mirror_active"]
+                    projector_mode: Literal["strict","auto","file"]
+                    projector_filename: Optional[str]
+                    projector_hash: str
+                    lane_mask_note: Optional[str]
+                
+                def _ensure_state():
+                    st.session_state.setdefault("parity_pairs_table", [])   # editable table rows (PairSpec-like)
+                    st.session_state.setdefault("parity_pairs_queue", [])   # validated runnable pairs
+                    st.session_state.setdefault("parity_skipped_specs", []) # skipped reasons (SkippedSpec)
+                    st.session_state.setdefault("parity_run_ctx", {})       # RunCtx
+                    st.session_state.setdefault("parity_last_report_pairs", None)  # results cache
+                
+                
+                def resolve_side(side: Side) -> dict:
+                    if "embedded" in side:
+                        return parse_embedded(side["embedded"])  # your existing io.parse_* over objects
+                    missing = [k for k in ("boundaries","shapes","cmap","H") if not side.get(k)]
+                    if missing:
+                        raise KeyError(f"PARITY_SPEC_MISSING:{missing}")
+                    for k in ("boundaries","shapes","cmap","H"):
+                        p = Path(side[k])
+                        if not (p.exists() and p.is_file()):
+                            raise FileNotFoundError(f"PARITY_FILE_NOT_FOUND:{k}={side[k]}")
+                    return parse_from_paths(
+                        boundaries_path=side["boundaries"], shapes_path=side["shapes"],
+                        cmap_path=side["cmap"], H_path=side["H"]
+                    )
+                
+                def lane_mask_k3_from_boundaries(boundaries) -> tuple[list[int], str]:
+                    d3 = (boundaries.blocks.__root__.get("3->2") 
+                          or boundaries.blocks.__root__.get("3")  # if your format uses "3" for 3→2
+                          or [])
+                    if not d3: return [], ""
+                    cols = len(d3[0])
+                    mask = [1 if any(row[j] & 1 for row in d3) else 0 for j in range(cols)]
+                    return mask, "".join("1" if b else "0" for b in mask)
+                
+                def run_pair(spec: PairSpec, run_ctx: RunCtx) -> dict:
+                    label = spec["label"]
+                    try:
+                        L = resolve_side(spec["left"])
+                    except Exception as e:
+                        raise RuntimeError(f"SKIP:left:{e}")
+                    try:
+                        R = resolve_side(spec["right"])
+                    except Exception as e:
+                        raise RuntimeError(f"SKIP:right:{e}")
+                
+                    # lane mask from THIS pair’s boundaries
+                    mask_vec, mask_str = lane_mask_k3_from_boundaries(L["boundaries"])  # boundaries object
+                    # (optionally assert R yields same mask; not required)
+                
+                    # strict leg
+                    sL = run_leg_strict(L)  # returns {"k2":bool,"k3":bool,"residual":"none|lanes|ker|mixed|error"}
+                    sR = run_leg_strict(R)
+                    strict = {"k2": bool(sL["k2"] and sR["k2"]),
+                              "k3": bool(sL["k3"] and sR["k3"]),
+                              "residual_tag": combine_residuals(sL["residual"], sR["residual"])}
+                
+                    # projected leg?
+                    projected = None
+                    if run_ctx["projector_mode"] == "auto":
+                        Pi = projector_from_lane_mask(mask_vec)  # diag(mask)
+                        pL = run_leg_projected(L, Pi)
+                        pR = run_leg_projected(R, Pi)
+                        projected = {"k2": bool(pL["k2"] and pR["k2"]),
+                                     "k3": bool(pL["k3"] and pR["k3"]),
+                                     "residual_tag": combine_residuals(pL["residual"], pR["residual"])}
+                    elif run_ctx["projector_mode"] == "file":
+                        Pi = get_frozen_projector()  # set once during compute_run_ctx / validation
+                        # Optionally enforce lane compatibility and hard-error:
+                        if not diag_matches_mask_if_required(Pi, mask_vec):
+                            raise RuntimeError(f"P3_LANE_MISMATCH: diag(P) != lane_mask(d3) : {diag_to_str(Pi)} vs {mask_str}")
+                        pL = run_leg_projected(L, Pi)
+                        pR = run_leg_projected(R, Pi)
+                        projected = {"k2": bool(pL["k2"] and pR["k2"]),
+                                     "k3": bool(pL["k3"] and pR["k3"]),
+                                     "residual_tag": combine_residuals(pL["residual"], pR["residual"])}
+                
+                    # hashes
+                    Lh = hashes_for_fixture(L)  # {"boundaries":"…","shapes":"…","cmap":"…","H":"…"}
+                    Rh = hashes_for_fixture(R)
+                    pair_hash = sha256_tuple(Lh, Rh)
+                
+                    return {
+                        "label": label,
+                        "pair_hash": pair_hash,
+                        "lane_mask_k3": mask_vec,
+                        "lane_mask": mask_str,
+                        "left_hashes": Lh,
+                        "right_hashes": Rh,
+                        "strict": strict,
+                        **({"projected": projected} if projected is not None else {}),
+                    }
+                
+                def queue_all_valid_from_table():
+                    _ensure_state()
+                    st.session_state["parity_pairs_queue"].clear()
+                    st.session_state["parity_skipped_specs"].clear()
+                
+                    rows = st.session_state["parity_pairs_table"]
+                    for row in rows:
+                        spec: PairSpec = {"label": row["label"], "left": row["left"], "right": row["right"]}
+                        # lightweight check: embedded or all 4 fields for each side
+                        misses = []
+                        for side_name in ("left","right"):
+                            s = spec[side_name]
+                            if "embedded" in s: 
+                                continue
+                            miss = [k for k in ("boundaries","shapes","cmap","H") if not s.get(k)]
+                            if miss:
+                                st.session_state["parity_skipped_specs"].append({"label": spec["label"], "side": side_name, "missing": miss})
+                                break
+                        else:
+                            st.session_state["parity_pairs_queue"].append(spec)
+                
+                
+                def run_parity_suite():
+                    _ensure_state()
+                    queue = st.session_state["parity_pairs_queue"]
+                    skipped = st.session_state["parity_skipped_specs"]
+                    if not queue:
+                        st.info("Queued pairs: 0 — nothing to run.")
+                        return
+                
+                    # Freeze decision
+                    rc_in = st.session_state.get("parity_run_ctx") or {}
+                    try:
+                        rc = compute_run_ctx(rc_in.get("policy_hint","mirror_active"), rc_in.get("projector_filename"))
+                    except Exception as e:
+                        st.error(str(e))  # e.g., PARITY_SCHEMA_INVALID or projector invalid
+                        return
+                    st.session_state["parity_run_ctx"] = rc  # freeze for this run
+                
+                    # Optional: if file mode, set global frozen projector (Pi) once here.
+                
+                    results = []
+                    proj_green = 0
+                    rows_total = len(queue)
+                    rows_skipped = len(skipped)
+                    rows_run = 0
+                
+                    for spec in queue:
+                        try:
+                            out = run_pair(spec, rc)
+                            results.append(out)
+                            rows_run += 1
+                            if rc["projector_mode"] != "strict" and out.get("projected",{}).get("k3") is True:
+                                proj_green += 1
+                        except RuntimeError as e:
+                            # convert into skipped entry and continue
+                            parts = str(e).split(":", 2)
+                            if parts and parts[0].startswith("SKIP"):
+                                side = parts[1] if len(parts) > 1 else ""
+                                skipped.append({"label": spec["label"], "side": side, "error": parts[-1]})
+                            else:
+                                st.error(str(e))
+                                return  # hard abort if it’s a non-skip fatal
+                
+                    # Write artifacts (next step)
+                    write_parity_artifacts(results, rc, skipped, rows_total, rows_skipped, rows_run, proj_green)
+                    st.session_state["parity_last_report_pairs"] = results
+                def run_parity_suite():
+                    _ensure_state()
+                    queue = st.session_state["parity_pairs_queue"]
+                    skipped = st.session_state["parity_skipped_specs"]
+                    if not queue:
+                        st.info("Queued pairs: 0 — nothing to run.")
+                        return
+                
+                    # Freeze decision
+                    rc_in = st.session_state.get("parity_run_ctx") or {}
+                    try:
+                        rc = compute_run_ctx(rc_in.get("policy_hint","mirror_active"), rc_in.get("projector_filename"))
+                    except Exception as e:
+                        st.error(str(e))  # e.g., PARITY_SCHEMA_INVALID or projector invalid
+                        return
+                    st.session_state["parity_run_ctx"] = rc  # freeze for this run
+                
+                    # Optional: if file mode, set global frozen projector (Pi) once here.
+                
+                    results = []
+                    proj_green = 0
+                    rows_total = len(queue)
+                    rows_skipped = len(skipped)
+                    rows_run = 0
+                
+                    for spec in queue:
+                        try:
+                            out = run_pair(spec, rc)
+                            results.append(out)
+                            rows_run += 1
+                            if rc["projector_mode"] != "strict" and out.get("projected",{}).get("k3") is True:
+                                proj_green += 1
+                        except RuntimeError as e:
+                            # convert into skipped entry and continue
+                            parts = str(e).split(":", 2)
+                            if parts and parts[0].startswith("SKIP"):
+                                side = parts[1] if len(parts) > 1 else ""
+                                skipped.append({"label": spec["label"], "side": side, "error": parts[-1]})
+                            else:
+                                st.error(str(e))
+                                return  # hard abort if it’s a non-skip fatal
+                
+                    # Write artifacts (next step)
+                    write_parity_artifacts(results, rc, skipped, rows_total, rows_skipped, rows_run, proj_green)
+                    st.session_state["parity_last_report_pairs"] = results
+                
+                def _pp_try_load(side: dict):
+                    """Load one fixture side either from embedded or from paths."""
+                    if "embedded" in side:
+                        emb = side["embedded"]
+                        return {
+                            "boundaries": io.parse_boundaries(emb["boundaries"]),
+                            "shapes":     io.parse_shapes(emb["shapes"]),
+                            "cmap":       io.parse_cmap(emb["cmap"]),
+                            "H":          io.parse_cmap(emb["H"]),
+                        }
+                    # path mode
+                    return load_fixture_from_paths(
+                        boundaries_path=side["boundaries"],
+                        cmap_path=side["cmap"],
+                        H_path=side["H"],
+                        shapes_path=side["shapes"],
+                    )
+                
+                
+                
+                # --------- Resolver + Fixture Loader -------------------------------------------
+                def _canon(s: str) -> str:
+                    return re.sub(r"[^a-z0-9.]+", "", (s or "").lower())
+                
+                def _resolve_fixture_path(p: str) -> str:
+                    """
+                    Resolve fixture filenames like 'boundaries D2.json' under various roots.
+                    """
+                    p = (p or "").strip()
+                    if not p:
+                        raise FileNotFoundError("Empty fixture path")
+                    roots = [Path("."), Path("inputs"), Path("/mnt/data"), FIXTURE_STASH_DIR]  # include stash dir
+                    tried = []
+                
+                    # 1) as-is
+                    cand = Path(p)
+                    tried.append(cand.as_posix())
+                    if cand.exists() and cand.is_file():
+                        return cand.as_posix()
+                
+                    # 2) under roots
+                    for r in roots:
+                        cand = r / p
+                        tried.append(cand.as_posix())
+                        if cand.exists() and cand.is_file():
+                            return cand.as_posix()
+                
+                    # 3) recursive fuzzy search
+                    target = _canon(Path(p).name)
+                    for r in roots:
+                        if not r.exists():
+                            continue
+                        for q in r.rglob("*"):
+                            if q.is_file():
+                                if _canon(q.name) == target or _canon(q.stem) == _canon(Path(p).stem):
+                                    return q.as_posix()
+                
+                    raise FileNotFoundError(
+                        f"Fixture file not found for '{p}'. Tried: " + " | ".join(tried[:10]) +
+                        " (also searched recursively under ./, inputs/, /mnt/data with fuzzy match)"
+                    )
+                
+                def load_fixture_from_paths(*, boundaries_path, cmap_path, H_path, shapes_path):
+                    """
+                    Resolve paths then parse fixtures via io.parse_*.
+                    """
+                    def _read_json(p):
+                        with open(p, "r", encoding="utf-8") as f:
+                            return _json.load(f)
+                
+                    b_path = _resolve_fixture_path(boundaries_path)
+                    c_path = _resolve_fixture_path(cmap_path)
+                    h_path = _resolve_fixture_path(H_path)
+                    u_path = _resolve_fixture_path(shapes_path)
+                
+                    return {
+                        "boundaries": io.parse_boundaries(_read_json(b_path)),
+                        "cmap": io.parse_cmap(_read_json(c_path)),
+                        "H": io.parse_cmap(_read_json(h_path)),
+                        "shapes": io.parse_shapes(_read_json(u_path)),
+                    }
+                
+                # ---- queue → portable JSON payload
+                def __pp_pairs_payload_from_queue(pairs: list[dict]) -> dict:
+                    def _paths_anyshape(fx: dict) -> dict:
+                        # prefer your universal adapter; fallback to SSOT file names
+                        try:
+                            return _paths_from_fixture_or_current(fx)
+                        except Exception:
+                            ib = st.session_state.get("_inputs_block") or {}
+                            fns = ib.get("filenames") or {}
+                            return {
+                                "boundaries": fx.get("boundaries", fns.get("boundaries", "inputs/boundaries.json")),
+                                "cmap":       fx.get("cmap",       fns.get("C",          "inputs/cmap.json")),
+                                "H":          fx.get("H",          fns.get("H",          "inputs/H.json")),
+                                "shapes":     fx.get("shapes",     fns.get("U",          "inputs/shapes.json")),
+                            }
+                    rows = []
+                    for row in (pairs or []):
+                        rows.append({
+                            "label": row.get("label","PAIR"),
+                            "left":  _paths_anyshape(row.get("left", {})  or {}),
+                            "right": _paths_anyshape(row.get("right", {}) or {}),
+                        })
+                    return {
+                        "schema_version": "1.0.0",
+                        "saved_at": __pp_now_z(),
+                        "count": len(rows),
+                        "pairs": rows,
+                    }
+                
+                # ---- path normalization for text inputs
+                def _ensure_json_path_str(p_str: str, default_name="parity_pairs.json") -> str:
+                    p = Path((p_str or "").strip() or default_name)
+                    if p.is_dir() or str(p).endswith(("/", "\\")) or p.name == "":
+                        p = p / default_name
+                    if p.suffix.lower() != ".json":
+                        p = p.with_suffix(".json")
+                    return p.as_posix()
+                
+                # --- Parity queue shims (safe to re-define if missing)
+                if "clear_parity_pairs" not in globals():
+                    def clear_parity_pairs():
+                        st.session_state["parity_pairs"] = []
+                
+                if "add_parity_pair" not in globals():
+                    def add_parity_pair(*, label: str, left_fixture: dict, right_fixture: dict) -> int:
+                        st.session_state.setdefault("parity_pairs", [])
+                        st.session_state["parity_pairs"].append({
+                            "label": label,
+                            "left":  left_fixture,
+                            "right": right_fixture,
+                        })
+                        return len(st.session_state["parity_pairs"])
+                
+                
+                # ---- export helper used by the button
+                def _export_pairs_to_path(path_str: str) -> str:
+                    p = Path(_ensure_json_path_str(path_str))
+                    p.parent.mkdir(parents=True, exist_ok=True)
+                    payload = __pp_pairs_payload_from_queue(st.session_state.get("parity_pairs", []) or [])
+                    tmp = p.with_suffix(p.suffix + ".tmp")
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        _json.dump(payload, f, ensure_ascii=False, indent=2)
+                        f.flush(); os.fsync(f.fileno())
+                    os.replace(tmp, p)
+                    return p.as_posix()
+                
+                # ---- import helper for the uploader (payload-based)
+                def _import_pairs_from_payload(payload: dict, *, merge: bool) -> int:
+                    if not merge:
+                        clear_parity_pairs()
+                    for r in (payload.get("pairs") or []):
+                        L, R = r.get("left") or {}, r.get("right") or {}
+                        fxL = load_fixture_from_paths(boundaries_path=L["boundaries"], cmap_path=L["cmap"], H_path=L["H"], shapes_path=L["shapes"])
+                        fxR = load_fixture_from_paths(boundaries_path=R["boundaries"], cmap_path=R["cmap"], H_path=R["H"], shapes_path=R["shapes"])
+                        add_parity_pair(label=r.get("label","PAIR"), left_fixture=fxL, right_fixture=fxR)
+                    return len(st.session_state.get("parity_pairs", []))
+                
+                
+                # -------------- Loader shim for parity import -----------------
+                if "load_fixture_from_paths" not in globals():
+                    def load_fixture_from_paths(*, boundaries_path, cmap_path, H_path, shapes_path):
+                        try:
+                            _ = (io.parse_boundaries, io.parse_cmap, io.parse_shapes)
+                        except Exception:
+                            raise RuntimeError(
+                                "Project parsing module `io` missing or shadowed. "
+                                "Ensure your project imports `io` with parse_* functions."
+                            )
+                        def _read(p):
+                            with open(Path(p), "r", encoding="utf-8") as f:
+                                return _json.load(f)
+                        dB = _read(boundaries_path)
+                        dC = _read(cmap_path)
+                        dH = _read(H_path)
+                        dU = _read(shapes_path)
+                        return {
+                            "boundaries": io.parse_boundaries(dB),
+                            "cmap": io.parse_cmap(dC),
+                            "H": io.parse_cmap(dH),
+                            "shapes": io.parse_shapes(dU),
+                        }
+                
+                        if "clear_parity_pairs" not in globals():
+                            def clear_parity_pairs():
+                                st.session_state["parity_pairs"] = []
+                        
+                        if "add_parity_pair" not in globals():
+                            def add_parity_pair(*, label: str, left_fixture: dict, right_fixture: dict) -> int:
+                                st.session_state.setdefault("parity_pairs", [])
+                                st.session_state["parity_pairs"].append({"label": label, "left": left_fixture, "right": right_fixture})
+                                return len(st.session_state["parity_pairs"])
+                
+                        if "_short_hash" not in globals():
+                            def _short_hash(h: str, n: int = 8) -> str:
+                                return (h[:n] + "…") if h else ""
+                
+                
+                
+                # ----------------- import_parity_pairs (validate & stash only) -----------------
+                def import_parity_pairs(
+                    path: str | Path = DEFAULT_PARITY_PATH,
+                    *,
+                    merge: bool = False,
+                ) -> int:
+                    # 1) Parse JSON
+                    payload = _safe_parse_json(str(path))
+                
+                    # 2) Strict schema validation + sanitization
+                    pairs_sanitized, policy_hint = validate_pairs_payload(payload)
+                
+                    # 3) Stash into session state (table source for the UI editor)
+                    if merge and "parity_pairs_table" in st.session_state:
+                        st.session_state["parity_pairs_table"].extend(pairs_sanitized)
+                    else:
+                        st.session_state["parity_pairs_table"] = pairs_sanitized
+                
+                    st.session_state["parity_policy_hint"] = policy_hint
+                
+                    # Optional: clear legacy queue to avoid confusion with the new table-driven flow
+                    st.session_state["parity_pairs"] = []
+                
+                    st.success(f"Imported {len(pairs_sanitized)} pair specs")
+                    return len(st.session_state["parity_pairs_table"])
+                    # === Policy picker (source of truth for parity runs) ===
+                st.radio(
+                    "Policy",
+                    ["strict", "projected(auto)", "projected(file)"],
+                    key="parity_policy_choice",
+                    horizontal=True,
+                )
+                #---------------------------helper-------------------------------------
+                
+                def _resolve_side_or_skip_exact(side: dict, *, label: str, side_name: str):
+                    """
+                    Strict resolver for a single side of a pair.
+                
+                    Returns:
+                        ("ok", fixture_dict)  -> fully parsed fixture (boundaries/cmap/H/shapes objects)
+                        ("skip", info_dict)   -> standardized reason with fields:
+                            { "label": <str>, "side": "left"|"right",
+                              "missing": [<keys>]?, "error": <CODE or message> }
+                
+                    Rules:
+                      • If 'embedded' exists, it wins. Parse it via _pp_load_embedded().
+                      • Otherwise require ALL four string paths: boundaries, shapes, cmap, H.
+                      • No fuzzy search here; paths must exist (checked via _path_exists_strict).
+                      • On any failure, return a 'skip' record with precise reason.
+                    """
+                    # Validate shape of the side object quickly
+                    if not isinstance(side, dict):
+                        return ("skip", {
+                            "label": label, "side": side_name,
+                            "error": "PARITY_SCHEMA_INVALID: side must be an object"
+                        })
+                
+                    # 1) Embedded wins
+                    if "embedded" in side and side["embedded"] is not None:
+                        try:
+                            fx = _pp_load_embedded(side["embedded"])
+                            return ("ok", fx)
+                        except Exception as e:
+                            return ("skip", {
+                                "label": label, "side": side_name,
+                                "error": f"PARITY_SCHEMA_INVALID: {e}"
+                            })
+                
+                    # 2) Require all four paths
+                    required = ("boundaries", "shapes", "cmap", "H")
+                    missing_keys = [k for k in required if not (isinstance(side.get(k), str) and side[k].strip())]
+                    if missing_keys:
+                        return ("skip", {
+                            "label": label, "side": side_name,
+                            "missing": missing_keys, "error": "PARITY_SPEC_MISSING"
+                        })
+                
+                    # 3) Paths must exist (no recursive/fuzzy)
+                    not_found = [k for k in required if not _path_exists_strict(side[k])]
+                    if not_found:
+                        return ("skip", {
+                            "label": label, "side": side_name,
+                            "missing": not_found, "error": "PARITY_FILE_NOT_FOUND"
+                        })
+                
+                    # 4) Load fixture from paths
+                    try:
+                        fx = _pp_try_load(side)
+                        return ("ok", fx)
+                    except Exception as e:
+                        return ("skip", {
+                            "label": label, "side": side_name,
+                            "error": f"PARITY_FILE_NOT_FOUND: {e}"
+                        })
+                
+                
+                
+                # --- Policy resolver used by the Parity · Run Suite block
+                def _policy_from_hint():
+                    """
+                    Resolve parity policy with this precedence:
+                    1) UI radio: st.session_state["parity_policy_choice"]
+                    2) Imported hint: st.session_state["parity_policy_hint"] in
+                       {"strict","projected:auto","projected:file","mirror_active"}
+                    3) Mirror app run_ctx.mode ("strict" / "projected(auto)" / "projected(file)")
+                    Returns: (mode, submode) where mode in {"strict","projected"} and submode in {"","auto","file"}.
+                    """
+                    # 1) UI radio (if you have one)
+                    choice = st.session_state.get("parity_policy_choice")
+                    if choice == "strict":
+                        return ("strict", "")
+                    if choice == "projected(auto)":
+                        return ("projected", "auto")
+                    if choice == "projected(file)":
+                        return ("projected", "file")
+                
+                    # 2) Imported hint (from the pairs payload)
+                    hint = (st.session_state.get("parity_policy_hint") or "mirror_active").strip()
+                    if hint == "strict":
+                        return ("strict", "")
+                    if hint == "projected:auto":
+                        return ("projected", "auto")
+                    if hint == "projected:file":
+                        return ("projected", "file")
+                
+                    # 3) Mirror the app's current policy
+                    rc = st.session_state.get("run_ctx") or {}
+                    mode = rc.get("mode", "strict")
+                    if mode == "strict":
+                        return ("strict","")
+                    if mode == "projected(auto)":
+                        return ("projected","auto")
+                    if mode == "projected(file)":
+                        return ("projected","file")
+                
+                    return ("strict","")  # safe default
+                
+                
+                # --- Filesystem guard (strict, no fuzzy)
+                def _path_exists_strict(p: str) -> bool:
+                    try:
+                        P = Path(p)
+                        return P.exists() and P.is_file()
+                    except Exception:
+                        return False
+                
+                # --- Embedded loader (inline preset → fixture objects)
+                def _pp_load_embedded(emb: dict) -> dict:
+                    """
+                    Parse embedded JSON blobs using your io.parse_* API.
+                    Accepts shapes in either form:
+                      {"n": {"2": 2, "3": 3}}  or  {"n2": 2, "n3": 3}
+                    We pass through to io.parse_shapes which already handles your schema.
+                    """
+                    if not isinstance(emb, dict):
+                        raise ValueError("embedded must be an object")
+                    return {
+                        "boundaries": io.parse_boundaries(emb["boundaries"]),
+                        "shapes":     io.parse_shapes(emb["shapes"]),
+                        "cmap":       io.parse_cmap(emb["cmap"]),
+                        "H":          io.parse_cmap(emb["H"]),
+                    }
+                
+                # --- Path-bundle loader (path mode → fixture objects)
+                def _pp_try_load(side: dict):
+                    """
+                    Load a fixture side from exact paths (no fuzzy). 
+                    Expects keys: boundaries, cmap, H, shapes.
+                    """
+                    return load_fixture_from_paths(
+                        boundaries_path=side["boundaries"],
+                        cmap_path=side["cmap"],
+                        H_path=side["H"],
+                        shapes_path=side["shapes"],
+                    )
+                
+                # --- Single-leg runner via your canonical overlap gate
+                def _pp_one_leg(boundaries_obj, cmap_obj, H_obj, projection_cfg: dict | None):
+                    """
+                    Runs one leg (strict if projection_cfg is None, otherwise projected)
+                    through your overlap_gate.overlap_check() and returns its result dict.
+                
+                    Returns shape (typical):
+                      {"2": {"eq": bool}, "3": {"eq": bool}, ...}
+                    On error, returns a safe stub with an _err message.
+                    """
+                    try:
+                        if projection_cfg is None:
+                            return overlap_gate.overlap_check(boundaries_obj, cmap_obj, H_obj)  # type: ignore
+                        return overlap_gate.overlap_check(
+                            boundaries_obj, cmap_obj, H_obj, projection_config=projection_cfg  # type: ignore
+                        )
+                    except Exception as e:
+                        return {"2": {"eq": False}, "3": {"eq": False}, "_err": str(e)}
+                
+                
+                # --- tiny truth helper
+                if "_bool_and" not in globals():
+                    def _bool_and(a, b):
+                        """Logical AND that tolerates None."""
+                        return (a is not None) and (b is not None) and bool(a) and bool(b)
+                
+                if "_emoji" not in globals():
+                    def _emoji(v):
+                        if v is None: return "—"
+                        return "✅" if bool(v) else "❌"
+                
+                
+                # --- Tiny helper: format a short hash for UI pills
+                def _short_hash(h: str | None) -> str:
+                    try:
+                        h = (h or "").strip()
+                    except Exception:
+                        h = ""
+                    return (h[:8] + "…") if h else "—"
+                
+                def _safe_tag(s: str) -> str:
+                    # Keep [A-Za-z0-9_.-], replace the rest with '_'
+                    return "".join(ch if (ch.isalnum() or ch in "._-") else "_" for ch in s)
+                
+                
+                
+                # --- Read a diagonal from a projector file (accepts {diag:[...]} or a 3x3 block)
+                def _projector_diag_from_file(path: str) -> list[int]:
+                    try:
+                        with open(Path(path), "r", encoding="utf-8") as f:
+                            pj = _json.load(f)
+                    except Exception as e:
+                        raise RuntimeError(f"P3_FILE_READ: {e}")
+                
+                    # Common shapes we support:
+                    #  1) {"diag":[1,1,0]}
+                    #  2) {"blocks":{"3":[[1,0,0],[0,1,0],[0,0,0]]}}
+                    #  3) {"3":[[...]]}
+                    if isinstance(pj, dict) and "diag" in pj:
+                        diag = pj["diag"]
+                        if not (isinstance(diag, list) and all(int(x) in (0,1) for x in diag)):
+                            raise RuntimeError("P3_BAD_DIAG: diag must be a 0/1 list")
+                        return [int(x) for x in diag]
+                
+                    # Try blocks["3"] or top-level "3"
+                    M = None
+                    if isinstance(pj, dict) and "blocks" in pj and isinstance(pj["blocks"], dict) and "3" in pj["blocks"]:
+                        M = pj["blocks"]["3"]
+                    elif isinstance(pj, dict) and "3" in pj:
+                        M = pj["3"]
+                
+                    if M is None:
+                        raise RuntimeError("P3_NOT_FOUND: expected 'diag' or blocks['3'] / '3'")
+                
+                    # Verify diagonal and extract its diagonal as diag list
+                    if not (isinstance(M, list) and M and all(isinstance(row, list) and len(row) == len(M) for row in M)):
+                        raise RuntimeError("P3_SHAPE: 3x3 (square) matrix required")
+                    n = len(M)
+                    # check diagonal + idempotent over GF(2)
+                    # diagonal:
+                    for i in range(n):
+                        for j in range(n):
+                            v = int(M[i][j]) & 1
+                            if (i == j and v not in (0,1)) or (i != j and v != 0):
+                                raise RuntimeError("P3_DIAGONAL: off-diagonal entries must be 0")
+                    # idempotent: M^2 == M over GF(2) -> for diagonal with 0/1 it holds; we already enforced diagonal
+                    return [int(M[i][i]) & 1 for i in range(n)]
+                
+                
+                # --- Apply a diagonal projector to a residual matrix: R_proj = R @ diag(mask)
+                def _apply_diag_to_residual(R: list[list[int]], diag_bits: list[int]) -> list[list[int]]:
+                    if not R or not diag_bits:
+                        return []
+                    m, n = len(R), len(R[0])
+                    if n != len(diag_bits):
+                        raise RuntimeError(f"P3_SHAPE_MISMATCH: residual n={n} vs diag n={len(diag_bits)}")
+                    out = [[0]*n for _ in range(m)]
+                    for i in range(m):
+                        Ri = R[i]
+                        for j in range(n):
+                            out[i][j] = (int(Ri[j]) & 1) * (int(diag_bits[j]) & 1)
+                    return out
+                
+                
+                # --- Quick all-zero check for matrices over GF(2)
+                def _all_zero_mat(M: list[list[int]]) -> bool:
+                    if not M:
+                        return True
+                    return all((int(x) & 1) == 0 for row in M for x in row)
+                
+                
+                # --- Strict FILE provenance (no experimental override anywhere)
+                projector_hash = ""
+                projector_diag = None  # will be a list[int] only for projected(file)
+                
+                if mode == "projected" and submode == "file":
+                    # Require a valid file
+                    if not projector_filename or not _path_exists_strict(projector_filename):
+                        st.error("Projector FILE required but missing/invalid. (projected:file) — blocking run.")
+                        st.stop()
+                    try:
+                        projector_hash = _sha256_hex(Path(projector_filename).read_bytes())
+                        projector_diag = _projector_diag_from_file(projector_filename)  # list[int]
+                        if not isinstance(projector_diag, list) or not projector_diag:
+                            st.error("P3_FILE_INVALID: empty or bad projector diag.")
+                            st.stop()
+                    except Exception as e:
+                        st.error(f"Projector FILE invalid: {e}")
+                        st.stop()
+                
+                
+                
+                
+                 # ================= Parity · Run Suite (final, with AUTO/FILE guards) =================
+                with st.expander("Parity · Run Suite"):
+                    table = st.session_state.get("parity_pairs_table") or []
+                    if not table:
+                        st.info("No pairs loaded. Use Import or Insert Defaults above.")
+                    else:
+                        # --- Policy decision for this suite run
+                        mode, submode = _policy_from_hint()  # -> ("strict"|"projected", sub in {"","auto","file"})
+                        rc = st.session_state.get("run_ctx") or {}
+                        projector_filename = rc.get("projector_filename","") if (mode=="projected" and submode=="file") else ""
+                
+                              
+                
+                        def _projector_diag_from_file(pth: str):
+                            # Expect a JSON with blocks["3"] as an n3×n3 binary matrix
+                            try:
+                                obj = _json.loads(Path(pth).read_text(encoding="utf-8"))
+                                M = ((obj.get("blocks") or {}).get("3") or [])
+                                # basic shape & diagonal checks happen later per pair (n3 known then)
+                                diag = []
+                                for i, row in enumerate(M):
+                                    diag.append(int(row[i]) & 1)
+                                return diag
+                            except Exception as e:
+                                return None
+                
+                        if mode == "projected" and submode == "file":
+                            if not projector_filename or not _path_exists_strict(projector_filename):
+                                st.error("Projector FILE required but missing/invalid. (projected:file) — block run.")
+                                st.stop()
+                            try:
+                                projector_hash = _sha256_hex(Path(projector_filename).read_bytes())
+                            except Exception as e:
+                                st.error(f"Could not hash projector file: {e}")
+                                st.stop()
+                            projector_diag = _projector_diag_from_file(projector_filename)
+                            if projector_diag is None:
+                                st.error("P3_SHAPE: projector file unreadable or missing blocks['3'] square matrix.")
+                                st.stop()
+                
+                        def _dims_from_boundaries(boundaries_obj) -> dict:
+                            """
+                            Return {"n2": rows, "n3": cols} from the pair's D3 incidence (3→2) matrix.
+                            Falls back to zeros if unavailable.
+                            """
+                            try:
+                                B  = (boundaries_obj or {}).blocks.__root__
+                                d3 = B.get("3->2") or B.get("3") or []
+                                if d3 and d3[0]:
+                                    return {"n2": len(d3), "n3": len(d3[0])}
+                            except Exception:
+                                pass
+                            return {"n2": 0, "n3": 0}
+                
+                        # --- Header bits
+                        c1, c2, c3 = st.columns([2,2,2])
+                        with c1:
+                            pill = "strict" if mode=="strict" else (f"projected({submode})" + (f" · {_short_hash(projector_hash)}" if submode=="file" else ""))
+                            st.caption("Policy"); st.code(pill, language="text")
+                        with c2:
+                            st.caption("Pairs in table"); st.code(str(len(table)), language="text")
+                        with c3:
+                            nonce_src = _json.dumps({"mode":mode,"sub":submode,"pj":projector_hash,"n":len(table)}, sort_keys=True, separators=(",",":")).encode("utf-8")
+                            parity_nonce = _sha256_hex(nonce_src)[:8]
+                            st.caption("Run nonce"); st.code(parity_nonce, language="text")
+                        
+                
+                            
+                # --- Run button (clean, self-contained) --------------------------------------
+                if st.button("▶ Run Parity Suite", key="pp_btn_run_suite_final"):
+                    report_pairs: list[dict] = []
+                    skipped: list[dict] = []
+                    projected_green_count = 0
+                    seen_pair_hashes: set[str] = set()
+                
+                    # Helper for safe tags in filenames
+                    def _safe_tag(s: str) -> str:
+                        return "".join(ch if (ch.isalnum() or ch in "._-") else "_" for ch in s)
+                
+                    # Iterate specs
+                    for spec in table:
+                        label = spec.get("label", "PAIR")
+                        L_in  = spec.get("left")  or {}
+                        R_in  = spec.get("right") or {}
+                
+                        # Resolve sides (no fuzzy)
+                        okL, fxL = _resolve_side_or_skip_exact(L_in, label=label, side_name="left")
+                        okR, fxR = _resolve_side_or_skip_exact(R_in, label=label, side_name="right")
+                        if okL != "ok":
+                            skipped.append(fxL); continue
+                        if okR != "ok":
+                            skipped.append(fxR); continue
+                
+                        # Pre-hash & dedupe by pair inputs (LH/RH × boundaries,shapes,cmap,H)
+                        left_hashes  = _hash_fixture_side(fxL)
+                        right_hashes = _hash_fixture_side(fxR)
+                        p_hash       = _pair_hash(left_hashes, right_hashes)
+                        if p_hash in seen_pair_hashes:
+                            skipped.append({"label": label, "side": "both", "error": "DUP_PAIR", "pair_hash": p_hash})
+                            continue
+                        seen_pair_hashes.add(p_hash)
+                
+                        # Lane mask from this pair (left is sufficient for your model)
+                        lane_mask_vec = _lane_mask_from_boundaries(fxL["boundaries"])
+                        lane_mask_str = "".join("1" if int(x) else "0" for x in lane_mask_vec)
+                
+                        # STRICT leg (booleans via gate)
+                        outL_s = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], None)
+                        outR_s = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], None)
+                        s_k2   = _bool_and(outL_s.get("2", {}).get("eq"), outR_s.get("2", {}).get("eq"))
+                        s_k3   = _bool_and(outL_s.get("3", {}).get("eq"), outR_s.get("3", {}).get("eq"))
+                
+                        # STRICT residual (used for tagging and as baseline for AUTO/FILE projection)
+                        R3_L = _r3_from_fixture(fxL)
+                        R3_R = _r3_from_fixture(fxR)
+                        try:
+                            strict_tag = _residual_enum_from_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], None)
+                        except Exception:
+                            strict_tag = "none" if bool(s_k3) else "ker"
+                        if s_k3 is False and strict_tag == "none":
+                            strict_tag = "ker"  # enforce consistency (never "none" when eq=false)
+                
+                        # PROJECTED leg (only when mode == "projected")
+                        proj_block = None
+                        if mode == "projected":
+                            cfg = {"source": {"2": "file", "3": submode}, "projector_files": {}}
+                            if submode == "file":
+                                cfg["projector_files"]["3"] = projector_filename
+                
+                            # Gate booleans under selected projector policy (keeps provenance)
+                            outL_p   = _pp_one_leg(fxL["boundaries"], fxL["cmap"], fxL["H"], cfg)
+                            outR_p   = _pp_one_leg(fxR["boundaries"], fxR["cmap"], fxR["H"], cfg)
+                            p_k2_gate = _bool_and(outL_p.get("2", {}).get("eq"), outR_p.get("2", {}).get("eq"))
+                            p_k3_gate = _bool_and(outL_p.get("3", {}).get("eq"), outR_p.get("3", {}).get("eq"))
+                
+                            if submode == "auto":
+                                # Π_auto = diag(lane_mask) applied to STRICT residual
+                                R3_L_proj = _apply_diag_to_residual(R3_L, lane_mask_vec)
+                                R3_R_proj = _apply_diag_to_residual(R3_R, lane_mask_vec)
+                                p_k3_calc = _all_zero_mat(R3_L_proj) and _all_zero_mat(R3_R_proj)
+                
+                                proj_tag_L = _classify_residual(R3_L_proj, lane_mask_vec)
+                                proj_tag_R = _classify_residual(R3_R_proj, lane_mask_vec)
+                                proj_tag   = proj_tag_L if proj_tag_L != "none" else proj_tag_R
+                
+                                proj_block = {
+                                    "k2": bool(p_k2_gate),
+                                    "k3": bool(p_k3_calc),
+                                    "residual_tag": proj_tag,
+                                    "projector_hash": _hash_obj(lane_mask_vec),  # per-pair provenance
+                                }
+                                if p_k3_calc:
+                                    projected_green_count += 1
+                
+                            else:
+                                # FILE mode: require diag(P) to match lane_mask; skip on mismatch
+                                diag = projector_diag or []
+                                n3   = len(lane_mask_vec)
+                                reason = None
+                                if len(diag) != n3:
+                                    reason = "P3_SHAPE"
+                                elif any((int(diag[j]) & 1) != (int(lane_mask_vec[j]) & 1) for j in range(n3)):
+                                    reason = "P3_LANE_MISMATCH"
+                                if reason is not None:
+                                    skipped.append({
+                                        "label": label, "side": "both", "error": reason,
+                                        "diag": diag, "mask": lane_mask_vec
+                                    })
+                                    continue  # do not run this pair
+                
+                                # Truth for projected k3 from post-projection residual (R3 @ Π)
+                                R3_L_proj = _apply_diag_to_residual(R3_L, diag)
+                                R3_R_proj = _apply_diag_to_residual(R3_R, diag)
+                                p_k3_calc = _all_zero_mat(R3_L_proj) and _all_zero_mat(R3_R_proj)
+                
+                                proj_tag_L = _classify_residual(R3_L_proj, lane_mask_vec)
+                                proj_tag_R = _classify_residual(R3_R_proj, lane_mask_vec)
+                                proj_tag   = proj_tag_L if proj_tag_L != "none" else proj_tag_R
+                
+                                proj_block = {
+                                    "k2": bool(p_k2_gate),   # keep k2 provenance from gate
+                                    "k3": bool(p_k3_calc),   # k3 truth from projected residual
+                                    "residual_tag": proj_tag,
+                                }
+                                if p_k3_calc:
+                                    projected_green_count += 1
+                
+                        # Assemble pair record
+                        pair_out = {
+                            "label": label,
+                            "pair_hash": p_hash,
+                            "lane_mask_k3": lane_mask_vec,
+                            "lane_mask": lane_mask_str,
+                            "dims": _dims_from_boundaries(fxL["boundaries"]),
+                            "left_hashes":  left_hashes,
+                            "right_hashes": right_hashes,
+                            "strict": {"k2": bool(s_k2), "k3": bool(s_k3), "residual_tag": strict_tag},
+                        }
+                        if proj_block is not None:
+                            pair_out["projected"] = proj_block
+                
+                        # Consistency guards (don’t crash; just ensure shape)
+                        if pair_out["strict"]["k3"] is False:
+                            if pair_out["strict"]["residual_tag"] == "none":
+                                pair_out["strict"]["residual_tag"] = "ker"
+                        if "projected" in pair_out and pair_out["projected"]["k3"] is False:
+                            if pair_out["projected"]["residual_tag"] == "none":
+                                pair_out["projected"]["residual_tag"] = "ker"
+                
+                        report_pairs.append(pair_out)
+                
+                    # ---- Build report root ---------------------------------------------------
+                    rows_total   = len(table)              # input queue size
+                    rows_run     = len(report_pairs)       # executed, unique by hash
+                    rows_skipped = len(skipped)
+                    if mode == "projected":
+                        pct = (projected_green_count / rows_run) if rows_run else 0.0
+                    else:
+                        pct = 0.0
+                
+                    policy_tag_run = "strict" if mode == "strict" else f"projected(columns@k=3,{submode})"
+                    lane_mask_note = ("AUTO projector uses each pair’s lane mask" if (mode == "projected" and submode == "auto") else "")
+                    run_note = ("Projected leg omitted in strict mode." if mode == "strict" else lane_mask_note)
+                
+                    report = {
+                        "schema_version": "1.0.0",
+                        "written_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "app_version": APP_VERSION,
+                        "policy_tag": policy_tag_run,
+                        "projector_mode": ("strict" if mode == "strict" else submode),
+                        "projector_filename": (projector_filename if (mode == "projected" and submode == "file") else ""),
+                        "projector_hash": (projector_hash if (mode == "projected" and submode == "file") else ""),
+                        "lane_mask_note": (lane_mask_note if lane_mask_note else ""),
+                        "run_note": run_note,
+                        "residual_method": "R3 strict vs R3·Π (lanes/ker/mixed)",
+                        "summary": {
+                            "rows_total": rows_total,
+                            "rows_skipped": rows_skipped,
+                            "rows_run": rows_run,
+                            "projected_green_count": (projected_green_count if mode == "projected" else 0),
+                            "pct": (pct if mode == "projected" else 0.0),
+                        },
+                        "pairs": report_pairs,
+                        "skipped": skipped,
+                    }
+                
+                    # Deterministic content hash (BEFORE filenames)
+                    report["content_hash"] = _sha256_hex(
+                        _json.dumps(report, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                    )
+                
+                    # Per-run filenames (content-hashed)
+                    safe_tag   = _safe_tag(report["policy_tag"])
+                    short_hash = report["content_hash"][:12]
+                    json_name  = f"parity_report__{safe_tag}__{short_hash}.json"
+                    csv_name   = f"parity_summary__{safe_tag}__{short_hash}.csv"
+                    json_path  = REPORTS_DIR / json_name
+                    csv_path   = REPORTS_DIR / csv_name
+                
+                    # --- Build CSV rows once (no duplicates—the loop deduped by pair_hash)
+                    hdr = [
+                        "label","policy_tag","projector_mode","projector_hash",
+                        "strict_k2","strict_k3","projected_k2","projected_k3",
+                        "residual_strict","residual_projected","lane_mask",
+                        "lh_boundaries_hash","lh_shapes_hash","lh_cmap_hash","lh_H_hash",
+                        "rh_boundaries_hash","rh_shapes_hash","rh_cmap_hash","rh_H_hash",
+                        "pair_hash",
+                    ]
+                    rows_csv = []
+                    for p in report_pairs:
+                        proj = p.get("projected") or {}
+                        rows_csv.append([
+                            p["label"], report["policy_tag"], report["projector_mode"], report["projector_hash"],
+                            str(p["strict"]["k2"]).lower(), str(p["strict"]["k3"]).lower(),
+                            ("" if not proj else str(proj.get("k2", False)).lower()),
+                            ("" if not proj else str(proj.get("k3", False)).lower()),
+                            p["strict"].get("residual_tag",""),
+                            ("" if not proj else proj.get("residual_tag","")),
+                            p.get("lane_mask",""),
+                            p["left_hashes"]["boundaries"], p["left_hashes"]["shapes"], p["left_hashes"]["cmap"], p["left_hashes"]["H"],
+                            p["right_hashes"]["boundaries"], p["right_hashes"]["shapes"], p["right_hashes"]["cmap"], p["right_hashes"]["H"],
+                            p["pair_hash"],
+                        ])
+                
+                    # Persist to session for UI
+                    st.session_state["parity_last_full_report"]  = report
+                    st.session_state["parity_last_report_pairs"] = report_pairs
+                    st.session_state["parity_last_report_path"]  = str(json_path)
+                    st.session_state["parity_last_summary_path"] = str(csv_path)
+                
+                    # Write JSON (best-effort)
+                    try:
+                        _atomic_write_json(json_path, report)
+                    except Exception as e:
+                        st.info(f"(Could not write {json_name}: {e})")
+                
+                    # Write CSV (best-effort)
+                    try:
+                        tmp_csv = csv_path.with_suffix(".csv.tmp")
+                        with open(tmp_csv, "w", newline="", encoding="utf-8") as f:
+                            w = csv.writer(f); w.writerow(hdr); w.writerows(rows_csv)
+                            f.flush(); os.fsync(f.fileno())
+                        os.replace(tmp_csv, csv_path)
+                    except Exception as e:
+                        st.info(f"(Could not write {csv_name}: {e})")
+                
+                    # --- UI summary + downloads
+                    st.success(
+                        "Run complete · "
+                        f"pairs={rows_run} · skipped={rows_skipped}"
+                        + (f" · GREEN={projected_green_count} ({pct:.2%})" if mode == "projected" else "")
+                    )
+                
+                    # In-memory downloads with unique keys
+                    json_mem = _io.BytesIO(_json.dumps(report, ensure_ascii=False, indent=2).encode("utf-8"))
+                    csv_mem  = _io.StringIO(); w = csv.writer(csv_mem); w.writerow(hdr); w.writerows(rows_csv)
+                    csv_bytes = _io.BytesIO(csv_mem.getvalue().encode("utf-8"))
+                
+                    dl_prefix = "strict" if mode == "strict" else f"proj_{submode}"
+                    st.download_button("Download parity_report.json",  json_mem, file_name=json_name, key=f"{dl_prefix}_json_{short_hash}")
+                    st.download_button("Download parity_summary.csv", csv_bytes, file_name=csv_name, key=f"{dl_prefix}_csv_{short_hash}")
+                
+                    # Compact ✓/✗ preview
+                    if report_pairs:
+                        st.caption("Summary (strict_k3 / projected_k3):")
+                        for p in report_pairs:
+                            s  = "✅" if p["strict"]["k3"] else "❌"
+                            pr = "—" if "projected" not in p else ("✅" if p["projected"]["k3"] else "❌")
+                            st.write(f"• {p['label']} → strict={s} · projected={pr}")
+                
+                          
+                
+                
+                
+                                                                        
+                                
+                      
+                              
                                                         
                 
-      
-              
+                
+                
+                
+                
                                         
-
-
-
-
-
-                        
-
-            
-
-# =============================================================================== 
-                      
-            
-
-
-# ================== Parity · Presets & Queue ALL valid ==================
-with st.expander("Parity · Presets & Queue"):
-    st.caption("Insert a preset spec into the editable table, then **Queue ALL valid pairs** to resolve and add them to the live queue used by the runner. No fuzzy search: missing fields/paths are listed under Skipped.")
-
-    def _insert_preset_payload(payload: dict, *, name: str):
-        try:
-            pairs, policy_hint = validate_pairs_payload(payload)
-            st.session_state["parity_pairs_table"] = pairs
-            st.session_state["parity_policy_hint"] = policy_hint
-            st.success(f"Inserted preset: {name} · {len(pairs)} pair(s)")
-        except Exception as e:
-            st.error(f"PARITY_SCHEMA_INVALID: {e}")
-
-    cA, cB, cC, cD = st.columns([2,2,2,2])
-
-    # --- 1) Row Parity preset (within-district row1 vs row2)
-    with cA:
-        if st.button("Insert defaults · Row Parity", key="pp_preset_row"):
-            _insert_preset_payload({
-                "schema_version": "1.0.0",
-                "policy_hint": "mirror_active",
-                "pairs": [
-                    {
-                        "label": "D3 • row1(101) ↔ row2(010)",
-                        "left":  {
-                            "boundaries": "inputs/D3/boundaries.json",
-                            "shapes":     "inputs/D3/shapes.json",
-                            "cmap":       "inputs/D3/Cmap_C3_bottomrow_101_D2D3.json",
-                            "H":          "inputs/D3/H_row1_selector.json"
-                        },
-                        "right": {
-                            "boundaries": "inputs/D3/boundaries.json",
-                            "shapes":     "inputs/D3/shapes.json",
-                            "cmap":       "inputs/D3/Cmap_C3_bottomrow_010_D3.json",
-                            "H":          "inputs/D3/H_row2_selector.json"
-                        }
-                    },
-                    {
-                        "label": "D2 • row1(101) ↔ row2(011)",
-                        "left":  {
-                            "boundaries": "inputs/D2/boundaries.json",
-                            "shapes":     "inputs/D2/shapes.json",
-                            "cmap":       "inputs/D2/Cmap_C3_bottomrow_101_D2.json",
-                            "H":          "inputs/D2/H_row1_selector.json"
-                        },
-                        "right": {
-                            "boundaries": "inputs/D2/boundaries.json",
-                            "shapes":     "inputs/D2/shapes.json",
-                            "cmap":       "inputs/D2/Cmap_C3_bottomrow_011_D2.json",
-                            "H":          "inputs/D2/H_row2_selector.json"
-                        }
-                    },
-                    {
-                        "label": "D4 • row1(101) ↔ row2(011)",
-                        "left":  {
-                            "boundaries": "inputs/D4/boundaries.json",
-                            "shapes":     "inputs/D4/shapes.json",
-                            "cmap":       "inputs/D4/cmap_C3_bottomrow_101_D4.json",
-                            "H":          "inputs/D4/H_row1_selector.json"
-                        },
-                        "right": {
-                            "boundaries": "inputs/D4/boundaries.json",
-                            "shapes":     "inputs/D4/shapes.json",
-                            "cmap":       "inputs/D4/Cmap_C3_bottomrow_011_D4.json",
-                            "H":          "inputs/D4/H_row2_selector.json"
-                        }
-                    }
-                ]
-            }, name="Row Parity")
-
-    # --- 2) District Parity preset (cross-district, same-H chains)
-    with cB:
-        if st.button("Insert defaults · District Parity", key="pp_preset_district"):
-            _insert_preset_payload({
-                "schema_version": "1.0.0",
-                "policy_hint": "mirror_active",
-                "pairs": [
-                    {
-                        "label": "row1 chain • D2(101) ↔ D3(110)",
-                        "left":  {
-                            "boundaries": "inputs/D2/boundaries.json",
-                            "shapes":     "inputs/D2/shapes.json",
-                            "cmap":       "inputs/D2/Cmap_C3_bottomrow_101_D2.json",
-                            "H":          "inputs/D2/H_row1_selector.json"
-                        },
-                        "right": {
-                            "boundaries": "inputs/D3/boundaries.json",
-                            "shapes":     "inputs/D3/shapes.json",
-                            "cmap":       "inputs/D3/Cmap_C3_bottomrow_110_D3.json",
-                            "H":          "inputs/D3/H_row1_selector.json"
-                        }
-                    },
-                    {
-                        "label": "row1 chain • D3(110) ↔ D4(101)",
-                        "left":  {
-                            "boundaries": "inputs/D3/boundaries.json",
-                            "shapes":     "inputs/D3/shapes.json",
-                            "cmap":       "inputs/D3/Cmap_C3_bottomrow_110_D3.json",
-                            "H":          "inputs/D3/H_row1_selector.json"
-                        },
-                        "right": {
-                            "boundaries": "inputs/D4/boundaries.json",
-                            "shapes":     "inputs/D4/shapes.json",
-                            "cmap":       "inputs/D4/cmap_C3_bottomrow_101_D4.json",
-                            "H":          "inputs/D4/H_row1_selector.json"
-                        }
-                    },
-                    {
-                        "label": "row2 chain • D2(011) ↔ D4(011)",
-                        "left":  {
-                            "boundaries": "inputs/D2/boundaries.json",
-                            "shapes":     "inputs/D2/shapes.json",
-                            "cmap":       "inputs/D2/Cmap_C3_bottomrow_011_D2.json",
-                            "H":          "inputs/D2/H_row2_selector.json"
-                        },
-                        "right": {
-                            "boundaries": "inputs/D4/boundaries.json",
-                            "shapes":     "inputs/D4/shapes.json",
-                            "cmap":       "inputs/D4/Cmap_C3_bottomrow_011_D4.json",
-                            "H":          "inputs/D4/H_row2_selector.json"
-                        }
-                    }
-                ]
-            }, name="District Parity")
-
-    # --- 3) Smoke preset (inline; zero path dependency)
-with cC:
-    if st.button("Insert defaults · Smoke (inline)", key="pp_preset_smoke"):
-        _insert_preset_payload({
-            "schema_version": "1.0.0",
-            "policy_hint": "projected:auto",
-            "pairs": [
-                {
-                    "label": "SELF • ker-only vs ker-only (D3 dims 2×3)",
-                    "left":  {
-                        "embedded": {
-                            "boundaries": {
-                                "name": "D3 dims",
-                                "blocks": {
-                                    "3": [[1,1,0],[0,1,0]]
+                
+                            
+                
+                # =============================================================================== 
+                                      
+                            
+                
+                
+                # ================== Parity · Presets & Queue ALL valid ==================
+                with st.expander("Parity · Presets & Queue"):
+                    st.caption("Insert a preset spec into the editable table, then **Queue ALL valid pairs** to resolve and add them to the live queue used by the runner. No fuzzy search: missing fields/paths are listed under Skipped.")
+                
+                    def _insert_preset_payload(payload: dict, *, name: str):
+                        try:
+                            pairs, policy_hint = validate_pairs_payload(payload)
+                            st.session_state["parity_pairs_table"] = pairs
+                            st.session_state["parity_policy_hint"] = policy_hint
+                            st.success(f"Inserted preset: {name} · {len(pairs)} pair(s)")
+                        except Exception as e:
+                            st.error(f"PARITY_SCHEMA_INVALID: {e}")
+                
+                    cA, cB, cC, cD = st.columns([2,2,2,2])
+                
+                    # --- 1) Row Parity preset (within-district row1 vs row2)
+                    with cA:
+                        if st.button("Insert defaults · Row Parity", key="pp_preset_row"):
+                            _insert_preset_payload({
+                                "schema_version": "1.0.0",
+                                "policy_hint": "mirror_active",
+                                "pairs": [
+                                    {
+                                        "label": "D3 • row1(101) ↔ row2(010)",
+                                        "left":  {
+                                            "boundaries": "inputs/D3/boundaries.json",
+                                            "shapes":     "inputs/D3/shapes.json",
+                                            "cmap":       "inputs/D3/Cmap_C3_bottomrow_101_D2D3.json",
+                                            "H":          "inputs/D3/H_row1_selector.json"
+                                        },
+                                        "right": {
+                                            "boundaries": "inputs/D3/boundaries.json",
+                                            "shapes":     "inputs/D3/shapes.json",
+                                            "cmap":       "inputs/D3/Cmap_C3_bottomrow_010_D3.json",
+                                            "H":          "inputs/D3/H_row2_selector.json"
+                                        }
+                                    },
+                                    {
+                                        "label": "D2 • row1(101) ↔ row2(011)",
+                                        "left":  {
+                                            "boundaries": "inputs/D2/boundaries.json",
+                                            "shapes":     "inputs/D2/shapes.json",
+                                            "cmap":       "inputs/D2/Cmap_C3_bottomrow_101_D2.json",
+                                            "H":          "inputs/D2/H_row1_selector.json"
+                                        },
+                                        "right": {
+                                            "boundaries": "inputs/D2/boundaries.json",
+                                            "shapes":     "inputs/D2/shapes.json",
+                                            "cmap":       "inputs/D2/Cmap_C3_bottomrow_011_D2.json",
+                                            "H":          "inputs/D2/H_row2_selector.json"
+                                        }
+                                    },
+                                    {
+                                        "label": "D4 • row1(101) ↔ row2(011)",
+                                        "left":  {
+                                            "boundaries": "inputs/D4/boundaries.json",
+                                            "shapes":     "inputs/D4/shapes.json",
+                                            "cmap":       "inputs/D4/cmap_C3_bottomrow_101_D4.json",
+                                            "H":          "inputs/D4/H_row1_selector.json"
+                                        },
+                                        "right": {
+                                            "boundaries": "inputs/D4/boundaries.json",
+                                            "shapes":     "inputs/D4/shapes.json",
+                                            "cmap":       "inputs/D4/Cmap_C3_bottomrow_011_D4.json",
+                                            "H":          "inputs/D4/H_row2_selector.json"
+                                        }
+                                    }
+                                ]
+                            }, name="Row Parity")
+                
+                    # --- 2) District Parity preset (cross-district, same-H chains)
+                    with cB:
+                        if st.button("Insert defaults · District Parity", key="pp_preset_district"):
+                            _insert_preset_payload({
+                                "schema_version": "1.0.0",
+                                "policy_hint": "mirror_active",
+                                "pairs": [
+                                    {
+                                        "label": "row1 chain • D2(101) ↔ D3(110)",
+                                        "left":  {
+                                            "boundaries": "inputs/D2/boundaries.json",
+                                            "shapes":     "inputs/D2/shapes.json",
+                                            "cmap":       "inputs/D2/Cmap_C3_bottomrow_101_D2.json",
+                                            "H":          "inputs/D2/H_row1_selector.json"
+                                        },
+                                        "right": {
+                                            "boundaries": "inputs/D3/boundaries.json",
+                                            "shapes":     "inputs/D3/shapes.json",
+                                            "cmap":       "inputs/D3/Cmap_C3_bottomrow_110_D3.json",
+                                            "H":          "inputs/D3/H_row1_selector.json"
+                                        }
+                                    },
+                                    {
+                                        "label": "row1 chain • D3(110) ↔ D4(101)",
+                                        "left":  {
+                                            "boundaries": "inputs/D3/boundaries.json",
+                                            "shapes":     "inputs/D3/shapes.json",
+                                            "cmap":       "inputs/D3/Cmap_C3_bottomrow_110_D3.json",
+                                            "H":          "inputs/D3/H_row1_selector.json"
+                                        },
+                                        "right": {
+                                            "boundaries": "inputs/D4/boundaries.json",
+                                            "shapes":     "inputs/D4/shapes.json",
+                                            "cmap":       "inputs/D4/cmap_C3_bottomrow_101_D4.json",
+                                            "H":          "inputs/D4/H_row1_selector.json"
+                                        }
+                                    },
+                                    {
+                                        "label": "row2 chain • D2(011) ↔ D4(011)",
+                                        "left":  {
+                                            "boundaries": "inputs/D2/boundaries.json",
+                                            "shapes":     "inputs/D2/shapes.json",
+                                            "cmap":       "inputs/D2/Cmap_C3_bottomrow_011_D2.json",
+                                            "H":          "inputs/D2/H_row2_selector.json"
+                                        },
+                                        "right": {
+                                            "boundaries": "inputs/D4/boundaries.json",
+                                            "shapes":     "inputs/D4/shapes.json",
+                                            "cmap":       "inputs/D4/Cmap_C3_bottomrow_011_D4.json",
+                                            "H":          "inputs/D4/H_row2_selector.json"
+                                        }
+                                    }
+                                ]
+                            }, name="District Parity")
+                
+                    # --- 3) Smoke preset (inline; zero path dependency)
+                with cC:
+                    if st.button("Insert defaults · Smoke (inline)", key="pp_preset_smoke"):
+                        _insert_preset_payload({
+                            "schema_version": "1.0.0",
+                            "policy_hint": "projected:auto",
+                            "pairs": [
+                                {
+                                    "label": "SELF • ker-only vs ker-only (D3 dims 2×3)",
+                                    "left":  {
+                                        "embedded": {
+                                            "boundaries": {
+                                                "name": "D3 dims",
+                                                "blocks": {
+                                                    "3": [[1,1,0],[0,1,0]]
+                                                }
+                                            },
+                                            "shapes":     { "n": { "2": 2, "3": 3 } },
+                                            "cmap":       {
+                                                "name": "C3 ker-only; C2=I",
+                                                "blocks": {
+                                                    "3": [[1,0,0],[0,1,0],[0,0,0]],
+                                                    "2": [[1,0],[0,1]]
+                                                }
+                                            },
+                                            "H":          {
+                                                "name": "H=0",
+                                                "blocks": {
+                                                    "2": [[0,0],[0,0],[0,0]]
+                                                }
+                                            }
+                                        }
+                                    },
+                                    "right": {
+                                        "embedded": {
+                                            "boundaries": {
+                                                "name": "D3 dims",
+                                                "blocks": {
+                                                    "3": [[1,1,0],[0,1,0]]
+                                                }
+                                            },
+                                            "shapes":     { "n": { "2": 2, "3": 3 } },
+                                            "cmap":       {
+                                                "name": "C3 ker-only; C2=I",
+                                                "blocks": {
+                                                    "3": [[1,0,0],[0,1,0],[0,0,0]],
+                                                    "2": [[1,0],[0,1]]
+                                                }
+                                            },
+                                            "H":          {
+                                                "name": "H=0",
+                                                "blocks": {
+                                                    "2": [[0,0],[0,0],[0,0]]
+                                                }
+                                            }
+                                        }
+                                    }
                                 }
-                            },
-                            "shapes":     { "n": { "2": 2, "3": 3 } },
-                            "cmap":       {
-                                "name": "C3 ker-only; C2=I",
-                                "blocks": {
-                                    "3": [[1,0,0],[0,1,0],[0,0,0]],
-                                    "2": [[1,0],[0,1]]
-                                }
-                            },
-                            "H":          {
-                                "name": "H=0",
-                                "blocks": {
-                                    "2": [[0,0],[0,0],[0,0]]
-                                }
-                            }
-                        }
-                    },
-                    "right": {
-                        "embedded": {
-                            "boundaries": {
-                                "name": "D3 dims",
-                                "blocks": {
-                                    "3": [[1,1,0],[0,1,0]]
-                                }
-                            },
-                            "shapes":     { "n": { "2": 2, "3": 3 } },
-                            "cmap":       {
-                                "name": "C3 ker-only; C2=I",
-                                "blocks": {
-                                    "3": [[1,0,0],[0,1,0],[0,0,0]],
-                                    "2": [[1,0],[0,1]]
-                                }
-                            },
-                            "H":          {
-                                "name": "H=0",
-                                "blocks": {
-                                    "2": [[0,0],[0,0],[0,0]]
-                                }
-                            }
-                        }
-                    }
-                }
-            ]
-        }, name="Smoke (inline)")
-
-    # --- 4) Quick preview of current table ---
-    table = st.session_state.get("parity_pairs_table") or []
-    if table:
-        st.caption(f"Pairs in table: {len(table)}")
-        try:
-            import pandas as pd
-            st.dataframe(pd.DataFrame([{"label": p.get("label","PAIR")} for p in table]),
-                         hide_index=True, use_container_width=True)
-        except Exception:
-            st.write("\n".join("• " + (p.get("label","PAIR") or "") for p in table[:6]))
-
-    # --- 5) Queue ALL valid pairs (strict resolver; record skips) ---
-    if st.button("Queue ALL valid pairs", key="pp_queue_all_valid", disabled=not bool(table)):
-        queued = 0
-        skipped = []
-        # Reset the live queue before enqueuing (fresh, reproducible)
-        st.session_state["parity_pairs"] = []
-
-        for spec in table:
-            label = spec.get("label","PAIR")
-            L     = spec.get("left") or {}
-            R     = spec.get("right") or {}
-
-            okL, fxL = _resolve_side_or_skip_exact(L, label=label, side_name="left")
-            okR, fxR = _resolve_side_or_skip_exact(R, label=label, side_name="right")
-            if okL != "ok":
-                skipped.append(fxL); continue
-            if okR != "ok":
-                skipped.append(fxR); continue
-
-            # Enqueue the fully parsed fixtures used by the runner
-            add_parity_pair(label=label, left_fixture=fxL, right_fixture=fxR)
-            queued += 1
-
-        if queued:
-            st.success(f"Queued {queued} pair(s) into the live parity queue.")
-        if skipped:
-            st.info("Skipped specs:")
-            for s in skipped[:20]:
-                if "missing" in s:
-                    st.write(f"• {s['label']} [{s['side']}] → PARITY_SPEC_MISSING: {s['missing']}")
-                else:
-                    st.write(f"• {s['label']} [{s['side']}] → {s.get('error','error')}")
-
-    # Optional tiny helper on the right
-    with cD:
-        st.caption("Tips")
-        st.markdown("- Edit paths in your presets before Queue ALL.\n- Inline preset never needs files.\n- FILE mode requires a valid projector file.")
-# ======================================================================
-
-
-
-
-
-# --------- UI for import/export (keep only one expander) ---------
-with st.expander("Parity pairs: import/export"):
-    colA, colB, colC = st.columns([3, 3, 2])
-    with colA:
-        export_path_txt = st.text_input(
-            "Export path",
-            value=str(DEFAULT_PARITY_PATH),
-            key="pp_export_path",
-            help="Path for saving pairs JSON."
-        )
-    with colB:
-        import_path_txt = st.text_input(
-            "Import path",
-            value=str(DEFAULT_PARITY_PATH),
-            key="pp_import_path",
-            help="Path to load pairs JSON or use uploader."
-        )
-    with colC:
-        merge_load = st.checkbox("Merge on import", value=False, key="pp_merge")
-
-    # Uploader
-    up_col1, up_col2 = st.columns([2, 3])
-    with up_col1:
-        uploaded_json = st.file_uploader("Import via upload", type=["json"], key="pp_uploader")
-    with up_col2:
-        st.caption("Tip: upload OR type a path; upload wins if both used.")
-
-    # Export button
-    c1, c2 = st.columns(2)
-    with c1:
-        disabled_export = _file_mode_invalid_now()
-        help_export = "Disabled due to validation failure." if disabled_export else "Write pairs to JSON and download."
-        if st.button("Export parity_pairs.json", key="pp_do_export", disabled=disabled_export, help=help_export):
-            try:
-                out_path = _export_pairs_to_path(export_path_txt)
-                st.success(f"Saved parity pairs → {out_path}")
-                payload = __pp_pairs_payload_from_queue(st.session_state.get("parity_pairs", []))
-                mem = _io.BytesIO(_json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
-                st.download_button("Download exported parity_pairs.json", mem, file_name=Path(out_path).name, key="dl_ppairs_json")
-            except Exception as e:
-                st.error(f"Export failed: {e}")
-
-    # Import button
-    with c2:
-        disabled_import = _file_mode_invalid_now()
-        help_import = "Disabled due to validation failure." if disabled_import else "Load pairs from JSON or path."
-        if st.button("Import parity_pairs.json", key="pp_do_import", disabled=disabled_import, help=help_import):
-            try:
-                if uploaded_json:
-                    payload = _json.loads(uploaded_json.getvalue().decode("utf-8"))
-                    n = _import_pairs_from_payload(payload, merge=merge_load)
-                    st.success(f"Loaded {n} pairs from uploaded file")
-                else:
-                    path_str = _ensure_json_path_str(import_path_txt)
-                    p = Path(path_str)
-                    if not (p.exists() and p.is_file()):
-                        raise FileNotFoundError(f"No file at {path_str}")
-                    with open(p, "r", encoding="utf-8") as f:
-                        payload = _json.load(f)
-                    n = _import_pairs_from_payload(payload, merge=merge_load)
-                    st.success(f"Loaded {n} pairs from {path_str}")
-            except Exception as e:
-                st.error(f"Import failed: {e}")
-
-# --------- END -----------------
-
- 
-
-# ------------------------ Cert writer (central, SSOT-only, with A/B embed) ------------------------
-st.divider()
-st.caption("Cert & provenance")
-
-from pathlib import Path
-import platform, os, json as _json
-from datetime import datetime, timezone
-import hashlib
-
-# Ensure bundles directory exists
-BUNDLES_DIR = Path(globals().get("BUNDLES_DIR", "bundles"))
-BUNDLES_DIR.mkdir(parents=True, exist_ok=True)
-
-LAB_SCHEMA_VERSION = "1.0.0"
-
-def _py_version_str() -> str:
-    return f"python-{platform.python_version()}"
-
-# Fallback: inputs signature from SSOT (kept local so this block is self-contained)
-def _inputs_sig_now() -> list[str]:
-    _ib_local = st.session_state.get("_inputs_block") or {}
-    return [
-        str(_ib_local.get("boundaries_hash","")),
-        str(_ib_local.get("C_hash","")),
-        str(_ib_local.get("H_hash","")),
-        str(_ib_local.get("U_hash","")),
-        str(_ib_local.get("shapes_hash","") or _ib_local.get("U_hash","")),
-    ]
-
-# Mode-aware FILE Π invalid helper (must exist globally; provide safe fallback)
-def _file_mode_invalid_now() -> bool:
-    rc = st.session_state.get("run_ctx") or {}
-    try:
-        return (str(rc.get("mode")) == "projected(file)") and bool(file_validation_failed())
-    except Exception:
-        return False
-
-# --- Helper functions ---
-def _assert_cert_invariants(cert: dict) -> None:
-    must = ("identity","policy","inputs","diagnostics","checks","signatures","residual_tags","promotion","artifact_hashes")
-    for key in must:
-        if key not in cert:
-            raise ValueError(f"CERT_INVAR:key-missing:{key}")
-    ident = cert["identity"] or {}; policy = cert["policy"] or {}; inputs = cert["inputs"] or {}
-    checks = cert["checks"] or {}; arts = cert["artifact_hashes"] or {}
-    for k in ("district_id","run_id","timestamp"):
-        if not str(ident.get(k,"")).strip():
-            raise ValueError(f"CERT_INVAR:identity-missing:{k}")
-    for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"):
-        if not isinstance(inputs.get(k,""), str) or inputs.get(k,"")=="":
-            raise ValueError(f"CERT_INVAR:inputs-hash-missing:{k}")
-    for k in ("boundaries_hash","C_hash","H_hash","U_hash"):
-        if arts.get(k,"") != inputs.get(k,""):
-            raise ValueError(f"CERT_INVAR:artifact-hash-mismatch:{k}")
-    dims = inputs.get("dims") or {}
-    if not (isinstance(dims.get("n2"), int) and isinstance(dims.get("n3"), int)):
-        raise ValueError("CERT_INVAR:inputs-dims-missing:n2-n3")
-    ptag = str(policy.get("policy_tag") or policy.get("label") or "").strip()
-    if not ptag: raise ValueError("CERT_INVAR:policy-tag-missing")
-    is_strict = (ptag == "strict")
-    is_file   = ptag.startswith("projected(file)")
-    is_auto   = ptag.startswith("projected(auto)")
-    kg = checks.get("ker_guard", "")
-    if is_strict and kg != "enforced":
-        raise ValueError("CERT_INVAR:ker-guard-should-be-enforced-for-strict")
-    if (is_file or is_auto) and kg != "off":
-        raise ValueError("CERT_INVAR:ker-guard-should-be-off-for-projected")
-    pj_hash = policy.get("projector_hash", "")
-    pj_file = policy.get("projector_filename", "") or ""
-    pj_cons = policy.get("projector_consistent_with_d", None)
-    if is_strict and (pj_file or pj_hash or (pj_cons is True)):
-        raise ValueError("CERT_INVAR:strict-must-not-carry-projector-fields")
-    if is_file:
-        if not pj_file: raise ValueError("CERT_INVAR:file-mode-missing-projector_filename")
-        if pj_cons is not True: raise ValueError("CERT_INVAR:file-mode-projector-not-consistent")
-        if not isinstance(pj_hash, str) or pj_hash == "":
-            raise ValueError("CERT_INVAR:file-mode-missing-projector_hash")
-    if is_auto and pj_file:
-        raise ValueError("CERT_INVAR:auto-mode-should-not-carry-projector_filename")
-
-# --- SSOT reads ---
-_rc  = st.session_state.get("run_ctx") or {}
-_out = st.session_state.get("overlap_out") or {}
-_ib  = st.session_state.get("_inputs_block") or {}
-_di  = st.session_state.get("_district_info") or {}
-_H   = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
-
-# --- Hard-guard: block ONLY when actually in projected(FILE) and Π invalid
-if _file_mode_invalid_now():
-    st.warning("Cert writing blocked: projected(FILE) is invalid. Fix or re-freeze the projector.")
-    st.stop()
-
-# --- Debounce (allow freezer / A/B to force a write this pass)
-if st.session_state.pop("should_write_cert", False):
-    st.session_state.pop("_last_cert_write_key", None)
-
-# --- Guard: run context + inputs SSOT ---
-if not (_rc and _out and _ib):
-    st.info("Run Overlap first to enable cert writing.")
-else:
-    # --- Skip duplicate writes (but don't stop the rest of the UI)
-    def _hz(s): return s if isinstance(s, str) else ""
-    write_key = (
-        _rc.get("policy_tag","strict"),
-        _hz(_ib.get("boundaries_hash","")),
-        _hz(_ib.get("C_hash","")),
-        _hz(_ib.get("H_hash","")),
-        _hz(_ib.get("U_hash","")),
-        _hz(_ib.get("shapes_hash","")),
-        (_hz(_rc.get("projector_hash","")) if str(_rc.get("mode","")).startswith("projected") else ""),
-        bool((_out.get("2",{}) or {}).get("eq", False)),
-        bool((_out.get("3",{}) or {}).get("eq", False)),
-    )
-    if st.session_state.get("_last_cert_write_key") == write_key:
-        st.caption("Cert unchanged — skipping rewrite.")
-    else:
-        st.session_state["_last_cert_write_key"] = write_key
-
-        # --- Diagnostics (single source) ---
-        lane_mask = list(_rc.get("lane_mask_k3") or [])
-        d3 = _rc.get("d3", [])
-        H2 = (_H.blocks.__root__.get("2") or [])
-        C3 = (cmap.blocks.__root__.get("3") or [])
-        I3 = eye(len(C3)) if C3 else []
-
-        def _bottom_row(M): return M[-1] if (M and len(M)) else []
-        def _xor(A,B):
-            if not A: return [r[:] for r in (B or [])]
-            if not B: return [r[:] for r in (A or [])]
-            return [[(A[i][j]^B[i][j])&1 for j in range(len(A[0]))] for i in range(len(A))]
-        def _mask_row(row, lm):
-            if not row: return []
-            return [int(row[j]) if int(lm[j]) else 0 for j in range(len(row))]
-
-        try:
-            H2d3  = mul(H2, d3) if (H2 and d3) else []
-            C3pI3 = _xor(C3, I3) if C3 else []
-        except Exception:
-            H2d3, C3pI3 = [], []
-
-        lane_idx = [j for j,m in enumerate(lane_mask) if m]
-        row_full_H2d3 = _bottom_row(H2d3)
-        row_full_C3I  = _bottom_row(C3pI3)
-
-        diagnostics_block = {
-            "lane_mask_k3": lane_mask,
-            "lane_vec_H2d3": {"row_full": row_full_H2d3, "row_lanes": _mask_row(row_full_H2d3, lane_mask)},
-            "lane_vec_C3plusI3": {"row_full": row_full_C3I, "row_lanes": _mask_row(row_full_C3I, lane_mask)},
-        }
-
-        # --- Signatures ---
-        def _gf2_rank(M):
-            if not M or not M[0]: return 0
-            A = [row[:] for row in M]; m, n = len(A), len(A[0]); r = c = 0
-            while r<m and c<n:
-                piv = next((i for i in range(r,m) if A[i][c]&1), None)
-                if piv is None: c+=1; continue
-                if piv!=r: A[r],A[piv]=A[piv],A[r]
-                for i in range(m):
-                    if i!=r and (A[i][c]&1):
-                        A[i]=[(A[i][j]^A[r][j])&1 for j in range(n)]
-                r+=1; c+=1
-            return r
-        rank_d3  = _gf2_rank(d3) if d3 else 0
-        ncols_d3 = len(d3[0]) if (d3 and d3[0]) else 0
-        ker_dim  = max(ncols_d3 - rank_d3, 0)
-        lane_pattern = "".join("1" if int(x) else "0" for x in (lane_mask or []))
-        def _col_support(M, cols):
-            if not M: return ""
-            use = cols if cols else list(range(len(M[0]) if (M and M[0]) else 0))
-            return "".join("1" if any((row[j]&1) for row in M) else "0" for j in use)
-
-        signatures_block = {
-            "d_signature": {"rank": rank_d3, "ker_dim": ker_dim, "lane_pattern": lane_pattern},
-            "fixture_signature": {"lane": _col_support(C3pI3, lane_idx)},
-        }
-
-        # --- Identity (one place) ---
-        district_id = _di.get("district_id", st.session_state.get("district_id","UNKNOWN"))
-        run_ts = getattr(hashes, "timestamp_iso_lisbon", lambda: datetime.now(timezone.utc).isoformat())()
-        policy_now = _rc.get("policy_tag", policy_label_from_cfg(cfg_active))
-        run_id = (st.session_state.get("run_ctx") or {}).get("run_id") or st.session_state.get("last_run_id")
-        if not run_id:
-            seed = "".join(str((_ib or {}).get(k,"")) for k in ("boundaries_hash","C_hash","H_hash","U_hash"))
-            run_id = getattr(hashes,"run_id",lambda a,b: hashlib.sha256(f"{a}|{b}".encode()).hexdigest()[:12])(seed, run_ts)
-            st.session_state["last_run_id"] = run_id
-
-        identity_block = {
-            "district_id": district_id, "run_id": run_id, "timestamp": run_ts,
-            "app_version": getattr(hashes,"APP_VERSION","v0.1-core"),
-            "python_version": _py_version_str(),
-        }
-
-        # --- Policy (mirror RC; strict clamps) ---
-        policy_block = {
-            "label": policy_now,
-            "policy_tag": policy_now,
-            "enabled_layers": cfg_active.get("enabled_layers", []),
-            "modes": cfg_active.get("modes", {}),
-            "source": (_rc.get("source") or {}),
-        }
-        if _rc.get("projector_hash") is not None:
-            policy_block["projector_hash"] = _rc.get("projector_hash","")
-        if _rc.get("projector_filename"):
-            policy_block["projector_filename"] = _rc.get("projector_filename","")
-        if _rc.get("projector_consistent_with_d") is not None:
-            policy_block["projector_consistent_with_d"] = bool(_rc.get("projector_consistent_with_d"))
-        if _rc.get("mode") == "strict":
-            policy_block["enabled_layers"] = []
-            for k in ("modes","source","projector_hash","projector_filename","projector_consistent_with_d"):
-                policy_block.pop(k, None)
-
-        # --- Checks / Inputs ---
-        residual_tags = st.session_state.get("residual_tags", {}) or {}
-        is_strict_mode = (_rc.get("mode") == "strict")
-        checks_block = {
-            **(_out or {}),
-            "grid":  bool((_out or {}).get("grid", True)),
-            "fence": bool((_out or {}).get("fence", True)),
-            "ker_guard": ("enforced" if is_strict_mode else "off"),
-        }
-
-        inputs_block_payload = {
-            "filenames": _ib.get("filenames", {
-                "boundaries": st.session_state.get("fname_boundaries","boundaries.json"),
-                "C":          st.session_state.get("fname_cmap","cmap.json"),
-                "H":          st.session_state.get("fname_h","H.json"),
-                "U":          st.session_state.get("fname_shapes","shapes.json"),
-            }),
-            "dims": _ib.get("dims", {}),
-            "boundaries_hash": _ib.get("boundaries_hash",""),
-            "C_hash": _ib.get("C_hash",""),
-            "H_hash": _ib.get("H_hash",""),
-            "U_hash": _ib.get("U_hash",""),
-            "shapes_hash": _ib.get("shapes_hash", _ib.get("U_hash","")),
-        }
-        if _rc.get("mode") == "projected(file)":
-            inputs_block_payload.setdefault("filenames", {})["projector"] = _rc.get("projector_filename","")
-
-        dims_now = inputs_block_payload.get("dims") or {}
-        for _k, _nk in (("2", dims_now.get("n2")), ("3", dims_now.get("n3"))):
-            if _k in checks_block:
-                checks_block[_k] = {**checks_block.get(_k, {}), "n_k": int(_nk) if _nk is not None else 0}
-
-        # --- Promotion ---
-        grid_ok  = bool(checks_block.get("grid", True))
-        fence_ok = bool(checks_block.get("fence", True))
-        k3_ok    = bool(checks_block.get("3", {}).get("eq", False))
-        k2_ok    = bool(checks_block.get("2", {}).get("eq", False))
-        mode_now = _rc.get("mode")
-        eligible, target = False, None
-        if mode_now == "strict" and all([grid_ok,fence_ok,k3_ok,k2_ok]) and residual_tags.get("strict","none")=="none":
-            eligible, target = True, "strict_anchor"
-        elif mode_now in ("projected(auto)","projected(file)") and all([grid_ok,fence_ok,k3_ok]) and residual_tags.get("projected","none")=="none":
-            if mode_now == "projected(file)":
-                if bool(_rc.get("projector_consistent_with_d")): eligible, target = True, "projected_exemplar"
-            else:
-                eligible, target = True, "projected_exemplar"
-        promotion_block = {"eligible_for_promotion": eligible, "promotion_target": target, "notes": ""}
-
-        # --- Artifacts mirror inputs (+ optional projector file sha) ---
-        artifact_hashes = {
-            "boundaries_hash": inputs_block_payload["boundaries_hash"],
-            "C_hash":          inputs_block_payload["C_hash"],
-            "H_hash":          inputs_block_payload["H_hash"],
-            "U_hash":          inputs_block_payload["U_hash"],
-        }
-        if "projector_hash" in policy_block:
-            artifact_hashes["projector_hash"] = policy_block.get("projector_hash","")
-        if _rc.get("mode") == "projected(file)":
-            pj_sha = _rc.get("projector_file_sha256")
-            if not pj_sha:
-                try:
-                    pf = _rc.get("projector_filename","")
-                    if pf and os.path.exists(pf):
-                        with open(pf,"rb") as f: pj_sha = hashlib.sha256(f.read()).hexdigest()
-                except Exception:
-                    pj_sha = None
-            if pj_sha:
-                policy_block["projector_file_sha256"] = pj_sha
-                artifact_hashes["projector_file_sha256"] = pj_sha
-
-        # --- Assemble (pre-hash) ---
-        cert_payload = {
-            "schema_version": LAB_SCHEMA_VERSION,
-            "identity": identity_block,
-            "policy": policy_block,
-            "inputs": inputs_block_payload,
-            "diagnostics": diagnostics_block,
-            "checks": checks_block,
-            "signatures": signatures_block,
-            "residual_tags": residual_tags,
-            "promotion": promotion_block,
-            "artifact_hashes": artifact_hashes,
-            "app_version": getattr(hashes,"APP_VERSION","v0.1-core"),
-            "python_version": _py_version_str(),
-        }
-        
-                       # --- Optional A/B embed (fresh only; no re-derivation here) ---
-        _ab = st.session_state.get("ab_compare") or {}
-        if _ab_is_fresh(_ab, rc=_rc, ib=inputs_block_payload):
-            strict_ctx = _ab.get("strict", {}) or {}
-            proj_ctx   = _ab.get("projected", {}) or {}
-        
-            def _pv(out_block):
-                return [
-                    int((out_block or {}).get("2",{}).get("eq", False)),
-                    int((out_block or {}).get("3",{}).get("eq", False)),
-                ]
-        
-            # stage snapshots
-            cert_payload["policy"]["strict_snapshot"] = {
-                "policy_tag": "strict",
-                "ker_guard": "enforced",
-                "inputs": {"filenames": inputs_block_payload.get("filenames", {})},
-                "lane_mask_k3": diagnostics_block["lane_mask_k3"],
-                "lane_vec_H2d3": strict_ctx.get("lane_vec_H2d3"),
-                "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3"),
-                "pass_vec": _pv(strict_ctx.get("out", {})),
-                "out": strict_ctx.get("out", {}),
-            }
-        
-            proj_snap = {
-                "policy_tag": proj_ctx.get("policy_tag") or (_rc.get("policy_tag") or ""),
-                "ker_guard": "off",
-                "inputs": {"filenames": inputs_block_payload.get("filenames", {})},
-                "lane_mask_k3": diagnostics_block["lane_mask_k3"],
-                "lane_vec_H2d3": proj_ctx.get("lane_vec_H2d3"),
-                "lane_vec_C3plusI3": proj_ctx.get("lane_vec_C3plusI3"),
-                "pass_vec": _pv(proj_ctx.get("out", {})),
-                "out": proj_ctx.get("out", {}),
-                "projector_hash": proj_ctx.get("projector_hash",""),
-                "projector_consistent_with_d": proj_ctx.get("projector_consistent_with_d", None),
-            }
-            if _rc.get("mode") == "projected(file)":
-                if _rc.get("projector_filename"):
-                    proj_snap["projector_filename"] = _rc.get("projector_filename")
-                if policy_block.get("projector_file_sha256"):
-                    proj_snap["projector_file_sha256"] = policy_block["projector_file_sha256"]
-        
-            cert_payload["policy"]["projected_snapshot"] = proj_snap
-            cert_payload["ab_pair_tag"] = _ab.get("pair_tag") or f"strict__VS__{proj_snap['policy_tag']}"
-            cert_payload["ab_embedded"] = True
-        
-            # soft guard: if mismatch, drop the embed instead of failing the cert
-            ab_proj_k3 = bool((_ab.get("projected") or {}).get("out", {}).get("3", {}).get("eq", False))
-            cur_k3     = bool(checks_block.get("3", {}).get("eq", False))
-            if ab_proj_k3 != cur_k3:
-                # remove staged snapshots + flag as stale
-                try:
-                    cert_payload["policy"].pop("strict_snapshot", None)
-                    cert_payload["policy"].pop("projected_snapshot", None)
-                except Exception:
-                    pass
-                cert_payload.pop("ab_pair_tag", None)
-                cert_payload["ab_embedded"] = False
-                cert_payload["ab_stale_reason"] = "projected_k3_mismatch"  # visible hint
-        else:
-            cert_payload["ab_embedded"] = False
-
-
-
-        # ---------- Standard meta before hashing ----------
-        cert_payload.setdefault("schema_version", SCHEMA_VERSION)
-        cert_payload.setdefault("app_version", APP_VERSION)
-        cert_payload.setdefault("python_version", _py_version_str())
-        rid = (st.session_state.get("run_ctx") or {}).get("run_id")
-        if rid:
-            cert_payload.setdefault("identity", {}).setdefault("run_id", rid)
-
-        # --- invariants + hash (final payload) ---
-        _assert_cert_invariants(cert_payload)
-        cert_payload.setdefault("integrity", {})
-        cert_payload["integrity"]["content_hash"] = hash_json(cert_payload)
-        full_hash = cert_payload["integrity"]["content_hash"]
-
-        # --- Write (prefer package) ---
-        cert_path = None
-        try:
-            result = export_mod.write_cert_json(cert_payload)
-            cert_path, full_hash = (result if isinstance(result,(list,tuple)) and len(result)>=2 else (result, full_hash))
-        except Exception:
-            outdir = Path(globals().get("CERTS_DIR","certs")); outdir.mkdir(parents=True, exist_ok=True)
-
-            def _safe(s: str) -> str:
-                return (s or "").replace("/", "_").replace(" ", "_")
-
-            district_id_safe = _safe(district_id)
-            safe_policy = _safe(policy_now)
-
-            ab_suffix = ""
-            if cert_payload.get("ab_embedded"):
-                pair = cert_payload.get("ab_pair_tag") or ""
-                ab_suffix = "__AB" + (f"__{_safe(pair)}" if pair else "")
-
-            fname = f"overlap__{district_id_safe}__{safe_policy}{ab_suffix}__{full_hash[:12]}.json"
-            p = outdir / fname
-            tmp = p.with_suffix(".json.tmp")
-            blob = _json.dumps(cert_payload, sort_keys=True, ensure_ascii=False, separators=(",",":")).encode("utf-8")
-            with open(tmp,"wb") as f: f.write(blob); f.flush(); os.fsync(f.fileno())
-            os.replace(tmp, p); cert_path = str(p)
-
-        # Cache + UI
-        st.session_state["cert_payload"] = cert_payload
-        st.session_state["last_cert_path"] = cert_path
-        st.session_state["last_run_id"] = cert_payload["identity"]["run_id"]
-        st.success(f"Cert written → `{cert_path}` · {full_hash[:12]}…")
-        st.caption(f"Embedded A/B → {cert_payload.get('ab_pair_tag','A/B')}" if cert_payload.get("ab_embedded") else "Embedded A/B → —")
-
-        # --- Bundle (cert + extras) ---
-        with st.expander("Bundle (cert + extras)"):
-            extras = ["policy.json",
-                      "reports/residual.json","reports/parity_report.json","reports/coverage_sampling.csv",
-                      "logs/gallery.jsonl","logs/witnesses.jsonl"]
-            if _rc.get("mode")=="projected(file)" and _rc.get("projector_filename"):
-                extras.append(_rc.get("projector_filename"))
-
-            _disabled = _file_mode_invalid_now()
-            _help_txt = "Disabled because projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π."
-            if st.button("Build Cert Bundle",
-                         key="build_cert_bundle_btn_final",
-                         disabled=_disabled,
-                         help=(_help_txt if _disabled else "Zip cert + selected artifacts")):
-                try:
-                    bp = build_cert_bundle(
-                        district_id=district_id, policy_tag=policy_now,
-                        cert_path=cert_path, content_hash=full_hash, extras=extras
-                    )
-                    st.success(f"Bundle ready → {bp}")
-                    try:
-                        with open(bp,"rb") as fz:
-                            st.download_button("Download cert bundle", fz, file_name=os.path.basename(bp),
-                                               key="dl_cert_bundle_zip_final")
-                    except Exception: pass
-                except Exception as e:
-                    st.error(f"Bundle build failed: {e}")
-
-# ───────────────────────── Certs on disk (tail) with A/B badge ─────────────────────────
-def _fmt_ts(ts):
-    try: return datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%SZ")
-    except: return ""
-
-CERTS_DIR = Path(globals().get("CERTS_DIR","certs"))
-CERTS_DIR.mkdir(parents=True, exist_ok=True)
-
-with st.expander("Certs on disk (last 5)", expanded=False):
-    all_certs = sorted(CERTS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-    st.caption(f"Found {len(all_certs)} certs in `{CERTS_DIR.as_posix()}`.")
-    ab_only = st.checkbox("Show only certs with A/B embed", value=False, key="tail_ab_only_final")
-
-    shown = 0
-    for p in all_certs:
-        if shown >= 5: break
-        try:
-            info = _json.loads(p.read_text(encoding="utf-8"))
-        except Exception:
-            continue
-        ident  = info.get("identity") or {}
-        policy = info.get("policy") or {}
-        tag    = policy.get("policy_tag") or "strict"
-        has_ab = bool(info.get("ab_embedded") or ("ab_pair_tag" in info) or ("ab_pair_tag" in policy))
-        if ab_only and not has_ab: continue
-        ab_label = f" · [A/B: {info.get('ab_pair_tag') or policy.get('ab_pair_tag') or 'A/B'}]" if has_ab else ""
-        st.write(f"• {_fmt_ts(p.stat().st_mtime)} · {ident.get('district_id','UNKNOWN')} · {tag} · {p.name}{ab_label}")
-        shown += 1
-
-
-
-
-##-----------------------BUNDLE DONWLOAD SECTION------------------------------------------##
-# Respect existing globals, with safe fallbacks
-CERTS_DIR      = Path(globals().get("CERTS_DIR", "certs"))
-LOGS_DIR       = Path(globals().get("LOGS_DIR", "logs"))
-REPORTS_DIR    = Path(globals().get("REPORTS_DIR", "reports"))
-BUNDLES_DIR    = Path(globals().get("BUNDLES_DIR", "bundles"))
-PROJECTORS_DIR = Path(globals().get("PROJECTORS_DIR", "projectors"))
-
-SCHEMA_VERSION = globals().get("SCHEMA_VERSION", "1.0.0")
-APP_VERSION    = globals().get("APP_VERSION", getattr(globals().get("hashes", object), "APP_VERSION", "v0.1-core"))
-
-# Ensure dirs we write to exist
-for _d in (BUNDLES_DIR,):
-    _d.mkdir(parents=True, exist_ok=True)
-
-# ───────────────────────── Utils (dedup) ─────────────────────────
-def _utc_iso_z() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-def _ymd_hms_compact() -> str:
-    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-
-def _sha256_file(p: Path) -> str:
-    h = hashlib.sha256()
-    with p.open("rb") as f:
-        for chunk in iter(lambda: f.read(65536), b""):
-            h.update(chunk)
-    return h.hexdigest()
-
-def _rel(p: Path) -> str:
-    try:
-        return p.resolve().relative_to(Path.cwd().resolve()).as_posix()
-    except Exception:
-        return p.as_posix()
-
-def _read_json_safely(p: Path):
-    try:
-        with p.open("r", encoding="utf-8") as f:
-            return json.load(f), None
-    except Exception as e:
-        return None, str(e)
-
-def _nonempty(p: Path) -> bool:
-    return p.exists() and p.is_file() and p.stat().st_size > 0
-
-def _count_files(root: Path) -> int:
-    if not root.exists(): return 0
-    n = 0
-    for _, _, files in os.walk(root): n += len(files)
-    return n
-
-def generate_run_id_from_seed(seed: str, ts: str) -> str:
-    return hashlib.sha256(f"{seed}|{ts}".encode("utf-8")).hexdigest()[:12]
-
-def _mkkey(ns: str, name: str) -> str:
-    return f"{ns}__{name}"
-
-def _fmt_ts(ts_float: float) -> str:
-    try:
-        return datetime.fromtimestamp(ts_float, timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
-    except Exception:
-        return ""
-
-def _py_version_str() -> str:
-    return f"python-{platform.python_version()}"
-
-# ───────────────────────── Builders (inputs bundle & snapshot) ─────────────────────────
-def build_inputs_bundle(*, inputs_block: dict, run_ctx: dict, district_id: str, run_id: str, policy_tag: str) -> str:
-    """
-    Creates a ZIP with manifest.json and input files.
-    """
-    app_ver = globals().get("APP_VERSION_STR", APP_VERSION)
-    py_ver  = globals().get("PY_VERSION_STR", _py_version_str())
-
-    BUNDLES_DIR.mkdir(parents=True, exist_ok=True)
-    fns = (inputs_block.get("filenames") or {})
-    fnames = {
-        "boundaries": fns.get("boundaries", st.session_state.get("fname_boundaries", "boundaries.json")),
-        "C":          fns.get("C",          st.session_state.get("fname_cmap",       "cmap.json")),
-        "H":          fns.get("H",          st.session_state.get("fname_h",          "H.json")),
-        "U":          fns.get("U",          st.session_state.get("fname_shapes",     "shapes.json")),
-        "projector":  fns.get("projector",  run_ctx.get("projector_filename", "") or ""),
-    }
-
-    hashes_block = {
-        "boundaries_hash": inputs_block.get("boundaries_hash", ""),
-        "C_hash":          inputs_block.get("C_hash", ""),
-        "H_hash":          inputs_block.get("H_hash", ""),
-        "U_hash":          inputs_block.get("U_hash", ""),
-        "shapes_hash":     inputs_block.get("shapes_hash", ""),
-    }
-
-    manifest = {
-        "schema_version": SCHEMA_VERSION,
-        "run_id": run_id,
-        "timestamp": _utc_iso_z(),
-        "app_version": app_ver,
-        "python_version": py_ver,
-        "policy_tag": policy_tag,
-        "hashes": hashes_block,
-        "filenames": fnames,
-        "projector": {
-            "mode": run_ctx.get("mode", "strict"),
-            "filename": run_ctx.get("projector_filename", ""),
-            "projector_hash": run_ctx.get("projector_hash", ""),
-        },
-    }
-
-    zname = f"inputs__{district_id or 'UNKNOWN'}__{run_id}.zip"
-    zpath = BUNDLES_DIR / zname
-
-    fd, tmp_name = tempfile.mkstemp(dir=BUNDLES_DIR, prefix=".tmp_inputs_", suffix=".zip")
-    os.close(fd)
-    tmp_path = Path(tmp_name)
-
-    try:
-        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("manifest.json", json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
-            for _, fp in fnames.items():
-                if not fp: continue
-                p = Path(fp)
-                if p.exists():
-                    try:
-                        arcname = p.resolve().relative_to(Path.cwd().resolve()).as_posix()
-                    except Exception:
-                        arcname = p.name
-                    zf.write(str(p), arcname=arcname)
-        try:
-            os.replace(tmp_path, zpath)
-        except OSError:
-            shutil.move(str(tmp_path), str(zpath))
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
-
-    return str(zpath)
-
-def build_everything_snapshot() -> str:
-    """
-    Builds a ZIP with certs, referenced projectors, logs, reports, metadata, and an index.
-    """
-    # Collect certs
-    cert_files = sorted(CERTS_DIR.glob("*.json"))
-    parsed, skipped = [], []
-    for p in cert_files:
-        data, err = _read_json_safely(p)
-        if err or not isinstance(data, dict):
-            skipped.append({"path": _rel(p), "reason": "JSON_PARSE_ERROR"})
-            continue
-        parsed.append((p, data))
-    if not parsed:
-        st.info("Nothing to snapshot yet (no parsed certs).")
-        return ""
-
-    proj_refs, districts, index_rows, manifest_files = set(), set(), [], []
-
-    for p, cert in parsed:
-        ident  = cert.get("identity") or {}
-        pol    = cert.get("policy") or {}
-        inputs = cert.get("inputs") or {}
-
-        did = ident.get("district_id") or "UNKNOWN"
-        districts.add(str(did))
-        manifest_files.append({
-            "path": _rel(p),
-            "sha256": _sha256_file(p),
-            "size": p.stat().st_size,
-        })
-
-        pj_fname = pol.get("projector_filename", "") or ""
-        if isinstance(pj_fname, str) and pj_fname.strip():
-            proj_refs.add(pj_fname.strip())
-
-        # prefer flat hashes, fall back to nested
-        hashes_flat   = {k: inputs.get(k) for k in ("boundaries_hash","C_hash","H_hash","U_hash")}
-        hashes_nested = inputs.get("hashes") or {}
-        def _hx(k): return hashes_flat.get(k) or hashes_nested.get(k) or ""
-
-        index_rows.append([
-            _rel(p),
-            (cert.get("integrity") or {}).get("content_hash", ""),
-            pol.get("policy_tag", ""),
-            did,
-            ident.get("run_id", ""),
-            ident.get("timestamp", ""),
-            _hx("boundaries_hash"),
-            _hx("C_hash"),
-            _hx("H_hash"),
-            _hx("U_hash"),
-            str(pol.get("projector_hash", "") or ""),
-            str(pol.get("projector_filename", "") or ""),
-        ])
-
-    # Resolve projectors
-    projectors, missing_projectors = [], []
-    for pj in sorted(proj_refs):
-        pj_path = Path(pj)
-        if not pj_path.exists():
-            alt = PROJECTORS_DIR / pj_path.name
-            if alt.exists():
-                pj_path = alt
-            else:
-                missing_projectors.append({"filename": _rel(pj_path), "referenced_by": "certs/* (various)"})
-                continue
-        projectors.append({"path": _rel(pj_path), "sha256": _sha256_file(pj_path), "size": pj_path.stat().st_size})
-
-    # Logs & reports that exist
-    logs_list = []
-    for name in ("gallery.jsonl", "witnesses.jsonl"):
-        p = LOGS_DIR / name
-        if _nonempty(p):
-            logs_list.append({"path": _rel(p), "sha256": _sha256_file(p), "size": p.stat().st_size})
-
-    reports_list = []
-    for rp in ("parity_report.json", "coverage_sampling.csv", "perturbation_sanity.csv", "fence_stress.csv"):
-        p = REPORTS_DIR / rp
-        if _nonempty(p):
-            reports_list.append({"path": _rel(p), "sha256": _sha256_file(p), "size": p.stat().st_size})
-
-    app_ver = APP_VERSION
-    py_ver  = _py_version_str()
-    districts_sorted = sorted(districts)
-
-    manifest = {
-        "schema_version": SCHEMA_VERSION,
-        "bundle_kind": "everything-snapshot",
-        "written_at_utc": _utc_iso_z(),
-        "app_version": app_ver,
-        "python_version": py_ver,
-        "districts": districts_sorted,
-        "counts": {
-            "certs": len(manifest_files),
-            "projectors": len(projectors),
-            "logs": {
-                "gallery_jsonl": int(any(x["path"].endswith("gallery.jsonl") for x in logs_list)),
-                "witnesses_jsonl": int(any(x["path"].endswith("witnesses.jsonl") for x in logs_list)),
-            },
-            "reports": {
-                "parity":   int(any(x["path"].endswith("parity_report.json") for x in reports_list)),
-                "coverage": int(any(x["path"].endswith("coverage_sampling.csv") for x in reports_list)),
-                "perturb":  int(any(x["path"].endswith("perturbation_sanity.csv") for x in reports_list)),
-                "fence":    int(any(x["path"].endswith("fence_stress.csv") for x in reports_list)),
-            }
-        },
-        "files": manifest_files,
-        "projectors": projectors,
-        "logs": logs_list,
-        "reports": reports_list,
-        "skipped": skipped,
-        "missing_projectors": missing_projectors,
-        "notes": "Certs are authoritative; only projectors referenced by any cert are included."
-    }
-
-    # Build cert_index.csv text
-    index_header = [
-        "cert_path","content_hash","policy_tag","district_id","run_id","written_at_utc",
-        "boundaries_hash","C_hash","H_hash","U_hash","projector_hash","projector_filename"
-    ]
-    fd, idx_tmp = tempfile.mkstemp(prefix=".tmp_cert_index_", suffix=".csv")
-    os.close(fd)
-    try:
-        with open(idx_tmp, "w", newline="", encoding="utf-8") as tf:
-            w = csv.writer(tf)
-            w.writerow(index_header)
-            w.writerows(index_rows)
-        with open(idx_tmp, "r", encoding="utf-8") as tf:
-            index_csv_text = tf.read()
-    finally:
-        try: os.remove(idx_tmp)
-        except Exception: pass
-
-    # Create ZIP (atomic)
-    tag   = next(iter(districts_sorted)) if len(districts_sorted) == 1 else "MULTI"
-    zname = f"snapshot__{tag}__{_ymd_hms_compact()}.zip"
-    zpath = BUNDLES_DIR / zname
-    fd, tmpname = tempfile.mkstemp(dir=BUNDLES_DIR, prefix=".tmp_snapshot_", suffix=".zip")
-    os.close(fd)
-    tmpzip = Path(tmpname)
-
-    try:
-        with zipfile.ZipFile(tmpzip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("manifest.json", json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
-            zf.writestr("cert_index.csv", index_csv_text)
-            for f in manifest_files + projectors + logs_list + reports_list:
-                p = Path(f["path"])
-                if p.exists():
-                    zf.write(p.as_posix(), arcname=f["path"])
-        os.replace(tmpzip, zpath)
-    finally:
-        if tmpzip.exists():
-            try: tmpzip.unlink()
-            except Exception: pass
-
-    if len(index_rows) != manifest["counts"]["certs"]:
-        st.warning("Index count does not match manifest cert count (investigate).")
-    return str(zpath)
-
-# ───────────────────────── Flush / Resets (dedup) ─────────────────────────
-def flush_workspace(*, delete_projectors: bool=False) -> dict:
-    """
-    Remove artifacts, reset session state, recreate empty dirs. Keeps inputs intact.
-    """
-    summary = {
-        "when": _utc_iso_z(),
-        "deleted_dirs": [],
-        "recreated_dirs": [],
-        "files_removed": 0,
-        "token": "",
-        "composite_cache_key_short": "",
-    }
-
-    # Clear session state (idempotent)
-    for k in (
-        "_inputs_block", "_district_info", "run_ctx", "overlap_out", "overlap_H",
-        "residual_tags", "ab_compare", "last_cert_path", "cert_payload",
-        "last_run_id", "_gallery_keys", "_last_boundaries_hash",
-        "_projector_cache", "_projector_cache_ab", "parity_pairs",
-        "parity_last_report_pairs", "selftests_snapshot"
-    ):
-        st.session_state.pop(k, None)
-
-    # Remove dirs and recreate
-    dirs = [CERTS_DIR, LOGS_DIR, REPORTS_DIR, BUNDLES_DIR]
-    if delete_projectors:
-        dirs.append(PROJECTORS_DIR)
-
-    removed_files_count = 0
-    for d in dirs:
-        if d.exists():
-            removed_files_count += _count_files(d)
-            shutil.rmtree(d)
-        d.mkdir(parents=True, exist_ok=True)
-        summary["deleted_dirs"].append(str(d))
-        summary["recreated_dirs"].append(str(d))
-    summary["files_removed"] = removed_files_count
-
-    # Generate new cache key and token
-    ts = _utc_iso_z()
-    salt = secrets.token_hex(2).upper()
-    token = f"FLUSH-{ts}-{salt}"
-    ckey = hashlib.sha256((ts + salt).encode("utf-8")).hexdigest()
-
-    st.session_state["_composite_cache_key"] = ckey
-    st.session_state["_last_flush_token"] = token
-    summary["token"] = token
-    summary["composite_cache_key_short"] = ckey[:12]
-    return summary
-
-def _soft_reset_before_overlap_local():
-    ss = st.session_state
-    for k in (
-        "run_ctx","overlap_out","overlap_cfg","overlap_policy_label",
-        "overlap_H","residual_tags","ab_compare",
-        "cert_payload","last_cert_path","_last_cert_write_key",
-        "_projector_cache","_projector_cache_ab"
-    ):
-        ss.pop(k, None)
-
-def _session_flush_run_cache():
-    # Clear computed session keys only; do not touch disk
-    if "_soft_reset_before_overlap" in globals():
-        try:
-            _soft_reset_before_overlap()  # type: ignore[name-defined]
-        except Exception:
-            _soft_reset_before_overlap_local()
-    else:
-        _soft_reset_before_overlap_local()
-    # Bump nonce
-    st.session_state["_fixture_nonce"] = int(st.session_state.get("_fixture_nonce", 0)) + 1
-    # New cache key + token
-    ts = _utc_iso_z()
-    salt = secrets.token_hex(2).upper()
-    token = f"RUN-FLUSH-{ts}-{salt}"
-    ckey  = hashlib.sha256((ts + salt).encode("utf-8")).hexdigest()
-    st.session_state["_composite_cache_key"] = ckey
-    st.session_state["_last_flush_token"] = token
-    return {"token": token, "ckey_short": ckey[:12]}
-
-def _full_flush_workspace(delete_projectors: bool = False):
-    # Prefer app’s flush if available
-    if "flush_workspace" in globals():
-        try:
-            return flush_workspace(delete_projectors=delete_projectors)  # type: ignore[name-defined]
-        except Exception:
-            pass
-    return flush_workspace(delete_projectors=delete_projectors)
-
-# ───────────────────────── UI: Exports / Snapshot / Flush (dedup, namespaced) ─────────────────────────
-EXPORTS_NS = "exports_v2"
-
-import os  
-
-with safe_expander("Exports", expanded=False):
-    c1, c2, c3 = st.columns(3)
-
-    # ---- Snapshot ZIP ----
-    with c1:
-        if st.button("Build Snapshot ZIP", key=_mkkey(EXPORTS_NS, "btn_build_snapshot")):
-            try:
-                zp = build_everything_snapshot()
-                if zp:
-                    st.success(f"Snapshot ready → {zp}")
-                    with open(zp, "rb") as fz:
-                        st.download_button(
-                            "Download snapshot.zip",
-                            fz,
-                            file_name=os.path.basename(zp),
-                            key=_mkkey(EXPORTS_NS, "dl_snapshot_zip"),
+                            ]
+                        }, name="Smoke (inline)")
+                
+                    # --- 4) Quick preview of current table ---
+                    table = st.session_state.get("parity_pairs_table") or []
+                    if table:
+                        st.caption(f"Pairs in table: {len(table)}")
+                        try:
+                            import pandas as pd
+                            st.dataframe(pd.DataFrame([{"label": p.get("label","PAIR")} for p in table]),
+                                         hide_index=True, use_container_width=True)
+                        except Exception:
+                            st.write("\n".join("• " + (p.get("label","PAIR") or "") for p in table[:6]))
+                
+                    # --- 5) Queue ALL valid pairs (strict resolver; record skips) ---
+                    if st.button("Queue ALL valid pairs", key="pp_queue_all_valid", disabled=not bool(table)):
+                        queued = 0
+                        skipped = []
+                        # Reset the live queue before enqueuing (fresh, reproducible)
+                        st.session_state["parity_pairs"] = []
+                
+                        for spec in table:
+                            label = spec.get("label","PAIR")
+                            L     = spec.get("left") or {}
+                            R     = spec.get("right") or {}
+                
+                            okL, fxL = _resolve_side_or_skip_exact(L, label=label, side_name="left")
+                            okR, fxR = _resolve_side_or_skip_exact(R, label=label, side_name="right")
+                            if okL != "ok":
+                                skipped.append(fxL); continue
+                            if okR != "ok":
+                                skipped.append(fxR); continue
+                
+                            # Enqueue the fully parsed fixtures used by the runner
+                            add_parity_pair(label=label, left_fixture=fxL, right_fixture=fxR)
+                            queued += 1
+                
+                        if queued:
+                            st.success(f"Queued {queued} pair(s) into the live parity queue.")
+                        if skipped:
+                            st.info("Skipped specs:")
+                            for s in skipped[:20]:
+                                if "missing" in s:
+                                    st.write(f"• {s['label']} [{s['side']}] → PARITY_SPEC_MISSING: {s['missing']}")
+                                else:
+                                    st.write(f"• {s['label']} [{s['side']}] → {s.get('error','error')}")
+                
+                    # Optional tiny helper on the right
+                    with cD:
+                        st.caption("Tips")
+                        st.markdown("- Edit paths in your presets before Queue ALL.\n- Inline preset never needs files.\n- FILE mode requires a valid projector file.")
+                # ======================================================================
+                
+                
+                
+                
+                
+                # --------- UI for import/export (keep only one expander) ---------
+                with st.expander("Parity pairs: import/export"):
+                    colA, colB, colC = st.columns([3, 3, 2])
+                    with colA:
+                        export_path_txt = st.text_input(
+                            "Export path",
+                            value=str(DEFAULT_PARITY_PATH),
+                            key="pp_export_path",
+                            help="Path for saving pairs JSON."
                         )
-            except Exception as e:
-                st.error(f"Snapshot failed: {e}")
-
-    # ---- Inputs Bundle ----
-    with c2:
-        if st.button("Export Inputs Bundle", key=_mkkey(EXPORTS_NS, "btn_export_inputs")):
-            try:
-                ib = st.session_state.get("_inputs_block") or {}
-                di = st.session_state.get("_district_info") or {}
-                rc = st.session_state.get("run_ctx") or {}
-                cert_cached = st.session_state.get("cert_payload")
-
-                district_id = di.get("district_id", "UNKNOWN")
-                run_id = (cert_cached or {}).get("identity", {}).get("run_id") or st.session_state.get("last_run_id")
-                if not run_id:
-                    seed_str = "".join(ib.get(k, "") for k in ("boundaries_hash", "C_hash", "H_hash", "U_hash"))
-                    ts = _utc_iso_z()
-                    run_id = generate_run_id_from_seed(seed_str, ts)
-                    st.session_state["last_run_id"] = run_id
-
-                policy_tag = st.session_state.get("overlap_policy_label") or rc.get("policy_tag") or "strict"
-
-                bp = build_inputs_bundle(
-                    inputs_block=ib,
-                    run_ctx=rc,
-                    district_id=district_id,
-                    run_id=run_id,
-                    policy_tag=policy_tag,
-                )
-                st.session_state["last_inputs_bundle_path"] = bp
-                st.success(f"Inputs bundle ready → {bp}")
-                with open(bp, "rb") as fz:
-                    st.download_button(
-                        "Download inputs bundle",
-                        fz,
-                        file_name=os.path.basename(bp),
-                        key=_mkkey(EXPORTS_NS, "dl_inputs_bundle"),
+                    with colB:
+                        import_path_txt = st.text_input(
+                            "Import path",
+                            value=str(DEFAULT_PARITY_PATH),
+                            key="pp_import_path",
+                            help="Path to load pairs JSON or use uploader."
+                        )
+                    with colC:
+                        merge_load = st.checkbox("Merge on import", value=False, key="pp_merge")
+                
+                    # Uploader
+                    up_col1, up_col2 = st.columns([2, 3])
+                    with up_col1:
+                        uploaded_json = st.file_uploader("Import via upload", type=["json"], key="pp_uploader")
+                    with up_col2:
+                        st.caption("Tip: upload OR type a path; upload wins if both used.")
+                
+                    # Export button
+                    c1, c2 = st.columns(2)
+                    with c1:
+                        disabled_export = _file_mode_invalid_now()
+                        help_export = "Disabled due to validation failure." if disabled_export else "Write pairs to JSON and download."
+                        if st.button("Export parity_pairs.json", key="pp_do_export", disabled=disabled_export, help=help_export):
+                            try:
+                                out_path = _export_pairs_to_path(export_path_txt)
+                                st.success(f"Saved parity pairs → {out_path}")
+                                payload = __pp_pairs_payload_from_queue(st.session_state.get("parity_pairs", []))
+                                mem = _io.BytesIO(_json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8"))
+                                st.download_button("Download exported parity_pairs.json", mem, file_name=Path(out_path).name, key="dl_ppairs_json")
+                            except Exception as e:
+                                st.error(f"Export failed: {e}")
+                
+                    # Import button
+                    with c2:
+                        disabled_import = _file_mode_invalid_now()
+                        help_import = "Disabled due to validation failure." if disabled_import else "Load pairs from JSON or path."
+                        if st.button("Import parity_pairs.json", key="pp_do_import", disabled=disabled_import, help=help_import):
+                            try:
+                                if uploaded_json:
+                                    payload = _json.loads(uploaded_json.getvalue().decode("utf-8"))
+                                    n = _import_pairs_from_payload(payload, merge=merge_load)
+                                    st.success(f"Loaded {n} pairs from uploaded file")
+                                else:
+                                    path_str = _ensure_json_path_str(import_path_txt)
+                                    p = Path(path_str)
+                                    if not (p.exists() and p.is_file()):
+                                        raise FileNotFoundError(f"No file at {path_str}")
+                                    with open(p, "r", encoding="utf-8") as f:
+                                        payload = _json.load(f)
+                                    n = _import_pairs_from_payload(payload, merge=merge_load)
+                                    st.success(f"Loaded {n} pairs from {path_str}")
+                            except Exception as e:
+                                st.error(f"Import failed: {e}")
+                
+                # --------- END -----------------
+                
+                 
+                
+                # ------------------------ Cert writer (central, SSOT-only, with A/B embed) ------------------------
+                st.divider()
+                st.caption("Cert & provenance")
+                
+                from pathlib import Path
+                import platform, os, json as _json
+                from datetime import datetime, timezone
+                import hashlib
+                
+                # Ensure bundles directory exists
+                BUNDLES_DIR = Path(globals().get("BUNDLES_DIR", "bundles"))
+                BUNDLES_DIR.mkdir(parents=True, exist_ok=True)
+                
+                LAB_SCHEMA_VERSION = "1.0.0"
+                
+                def _py_version_str() -> str:
+                    return f"python-{platform.python_version()}"
+                
+                # Fallback: inputs signature from SSOT (kept local so this block is self-contained)
+                def _inputs_sig_now() -> list[str]:
+                    _ib_local = st.session_state.get("_inputs_block") or {}
+                    return [
+                        str(_ib_local.get("boundaries_hash","")),
+                        str(_ib_local.get("C_hash","")),
+                        str(_ib_local.get("H_hash","")),
+                        str(_ib_local.get("U_hash","")),
+                        str(_ib_local.get("shapes_hash","") or _ib_local.get("U_hash","")),
+                    ]
+                
+                # Mode-aware FILE Π invalid helper (must exist globally; provide safe fallback)
+                def _file_mode_invalid_now() -> bool:
+                    rc = st.session_state.get("run_ctx") or {}
+                    try:
+                        return (str(rc.get("mode")) == "projected(file)") and bool(file_validation_failed())
+                    except Exception:
+                        return False
+                
+                # --- Helper functions ---
+                def _assert_cert_invariants(cert: dict) -> None:
+                    must = ("identity","policy","inputs","diagnostics","checks","signatures","residual_tags","promotion","artifact_hashes")
+                    for key in must:
+                        if key not in cert:
+                            raise ValueError(f"CERT_INVAR:key-missing:{key}")
+                    ident = cert["identity"] or {}; policy = cert["policy"] or {}; inputs = cert["inputs"] or {}
+                    checks = cert["checks"] or {}; arts = cert["artifact_hashes"] or {}
+                    for k in ("district_id","run_id","timestamp"):
+                        if not str(ident.get(k,"")).strip():
+                            raise ValueError(f"CERT_INVAR:identity-missing:{k}")
+                    for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"):
+                        if not isinstance(inputs.get(k,""), str) or inputs.get(k,"")=="":
+                            raise ValueError(f"CERT_INVAR:inputs-hash-missing:{k}")
+                    for k in ("boundaries_hash","C_hash","H_hash","U_hash"):
+                        if arts.get(k,"") != inputs.get(k,""):
+                            raise ValueError(f"CERT_INVAR:artifact-hash-mismatch:{k}")
+                    dims = inputs.get("dims") or {}
+                    if not (isinstance(dims.get("n2"), int) and isinstance(dims.get("n3"), int)):
+                        raise ValueError("CERT_INVAR:inputs-dims-missing:n2-n3")
+                    ptag = str(policy.get("policy_tag") or policy.get("label") or "").strip()
+                    if not ptag: raise ValueError("CERT_INVAR:policy-tag-missing")
+                    is_strict = (ptag == "strict")
+                    is_file   = ptag.startswith("projected(file)")
+                    is_auto   = ptag.startswith("projected(auto)")
+                    kg = checks.get("ker_guard", "")
+                    if is_strict and kg != "enforced":
+                        raise ValueError("CERT_INVAR:ker-guard-should-be-enforced-for-strict")
+                    if (is_file or is_auto) and kg != "off":
+                        raise ValueError("CERT_INVAR:ker-guard-should-be-off-for-projected")
+                    pj_hash = policy.get("projector_hash", "")
+                    pj_file = policy.get("projector_filename", "") or ""
+                    pj_cons = policy.get("projector_consistent_with_d", None)
+                    if is_strict and (pj_file or pj_hash or (pj_cons is True)):
+                        raise ValueError("CERT_INVAR:strict-must-not-carry-projector-fields")
+                    if is_file:
+                        if not pj_file: raise ValueError("CERT_INVAR:file-mode-missing-projector_filename")
+                        if pj_cons is not True: raise ValueError("CERT_INVAR:file-mode-projector-not-consistent")
+                        if not isinstance(pj_hash, str) or pj_hash == "":
+                            raise ValueError("CERT_INVAR:file-mode-missing-projector_hash")
+                    if is_auto and pj_file:
+                        raise ValueError("CERT_INVAR:auto-mode-should-not-carry-projector_filename")
+                
+                # --- SSOT reads ---
+                _rc  = st.session_state.get("run_ctx") or {}
+                _out = st.session_state.get("overlap_out") or {}
+                _ib  = st.session_state.get("_inputs_block") or {}
+                _di  = st.session_state.get("_district_info") or {}
+                _H   = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
+                
+                # --- Hard-guard: block ONLY when actually in projected(FILE) and Π invalid
+                if _file_mode_invalid_now():
+                    st.warning("Cert writing blocked: projected(FILE) is invalid. Fix or re-freeze the projector.")
+                    st.stop()
+                
+                # --- Debounce (allow freezer / A/B to force a write this pass)
+                if st.session_state.pop("should_write_cert", False):
+                    st.session_state.pop("_last_cert_write_key", None)
+                
+                # --- Guard: run context + inputs SSOT ---
+                if not (_rc and _out and _ib):
+                    st.info("Run Overlap first to enable cert writing.")
+                else:
+                    # --- Skip duplicate writes (but don't stop the rest of the UI)
+                    def _hz(s): return s if isinstance(s, str) else ""
+                    write_key = (
+                        _rc.get("policy_tag","strict"),
+                        _hz(_ib.get("boundaries_hash","")),
+                        _hz(_ib.get("C_hash","")),
+                        _hz(_ib.get("H_hash","")),
+                        _hz(_ib.get("U_hash","")),
+                        _hz(_ib.get("shapes_hash","")),
+                        (_hz(_rc.get("projector_hash","")) if str(_rc.get("mode","")).startswith("projected") else ""),
+                        bool((_out.get("2",{}) or {}).get("eq", False)),
+                        bool((_out.get("3",{}) or {}).get("eq", False)),
                     )
-            except Exception as e:
-                st.error(f"Export Inputs Bundle failed: {e}")
-
-    # ---- Flushes ----
-    with c3:
-        st.caption("Flush / Reset")
-        if st.button(
-            "Quick Reset (session only)",
-            key=_mkkey(EXPORTS_NS, "btn_quick_reset_session"),
-            help="Clears computed session data, bumps nonce; does not touch files.",
-        ):
-            out = _session_flush_run_cache()
-            st.success(f"Run cache flushed · token={out['token']} · key={out['ckey_short']}")
-
-        inc_pj = st.checkbox(
-            "Also remove projectors (full flush)",
-            value=False,
-            key=_mkkey(EXPORTS_NS, "flush_inc_pj"),
-        )
-        confirm = st.checkbox(
-            "I understand this deletes files on disk",
-            value=False,
-            key=_mkkey(EXPORTS_NS, "ff_confirm"),
-        )
-        if st.button(
-            "Full Flush (certs/logs/reports/bundles)",
-            key=_mkkey(EXPORTS_NS, "btn_full_flush"),
-            disabled=not confirm,
-            help="Deletes persisted outputs; keeps inputs. Bumps nonce & resets session.",
-        ):
-            try:
-                info = _full_flush_workspace(delete_projectors=inc_pj)
-                st.success(f"Workspace flushed · {info['token']}")
-                st.caption(f"New cache key: `{info['composite_cache_key_short']}`")
-                with st.expander("Flush details"):
-                    st.json(info)
-            except Exception as e:
-                st.error(f"Flush failed: {e}")
+                    if st.session_state.get("_last_cert_write_key") == write_key:
+                        st.caption("Cert unchanged — skipping rewrite.")
+                    else:
+                        st.session_state["_last_cert_write_key"] = write_key
+                
+                        # --- Diagnostics (single source) ---
+                        lane_mask = list(_rc.get("lane_mask_k3") or [])
+                        d3 = _rc.get("d3", [])
+                        H2 = (_H.blocks.__root__.get("2") or [])
+                        C3 = (cmap.blocks.__root__.get("3") or [])
+                        I3 = eye(len(C3)) if C3 else []
+                
+                        def _bottom_row(M): return M[-1] if (M and len(M)) else []
+                        def _xor(A,B):
+                            if not A: return [r[:] for r in (B or [])]
+                            if not B: return [r[:] for r in (A or [])]
+                            return [[(A[i][j]^B[i][j])&1 for j in range(len(A[0]))] for i in range(len(A))]
+                        def _mask_row(row, lm):
+                            if not row: return []
+                            return [int(row[j]) if int(lm[j]) else 0 for j in range(len(row))]
+                
+                        try:
+                            H2d3  = mul(H2, d3) if (H2 and d3) else []
+                            C3pI3 = _xor(C3, I3) if C3 else []
+                        except Exception:
+                            H2d3, C3pI3 = [], []
+                
+                        lane_idx = [j for j,m in enumerate(lane_mask) if m]
+                        row_full_H2d3 = _bottom_row(H2d3)
+                        row_full_C3I  = _bottom_row(C3pI3)
+                
+                        diagnostics_block = {
+                            "lane_mask_k3": lane_mask,
+                            "lane_vec_H2d3": {"row_full": row_full_H2d3, "row_lanes": _mask_row(row_full_H2d3, lane_mask)},
+                            "lane_vec_C3plusI3": {"row_full": row_full_C3I, "row_lanes": _mask_row(row_full_C3I, lane_mask)},
+                        }
+                
+                        # --- Signatures ---
+                        def _gf2_rank(M):
+                            if not M or not M[0]: return 0
+                            A = [row[:] for row in M]; m, n = len(A), len(A[0]); r = c = 0
+                            while r<m and c<n:
+                                piv = next((i for i in range(r,m) if A[i][c]&1), None)
+                                if piv is None: c+=1; continue
+                                if piv!=r: A[r],A[piv]=A[piv],A[r]
+                                for i in range(m):
+                                    if i!=r and (A[i][c]&1):
+                                        A[i]=[(A[i][j]^A[r][j])&1 for j in range(n)]
+                                r+=1; c+=1
+                            return r
+                        rank_d3  = _gf2_rank(d3) if d3 else 0
+                        ncols_d3 = len(d3[0]) if (d3 and d3[0]) else 0
+                        ker_dim  = max(ncols_d3 - rank_d3, 0)
+                        lane_pattern = "".join("1" if int(x) else "0" for x in (lane_mask or []))
+                        def _col_support(M, cols):
+                            if not M: return ""
+                            use = cols if cols else list(range(len(M[0]) if (M and M[0]) else 0))
+                            return "".join("1" if any((row[j]&1) for row in M) else "0" for j in use)
+                
+                        signatures_block = {
+                            "d_signature": {"rank": rank_d3, "ker_dim": ker_dim, "lane_pattern": lane_pattern},
+                            "fixture_signature": {"lane": _col_support(C3pI3, lane_idx)},
+                        }
+                
+                        # --- Identity (one place) ---
+                        district_id = _di.get("district_id", st.session_state.get("district_id","UNKNOWN"))
+                        run_ts = getattr(hashes, "timestamp_iso_lisbon", lambda: datetime.now(timezone.utc).isoformat())()
+                        policy_now = _rc.get("policy_tag", policy_label_from_cfg(cfg_active))
+                        run_id = (st.session_state.get("run_ctx") or {}).get("run_id") or st.session_state.get("last_run_id")
+                        if not run_id:
+                            seed = "".join(str((_ib or {}).get(k,"")) for k in ("boundaries_hash","C_hash","H_hash","U_hash"))
+                            run_id = getattr(hashes,"run_id",lambda a,b: hashlib.sha256(f"{a}|{b}".encode()).hexdigest()[:12])(seed, run_ts)
+                            st.session_state["last_run_id"] = run_id
+                
+                        identity_block = {
+                            "district_id": district_id, "run_id": run_id, "timestamp": run_ts,
+                            "app_version": getattr(hashes,"APP_VERSION","v0.1-core"),
+                            "python_version": _py_version_str(),
+                        }
+                
+                        # --- Policy (mirror RC; strict clamps) ---
+                        policy_block = {
+                            "label": policy_now,
+                            "policy_tag": policy_now,
+                            "enabled_layers": cfg_active.get("enabled_layers", []),
+                            "modes": cfg_active.get("modes", {}),
+                            "source": (_rc.get("source") or {}),
+                        }
+                        if _rc.get("projector_hash") is not None:
+                            policy_block["projector_hash"] = _rc.get("projector_hash","")
+                        if _rc.get("projector_filename"):
+                            policy_block["projector_filename"] = _rc.get("projector_filename","")
+                        if _rc.get("projector_consistent_with_d") is not None:
+                            policy_block["projector_consistent_with_d"] = bool(_rc.get("projector_consistent_with_d"))
+                        if _rc.get("mode") == "strict":
+                            policy_block["enabled_layers"] = []
+                            for k in ("modes","source","projector_hash","projector_filename","projector_consistent_with_d"):
+                                policy_block.pop(k, None)
+                
+                        # --- Checks / Inputs ---
+                        residual_tags = st.session_state.get("residual_tags", {}) or {}
+                        is_strict_mode = (_rc.get("mode") == "strict")
+                        checks_block = {
+                            **(_out or {}),
+                            "grid":  bool((_out or {}).get("grid", True)),
+                            "fence": bool((_out or {}).get("fence", True)),
+                            "ker_guard": ("enforced" if is_strict_mode else "off"),
+                        }
+                
+                        inputs_block_payload = {
+                            "filenames": _ib.get("filenames", {
+                                "boundaries": st.session_state.get("fname_boundaries","boundaries.json"),
+                                "C":          st.session_state.get("fname_cmap","cmap.json"),
+                                "H":          st.session_state.get("fname_h","H.json"),
+                                "U":          st.session_state.get("fname_shapes","shapes.json"),
+                            }),
+                            "dims": _ib.get("dims", {}),
+                            "boundaries_hash": _ib.get("boundaries_hash",""),
+                            "C_hash": _ib.get("C_hash",""),
+                            "H_hash": _ib.get("H_hash",""),
+                            "U_hash": _ib.get("U_hash",""),
+                            "shapes_hash": _ib.get("shapes_hash", _ib.get("U_hash","")),
+                        }
+                        if _rc.get("mode") == "projected(file)":
+                            inputs_block_payload.setdefault("filenames", {})["projector"] = _rc.get("projector_filename","")
+                
+                        dims_now = inputs_block_payload.get("dims") or {}
+                        for _k, _nk in (("2", dims_now.get("n2")), ("3", dims_now.get("n3"))):
+                            if _k in checks_block:
+                                checks_block[_k] = {**checks_block.get(_k, {}), "n_k": int(_nk) if _nk is not None else 0}
+                
+                        # --- Promotion ---
+                        grid_ok  = bool(checks_block.get("grid", True))
+                        fence_ok = bool(checks_block.get("fence", True))
+                        k3_ok    = bool(checks_block.get("3", {}).get("eq", False))
+                        k2_ok    = bool(checks_block.get("2", {}).get("eq", False))
+                        mode_now = _rc.get("mode")
+                        eligible, target = False, None
+                        if mode_now == "strict" and all([grid_ok,fence_ok,k3_ok,k2_ok]) and residual_tags.get("strict","none")=="none":
+                            eligible, target = True, "strict_anchor"
+                        elif mode_now in ("projected(auto)","projected(file)") and all([grid_ok,fence_ok,k3_ok]) and residual_tags.get("projected","none")=="none":
+                            if mode_now == "projected(file)":
+                                if bool(_rc.get("projector_consistent_with_d")): eligible, target = True, "projected_exemplar"
+                            else:
+                                eligible, target = True, "projected_exemplar"
+                        promotion_block = {"eligible_for_promotion": eligible, "promotion_target": target, "notes": ""}
+                
+                        # --- Artifacts mirror inputs (+ optional projector file sha) ---
+                        artifact_hashes = {
+                            "boundaries_hash": inputs_block_payload["boundaries_hash"],
+                            "C_hash":          inputs_block_payload["C_hash"],
+                            "H_hash":          inputs_block_payload["H_hash"],
+                            "U_hash":          inputs_block_payload["U_hash"],
+                        }
+                        if "projector_hash" in policy_block:
+                            artifact_hashes["projector_hash"] = policy_block.get("projector_hash","")
+                        if _rc.get("mode") == "projected(file)":
+                            pj_sha = _rc.get("projector_file_sha256")
+                            if not pj_sha:
+                                try:
+                                    pf = _rc.get("projector_filename","")
+                                    if pf and os.path.exists(pf):
+                                        with open(pf,"rb") as f: pj_sha = hashlib.sha256(f.read()).hexdigest()
+                                except Exception:
+                                    pj_sha = None
+                            if pj_sha:
+                                policy_block["projector_file_sha256"] = pj_sha
+                                artifact_hashes["projector_file_sha256"] = pj_sha
+                
+                        # --- Assemble (pre-hash) ---
+                        cert_payload = {
+                            "schema_version": LAB_SCHEMA_VERSION,
+                            "identity": identity_block,
+                            "policy": policy_block,
+                            "inputs": inputs_block_payload,
+                            "diagnostics": diagnostics_block,
+                            "checks": checks_block,
+                            "signatures": signatures_block,
+                            "residual_tags": residual_tags,
+                            "promotion": promotion_block,
+                            "artifact_hashes": artifact_hashes,
+                            "app_version": getattr(hashes,"APP_VERSION","v0.1-core"),
+                            "python_version": _py_version_str(),
+                        }
+                        
+                                       # --- Optional A/B embed (fresh only; no re-derivation here) ---
+                        _ab = st.session_state.get("ab_compare") or {}
+                        if _ab_is_fresh(_ab, rc=_rc, ib=inputs_block_payload):
+                            strict_ctx = _ab.get("strict", {}) or {}
+                            proj_ctx   = _ab.get("projected", {}) or {}
+                        
+                            def _pv(out_block):
+                                return [
+                                    int((out_block or {}).get("2",{}).get("eq", False)),
+                                    int((out_block or {}).get("3",{}).get("eq", False)),
+                                ]
+                        
+                            # stage snapshots
+                            cert_payload["policy"]["strict_snapshot"] = {
+                                "policy_tag": "strict",
+                                "ker_guard": "enforced",
+                                "inputs": {"filenames": inputs_block_payload.get("filenames", {})},
+                                "lane_mask_k3": diagnostics_block["lane_mask_k3"],
+                                "lane_vec_H2d3": strict_ctx.get("lane_vec_H2d3"),
+                                "lane_vec_C3plusI3": strict_ctx.get("lane_vec_C3plusI3"),
+                                "pass_vec": _pv(strict_ctx.get("out", {})),
+                                "out": strict_ctx.get("out", {}),
+                            }
+                        
+                            proj_snap = {
+                                "policy_tag": proj_ctx.get("policy_tag") or (_rc.get("policy_tag") or ""),
+                                "ker_guard": "off",
+                                "inputs": {"filenames": inputs_block_payload.get("filenames", {})},
+                                "lane_mask_k3": diagnostics_block["lane_mask_k3"],
+                                "lane_vec_H2d3": proj_ctx.get("lane_vec_H2d3"),
+                                "lane_vec_C3plusI3": proj_ctx.get("lane_vec_C3plusI3"),
+                                "pass_vec": _pv(proj_ctx.get("out", {})),
+                                "out": proj_ctx.get("out", {}),
+                                "projector_hash": proj_ctx.get("projector_hash",""),
+                                "projector_consistent_with_d": proj_ctx.get("projector_consistent_with_d", None),
+                            }
+                            if _rc.get("mode") == "projected(file)":
+                                if _rc.get("projector_filename"):
+                                    proj_snap["projector_filename"] = _rc.get("projector_filename")
+                                if policy_block.get("projector_file_sha256"):
+                                    proj_snap["projector_file_sha256"] = policy_block["projector_file_sha256"]
+                        
+                            cert_payload["policy"]["projected_snapshot"] = proj_snap
+                            cert_payload["ab_pair_tag"] = _ab.get("pair_tag") or f"strict__VS__{proj_snap['policy_tag']}"
+                            cert_payload["ab_embedded"] = True
+                        
+                            # soft guard: if mismatch, drop the embed instead of failing the cert
+                            ab_proj_k3 = bool((_ab.get("projected") or {}).get("out", {}).get("3", {}).get("eq", False))
+                            cur_k3     = bool(checks_block.get("3", {}).get("eq", False))
+                            if ab_proj_k3 != cur_k3:
+                                # remove staged snapshots + flag as stale
+                                try:
+                                    cert_payload["policy"].pop("strict_snapshot", None)
+                                    cert_payload["policy"].pop("projected_snapshot", None)
+                                except Exception:
+                                    pass
+                                cert_payload.pop("ab_pair_tag", None)
+                                cert_payload["ab_embedded"] = False
+                                cert_payload["ab_stale_reason"] = "projected_k3_mismatch"  # visible hint
+                        else:
+                            cert_payload["ab_embedded"] = False
+                
+                
+                
+                        # ---------- Standard meta before hashing ----------
+                        cert_payload.setdefault("schema_version", SCHEMA_VERSION)
+                        cert_payload.setdefault("app_version", APP_VERSION)
+                        cert_payload.setdefault("python_version", _py_version_str())
+                        rid = (st.session_state.get("run_ctx") or {}).get("run_id")
+                        if rid:
+                            cert_payload.setdefault("identity", {}).setdefault("run_id", rid)
+                
+                        # --- invariants + hash (final payload) ---
+                        _assert_cert_invariants(cert_payload)
+                        cert_payload.setdefault("integrity", {})
+                        cert_payload["integrity"]["content_hash"] = hash_json(cert_payload)
+                        full_hash = cert_payload["integrity"]["content_hash"]
+                
+                        # --- Write (prefer package) ---
+                        cert_path = None
+                        try:
+                            result = export_mod.write_cert_json(cert_payload)
+                            cert_path, full_hash = (result if isinstance(result,(list,tuple)) and len(result)>=2 else (result, full_hash))
+                        except Exception:
+                            outdir = Path(globals().get("CERTS_DIR","certs")); outdir.mkdir(parents=True, exist_ok=True)
+                
+                            def _safe(s: str) -> str:
+                                return (s or "").replace("/", "_").replace(" ", "_")
+                
+                            district_id_safe = _safe(district_id)
+                            safe_policy = _safe(policy_now)
+                
+                            ab_suffix = ""
+                            if cert_payload.get("ab_embedded"):
+                                pair = cert_payload.get("ab_pair_tag") or ""
+                                ab_suffix = "__AB" + (f"__{_safe(pair)}" if pair else "")
+                
+                            fname = f"overlap__{district_id_safe}__{safe_policy}{ab_suffix}__{full_hash[:12]}.json"
+                            p = outdir / fname
+                            tmp = p.with_suffix(".json.tmp")
+                            blob = _json.dumps(cert_payload, sort_keys=True, ensure_ascii=False, separators=(",",":")).encode("utf-8")
+                            with open(tmp,"wb") as f: f.write(blob); f.flush(); os.fsync(f.fileno())
+                            os.replace(tmp, p); cert_path = str(p)
+                
+                        # Cache + UI
+                        st.session_state["cert_payload"] = cert_payload
+                        st.session_state["last_cert_path"] = cert_path
+                        st.session_state["last_run_id"] = cert_payload["identity"]["run_id"]
+                        st.success(f"Cert written → `{cert_path}` · {full_hash[:12]}…")
+                        st.caption(f"Embedded A/B → {cert_payload.get('ab_pair_tag','A/B')}" if cert_payload.get("ab_embedded") else "Embedded A/B → —")
+                
+                        # --- Bundle (cert + extras) ---
+                        with st.expander("Bundle (cert + extras)"):
+                            extras = ["policy.json",
+                                      "reports/residual.json","reports/parity_report.json","reports/coverage_sampling.csv",
+                                      "logs/gallery.jsonl","logs/witnesses.jsonl"]
+                            if _rc.get("mode")=="projected(file)" and _rc.get("projector_filename"):
+                                extras.append(_rc.get("projector_filename"))
+                
+                            _disabled = _file_mode_invalid_now()
+                            _help_txt = "Disabled because projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π."
+                            if st.button("Build Cert Bundle",
+                                         key="build_cert_bundle_btn_final",
+                                         disabled=_disabled,
+                                         help=(_help_txt if _disabled else "Zip cert + selected artifacts")):
+                                try:
+                                    bp = build_cert_bundle(
+                                        district_id=district_id, policy_tag=policy_now,
+                                        cert_path=cert_path, content_hash=full_hash, extras=extras
+                                    )
+                                    st.success(f"Bundle ready → {bp}")
+                                    try:
+                                        with open(bp,"rb") as fz:
+                                            st.download_button("Download cert bundle", fz, file_name=os.path.basename(bp),
+                                                               key="dl_cert_bundle_zip_final")
+                                    except Exception: pass
+                                except Exception as e:
+                                    st.error(f"Bundle build failed: {e}")
+                
+                # ───────────────────────── Certs on disk (tail) with A/B badge ─────────────────────────
+                def _fmt_ts(ts):
+                    try: return datetime.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%SZ")
+                    except: return ""
+                
+                CERTS_DIR = Path(globals().get("CERTS_DIR","certs"))
+                CERTS_DIR.mkdir(parents=True, exist_ok=True)
+                
+                with st.expander("Certs on disk (last 5)", expanded=False):
+                    all_certs = sorted(CERTS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+                    st.caption(f"Found {len(all_certs)} certs in `{CERTS_DIR.as_posix()}`.")
+                    ab_only = st.checkbox("Show only certs with A/B embed", value=False, key="tail_ab_only_final")
+                
+                    shown = 0
+                    for p in all_certs:
+                        if shown >= 5: break
+                        try:
+                            info = _json.loads(p.read_text(encoding="utf-8"))
+                        except Exception:
+                            continue
+                        ident  = info.get("identity") or {}
+                        policy = info.get("policy") or {}
+                        tag    = policy.get("policy_tag") or "strict"
+                        has_ab = bool(info.get("ab_embedded") or ("ab_pair_tag" in info) or ("ab_pair_tag" in policy))
+                        if ab_only and not has_ab: continue
+                        ab_label = f" · [A/B: {info.get('ab_pair_tag') or policy.get('ab_pair_tag') or 'A/B'}]" if has_ab else ""
+                        st.write(f"• {_fmt_ts(p.stat().st_mtime)} · {ident.get('district_id','UNKNOWN')} · {tag} · {p.name}{ab_label}")
+                        shown += 1
+                
+                
+                
+                
+                ##-----------------------BUNDLE DONWLOAD SECTION------------------------------------------##
+                # Respect existing globals, with safe fallbacks
+                CERTS_DIR      = Path(globals().get("CERTS_DIR", "certs"))
+                LOGS_DIR       = Path(globals().get("LOGS_DIR", "logs"))
+                REPORTS_DIR    = Path(globals().get("REPORTS_DIR", "reports"))
+                BUNDLES_DIR    = Path(globals().get("BUNDLES_DIR", "bundles"))
+                PROJECTORS_DIR = Path(globals().get("PROJECTORS_DIR", "projectors"))
+                
+                SCHEMA_VERSION = globals().get("SCHEMA_VERSION", "1.0.0")
+                APP_VERSION    = globals().get("APP_VERSION", getattr(globals().get("hashes", object), "APP_VERSION", "v0.1-core"))
+                
+                # Ensure dirs we write to exist
+                for _d in (BUNDLES_DIR,):
+                    _d.mkdir(parents=True, exist_ok=True)
+                
+                # ───────────────────────── Utils (dedup) ─────────────────────────
+                def _utc_iso_z() -> str:
+                    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+                
+                def _ymd_hms_compact() -> str:
+                    return datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+                
+                def _sha256_file(p: Path) -> str:
+                    h = hashlib.sha256()
+                    with p.open("rb") as f:
+                        for chunk in iter(lambda: f.read(65536), b""):
+                            h.update(chunk)
+                    return h.hexdigest()
+                
+                def _rel(p: Path) -> str:
+                    try:
+                        return p.resolve().relative_to(Path.cwd().resolve()).as_posix()
+                    except Exception:
+                        return p.as_posix()
+                
+                def _read_json_safely(p: Path):
+                    try:
+                        with p.open("r", encoding="utf-8") as f:
+                            return json.load(f), None
+                    except Exception as e:
+                        return None, str(e)
+                
+                def _nonempty(p: Path) -> bool:
+                    return p.exists() and p.is_file() and p.stat().st_size > 0
+                
+                def _count_files(root: Path) -> int:
+                    if not root.exists(): return 0
+                    n = 0
+                    for _, _, files in os.walk(root): n += len(files)
+                    return n
+                
+                def generate_run_id_from_seed(seed: str, ts: str) -> str:
+                    return hashlib.sha256(f"{seed}|{ts}".encode("utf-8")).hexdigest()[:12]
+                
+                def _mkkey(ns: str, name: str) -> str:
+                    return f"{ns}__{name}"
+                
+                def _fmt_ts(ts_float: float) -> str:
+                    try:
+                        return datetime.fromtimestamp(ts_float, timezone.utc).strftime("%Y-%m-%d %H:%M:%SZ")
+                    except Exception:
+                        return ""
+                
+                def _py_version_str() -> str:
+                    return f"python-{platform.python_version()}"
+                
+                # ───────────────────────── Builders (inputs bundle & snapshot) ─────────────────────────
+                def build_inputs_bundle(*, inputs_block: dict, run_ctx: dict, district_id: str, run_id: str, policy_tag: str) -> str:
+                    """
+                    Creates a ZIP with manifest.json and input files.
+                    """
+                    app_ver = globals().get("APP_VERSION_STR", APP_VERSION)
+                    py_ver  = globals().get("PY_VERSION_STR", _py_version_str())
+                
+                    BUNDLES_DIR.mkdir(parents=True, exist_ok=True)
+                    fns = (inputs_block.get("filenames") or {})
+                    fnames = {
+                        "boundaries": fns.get("boundaries", st.session_state.get("fname_boundaries", "boundaries.json")),
+                        "C":          fns.get("C",          st.session_state.get("fname_cmap",       "cmap.json")),
+                        "H":          fns.get("H",          st.session_state.get("fname_h",          "H.json")),
+                        "U":          fns.get("U",          st.session_state.get("fname_shapes",     "shapes.json")),
+                        "projector":  fns.get("projector",  run_ctx.get("projector_filename", "") or ""),
+                    }
+                
+                    hashes_block = {
+                        "boundaries_hash": inputs_block.get("boundaries_hash", ""),
+                        "C_hash":          inputs_block.get("C_hash", ""),
+                        "H_hash":          inputs_block.get("H_hash", ""),
+                        "U_hash":          inputs_block.get("U_hash", ""),
+                        "shapes_hash":     inputs_block.get("shapes_hash", ""),
+                    }
+                
+                    manifest = {
+                        "schema_version": SCHEMA_VERSION,
+                        "run_id": run_id,
+                        "timestamp": _utc_iso_z(),
+                        "app_version": app_ver,
+                        "python_version": py_ver,
+                        "policy_tag": policy_tag,
+                        "hashes": hashes_block,
+                        "filenames": fnames,
+                        "projector": {
+                            "mode": run_ctx.get("mode", "strict"),
+                            "filename": run_ctx.get("projector_filename", ""),
+                            "projector_hash": run_ctx.get("projector_hash", ""),
+                        },
+                    }
+                
+                    zname = f"inputs__{district_id or 'UNKNOWN'}__{run_id}.zip"
+                    zpath = BUNDLES_DIR / zname
+                
+                    fd, tmp_name = tempfile.mkstemp(dir=BUNDLES_DIR, prefix=".tmp_inputs_", suffix=".zip")
+                    os.close(fd)
+                    tmp_path = Path(tmp_name)
+                
+                    try:
+                        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                            zf.writestr("manifest.json", json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+                            for _, fp in fnames.items():
+                                if not fp: continue
+                                p = Path(fp)
+                                if p.exists():
+                                    try:
+                                        arcname = p.resolve().relative_to(Path.cwd().resolve()).as_posix()
+                                    except Exception:
+                                        arcname = p.name
+                                    zf.write(str(p), arcname=arcname)
+                        try:
+                            os.replace(tmp_path, zpath)
+                        except OSError:
+                            shutil.move(str(tmp_path), str(zpath))
+                    finally:
+                        if tmp_path.exists():
+                            tmp_path.unlink(missing_ok=True)
+                
+                    return str(zpath)
+                
+                def build_everything_snapshot() -> str:
+                    """
+                    Builds a ZIP with certs, referenced projectors, logs, reports, metadata, and an index.
+                    """
+                    # Collect certs
+                    cert_files = sorted(CERTS_DIR.glob("*.json"))
+                    parsed, skipped = [], []
+                    for p in cert_files:
+                        data, err = _read_json_safely(p)
+                        if err or not isinstance(data, dict):
+                            skipped.append({"path": _rel(p), "reason": "JSON_PARSE_ERROR"})
+                            continue
+                        parsed.append((p, data))
+                    if not parsed:
+                        st.info("Nothing to snapshot yet (no parsed certs).")
+                        return ""
+                
+                    proj_refs, districts, index_rows, manifest_files = set(), set(), [], []
+                
+                    for p, cert in parsed:
+                        ident  = cert.get("identity") or {}
+                        pol    = cert.get("policy") or {}
+                        inputs = cert.get("inputs") or {}
+                
+                        did = ident.get("district_id") or "UNKNOWN"
+                        districts.add(str(did))
+                        manifest_files.append({
+                            "path": _rel(p),
+                            "sha256": _sha256_file(p),
+                            "size": p.stat().st_size,
+                        })
+                
+                        pj_fname = pol.get("projector_filename", "") or ""
+                        if isinstance(pj_fname, str) and pj_fname.strip():
+                            proj_refs.add(pj_fname.strip())
+                
+                        # prefer flat hashes, fall back to nested
+                        hashes_flat   = {k: inputs.get(k) for k in ("boundaries_hash","C_hash","H_hash","U_hash")}
+                        hashes_nested = inputs.get("hashes") or {}
+                        def _hx(k): return hashes_flat.get(k) or hashes_nested.get(k) or ""
+                
+                        index_rows.append([
+                            _rel(p),
+                            (cert.get("integrity") or {}).get("content_hash", ""),
+                            pol.get("policy_tag", ""),
+                            did,
+                            ident.get("run_id", ""),
+                            ident.get("timestamp", ""),
+                            _hx("boundaries_hash"),
+                            _hx("C_hash"),
+                            _hx("H_hash"),
+                            _hx("U_hash"),
+                            str(pol.get("projector_hash", "") or ""),
+                            str(pol.get("projector_filename", "") or ""),
+                        ])
+                
+                    # Resolve projectors
+                    projectors, missing_projectors = [], []
+                    for pj in sorted(proj_refs):
+                        pj_path = Path(pj)
+                        if not pj_path.exists():
+                            alt = PROJECTORS_DIR / pj_path.name
+                            if alt.exists():
+                                pj_path = alt
+                            else:
+                                missing_projectors.append({"filename": _rel(pj_path), "referenced_by": "certs/* (various)"})
+                                continue
+                        projectors.append({"path": _rel(pj_path), "sha256": _sha256_file(pj_path), "size": pj_path.stat().st_size})
+                
+                    # Logs & reports that exist
+                    logs_list = []
+                    for name in ("gallery.jsonl", "witnesses.jsonl"):
+                        p = LOGS_DIR / name
+                        if _nonempty(p):
+                            logs_list.append({"path": _rel(p), "sha256": _sha256_file(p), "size": p.stat().st_size})
+                
+                    reports_list = []
+                    for rp in ("parity_report.json", "coverage_sampling.csv", "perturbation_sanity.csv", "fence_stress.csv"):
+                        p = REPORTS_DIR / rp
+                        if _nonempty(p):
+                            reports_list.append({"path": _rel(p), "sha256": _sha256_file(p), "size": p.stat().st_size})
+                
+                    app_ver = APP_VERSION
+                    py_ver  = _py_version_str()
+                    districts_sorted = sorted(districts)
+                
+                    manifest = {
+                        "schema_version": SCHEMA_VERSION,
+                        "bundle_kind": "everything-snapshot",
+                        "written_at_utc": _utc_iso_z(),
+                        "app_version": app_ver,
+                        "python_version": py_ver,
+                        "districts": districts_sorted,
+                        "counts": {
+                            "certs": len(manifest_files),
+                            "projectors": len(projectors),
+                            "logs": {
+                                "gallery_jsonl": int(any(x["path"].endswith("gallery.jsonl") for x in logs_list)),
+                                "witnesses_jsonl": int(any(x["path"].endswith("witnesses.jsonl") for x in logs_list)),
+                            },
+                            "reports": {
+                                "parity":   int(any(x["path"].endswith("parity_report.json") for x in reports_list)),
+                                "coverage": int(any(x["path"].endswith("coverage_sampling.csv") for x in reports_list)),
+                                "perturb":  int(any(x["path"].endswith("perturbation_sanity.csv") for x in reports_list)),
+                                "fence":    int(any(x["path"].endswith("fence_stress.csv") for x in reports_list)),
+                            }
+                        },
+                        "files": manifest_files,
+                        "projectors": projectors,
+                        "logs": logs_list,
+                        "reports": reports_list,
+                        "skipped": skipped,
+                        "missing_projectors": missing_projectors,
+                        "notes": "Certs are authoritative; only projectors referenced by any cert are included."
+                    }
+                
+                    # Build cert_index.csv text
+                    index_header = [
+                        "cert_path","content_hash","policy_tag","district_id","run_id","written_at_utc",
+                        "boundaries_hash","C_hash","H_hash","U_hash","projector_hash","projector_filename"
+                    ]
+                    fd, idx_tmp = tempfile.mkstemp(prefix=".tmp_cert_index_", suffix=".csv")
+                    os.close(fd)
+                    try:
+                        with open(idx_tmp, "w", newline="", encoding="utf-8") as tf:
+                            w = csv.writer(tf)
+                            w.writerow(index_header)
+                            w.writerows(index_rows)
+                        with open(idx_tmp, "r", encoding="utf-8") as tf:
+                            index_csv_text = tf.read()
+                    finally:
+                        try: os.remove(idx_tmp)
+                        except Exception: pass
+                
+                    # Create ZIP (atomic)
+                    tag   = next(iter(districts_sorted)) if len(districts_sorted) == 1 else "MULTI"
+                    zname = f"snapshot__{tag}__{_ymd_hms_compact()}.zip"
+                    zpath = BUNDLES_DIR / zname
+                    fd, tmpname = tempfile.mkstemp(dir=BUNDLES_DIR, prefix=".tmp_snapshot_", suffix=".zip")
+                    os.close(fd)
+                    tmpzip = Path(tmpname)
+                
+                    try:
+                        with zipfile.ZipFile(tmpzip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+                            zf.writestr("manifest.json", json.dumps(manifest, sort_keys=True, separators=(",", ":"), ensure_ascii=False))
+                            zf.writestr("cert_index.csv", index_csv_text)
+                            for f in manifest_files + projectors + logs_list + reports_list:
+                                p = Path(f["path"])
+                                if p.exists():
+                                    zf.write(p.as_posix(), arcname=f["path"])
+                        os.replace(tmpzip, zpath)
+                    finally:
+                        if tmpzip.exists():
+                            try: tmpzip.unlink()
+                            except Exception: pass
+                
+                    if len(index_rows) != manifest["counts"]["certs"]:
+                        st.warning("Index count does not match manifest cert count (investigate).")
+                    return str(zpath)
+                
+                # ───────────────────────── Flush / Resets (dedup) ─────────────────────────
+                def flush_workspace(*, delete_projectors: bool=False) -> dict:
+                    """
+                    Remove artifacts, reset session state, recreate empty dirs. Keeps inputs intact.
+                    """
+                    summary = {
+                        "when": _utc_iso_z(),
+                        "deleted_dirs": [],
+                        "recreated_dirs": [],
+                        "files_removed": 0,
+                        "token": "",
+                        "composite_cache_key_short": "",
+                    }
+                
+                    # Clear session state (idempotent)
+                    for k in (
+                        "_inputs_block", "_district_info", "run_ctx", "overlap_out", "overlap_H",
+                        "residual_tags", "ab_compare", "last_cert_path", "cert_payload",
+                        "last_run_id", "_gallery_keys", "_last_boundaries_hash",
+                        "_projector_cache", "_projector_cache_ab", "parity_pairs",
+                        "parity_last_report_pairs", "selftests_snapshot"
+                    ):
+                        st.session_state.pop(k, None)
+                
+                    # Remove dirs and recreate
+                    dirs = [CERTS_DIR, LOGS_DIR, REPORTS_DIR, BUNDLES_DIR]
+                    if delete_projectors:
+                        dirs.append(PROJECTORS_DIR)
+                
+                    removed_files_count = 0
+                    for d in dirs:
+                        if d.exists():
+                            removed_files_count += _count_files(d)
+                            shutil.rmtree(d)
+                        d.mkdir(parents=True, exist_ok=True)
+                        summary["deleted_dirs"].append(str(d))
+                        summary["recreated_dirs"].append(str(d))
+                    summary["files_removed"] = removed_files_count
+                
+                    # Generate new cache key and token
+                    ts = _utc_iso_z()
+                    salt = secrets.token_hex(2).upper()
+                    token = f"FLUSH-{ts}-{salt}"
+                    ckey = hashlib.sha256((ts + salt).encode("utf-8")).hexdigest()
+                
+                    st.session_state["_composite_cache_key"] = ckey
+                    st.session_state["_last_flush_token"] = token
+                    summary["token"] = token
+                    summary["composite_cache_key_short"] = ckey[:12]
+                    return summary
+                
+                def _soft_reset_before_overlap_local():
+                    ss = st.session_state
+                    for k in (
+                        "run_ctx","overlap_out","overlap_cfg","overlap_policy_label",
+                        "overlap_H","residual_tags","ab_compare",
+                        "cert_payload","last_cert_path","_last_cert_write_key",
+                        "_projector_cache","_projector_cache_ab"
+                    ):
+                        ss.pop(k, None)
+                
+                def _session_flush_run_cache():
+                    # Clear computed session keys only; do not touch disk
+                    if "_soft_reset_before_overlap" in globals():
+                        try:
+                            _soft_reset_before_overlap()  # type: ignore[name-defined]
+                        except Exception:
+                            _soft_reset_before_overlap_local()
+                    else:
+                        _soft_reset_before_overlap_local()
+                    # Bump nonce
+                    st.session_state["_fixture_nonce"] = int(st.session_state.get("_fixture_nonce", 0)) + 1
+                    # New cache key + token
+                    ts = _utc_iso_z()
+                    salt = secrets.token_hex(2).upper()
+                    token = f"RUN-FLUSH-{ts}-{salt}"
+                    ckey  = hashlib.sha256((ts + salt).encode("utf-8")).hexdigest()
+                    st.session_state["_composite_cache_key"] = ckey
+                    st.session_state["_last_flush_token"] = token
+                    return {"token": token, "ckey_short": ckey[:12]}
+                
+                def _full_flush_workspace(delete_projectors: bool = False):
+                    # Prefer app’s flush if available
+                    if "flush_workspace" in globals():
+                        try:
+                            return flush_workspace(delete_projectors=delete_projectors)  # type: ignore[name-defined]
+                        except Exception:
+                            pass
+                    return flush_workspace(delete_projectors=delete_projectors)
+                
+                # ───────────────────────── UI: Exports / Snapshot / Flush (dedup, namespaced) ─────────────────────────
+                EXPORTS_NS = "exports_v2"
+                
+                import os  
+                
+                with safe_expander("Exports", expanded=False):
+                    c1, c2, c3 = st.columns(3)
+                
+                    # ---- Snapshot ZIP ----
+                    with c1:
+                        if st.button("Build Snapshot ZIP", key=_mkkey(EXPORTS_NS, "btn_build_snapshot")):
+                            try:
+                                zp = build_everything_snapshot()
+                                if zp:
+                                    st.success(f"Snapshot ready → {zp}")
+                                    with open(zp, "rb") as fz:
+                                        st.download_button(
+                                            "Download snapshot.zip",
+                                            fz,
+                                            file_name=os.path.basename(zp),
+                                            key=_mkkey(EXPORTS_NS, "dl_snapshot_zip"),
+                                        )
+                            except Exception as e:
+                                st.error(f"Snapshot failed: {e}")
+                
+                    # ---- Inputs Bundle ----
+                    with c2:
+                        if st.button("Export Inputs Bundle", key=_mkkey(EXPORTS_NS, "btn_export_inputs")):
+                            try:
+                                ib = st.session_state.get("_inputs_block") or {}
+                                di = st.session_state.get("_district_info") or {}
+                                rc = st.session_state.get("run_ctx") or {}
+                                cert_cached = st.session_state.get("cert_payload")
+                
+                                district_id = di.get("district_id", "UNKNOWN")
+                                run_id = (cert_cached or {}).get("identity", {}).get("run_id") or st.session_state.get("last_run_id")
+                                if not run_id:
+                                    seed_str = "".join(ib.get(k, "") for k in ("boundaries_hash", "C_hash", "H_hash", "U_hash"))
+                                    ts = _utc_iso_z()
+                                    run_id = generate_run_id_from_seed(seed_str, ts)
+                                    st.session_state["last_run_id"] = run_id
+                
+                                policy_tag = st.session_state.get("overlap_policy_label") or rc.get("policy_tag") or "strict"
+                
+                                bp = build_inputs_bundle(
+                                    inputs_block=ib,
+                                    run_ctx=rc,
+                                    district_id=district_id,
+                                    run_id=run_id,
+                                    policy_tag=policy_tag,
+                                )
+                                st.session_state["last_inputs_bundle_path"] = bp
+                                st.success(f"Inputs bundle ready → {bp}")
+                                with open(bp, "rb") as fz:
+                                    st.download_button(
+                                        "Download inputs bundle",
+                                        fz,
+                                        file_name=os.path.basename(bp),
+                                        key=_mkkey(EXPORTS_NS, "dl_inputs_bundle"),
+                                    )
+                            except Exception as e:
+                                st.error(f"Export Inputs Bundle failed: {e}")
+                
+                    # ---- Flushes ----
+                    with c3:
+                        st.caption("Flush / Reset")
+                        if st.button(
+                            "Quick Reset (session only)",
+                            key=_mkkey(EXPORTS_NS, "btn_quick_reset_session"),
+                            help="Clears computed session data, bumps nonce; does not touch files.",
+                        ):
+                            out = _session_flush_run_cache()
+                            st.success(f"Run cache flushed · token={out['token']} · key={out['ckey_short']}")
+                
+                        inc_pj = st.checkbox(
+                            "Also remove projectors (full flush)",
+                            value=False,
+                            key=_mkkey(EXPORTS_NS, "flush_inc_pj"),
+                        )
+                        confirm = st.checkbox(
+                            "I understand this deletes files on disk",
+                            value=False,
+                            key=_mkkey(EXPORTS_NS, "ff_confirm"),
+                        )
+                        if st.button(
+                            "Full Flush (certs/logs/reports/bundles)",
+                            key=_mkkey(EXPORTS_NS, "btn_full_flush"),
+                            disabled=not confirm,
+                            help="Deletes persisted outputs; keeps inputs. Bumps nonce & resets session.",
+                        ):
+                            try:
+                                info = _full_flush_workspace(delete_projectors=inc_pj)
+                                st.success(f"Workspace flushed · {info['token']}")
+                                st.caption(f"New cache key: `{info['composite_cache_key_short']}`")
+                                with st.expander("Flush details"):
+                                    st.json(info)
+                            except Exception as e:
+                                st.error(f"Flush failed: {e}")
 
 
 
