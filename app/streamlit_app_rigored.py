@@ -2115,75 +2115,178 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
             ]
             _atomic_write_csv(PERTURB_OUT_PATH, header, rows, meta)
             st.success(f"Perturbation sanity saved → {PERTURB_OUT_PATH}")
-    
-            # ── Fence stress (optional)
+            # ---- JSON companion for Perturbation Sanity (robust) ----
+            try:
+                rc_ps = require_fresh_run_ctx()
+            except Exception:
+                rc_ps = st.session_state.get("run_ctx") or {}
+            
+            policy_ps = _policy_block_from_run_ctx(rc_ps) if "_policy_block_from_run_ctx" in globals() else {
+                "policy_tag": rc_ps.get("policy_tag","strict"),
+                "projector_mode": ("strict" if rc_ps.get("mode") == "strict" else (rc_ps.get("mode") or "")),
+                "projector_filename": rc_ps.get("projector_filename",""),
+                "projector_hash": rc_ps.get("projector_hash",""),
+            }
+            inputs_ps = _inputs_block_from_session() if "_inputs_block_from_session" in globals() else {
+                "hashes": {
+                    "boundaries_hash": rc_ps.get("boundaries_hash",""),
+                    "C_hash": rc_ps.get("C_hash",""),
+                    "H_hash": rc_ps.get("H_hash",""),
+                    "U_hash": rc_ps.get("U_hash",""),
+                    "shapes_hash": rc_ps.get("shapes_hash",""),
+                },
+                "dims": {"n2": int(n2), "n3": int(n3)},
+                "lane_mask_k3": rc_ps.get("lane_mask_k3", []),
+            }
+            
+            # Rebuild JSON results from your CSV rows (flip_id, guard_tripped, expected_guard, note)
+            matches = 0; mismatches = 0
+            results_ps = []
+            for row in rows:
+                flip_id        = int(row[0]) if len(row) > 0 else -1
+                guard_tripped  = int(row[1]) if len(row) > 1 else 0
+                expected_guard = str(row[2]) if len(row) > 2 else "grammar"
+                note           = str(row[3]) if len(row) > 3 else ""
+                ok = bool(guard_tripped)  # your current logic expects a drift
+                matches    += int(ok)
+                mismatches += int(not ok)
+                results_ps.append({
+                    "flip_id": flip_id,
+                    "guard_tripped": ("grammar" if guard_tripped else "none"),
+                    "expected_guard": expected_guard,
+                    "note": note,
+                })
+            
+            perturb_json = {
+                "schema_version": SCHEMA_VERSION,
+                "written_at_utc": _utc_iso_z(),
+                "app_version": APP_VERSION,
+                "identity": {
+                    "run_id": (rc_ps.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
+                    "district_id": rc_ps.get("district_id","D3"),
+                    "fixture_nonce": rc_ps.get("fixture_nonce",""),
+                },
+                "policy": policy_ps,
+                "inputs": inputs_ps,
+                "anchor": {
+                    "id": rc_ps.get("fixture_nonce", ""),
+                    "lane_mask_k3": rc_ps.get("lane_mask_k3") or [],
+                },
+                "run": {
+                    "max_flips": int(max_flips),
+                    "flip_domain": "lanes-only",
+                    "ker_guard": "enforced",
+                    "seed": str(seed_txt),
+                },
+                "results": results_ps,
+                "summary": {"matches": matches, "mismatches": mismatches},
+                "integrity": {"content_hash": ""},
+            }
+            perturb_json["integrity"]["content_hash"] = _hash_json(perturb_json)
+            
+            # Write to disk (content-hashed name)
+            try:
+                h12 = perturb_json["integrity"]["content_hash"][:12]
+                pert_json_name = f"perturbation_sanity__{h12}.json"
+                pert_json_path = REPORTS_DIR / pert_json_name
+                _atomic_write_json(pert_json_path, perturb_json)
+                st.session_state.setdefault("last_report_paths", {})["perturbation_sanity"] = {
+                    "csv": str(PERTURB_OUT_PATH), "json": str(pert_json_path)
+                }
+            except Exception as e:
+                st.info(f"(Could not write perturbation JSON: {e})")
+            
+            # Always offer in-memory JSON download
+            try:
+                import io as _io, json as _json
+                mem = _io.BytesIO(_json.dumps(perturb_json, ensure_ascii=False, indent=2).encode("utf-8"))
+                st.download_button(
+                    "Download perturbation_sanity.json",
+                    mem,
+                    file_name=(pert_json_name if 'pert_json_name' in locals() else "perturbation_sanity.json"),
+                    key=f"dl_ps_json_{perturb_json['integrity']['content_hash'][:8]}",
+                )
+            except Exception as e:
+                st.info(f"(Could not build perturbation JSON download: {e})")
+
+                # --- Fence stress: perturb U (carrier) if hooks available; otherwise fall back to H2 tweak
             if run_fence:
-                rows_fs = []
-                notes = []
-    
+                # Small helpers
+                def _strict_eq_for(boundaries_obj, cmap_obj, H_obj):
+                    d3 = (boundaries_obj.blocks.__root__.get("3") or [])
+                    H2 = (H_obj.blocks.__root__.get("2") or [])
+                    C3 = (cmap_obj.blocks.__root__.get("3") or [])
+                    return int(_is_zero(_strict_R3(H2, d3, C3)))
+            
+                rows_fs: list[list[str]] = []
+                notes: list[str] = []
+            
                 if HAS_U_HOOKS:
+                    # Read base carrier mask
                     U_mask = get_carrier_mask(U0)  # type: ignore[name-defined]
                     rU = len(U_mask); cU = len(U_mask[0]) if (U_mask and U_mask[0]) else 0
-    
+            
                     def _count1(M): return sum(int(x & 1) for row in (M or []) for x in row)
-    
+            
+                    # U_shrink (border erosion)
                     U_shrink = _copy_mat(U_mask)
                     if rU and cU:
                         for j in range(cU): U_shrink[0][j] = 0; U_shrink[-1][j] = 0
                         for i in range(rU): U_shrink[i][0] = 0; U_shrink[i][-1] = 0
-    
+            
+                    # U_plus (border dilation)
                     U_plus = _copy_mat(U_mask)
                     if rU and cU:
                         for j in range(cU): U_plus[0][j]  = 1; U_plus[-1][j] = 1
                         for i in range(rU): U_plus[i][0]  = 1; U_plus[i][-1] = 1
-    
-                    U_shrink_obj = set_carrier_mask(json.loads(json.dumps(U0.dict() if hasattr(U0,"dict") else {"blocks": {}})), U_shrink)  # type: ignore[name-defined]
-                    U_plus_obj   = set_carrier_mask(json.loads(json.dumps(U0.dict() if hasattr(U0,"dict") else {"blocks": {}})), U_plus)    # type: ignore[name-defined]
+            
+                    # Build shapes variants (no global mutation)
+                    U_shrink_obj = set_carrier_mask(json.loads(json.dumps(U0.dict() if hasattr(U0, "dict") else {"blocks": {}})), U_shrink)  # type: ignore[name-defined]
+                    U_plus_obj   = set_carrier_mask(json.loads(json.dumps(U0.dict() if hasattr(U0, "dict") else {"blocks": {}})), U_plus)    # type: ignore[name-defined]
                     if not hasattr(U_shrink_obj, "blocks"):
                         U_shrink_obj = io.parse_shapes(U_shrink_obj)
                     if not hasattr(U_plus_obj, "blocks"):
                         U_plus_obj = io.parse_shapes(U_plus_obj)
-    
-                    def _strict_eq_for(boundaries_obj, cmap_obj, H_obj):
-                        d3 = (boundaries_obj.blocks.__root__.get("3") or [])
-                        H2 = (H_obj.blocks.__root__.get("2") or [])
-                        C3 = (cmap_obj.blocks.__root__.get("3") or [])
-                        return int(_is_zero(_strict_R3(H2, d3, C3)))
-    
+            
+                    # Strict pass_vec = [k2, k3]; k2 assumed 1 under strict; k3 from strict eq
                     eq_shrink = _strict_eq_for(B0, C0, H0)
                     eq_plus   = _strict_eq_for(B0, C0, H0)
-    
+            
                     rows_fs.append(["U_shrink", f"[1,{eq_shrink}]", f"|U|:{_count1(U_mask)}→{_count1(U_shrink)}"])
                     rows_fs.append(["U_plus",   f"[1,{eq_plus}]",   f"|U|:{_count1(U_mask)}→{_count1(U_plus)}"])
                     notes.append("fence target = U (carrier); H fixed")
                 else:
+                    # Fallback: H2 shrink/plus (keeps old behavior if no U hooks)
                     H2 = (H0.blocks.__root__.get("2") or [])
                     H2_shrink = _copy_mat(H2[:-1]) if len(H2) >= 1 else _copy_mat(H2)
                     if H2 and H2[0]:
-                        zero_row = [0]*len(H2[0]); H2_plus = _copy_mat(H2) + [zero_row]
+                        zero_row = [0] * len(H2[0]); H2_plus = _copy_mat(H2) + [zero_row]
                     else:
                         H2_plus = _copy_mat(H2)
-    
-                    H_shrink = json.loads(json.dumps(H0.dict() if hasattr(H0,"dict") else {"blocks": {}}))
-                    H_plus   = json.loads(json.dumps(H0.dict() if hasattr(H0,"dict") else {"blocks": {}}))
+            
+                    H_shrink = json.loads(json.dumps(H0.dict() if hasattr(H0, "dict") else {"blocks": {}}))
+                    H_plus   = json.loads(json.dumps(H0.dict() if hasattr(H0, "dict") else {"blocks": {}}))
                     H_shrink.setdefault("blocks", {})["2"] = H2_shrink
                     H_plus.setdefault("blocks", {})["2"]   = H2_plus
                     H_shrink = io.parse_cmap(H_shrink)
                     H_plus   = io.parse_cmap(H_plus)
-    
+            
                     C3 = (C0.blocks.__root__.get("3") or [])
                     d3 = (B0.blocks.__root__.get("3") or [])
+            
+                    # R3 = H2@d3 ^ (C3 ^ I3) — shapes may differ; guard in helpers handles mismatches.
                     R3_shrink = _strict_R3(H2_shrink, d3, C3)
                     R3_plus   = _strict_R3(H2_plus,   d3, C3)
                     eq_shrink = int(_is_zero(R3_shrink))
                     eq_plus   = int(_is_zero(R3_plus))
-    
+            
                     rows_fs = [
                         ["H2_shrink (fallback)", f"[1,{eq_shrink}]", "drop last H2 row"],
                         ["H2_plus (fallback)",   f"[1,{eq_plus}]",   "append zero row to H2"],
                     ]
                     notes.append("fallback: fence target = H2 (no U hooks found)")
-    
+            
+                # --- Write CSV (3-col header)
                 fence_header = ["U_class", "pass_vec", "note"]
                 fence_meta = [
                     f"schema_version={SCHEMA_VERSION}",
@@ -2191,120 +2294,97 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     f"run_id={(st.session_state.get('run_ctx') or {}).get('run_id','')}",
                     f"app_version={APP_VERSION}",
                 ] + notes
-    
-                _atomic_write_csv(FENCE_OUT_PATH, fence_header, rows_fs, fence_meta)
-                st.success(f"Fence stress saved → {FENCE_OUT_PATH}")
-    
-            # Quick CSV downloads
-            try:
-                with open(PERTURB_OUT_PATH, "rb") as f:
-                    st.download_button("Download perturbation_sanity.csv", f, file_name="perturbation_sanity.csv", key="dl_ps_csv")
-            except Exception:
-                pass
-            if run_fence and FENCE_OUT_PATH.exists():
-                try:
-                    with open(FENCE_OUT_PATH, "rb") as f2:
-                        st.download_button("Download fence_stress.csv", f2, file_name="fence_stress.csv", key="dl_fence_csv")
-                except Exception:
-                    pass
-    
-        except Exception as e:
-            # ←← This closes the try: so the interpreter is NOT inside a try when it reaches Coverage.
-            st.error(f"Perturbation/Fence run failed: {e}")
-
             
-
-
-
-            # --- Fence stress: perturb U (carrier) if hooks available; otherwise fall back to H2 tweak
-            if run_fence:
-                # Prepare small helpers
-                def _strict_eq_for(boundaries_obj, cmap_obj, H_obj):
-                    d3 = (boundaries_obj.blocks.__root__.get("3") or [])
-                    H2 = (H_obj.blocks.__root__.get("2") or [])
-                    C3 = (cmap_obj.blocks.__root__.get("3") or [])
-                    return int(_is_zero(_strict_R3(H2, d3, C3)))
-
-                notes = []
-                rows_fs = []
-
-                if HAS_U_HOOKS:
-                    # Read base carrier mask
-                    U_mask = get_carrier_mask(U0)  # type: ignore[name-defined]
-                    rU = len(U_mask); cU = len(U_mask[0]) if (U_mask and U_mask[0]) else 0
-
-                    def _count1(M): return sum(int(x & 1) for row in (M or []) for x in row)
-
-                    # U_shrink: simple 1-cell erosion on the border (best-effort)
-                    U_shrink = _copy_mat(U_mask)
-                    if rU and cU:
-                        for j in range(cU): U_shrink[0][j] = 0; U_shrink[-1][j] = 0
-                        for i in range(rU): U_shrink[i][0] = 0; U_shrink[i][-1] = 0
-
-                    # U_plus: simple 1-cell dilation on the border (best-effort)
-                    U_plus = _copy_mat(U_mask)
-                    if rU and cU:
-                        for j in range(cU): U_plus[0][j]  = 1; U_plus[-1][j] = 1
-                        for i in range(rU): U_plus[i][0]  = 1; U_plus[i][-1] = 1
-
-                    # Build shapes variants (without touching global state)
-                    U_shrink_obj = set_carrier_mask(json.loads(json.dumps(U0.dict() if hasattr(U0,"dict") else {"blocks": {}})), U_shrink)  # type: ignore[name-defined]
-                    U_plus_obj   = set_carrier_mask(json.loads(json.dumps(U0.dict() if hasattr(U0,"dict") else {"blocks": {}})), U_plus)    # type: ignore[name-defined]
-                    # Re-parse to your shapes type if set_carrier_mask returned dicts
-                    if not hasattr(U_shrink_obj, "blocks"):
-                        U_shrink_obj = io.parse_shapes(U_shrink_obj)
-                    if not hasattr(U_plus_obj, "blocks"):
-                        U_plus_obj = io.parse_shapes(U_plus_obj)
-
-                    # Run strict eq (policy constant)
-                    eq_shrink = _strict_eq_for(B0, C0, H0)
-                    eq_plus   = _strict_eq_for(B0, C0, H0)
-
-                    rows_fs.append(["U_shrink", f"[1,{eq_shrink}]", f"|U|:{_count1(U_mask)}→{_count1(U_shrink)}"])
-                    rows_fs.append(["U_plus",   f"[1,{eq_plus}]",   f"|U|:{_count1(U_mask)}→{_count1(U_plus)}"])
-                    notes.append("fence target = U (carrier); H fixed")
-                else:
-                    # Fallback to previous H2 perturbation (keeps behavior if U hooks are absent)
-                    H2 = (H0.blocks.__root__.get("2") or [])
-                    H2_shrink = _copy_mat(H2[:-1]) if len(H2) >= 1 else _copy_mat(H2)
-                    if H2 and H2[0]:
-                        zero_row = [0]*len(H2[0]); H2_plus = _copy_mat(H2) + [zero_row]
-                    else:
-                        H2_plus = _copy_mat(H2)
-
-                    H_shrink = json.loads(json.dumps(H0.dict() if hasattr(H0,"dict") else {"blocks": {}}))
-                    H_plus   = json.loads(json.dumps(H0.dict() if hasattr(H0,"dict") else {"blocks": {}}))
-                    H_shrink.setdefault("blocks", {})["2"] = H2_shrink
-                    H_plus.setdefault("blocks", {})["2"]   = H2_plus
-                    H_shrink = io.parse_cmap(H_shrink)
-                    H_plus   = io.parse_cmap(H_plus)
-
-                    C3 = (C0.blocks.__root__.get("3") or [])
-                    d3 = (B0.blocks.__root__.get("3") or [])
-                    R3_shrink = _strict_R3(H2_shrink, d3, C3)
-                    R3_plus   = _strict_R3(H2_plus,   d3, C3)
-                    eq_shrink = int(_is_zero(R3_shrink))
-                    eq_plus   = int(_is_zero(R3_plus))
-
-                    rows_fs = [
-                        ["H2_shrink (fallback)", f"[1,{eq_shrink}]", "drop last H2 row"],
-                        ["H2_plus (fallback)",   f"[1,{eq_plus}]",   "append zero row to H2"],
-                    ]
-                    notes.append("fallback: fence target = H2 (no U hooks found)")
-
-                # Write CSV (3d header)
-                fence_header = ["U_class", "pass_vec", "note"]
-                fence_meta = [
-                    f"schema_version={SCHEMA_VERSION}",
-                    f"saved_at={_utc_iso_z()}",
-                    f"run_id={(st.session_state.get('run_ctx') or {}).get('run_id','')}",
-                    f"app_version={APP_VERSION}",
-                ] + notes  # optional notes appended
-
                 _atomic_write_csv(FENCE_OUT_PATH, fence_header, rows_fs, fence_meta)
                 st.success(f"Fence stress saved → {FENCE_OUT_PATH}")
-                
-                                          # —— JSON payload for Fence Stress ——
+            
+                # ---- JSON companion (content-hashed filename + download)
+                try:
+                    try:
+                        rc_fs = require_fresh_run_ctx()
+                    except Exception:
+                        rc_fs = st.session_state.get("run_ctx") or {}
+            
+                    policy_fs = _policy_block_from_run_ctx(rc_fs) if "_policy_block_from_run_ctx" in globals() else {
+                        "policy_tag": rc_fs.get("policy_tag", "strict"),
+                        "projector_mode": ("strict" if rc_fs.get("mode") == "strict" else (rc_fs.get("mode") or "")),
+                        "projector_filename": rc_fs.get("projector_filename", ""),
+                        "projector_hash": rc_fs.get("projector_hash", ""),
+                    }
+                    inputs_fs = _inputs_block_from_session() if "_inputs_block_from_session" in globals() else {
+                        "hashes": {
+                            "boundaries_hash": rc_fs.get("boundaries_hash",""),
+                            "C_hash": rc_fs.get("C_hash",""),
+                            "H_hash": rc_fs.get("H_hash",""),
+                            "U_hash": rc_fs.get("U_hash",""),
+                            "shapes_hash": rc_fs.get("shapes_hash",""),
+                        },
+                        "dims": {"n2": int(n2), "n3": int(n3)},
+                        "lane_mask_k3": rc_fs.get("lane_mask_k3", []),
+                    }
+            
+                    # Map rows to JSON results
+                    results_fs_json = []
+                    for U_class, pass_vec, note in rows_fs:
+                        try:
+                            pv = pass_vec.strip("[]").split(",")
+                            k2b = bool(int(str(pv[0]).strip()))
+                            k3b = bool(int(str(pv[1]).strip()))
+                        except Exception:
+                            k2b = False; k3b = False
+                        results_fs_json.append({
+                            "U_class": str(U_class),
+                            "pass_vec": [k2b, k3b],
+                            "note": str(note),
+                        })
+            
+                    fence_json = {
+                        "schema_version": SCHEMA_VERSION,
+                        "written_at_utc": _utc_iso_z(),
+                        "app_version": APP_VERSION,
+                        "identity": {
+                            "run_id": (rc_fs.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
+                            "district_id": rc_fs.get("district_id", "D3"),
+                            "fixture_nonce": rc_fs.get("fixture_nonce", ""),
+                        },
+                        "policy": policy_fs,
+                        "inputs": inputs_fs,
+                        "exemplar": {
+                            "fixture_id": rc_fs.get("fixture_nonce",""),
+                            "lane_mask_k3": rc_fs.get("lane_mask_k3") or [],
+                        },
+                        "results": results_fs_json,
+                        "integrity": {"content_hash": ""},
+                    }
+                    fence_json["integrity"]["content_hash"] = _hash_json(fence_json)
+            
+                    h12 = fence_json["integrity"]["content_hash"][:12]
+                    fence_json_name = f"fence_stress__{h12}.json"
+                    fence_json_path = REPORTS_DIR / fence_json_name
+                    try:
+                        _atomic_write_json(fence_json_path, fence_json)
+                    except Exception as e:
+                        st.info(f"(Could not write fence JSON: {e})")
+            
+                    # In-memory download
+                    import io as _io, json as _json
+                    mem = _io.BytesIO(_json.dumps(fence_json, ensure_ascii=False, indent=2).encode("utf-8"))
+                    st.download_button(
+                        "Download fence_stress.json",
+                        mem,
+                        file_name=fence_json_name,
+                        key=f"dl_fence_json_{h12}",
+                    )
+            
+                    # Remember paths
+                    st.session_state.setdefault("last_report_paths", {})["fence_stress"] = {
+                        "csv": str(FENCE_OUT_PATH), "json": str(fence_json_path)
+                    }
+                except Exception as e:
+                    st.info(f"(Could not build fence JSON: {e})")
+            
+                    
+                # ---- JSON companion for Fence Stress (robust) ----
                 try:
                     rc_fs = require_fresh_run_ctx()
                 except Exception:
@@ -2316,7 +2396,6 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     "projector_filename": rc_fs.get("projector_filename",""),
                     "projector_hash": rc_fs.get("projector_hash",""),
                 }
-                
                 inputs_fs = _inputs_block_from_session() if "_inputs_block_from_session" in globals() else {
                     "hashes": {
                         "boundaries_hash": rc_fs.get("boundaries_hash",""),
@@ -2329,54 +2408,95 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     "lane_mask_k3": rc_fs.get("lane_mask_k3", []),
                 }
                 
-                # normalize rows into dicts
-                rows_fs_json = []
-                for cls, passvec, note in rows_fs:
-                    # passvec is like "[1,1]"
-                    k2k3 = [int(x) for x in passvec.strip("[]").split(",")] if isinstance(passvec, str) else list(passvec)
-                    rows_fs_json.append({
-                        "U_class": str(cls),
-                        "pass_vec": [int(k2k3[0]), int(k2k3[1])] if len(k2k3) == 2 else [0,0],
-                        "note": str(note),
+                # Map your fence rows to JSON results
+                results_fs_json = []
+                for r in rows_fs:
+                    # rows_fs items were like ["U_shrink", "[1,1]" or "[1,0]", "note..."]
+                    U_class = str(r[0]) if len(r) > 0 else "U_unknown"
+                    pass_vec = str(r[1]) if len(r) > 1 else "[?,?]"
+                    note     = str(r[2]) if len(r) > 2 else ""
+                    # normalize pass_vec into booleans if it's "[k2,k3]"
+                    try:
+                        pv = pass_vec.strip("[]").split(",")
+                        k2b = bool(int(str(pv[0]).strip()))
+                        k3b = bool(int(str(pv[1]).strip()))
+                    except Exception:
+                        k2b = False; k3b = False
+                    results_fs_json.append({
+                        "U_class": U_class,
+                        "pass_vec": [k2b, k3b],
+                        "note": note,
                     })
                 
-                payload_fs = {
+                fence_json = {
+                    "schema_version": SCHEMA_VERSION,
+                    "written_at_utc": _utc_iso_z(),
+                    "app_version": APP_VERSION,
                     "identity": {
-                        "run_id": (rc_fs.get("run_id") or ""),
+                        "run_id": (rc_fs.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
                         "district_id": rc_fs.get("district_id","D3"),
-                        "fixture_id": (inputs_fs.get("hashes",{}).get("C_hash","")[:8] + "+" +
-                                       inputs_fs.get("hashes",{}).get("H_hash","")[:8]),
+                        "fixture_nonce": rc_fs.get("fixture_nonce",""),
                     },
                     "policy": policy_fs,
                     "inputs": inputs_fs,
-                    "exemplar": {"lane_mask_k3": inputs_fs.get("lane_mask_k3", [])},
-                    "results": rows_fs_json,
-                    "summary": {"num_cases": len(rows_fs_json)},
-                    "integrity": {},
-                    "schema_version": FENCE_SCHEMA_VERSION,
-                    "app_version": APP_VER,
-                    "written_at_utc": _utc_iso_z() if " _utc_iso_z" in globals() else datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "exemplar": {
+                        "fixture_id": rc_fs.get("fixture_nonce",""),
+                        "lane_mask_k3": rc_fs.get("lane_mask_k3") or [],
+                    },
+                    "results": results_fs_json,
+                    "integrity": {"content_hash": ""},
                 }
-                payload_fs["integrity"]["content_hash"] = _hash_json(payload_fs)
-                hash12_fs = payload_fs["integrity"]["content_hash"][:12]
-                fs_json_name = f"fence_stress__{hash12_fs}.json"
-                fs_json_path = REPORTS_DIR / fs_json_name
+                fence_json["integrity"]["content_hash"] = _hash_json(fence_json)
                 
+                # Write to disk (content-hashed name)
                 try:
-                    _atomic_write_json(fs_json_path, payload_fs)
+                    h12 = fence_json["integrity"]["content_hash"][:12]
+                    fence_json_name = f"fence_stress__{h12}.json"
+                    fence_json_path = REPORTS_DIR / fence_json_name
+                    _atomic_write_json(fence_json_path, fence_json)
+                    st.session_state.setdefault("last_report_paths", {})["fence_stress"] = {
+                        "csv": str(FENCE_OUT_PATH), "json": str(fence_json_path)
+                    }
                 except Exception as e:
-                    st.warning(f"(Could not write fence JSON: {e})")
-
-
+                    st.info(f"(Could not write fence JSON: {e})")
                 
+                # In-memory JSON download
                 try:
                     import io as _io, json as _json
-                    mem = _io.BytesIO(_json.dumps(payload_fs, ensure_ascii=False, indent=2).encode("utf-8"))
-                    st.download_button("Download fence_stress.json", mem, file_name=fs_json_name, key=f"dl_fence_json_{hash12_fs}")
+                    mem = _io.BytesIO(_json.dumps(fence_json, ensure_ascii=False, indent=2).encode("utf-8"))
+                    st.download_button(
+                        "Download fence_stress.json",
+                        mem,
+                        file_name=(fence_json_name if 'fence_json_name' in locals() else "fence_stress.json"),
+                        key=f"dl_fence_json_{fence_json['integrity']['content_hash'][:8]}",
+                    )
+                except Exception as e:
+                    st.info(f"(Could not build fence JSON download: {e})")
+
+        
+                # Quick CSV downloads
+                try:
+                    with open(PERTURB_OUT_PATH, "rb") as f:
+                        st.download_button("Download perturbation_sanity.csv", f, file_name="perturbation_sanity.csv", key="dl_ps_csv")
                 except Exception:
                     pass
-                except Exception as e:
-                    st.error(f"Perturbation/Fence run failed: {e}")
+                if run_fence and FENCE_OUT_PATH.exists():
+                    try:
+                        with open(FENCE_OUT_PATH, "rb") as f2:
+                            st.download_button("Download fence_stress.csv", f2, file_name="fence_stress.csv", key="dl_fence_csv")
+                    except Exception:
+                        pass
+                    except Exception as e:
+                # ←← This closes the try: so the interpreter is NOT inside a try when it reaches Coverage.
+                st.error(f"Perturbation/Fence run failed: {e}")
+
+            
+
+
+
+        
+                
+                                          
                            
                                 
 
