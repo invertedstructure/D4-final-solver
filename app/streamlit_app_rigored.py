@@ -1723,6 +1723,8 @@ from pathlib import Path
 import os, tempfile, copy as _copy
 import json as _json, hashlib as _hash
 import streamlit as st
+import datetime as _dt
+import random as _random  # used by some callers; harmless here
 
 # 1) Schema/version + field (one source of truth for F1/F2/F3)
 SCHEMA_VERSION = "1.1.0"     # coverage_sampling, perturbation_sanity, fence_stress
@@ -1732,14 +1734,13 @@ FIELD          = "GF(2)"     # identity.field in all JSON payloads
 GUARD_ENUM = ["grid", "wiggle", "echo", "fence", "ker_guard", "none", "error"]
 
 # ===== Minimal safety shims (no-ops when real impls are loaded) =====
-import datetime as _dt
 
 if "APP_VERSION" not in globals():
     APP_VERSION = "v0.1-core"  # safe default; your app can overwrite
 
 if "_utc_iso_z" not in globals():
     def _utc_iso_z() -> str:
-        # 2025-10-13T07:42:12Z
+        # e.g., 2025-10-13T07:42:12Z
         return _dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
 # Session guards
@@ -1777,7 +1778,7 @@ if "io" not in globals():
     class _IO_STUB:
         @staticmethod
         def parse_cmap(d):      # minimal pydantic-like stub
-            class _X: 
+            class _X:
                 def __init__(self, d): self.blocks = type("B", (), {"__root__": d.get("blocks", {})})
                 def dict(self): return {"blocks": self.blocks.__root__}
             return _X(d or {"blocks": {}})
@@ -1796,6 +1797,16 @@ if "append_witness_row" not in globals():
         # no-op when witness system isn’t loaded
         return False
 
+# Ensure inputs_hashes exists (no recompute; copy from run_ctx/certs)
+if "_ensure_inputs_hashes" not in globals():
+    def _ensure_inputs_hashes():
+        rc = st.session_state.get("run_ctx") or {}
+        ih = st.session_state.get("inputs_hashes") or {}
+        keys = ["boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"]
+        merged = {k: (ih.get(k) or rc.get(k) or st.session_state.get(k) or "") for k in keys}
+        st.session_state["inputs_hashes"] = merged
+        return merged
+_ensure_inputs_hashes()
 
 # 3) Canonical content hashing (ints not bools; sorted keys; ASCII; no spaces)
 def _deep_intify(o):
@@ -1881,48 +1892,8 @@ def _inputs_block_from_session(strict_dims: tuple[int,int] | None = None) -> dic
 
     lane_mask = [int(x) & 1 for x in (rc.get("lane_mask_k3") or [])]
     return {"hashes": hashes, "dims": {"n2": n2, "n3": n3}, "lane_mask_k3": lane_mask}
-    # Normalize projector info in run_ctx
-try:
-    mode, sub, fname, pj_hash, pj_diag = _resolve_projector_from_rc()
-    rc_here = st.session_state.get("run_ctx") or {}
-    if pj_hash:
-        rc_here["projector_hash"] = pj_hash
-        if fname: rc_here["projector_filename"] = fname
-    st.session_state["run_ctx"] = rc_here
-except Exception as e:
-    # keep errors explicit; projected(file) will auto-disable via file_validation_failed()
-    st.caption(f"Π normalize: {e}")
 
-
-# 6) Policy block from run_ctx (strict / projected(auto|file))
-def _policy_block_from_run_ctx(rc: dict) -> dict:
-    mode = str(rc.get("mode", "strict"))
-    if mode == "strict":
-        return {
-            "policy_tag": "strict",
-            "projector_mode": "strict",
-            "projector_filename": "",
-            "projector_hash": "",
-        }
-    if mode == "projected(auto)":
-        diag_hash = _sha256_hex(
-            _json.dumps(rc.get("lane_mask_k3") or [], sort_keys=True, separators=(",", ":")).encode("utf-8")
-        )
-        return {
-            "policy_tag": "projected(columns@k=3,auto)",
-            "projector_mode": "auto",
-            "projector_filename": "",
-            "projector_hash": diag_hash,
-        }
-    # projected(file)
-    return {
-        "policy_tag": "projected(columns@k=3,file)",
-        "projector_mode": "file",
-        "projector_filename": rc.get("projector_filename", "") or "",
-        "projector_hash": rc.get("projector_hash", "") or "",
-    }
-
-# 7) Projector resolution helper (safe; errors are explicit)
+# Projector resolution helper (safe; errors are explicit)
 def _resolve_projector_from_rc():
     """
     Returns: (mode, submode, filename, projector_hash, projector_diag or None)
@@ -1953,7 +1924,48 @@ def _resolve_projector_from_rc():
 
     return mode, submode, filename, pj_hash, pj_diag
 
-# 8) Guard mapping wrapper (keep enums consistent, tolerant to missing impl)
+# Projector normalization helper (call right before building any policy_*)
+def normalize_projector_into_run_ctx():
+    try:
+        mode, sub, fname, pj_hash, pj_diag = _resolve_projector_from_rc()
+        rc_here = st.session_state.get("run_ctx") or {}
+        if pj_hash:
+            rc_here["projector_hash"] = pj_hash
+            if fname: rc_here["projector_filename"] = fname
+        st.session_state["run_ctx"] = rc_here
+    except Exception as e:
+        # keep errors explicit; projected(file) will auto-disable via file_validation_failed()
+        st.caption(f"Π normalize: {e}")
+
+# 6) Policy block from run_ctx (strict / projected(auto|file))
+def _policy_block_from_run_ctx(rc: dict) -> dict:
+    mode = str(rc.get("mode", "strict"))
+    if mode == "strict":
+        return {
+            "policy_tag": "strict",
+            "projector_mode": "strict",
+            "projector_filename": "",
+            "projector_hash": "",
+        }
+    if mode == "projected(auto)":
+        diag_hash = _sha256_hex(
+            _json.dumps(rc.get("lane_mask_k3") or [], sort_keys=True, separators=(",", ":")).encode("utf-8")
+        )
+        return {
+            "policy_tag": "projected(columns@k=3,auto)",
+            "projector_mode": "auto",
+            "projector_filename": "",
+            "projector_hash": diag_hash,
+        }
+    # projected(file)
+    return {
+        "policy_tag": "projected(columns@k=3,file)",
+        "projector_mode": "file",
+        "projector_filename": rc.get("projector_filename", "") or "",
+        "projector_hash": rc.get("projector_hash", "") or "",
+    }
+
+# 7) Guard mapping wrapper (keep enums consistent, tolerant to missing impl)
 def _first_tripped_guard(strict_out: dict) -> str:
     """
     Adapter to your existing guard checker. Must return a value in GUARD_ENUM.
@@ -1974,13 +1986,14 @@ def _first_tripped_guard(strict_out: dict) -> str:
         pass
     return "none"
 
-# 9) Small badge helper (UI polish)
+# 8) Small badge helper (UI polish)
 def _hash_badge(h: str) -> str:
     return f"wrote CSV + JSON ✓ · hash: {h[:12]}"
 
-# 10) Tiny linalg helpers for residuals (shape-tolerant XOR)
+# 9) Tiny linalg helpers for residuals (shape-tolerant XOR)
 def _xor_overlap(A: list[list[int]], B: list[list[int]]) -> list[list[int]]:
-    """XOR two matrices over their common (min) shape; return result with A's shape."""
+    """XOR two matrices over their common (min) shape.
+    If one input is empty, return a copy of the other (shape-preserving fallback)."""
     if not A and not B:
         return []
     if not A:
@@ -2012,8 +2025,6 @@ def _strict_R3(H2: list[list[int]], d3: list[list[int]], C3: list[list[int]]) ->
     C3p = _xor_overlap(C3, I3) if (C3 or I3) else []
     if C3p and len(M) != len(C3p):
         st.caption(f"⚠︎ R3 row mismatch: H2@d3={len(M)}×{len(M[0]) if (M and M[0]) else 0}, C3^I3={len(C3p)}×{len(C3p[0]) if (C3p and C3p[0]) else 0}")
-        if lane_mask_bits and len(lane_mask_bits) != int(n3):
-    st.caption(f"⚠︎ lane_mask_k3 has {len(lane_mask_bits)} bits but n₃={n3}")
     return _xor_overlap(M, C3p) if C3p else M
 
 def _projected_R3(R3_strict, P_active):
@@ -2082,16 +2093,13 @@ HAS_U_HOOKS = (
 )
 
 with st.expander("Reports: Perturbation Sanity & Fence Stress"):
-        # Ensure inputs_hashes exists (no recompute; copy from run_ctx/certs)
-    def _ensure_inputs_hashes():
-        rc = st.session_state.get("run_ctx") or {}
-        ih = st.session_state.get("inputs_hashes") or {}
-        keys = ["boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"]
-        merged = {k: (ih.get(k) or rc.get(k) or st.session_state.get(k) or "") for k in keys}
-        st.session_state["inputs_hashes"] = merged
-        return merged
+    # Ensure reports dir exists (defensive)
+    REPORTS_DIR = Path(st.session_state.get("REPORTS_DIR", "reports"))
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    _ensure_inputs_hashes()
+    # Ensure SSOT input hashes are present (no recompute; from helpers)
+    if "_ensure_inputs_hashes" in globals():
+        _ensure_inputs_hashes()
 
     # Freshness + SSOT guardrails
     try:
@@ -2101,7 +2109,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
         st.warning(str(e))
         st.stop()
 
-    # Inputs / policy
+    # Inputs / policy context
     H_used  = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
     P_active = rc.get("P_active") if str(rc.get("mode","")).startswith("projected") else None
     B0, C0, H0 = boundaries, cmap, H_used
@@ -2117,7 +2125,8 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
         max_flips = st.number_input("Perturbation: max flips", min_value=1, max_value=500, value=24, step=1, key="ps_max")
         seed_txt  = st.text_input("Seed (determines flip order)", value="ps-seed-1", key="ps_seed")
     with colB:
-        run_fence  = st.checkbox("Include Fence stress run (perturb U)", value=True, key="fence_on")
+        run_fence       = st.checkbox("Include Fence stress run (perturb U)", value=True, key="fence_on")
+        enable_witness  = st.checkbox("Write witness on mismatches", value=True, key="ps_witness_on")
 
     # Disable downstream actions if FILE Π invalid (global predicate)
     disabled = file_validation_failed()
@@ -2237,8 +2246,6 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 ok = (guard == expected_guard)
                 matches += int(ok)
                 mismatches += int(not ok)
-                enable_witness = st.checkbox("Write witness on mismatches", value=True, key="ps_witness_on")
-
 
                 # Optional witness on drift (minimal)
                 witness_written = False
@@ -2255,7 +2262,6 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                             witness_written = True
                         except Exception:
                             witness_written = False
-
 
                 ps_results.append({
                     "flip_id": int(k),
@@ -2274,7 +2280,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 })
 
             # Write Perturbation CSV
-            PERTURB_OUT_PATH = Path(st.session_state.get("REPORTS_DIR", "reports")) / "perturbation_sanity.csv"
+            PERTURB_OUT_PATH = REPORTS_DIR / "perturbation_sanity.csv"
             _atomic_write_csv(
                 PERTURB_OUT_PATH,
                 header=["flip_id", "guard_tripped", "expected_guard", "note"],
@@ -2299,8 +2305,17 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
             except Exception:
                 rc_ps = st.session_state.get("run_ctx") or {}
 
+            # Normalize Π info into run_ctx just before policy build
+            if "normalize_projector_into_run_ctx" in globals():
+                normalize_projector_into_run_ctx()
+
             policy_ps = _policy_block_from_run_ctx(rc_ps)
             inputs_ps = _inputs_block_from_session(strict_dims=(n2, n3))
+
+            # lane-mask vs n3 heads-up
+            lm_bits_ps = "".join("1" if int(x) else "0" for x in inputs_ps.get("lane_mask_k3", []))
+            if lm_bits_ps and len(lm_bits_ps) != int(n3):
+                st.caption(f"⚠︎ lane_mask_k3 has {len(lm_bits_ps)} bits but n₃={n3}")
 
             perturb_json = {
                 "schema_version": SCHEMA_VERSION,
@@ -2341,8 +2356,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
             try:
                 h12 = perturb_json["integrity"]["content_hash"][:12]
                 h8  = perturb_json["integrity"]["content_hash"][:8]
-                pert_json_path = (Path(st.session_state.get("REPORTS_DIR", "reports")) /
-                                  f"perturbation_sanity__{h12}.json")
+                pert_json_path = REPORTS_DIR / f"perturbation_sanity__{h12}.json"
                 _atomic_write_json(pert_json_path, perturb_json)
                 st.session_state.setdefault("last_report_paths", {})["perturbation_sanity"] = {
                     "csv": str(PERTURB_OUT_PATH), "json": str(pert_json_path)
@@ -2375,7 +2389,6 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 eq_base = int((not R3_base) or all(all((x & 1) == 0 for x in row) for row in R3_base))
                 rows_fs.append(["U_min", f"[1,{eq_base}]", "baseline"])
 
-                # Variants
                 if HAS_U_HOOKS:
                     # Carrier mask mutate
                     U_mask = get_carrier_mask(U0)  # type: ignore[name-defined]
@@ -2393,28 +2406,9 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                         for j in range(cU): U_plus[0][j]  = 1; U_plus[-1][j] = 1
                         for i in range(rU): U_plus[i][0]  = 1; U_plus[i][-1] = 1
 
-                    # NB: if overlap gates depend on U in your pipeline, re-run them here.
-                    # In this minimal variant, we only record deltas and keep H fixed.
+                    # Minimal semantics: record deltas; fence outcome may remain unchanged
                     eq_shrink = eq_base
                     eq_plus   = eq_base
-                    # After computing eq_base, eq_shrink, eq_plus ...
-                    def _unchanged_note(eq_before, eq_after):
-                        return "H2-row change only; fence unchanged" if int(eq_before) == int(eq_after) else ""
-                    
-                    # When appending H2_shrink / H2_plus rows:
-                    rows_fs.append([
-                        "H2_shrink",
-                        f"[1,{eq_shrink}]",
-                        _json.dumps({"delta_H2":{"rows_before": len(H2), "rows_after": len(H2_shrink)},
-                                     "note": _unchanged_note(eq_base, eq_shrink)}, separators=(",", ":"))
-                    ])
-                    rows_fs.append([
-                        "H2_plus",
-                        f"[1,{eq_plus}]",
-                        _json.dumps({"delta_H2":{"rows_before": len(H2), "rows_after": len(H2_plus)},
-                                     "note": _unchanged_note(eq_base, eq_plus)}, separators=(",", ":"))
-                    ])
-
 
                     rows_fs.append([
                         "U_shrink",
@@ -2450,13 +2444,24 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     eq_shrink = int((not R3_shrink) or all(all((x & 1) == 0 for x in row) for row in R3_shrink))
                     eq_plus   = int((not R3_plus)   or all(all((x & 1) == 0 for x in row) for row in R3_plus))
 
-                    rows_fs.append(["H2_shrink", f"[1,{eq_shrink}]",
-                                    _json.dumps({"delta_H2":{"rows_before": len(H2), "rows_after": len(H2_shrink)}}, separators=(",", ":"))])
-                    rows_fs.append(["H2_plus",   f"[1,{eq_plus}]",
-                                    _json.dumps({"delta_H2":{"rows_before": len(H2), "rows_after": len(H2_plus)}}, separators=(",", ":"))])
+                    def _unchanged_note(eq_before, eq_after):
+                        return "H2-row change only; fence unchanged" if int(eq_before) == int(eq_after) else ""
+
+                    rows_fs.append([
+                        "H2_shrink",
+                        f"[1,{eq_shrink}]",
+                        _json.dumps({"delta_H2":{"rows_before": len(H2), "rows_after": len(H2_shrink)},
+                                     "note": _unchanged_note(eq_base, eq_shrink)}, separators=(",", ":"))
+                    ])
+                    rows_fs.append([
+                        "H2_plus",
+                        f"[1,{eq_plus}]",
+                        _json.dumps({"delta_H2":{"rows_before": len(H2), "rows_after": len(H2_plus)},
+                                     "note": _unchanged_note(eq_base, eq_plus)}, separators=(",", ":"))
+                    ])
 
                 # Fence CSV
-                FENCE_OUT_PATH = Path(st.session_state.get("REPORTS_DIR", "reports")) / "fence_stress.csv"
+                FENCE_OUT_PATH = REPORTS_DIR / "fence_stress.csv"
                 fence_meta = [
                     f"schema_version={SCHEMA_VERSION}",
                     f"saved_at={_utc_iso_z()}",
@@ -2475,10 +2480,13 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 except Exception:
                     rc_fs = st.session_state.get("run_ctx") or {}
 
+                # Normalize Π info into run_ctx just before policy build
+                if "normalize_projector_into_run_ctx" in globals():
+                    normalize_projector_into_run_ctx()
+
                 policy_fs = _policy_block_from_run_ctx(rc_fs)
                 inputs_fs = _inputs_block_from_session(strict_dims=(n2, n3))
 
-                # Map CSV rows to JSON results (and try to decode delta_* objects from note where present)
                 results_fs_json = []
                 for r in rows_fs:
                     U_class = str(r[0]) if len(r) > 0 else "U_unknown"
@@ -2530,8 +2538,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 try:
                     h12 = fence_json["integrity"]["content_hash"][:12]
                     h8  = fence_json["integrity"]["content_hash"][:8]
-                    fence_json_path = (Path(st.session_state.get("REPORTS_DIR", "reports")) /
-                                       f"fence_stress__{h12}.json")
+                    fence_json_path = REPORTS_DIR / f"fence_stress__{h12}.json"
                     _atomic_write_json(fence_json_path, fence_json)
                     st.session_state.setdefault("last_report_paths", {})["fence_stress"] = {
                         "csv": str(FENCE_OUT_PATH), "json": str(fence_json_path)
@@ -2615,23 +2622,25 @@ if "_in_district_guess" not in globals():
             return 0
 
 
-
 # =============================== Coverage Sampling (non-blocking) ==============================
 # Standalone: no open try/except should be above this line.
-# -- Ensure REPORTS_DIR exists for coverage block (defensive bootstrap) --
 from pathlib import Path
 
+# Ensure REPORTS_DIR exists for coverage block (defensive bootstrap)
 if "REPORTS_DIR" not in globals() or REPORTS_DIR is None:
     REPORTS_DIR = Path("reports")
 else:
     REPORTS_DIR = Path(REPORTS_DIR)
-
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 COVERAGE_CSV_PATH = REPORTS_DIR / "coverage_sampling.csv"
 COVERAGE_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 with st.expander("Coverage Sampling"):
+    # Ensure SSOT input hashes are present (no recompute)
+    if "_ensure_inputs_hashes" in globals():
+        _ensure_inputs_hashes()
+
     # Freshness — do not stop the render if missing
     rc = None
     try:
@@ -2739,15 +2748,6 @@ with st.expander("Coverage Sampling"):
                     st.dataframe(preview, use_container_width=True, hide_index=True)
                 except Exception:
                     pass
-                    # Quick coherence heads-up
-                if inputs_ps.get("lane_mask_k3"):
-                    lm_bits = "".join("1" if int(x) else "0" for x in inputs_ps["lane_mask_k3"])
-                    if len(lm_bits) != int(n3):
-                        st.caption(f"⚠︎ lane_mask_k3 has {len(lm_bits)} bits but n₃={n3}")
-                
-                # (Already echoing at top-level) keep:
-                #   "lane_mask_k3": inputs_*["lane_mask_k3"]
-
 
                 # Build JSON payload (1.1.0)
                 try:
@@ -2755,8 +2755,17 @@ with st.expander("Coverage Sampling"):
                 except Exception:
                     rc_cov = st.session_state.get("run_ctx") or {}
 
+                # Normalize Π info into run_ctx just before policy build
+                if "normalize_projector_into_run_ctx" in globals():
+                    normalize_projector_into_run_ctx()
+
                 policy_cov = _policy_block_from_run_ctx(rc_cov)
                 inputs_cov = _inputs_block_from_session((int(n2), int(n3)))
+
+                # Quick coherence heads-up (lane_mask vs n3)
+                lm_bits_cov = "".join("1" if int(x) else "0" for x in inputs_cov.get("lane_mask_k3", []))
+                if lm_bits_cov and len(lm_bits_cov) != int(n3):
+                    st.caption(f"⚠︎ lane_mask_k3 has {len(lm_bits_cov)} bits but n₃={n3}")
 
                 known_signatures = (rc_cov.get("known_signatures") or [])
                 residual_method = "R3 strict vs R3·Π (lanes/ker/mixed)"
@@ -2809,6 +2818,7 @@ with st.expander("Coverage Sampling"):
                     "integrity": {"content_hash": ""},
                 }
 
+                # Lightweight self-check
                 def _coverage_self_check(p):
                     problems = []
                     if "lane_mask_k3" not in p: problems.append("lane_mask_k3 missing")
@@ -2819,11 +2829,9 @@ with st.expander("Coverage Sampling"):
                         if k not in summ: problems.append(f"summary.{k} missing")
                     if not p.get("integrity",{}).get("content_hash"): problems.append("integrity.content_hash missing")
                     return problems
-                
                 issues = _coverage_self_check(payload_cov)
                 if issues:
                     st.warning("Coverage JSON minor issues: " + "; ".join(issues))
-
 
                 # Integrity (stable)
                 payload_cov["integrity"]["content_hash"] = _hash_json(payload_cov)
@@ -2870,7 +2878,6 @@ with st.expander("Coverage Sampling"):
 
         except Exception as e:
             st.error(f"Coverage sampling failed: {e}")
-
 
            
 
