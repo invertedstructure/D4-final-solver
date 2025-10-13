@@ -1753,6 +1753,7 @@ if "require_fresh_run_ctx" not in globals():
             raise RuntimeError("RUN_CTX_MISSING: run Overlap first.")
         return rc
 
+
 if "rectify_run_ctx_mask_from_d3" not in globals():
     def rectify_run_ctx_mask_from_d3():
         rc = st.session_state.get("run_ctx") or {}
@@ -1809,6 +1810,63 @@ if "_ensure_inputs_hashes" not in globals():
         st.session_state["inputs_hashes"] = merged
         return merged
 _ensure_inputs_hashes()
+
+        # ===== Strict mode toggles =====
+DEV_ALLOW_INPUT_HASH_BACKFILL = False   # no dev backfill in evidence runs
+
+# ===== SSOT preflights (copy-only; fail-fast) =====
+def _require_inputs_hashes_strict() -> dict:
+    """
+    Read SSOT input hashes (copy-only). If any are empty → hard fail.
+    Returns the dict so that callers can embed it untouched in JSONs.
+    """
+    ih = (st.session_state.get("inputs_hashes") or {}).copy()
+    keys = ["boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"]
+    # Mirror from run_ctx if present (still copy-only; no recompute)
+    rc = st.session_state.get("run_ctx") or {}
+    for k in keys:
+        ih[k] = ih.get(k) or rc.get(k) or ""
+    if not all(ih.get(k, "") for k in keys):
+        missing = [k for k in keys if not ih.get(k)]
+        raise RuntimeError(
+            "INPUT_HASHES_MISSING: wire SSOT from Cert/Overlap; backfill disabled "
+            f"(missing: {', '.join(missing)})"
+        )
+    # normalize into session so downstream reads are consistent
+    st.session_state["inputs_hashes"] = ih
+    rc.update(ih); st.session_state["run_ctx"] = rc
+    return ih
+
+def _require_lane_mask_ssot() -> list[int]:
+    """
+    Lane mask is computed once (at Overlap/Cert) from the stored d3 snapshot and kept in run_ctx.
+    Here we only read it; we do NOT infer/guess/rectify.
+    """
+    rc = st.session_state.get("run_ctx") or {}
+    lm = rc.get("lane_mask_k3")
+    if not isinstance(lm, list) or any((int(x) & 1) not in (0,1) for x in (lm or [])):
+        raise RuntimeError("LANE_MASK_MISSING: compute lane_mask_k3 at Cert/Overlap stage and stash in run_ctx.")
+    return [int(x) & 1 for x in lm]
+
+def _require_projector_file_if_needed():
+    """
+    If mode==projected(file), require projector_filename & projector_hash pre-validated at Cert/Overlap.
+    No AUTO fallback here. If lanes don’t match projector diag, upstream must have blocked with P3_LANE_MISMATCH.
+    """
+    rc = st.session_state.get("run_ctx") or {}
+    m = rc.get("mode", "strict")
+    if m == "projected(file)":
+        if not rc.get("projector_filename") or not rc.get("projector_hash"):
+            raise RuntimeError("P3_FILE_MISSING: projected(FILE) selected without validated projector.")
+        # We do NOT re-parse or re-validate here. Evidence path is copy-only.
+    elif m == "projected(auto)":
+        # In strict evidence runs, avoid AUTO. Treat as a configuration error.
+        raise RuntimeError("P3_AUTO_DISALLOWED: projector(auto) not allowed in strict evidence runs. Freeze to FILE or use strict.")
+    # if strict → nothing to enforce here
+    return
+
+# (Your _strict_R3 already fails on shape mismatches — good. No _xor_overlap, no dev fallbacks.)
+
 
 # 3) Canonical content hashing (ints not bools; sorted keys; ASCII; no spaces)
 def _deep_intify(o):
@@ -2093,6 +2151,11 @@ HAS_U_HOOKS = (
 )
 
 with st.expander("Reports: Perturbation Sanity & Fence Stress"):
+    # STRlCT SSOT preflight (copy-only)
+    _require_projector_file_if_needed()
+    _require_inputs_hashes_strict()
+    _require_lane_mask_ssot()
+
     # Ensure reports dir exists (defensive)
     REPORTS_DIR = Path(st.session_state.get("REPORTS_DIR", "reports"))
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -2623,6 +2686,11 @@ COVERAGE_CSV_PATH = REPORTS_DIR / "coverage_sampling.csv"
 COVERAGE_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 with st.expander("Coverage Sampling"):
+    # STRlCT SSOT preflight (copy-only)
+    _require_projector_file_if_needed()
+    _require_inputs_hashes_strict()
+    _require_lane_mask_ssot()
+
     # Ensure SSOT input hashes are present (no recompute)
     if "_ensure_inputs_hashes" in globals():
         _ensure_inputs_hashes()
