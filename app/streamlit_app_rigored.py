@@ -2382,6 +2382,21 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     }
                 except Exception as e:
                     st.info(f"(Could not build fence JSON: {e})")
+                      # Quick CSV downloads
+                try:
+                    with open(PERTURB_OUT_PATH, "rb") as f:
+                        st.download_button("Download perturbation_sanity.csv", f, file_name="perturbation_sanity.csv", key="dl_ps_csv")
+                except Exception:
+                    pass
+                if run_fence and FENCE_OUT_PATH.exists():
+                    try:
+                        with open(FENCE_OUT_PATH, "rb") as f2:
+                            st.download_button("Download fence_stress.csv", f2, file_name="fence_stress.csv", key="dl_fence_csv")
+                    except Exception:
+                        pass
+                    except Exception as e:
+                # ←← This closes the try: so the interpreter is NOT inside a try when it reaches Coverage.
+                        st.error(f"Perturbation/Fence run failed: {e}")
             
                     
                 # ---- JSON companion for Fence Stress (robust) ----
@@ -2474,21 +2489,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     st.info(f"(Could not build fence JSON download: {e})")
 
         
-                # Quick CSV downloads
-                try:
-                    with open(PERTURB_OUT_PATH, "rb") as f:
-                        st.download_button("Download perturbation_sanity.csv", f, file_name="perturbation_sanity.csv", key="dl_ps_csv")
-                except Exception:
-                    pass
-                if run_fence and FENCE_OUT_PATH.exists():
-                    try:
-                        with open(FENCE_OUT_PATH, "rb") as f2:
-                            st.download_button("Download fence_stress.csv", f2, file_name="fence_stress.csv", key="dl_fence_csv")
-                    except Exception:
-                        pass
-                    except Exception as e:
-                # ←← This closes the try: so the interpreter is NOT inside a try when it reaches Coverage.
-                        st.error(f"Perturbation/Fence run failed: {e}")
+              
 
             
 
