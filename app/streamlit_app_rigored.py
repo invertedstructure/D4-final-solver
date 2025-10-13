@@ -2000,6 +2000,8 @@ def _strict_R3(H2: list[list[int]], d3: list[list[int]], C3: list[list[int]]) ->
     C3p = _xor_overlap(C3, I3) if (C3 or I3) else []
     if C3p and len(M) != len(C3p):
         st.caption(f"⚠︎ R3 row mismatch: H2@d3={len(M)}×{len(M[0]) if (M and M[0]) else 0}, C3^I3={len(C3p)}×{len(C3p[0]) if (C3p and C3p[0]) else 0}")
+        if lane_mask_bits and len(lane_mask_bits) != int(n3):
+    st.caption(f"⚠︎ lane_mask_k3 has {len(lane_mask_bits)} bits but n₃={n3}")
     return _xor_overlap(M, C3p) if C3p else M
 
 def _projected_R3(R3_strict, P_active):
@@ -2068,6 +2070,17 @@ HAS_U_HOOKS = (
 )
 
 with st.expander("Reports: Perturbation Sanity & Fence Stress"):
+        # Ensure inputs_hashes exists (no recompute; copy from run_ctx/certs)
+    def _ensure_inputs_hashes():
+        rc = st.session_state.get("run_ctx") or {}
+        ih = st.session_state.get("inputs_hashes") or {}
+        keys = ["boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"]
+        merged = {k: (ih.get(k) or rc.get(k) or st.session_state.get(k) or "") for k in keys}
+        st.session_state["inputs_hashes"] = merged
+        return merged
+
+    _ensure_inputs_hashes()
+
     # Freshness + SSOT guardrails
     try:
         rc = require_fresh_run_ctx()
@@ -2212,10 +2225,12 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 ok = (guard == expected_guard)
                 matches += int(ok)
                 mismatches += int(not ok)
+                enable_witness = st.checkbox("Write witness on mismatches", value=True, key="ps_witness_on")
+
 
                 # Optional witness on drift (minimal)
                 witness_written = False
-                if not ok:
+                if enable_witness and not ok:
                     cert_like = st.session_state.get("cert_payload")
                     if cert_like and "append_witness_row" in globals():
                         try:
@@ -2228,6 +2243,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                             witness_written = True
                         except Exception:
                             witness_written = False
+
 
                 ps_results.append({
                     "flip_id": int(k),
@@ -2369,6 +2385,24 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     # In this minimal variant, we only record deltas and keep H fixed.
                     eq_shrink = eq_base
                     eq_plus   = eq_base
+                    # After computing eq_base, eq_shrink, eq_plus ...
+                    def _unchanged_note(eq_before, eq_after):
+                        return "H2-row change only; fence unchanged" if int(eq_before) == int(eq_after) else ""
+                    
+                    # When appending H2_shrink / H2_plus rows:
+                    rows_fs.append([
+                        "H2_shrink",
+                        f"[1,{eq_shrink}]",
+                        _json.dumps({"delta_H2":{"rows_before": len(H2), "rows_after": len(H2_shrink)},
+                                     "note": _unchanged_note(eq_base, eq_shrink)}, separators=(",", ":"))
+                    ])
+                    rows_fs.append([
+                        "H2_plus",
+                        f"[1,{eq_plus}]",
+                        _json.dumps({"delta_H2":{"rows_before": len(H2), "rows_after": len(H2_plus)},
+                                     "note": _unchanged_note(eq_base, eq_plus)}, separators=(",", ":"))
+                    ])
+
 
                     rows_fs.append([
                         "U_shrink",
@@ -2693,6 +2727,15 @@ with st.expander("Coverage Sampling"):
                     st.dataframe(preview, use_container_width=True, hide_index=True)
                 except Exception:
                     pass
+                    # Quick coherence heads-up
+                if inputs_ps.get("lane_mask_k3"):
+                    lm_bits = "".join("1" if int(x) else "0" for x in inputs_ps["lane_mask_k3"])
+                    if len(lm_bits) != int(n3):
+                        st.caption(f"⚠︎ lane_mask_k3 has {len(lm_bits)} bits but n₃={n3}")
+                
+                # (Already echoing at top-level) keep:
+                #   "lane_mask_k3": inputs_*["lane_mask_k3"]
+
 
                 # Build JSON payload (1.1.0)
                 try:
@@ -2753,6 +2796,22 @@ with st.expander("Coverage Sampling"):
                     },
                     "integrity": {"content_hash": ""},
                 }
+
+                def _coverage_self_check(p):
+                    problems = []
+                    if "lane_mask_k3" not in p: problems.append("lane_mask_k3 missing")
+                    if "known_signatures" not in p: problems.append("known_signatures missing")
+                    if p.get("residual_method","") == "": problems.append("residual_method missing/empty")
+                    summ = p.get("summary", {})
+                    for k in ["N","unique_signatures","pct_in_district"]:
+                        if k not in summ: problems.append(f"summary.{k} missing")
+                    if not p.get("integrity",{}).get("content_hash"): problems.append("integrity.content_hash missing")
+                    return problems
+                
+                issues = _coverage_self_check(payload_cov)
+                if issues:
+                    st.warning("Coverage JSON minor issues: " + "; ".join(issues))
+
 
                 # Integrity (stable)
                 payload_cov["integrity"]["content_hash"] = _hash_json(payload_cov)
