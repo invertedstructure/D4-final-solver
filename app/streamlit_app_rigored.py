@@ -2286,6 +2286,37 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
         disabled=disabled,
         help=(help_txt if disabled else "Run perturbation sanity; optionally include fence"),
     ):
+        # ——— Publish staged SSOT hashes on click (copy-only; no recompute) ———
+        ih_live = st.session_state.get("inputs_hashes") or {}
+        if not all(ih_live.get(k) for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")):
+            pend = st.session_state.get("_inputs_hashes_pending") or {}
+            dims = st.session_state.get("_dims_pending") or {}
+            files = st.session_state.get("_filenames_pending") or {}
+        
+            # accept only if all five are present (copy-only)
+            if all(pend.get(k) for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")) and dims:
+                # publish SSOT hashes
+                st.session_state["inputs_hashes"] = pend.copy()
+        
+                # build the _inputs_block the writers read from (no backfill from objects)
+                st.session_state["_inputs_block"] = {
+                    "filenames": files if files else {
+                        "boundaries": st.session_state.get("fname_boundaries","boundaries.json"),
+                        "C":          st.session_state.get("fname_cmap","cmap.json"),
+                        "H":          st.session_state.get("fname_h","H.json"),
+                        "U":          st.session_state.get("fname_shapes","shapes.json"),
+                    },
+                    "dims": {"n2": int(dims.get("n2", 0)), "n3": int(dims.get("n3", 0))},
+                    "boundaries_hash": pend["boundaries_hash"],
+                    "C_hash":          pend["C_hash"],
+                    "H_hash":          pend["H_hash"],
+                    "U_hash":          pend["U_hash"],
+                    "shapes_hash":     pend["shapes_hash"],
+                    # (optional convenience for readers)
+                    "hashes": pend.copy(),
+                    "lane_mask_k3": (st.session_state.get("run_ctx") or {}).get("lane_mask_k3", []),
+                }
+
         # make sure SSOT hashes are published (copy-only; no recompute)
         if "_ensure_inputs_hashes" in globals():
             _ensure_inputs_hashes()
@@ -2543,6 +2574,37 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
             if run_fence:
                 if "_ensure_inputs_hashes" in globals():
                     _ensure_inputs_hashes()
+                    # ——— Publish staged SSOT hashes on click (copy-only; no recompute) ———
+                ih_live = st.session_state.get("inputs_hashes") or {}
+                if not all(ih_live.get(k) for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")):
+                    pend = st.session_state.get("_inputs_hashes_pending") or {}
+                    dims = st.session_state.get("_dims_pending") or {}
+                    files = st.session_state.get("_filenames_pending") or {}
+                
+                    # accept only if all five are present (copy-only)
+                    if all(pend.get(k) for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")) and dims:
+                        # publish SSOT hashes
+                        st.session_state["inputs_hashes"] = pend.copy()
+                
+                        # build the _inputs_block the writers read from (no backfill from objects)
+                        st.session_state["_inputs_block"] = {
+                            "filenames": files if files else {
+                                "boundaries": st.session_state.get("fname_boundaries","boundaries.json"),
+                                "C":          st.session_state.get("fname_cmap","cmap.json"),
+                                "H":          st.session_state.get("fname_h","H.json"),
+                                "U":          st.session_state.get("fname_shapes","shapes.json"),
+                            },
+                            "dims": {"n2": int(dims.get("n2", 0)), "n3": int(dims.get("n3", 0))},
+                            "boundaries_hash": pend["boundaries_hash"],
+                            "C_hash":          pend["C_hash"],
+                            "H_hash":          pend["H_hash"],
+                            "U_hash":          pend["U_hash"],
+                            "shapes_hash":     pend["shapes_hash"],
+                            # (optional convenience for readers)
+                            "hashes": pend.copy(),
+                            "lane_mask_k3": (st.session_state.get("run_ctx") or {}).get("lane_mask_k3", []),
+                        }
+
                 # evidence-only guards...
                 _require_inputs_hashes_strict_for_run()
                 _require_lane_mask_for_run()
