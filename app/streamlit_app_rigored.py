@@ -1180,6 +1180,39 @@ except Exception:
     def eye(n):
         return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
 
+# --- Canonical hashing helpers (GF(2) safe) ---
+import hashlib as _hash
+import copy as _copy
+
+def _deep_intify(o):
+    """Convert True/False to 1/0 recursively so GF(2) matrices hash stably."""
+    if isinstance(o, bool): return 1 if o else 0
+    if isinstance(o, list): return [_deep_intify(x) for x in o]
+    if isinstance(o, dict): return {k: _deep_intify(v) for k, v in o.items()}
+    return o
+
+def _hash_json(obj) -> str:
+    canon = _deep_intify(_copy.deepcopy(obj))
+    s = _json.dumps(canon, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    return _hash.sha256(s).hexdigest()
+
+def _sha256_hex(b: bytes) -> str:
+    return _hash.sha256(b).hexdigest()
+
+def _stable_hash(obj) -> str:
+    """
+    Stable content hash for dict/list/matrix payloads used in SSOT.
+    Booleans coerced to ints; ASCII; sorted keys; no spaces.
+    """
+    try:
+        return _hash_json(obj)
+    except Exception:
+        try:
+            return _hash.sha256(str(obj).encode("utf-8", "ignore")).hexdigest()
+        except Exception:
+            return ""
+
+
 
 # ------------------------------ OVERLAP TAB (polished, SSOT-staging) -----------------------------------
 
