@@ -2387,25 +2387,39 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
         except Exception as e:
             st.error(f"Perturbation/Fence run failed: {e}")
 
+                    # Quick CSV downloads (safe, unique keys)
+                try:
+                    from pathlib import Path as _Path
+                    _ps_key = f"dl_ps_csv_{_Path(PERTURB_OUT_PATH).stat().st_mtime_ns if _Path(PERTURB_OUT_PATH).exists() else 'na'}"
+                    if _Path(PERTURB_OUT_PATH).exists():
+                        with open(PERTURB_OUT_PATH, "rb") as f_ps:
+                            st.download_button(
+                                "Download perturbation_sanity.csv",
+                                f_ps,
+                                file_name="perturbation_sanity.csv",
+                                key=_ps_key,
+                            )
+                except Exception as e:
+                    st.info(f"(Could not open perturbation_sanity.csv: {e})")
+                
+                try:
+                    from pathlib import Path as _Path
+                    if run_fence and _Path(FENCE_OUT_PATH).exists():
+                        _fs_key = f"dl_fence_csv_{_Path(FENCE_OUT_PATH).stat().st_mtime_ns}"
+                        with open(FENCE_OUT_PATH, "rb") as f_fs:
+                            st.download_button(
+                                "Download fence_stress.csv",
+                                f_fs,
+                                file_name="fence_stress.csv",
+                                key=_fs_key,
+                            )
+                except Exception as e:
+                    st.info(f"(Could not open fence_stress.csv: {e})")
 
 
 
                
-                          # Quick CSV downloads
-                    try:
-                        with open(PERTURB_OUT_PATH, "rb") as f:
-                            st.download_button("Download perturbation_sanity.csv", f, file_name="perturbation_sanity.csv", key="dl_ps_csv")
-                    except Exception:
-                        pass
-                    if run_fence and FENCE_OUT_PATH.exists():
-                        try:
-                            with open(FENCE_OUT_PATH, "rb") as f2:
-                                st.download_button("Download fence_stress.csv", f2, file_name="fence_stress.csv", key="dl_fence_csv")
-                        except Exception:
-                            pass
-                        except Exception as e:
-                    # ←← This closes the try: so the interpreter is NOT inside a try when it reaches Coverage.
-                            st.error(f"Perturbation/Fence run failed: {e}")
+   
             
                     
                         
