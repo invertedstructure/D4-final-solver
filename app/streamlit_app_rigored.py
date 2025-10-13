@@ -2548,106 +2548,26 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 # Badge
                 st.info(_hash_badge(fence_json["integrity"]["content_hash"]))
 
-
-
-                
-
-
-
-               
-   
-            
-                    
-                        
-              
-
-            
-
-
-
-        
-                
-                                          
-                           
-                                
-
 # =============================== Coverage Sampling (non-blocking) ==============================
+# Standalone: no open try/except should be above this line.
 
-# Paths for coverage artifacts (top-level, not inside any try/with)
-COVERAGE_CSV_PATH  = REPORTS_DIR / "coverage_sampling.csv"
-COVERAGE_JSON_PATH = REPORTS_DIR / "coverage_sampling.json"
+COVERAGE_CSV_PATH = REPORTS_DIR / "coverage_sampling.csv"
 COVERAGE_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-
-def _rand_gf2_matrix(rows: int, cols: int, density: float, rng: random.Random) -> list[list[int]]:
-    density = max(0.0, min(1.0, float(density)))
-    return [[1 if rng.random() < density else 0 for _ in range(cols)] for _ in range(rows)]
-
-def _gf2_rank(M: list[list[int]]) -> int:
-    if not M: return 0
-    A = [row[:] for row in M]
-    m, n = len(A), len(A[0])
-    r, c = 0, 0
-    while r < m and c < n:
-        pivot = None
-        for i in range(r, m):
-            if A[i][c] & 1: pivot = i; break
-        if pivot is None:
-            c += 1; continue
-        if pivot != r:
-            A[r], A[pivot] = A[pivot], A[r]
-        for i in range(r+1, m):
-            if A[i][c] & 1:
-                A[i] = [(A[i][j] ^ A[r][j]) for j in range(n)]
-        r += 1; c += 1
-    return r
-
-def _col_support_pattern(M: list[list[int]]) -> list[str]:
-    if not M: return []
-    rows, cols = len(M), len(M[0])
-    cols_bits = []
-    for j in range(cols):
-        bits = ''.join('1' if (M[i][j] & 1) else '0' for i in range(rows))
-        cols_bits.append(bits)
-    cols_bits.sort()
-    return cols_bits
-
-def _lane_pattern_from_mask(mask: list[int]) -> str:
-    return ''.join(str(int(x) & 1) for x in (mask or []))
-
-def _coverage_signature(d_k1: list[list[int]], n_k: int) -> str:
-    rk = _gf2_rank(d_k1)
-    ker = max(0, int(n_k) - rk)
-    patt = _col_support_pattern(d_k1)
-    return f"rk={rk};ker={ker};pattern=[{','.join(patt)}]"
-
-def _in_district_guess(signature: str, *, current_lane_pattern: str) -> int:
-    try:
-        bracket = signature.split("pattern=[", 1)[1].split("]", 1)[0]
-        col_bitstrings = [s.strip() for s in bracket.split(",") if s.strip()]
-        return int(any(bs == current_lane_pattern for bs in col_bitstrings))
-    except Exception:
-        return 0
-
-with st.expander("Coverage Sampling", expanded=False):
-    # --- Freshness (soft-guard; never stop before button) ---
+with st.expander("Coverage Sampling"):
+    # Freshness — do not stop the render if missing
     rc = None
     try:
         rc = require_fresh_run_ctx()
         rc = rectify_run_ctx_mask_from_d3()
     except Exception as e:
-        st.warning(f"Coverage: {e}")
+        st.warning(str(e))
 
-    # --- Safe defaults (never throw) ---
-    n3_default = 0
+    # Defaults (safe even if rc is None)
+    n3_default = int((rc or {}).get("n3") or 0)
     try:
-        n3_default = int((rc or {}).get("n3") or 0)
-    except Exception:
-        n3_default = 0
-
-    try:
-        H_local = st.session_state.get("overlap_H") or (_load_h_local() if "_load_h_local" in globals() else None)
-        H2_rows = len((H_local.blocks.__root__.get("2") or [])) if H_local else 0
+        H_local = st.session_state.get("overlap_H") or _load_h_local()
+        H2_rows = len((H_local.blocks.__root__.get("2") or []))
     except Exception:
         H2_rows = 0
     n2_default = H2_rows
@@ -2668,13 +2588,8 @@ with st.expander("Coverage Sampling", expanded=False):
 
     seed_txt = st.text_input("Seed (any string/hex)", value="cov-seed-0001", key="cov_seed")
 
-    # --- Disable flag (never throw) ---
-    file_bad = False
-    try:
-        file_bad = bool(file_validation_failed())
-    except Exception:
-        file_bad = False  # better to allow than to hide the button
-
+    # Disable when not ready (no stops)
+    file_bad = file_validation_failed()
     cov_disabled = file_bad or (rc is None) or (n2_default <= 0) or (n3_default <= 0)
     tips = []
     if rc is None: tips.append("Run Overlap first.")
@@ -2682,16 +2597,13 @@ with st.expander("Coverage Sampling", expanded=False):
     if file_bad: tips.append("Projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π.")
     cov_help = " ".join(tips) or "Generate coverage_sampling.csv with meta header."
 
-    # --- The button will render regardless (may be disabled) ---
-    ran_cov = st.button("Coverage Sample", key="btn_coverage_sample", disabled=cov_disabled, help=cov_help)
+    if st.button("Coverage Sample", key="btn_coverage_sample",
+                 disabled=cov_disabled, help=cov_help):
+        try:
+            if n3 <= 0 or n2 <= 0:
+                st.warning("Please ensure n₂ and n₃ are both > 0.")
+                st.stop()
 
-    # Optional tiny debug line so you can see why it’s disabled
-    st.caption(f"cov_disabled={cov_disabled} · rc={'ok' if rc else 'none'} · n2={n2_default} · n3={n3_default} · file_bad={file_bad}")
-
-    if ran_cov:
-        if n3 <= 0 or n2 <= 0:
-            st.warning("Please ensure n₂ and n₃ are both > 0.")
-        else:
             rng = random.Random(); rng.seed(seed_txt)
 
             # Stamp a run_id
@@ -2715,7 +2627,7 @@ with st.expander("Coverage Sampling", expanded=False):
             # Standardized meta header
             meta_lines = [
                 f"schema_version={SCHEMA_VERSION}",
-                f"saved_at={_utc_iso_z() if '_utc_iso_z' in globals() else datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')}",
+                f"saved_at={_utc_iso_z()}",
                 f"run_id={(st.session_state.get('run_ctx') or {}).get('run_id','')}",
                 f"app_version={APP_VERSION}",
                 f"seed={seed_txt}",
@@ -2756,7 +2668,7 @@ with st.expander("Coverage Sampling", expanded=False):
             except Exception:
                 pass
 
-            # ---- JSON companion (mirrors your later block; keep the fixed _utc_iso_z check) ----
+            # —— JSON payload for Coverage Sampling ——
             try:
                 rc_cov = require_fresh_run_ctx()
             except Exception:
@@ -2787,7 +2699,7 @@ with st.expander("Coverage Sampling", expanded=False):
             for sig, cnt, in_d, pctv in rows:
                 results_cov.append({
                     "signature": sig,
-                    "signature_canonical": sig,
+                    "signature_canonical": sig,   # your _coverage_signature already canonicalizes
                     "count": int(cnt),
                     "pct": float(pctv),
                     "in_district": bool(int(in_d)),
@@ -2797,7 +2709,11 @@ with st.expander("Coverage Sampling", expanded=False):
 
             known_signatures = (rc_cov.get("known_signatures") or [])
             payload_cov = {
+                "schema_version": SCHEMA_VERSION,
+                "written_at_utc": _utc_iso_z(),
+                "app_version": APP_VERSION,
                 "identity": {
+                    "field": FIELD,
                     "run_id": (rc_cov.get("run_id") or ""),
                     "district_id": rc_cov.get("district_id","D3"),
                 },
@@ -2822,28 +2738,35 @@ with st.expander("Coverage Sampling", expanded=False):
                     "in_district_hits": int(sum(1 for r in results_cov if r["in_district"])),
                     "hit_rate_pct": (100.0 * sum(1 for r in results_cov if r["in_district"]) / float(num_samples)) if int(num_samples) else 0.0,
                 },
-                "integrity": {},
-                "schema_version": SCHEMA_VERSION,
-                "app_version": APP_VERSION,
-                "written_at_utc": (_utc_iso_z() if "_utc_iso_z" in globals() else datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")),
+                "integrity": {"content_hash": ""},
             }
             payload_cov["integrity"]["content_hash"] = _hash_json(payload_cov)
-
             hash12_cov = payload_cov["integrity"]["content_hash"][:12]
             cov_json_name = f"coverage_sampling__{hash12_cov}.json"
             cov_json_path = REPORTS_DIR / cov_json_name
 
             try:
                 _atomic_write_json(cov_json_path, payload_cov)
+                st.session_state.setdefault("last_report_paths", {})["coverage_sampling"] = {
+                    "csv": str(COVERAGE_CSV_PATH), "json": str(cov_json_path)
+                }
             except Exception as e:
                 st.warning(f"(Could not write coverage JSON: {e})")
 
+            # JSON download
             try:
                 import io as _io, json as _json
                 mem = _io.BytesIO(_json.dumps(payload_cov, ensure_ascii=False, indent=2).encode("utf-8"))
-                st.download_button("Download coverage_sampling.json", mem, file_name=cov_json_name, key=f"dl_cov_json_{hash12_cov}")
+                st.download_button("Download coverage_sampling.json", mem, file_name=cov_json_name, key=f"dl_cov_json_{hash12_cov[:8]}")
             except Exception:
                 pass
+
+            # Hash badge
+            st.info(_hash_badge(payload_cov["integrity"]["content_hash"]))
+
+        except Exception as e:
+            st.error(f"Coverage sampling failed: {e}")
+
 
 
 
