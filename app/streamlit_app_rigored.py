@@ -2009,23 +2009,43 @@ def _xor_overlap(A: list[list[int]], B: list[list[int]]) -> list[list[int]]:
             R[i][j] = (A[i][j] ^ B[i][j]) & 1
     return R
 
+DEV_ALLOW_SHAPE_FALLBACK = False  # hard off
+
+def _validate_shapes_or_raise(H2, d3, C3):
+    rH, cH = (len(H2), len(H2[0]) if (H2 and H2[0]) else 0)
+    rD, cD = (len(d3), len(d3[0]) if (d3 and d3[0]) else 0)
+    rC, cC = (len(C3), len(C3[0]) if (C3 and C3[0]) else 0)
+    # expected: H2: n3×n2 ; d3: n2×n3 ; C3: n3×n3
+    # infer (n2, n3) from d3
+    n2, n3 = rD, cD
+    ok = (
+        rH == n3 and cH == n2 and
+        rD == n2 and cD == n3 and
+        rC == n3 and cC == n3
+    )
+    if not ok:
+        raise RuntimeError(
+            f"R3_SHAPE: expected H2({n3}×{n2})·d3({n2}×{n3}) and (C3⊕I3)({n3}×{n3}), "
+            f"got H2({rH}×{cH}), d3({rD}×{cD}), C3({rC}×{cC})"
+        )
+
+
 def _strict_R3(H2: list[list[int]], d3: list[list[int]], C3: list[list[int]]) -> list[list[int]]:
-    """Compute R3 = (H2 @ d3) XOR (C3 XOR I3); tolerates shape mismatches."""
-    if not (H2 and d3):
-        return []
-    # H2 @ d3
-    if "mul" in globals() and callable(globals()["mul"]):
-        M = mul(H2, d3)  # type: ignore[name-defined]
-    else:
-        # Soft fallback: keep shapes flowing; not mathematically exact
-        M = _xor_overlap(H2, d3)
-    # C3 ⊕ I3
-    n3 = len(C3[0]) if (C3 and C3[0]) else 0
-    I3 = [[1 if i == j else 0 for j in range(n3)] for i in range(n3)] if n3 else []
-    C3p = _xor_overlap(C3, I3) if (C3 or I3) else []
-    if C3p and len(M) != len(C3p):
-        st.caption(f"⚠︎ R3 row mismatch: H2@d3={len(M)}×{len(M[0]) if (M and M[0]) else 0}, C3^I3={len(C3p)}×{len(C3p[0]) if (C3p and C3p[0]) else 0}")
-    return _xor_overlap(M, C3p) if C3p else M
+    """Compute R3 = (H2 @ d3) XOR (C3 XOR I3). Strict shape checks; no fallbacks."""
+    if not (H2 and d3 and C3):
+        raise RuntimeError("R3_INPUTS_MISSING: require non-empty H2, d3, C3.")
+    _validate_shapes_or_raise(H2, d3, C3)
+    # H2 @ d3   (caller must provide mul over GF(2))
+    if "mul" not in globals() or not callable(globals()["mul"]):
+        raise RuntimeError("R3_MUL_MISSING: GF(2) mul(H2,d3) not available.")
+    M = mul(H2, d3)  # type: ignore[name-defined]
+    n3 = len(C3)
+    I3 = [[1 if i == j else 0 for j in range(n3)] for i in range(n3)]
+    # XOR over identical shapes
+    C3p = [[(C3[i][j] ^ I3[i][j]) & 1 for j in range(n3)] for i in range(n3)]
+    R  = [[(M[i][j] ^ C3p[i][j]) & 1 for j in range(n3)] for i in range(n3)]
+    return R
+
 
 def _projected_R3(R3_strict, P_active):
     if not (R3_strict and P_active):
@@ -2170,6 +2190,11 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
             matches = 0
             mismatches = 0
 
+            inputs_ps_tmp = _inputs_block_from_session(strict_dims=(n2, n3))
+            lane_mask = [int(x)&1 for x in inputs_ps_tmp.get("lane_mask_k3", [])]
+            allowed_cols_set = {j for j,b in enumerate(lane_mask) if b == 1}
+
+
             for (r, c, k) in _flip_targets_lanes_only(n2, n3, int(max_flips), seed_txt):
                 # Empty fixture → no-op row
                 if not (n2 and n3):
@@ -2190,6 +2215,12 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     continue
 
                 lane_col = (c in allowed_cols_set)
+                if not lane_col:
+                    # expected none + no counts
+                    rows.append([k, 0, "none", "off-domain (ker column)"])
+                    ps_results.append({... "expected_guard":"none", "flip_spec":{..., "lane_col":False, "skip_reason":"off-domain"}, ...})
+                    continue
+
                 bit_before = int(d3_base[r][c]) if (r < len(d3_base) and c < len(d3_base[0])) else 0
 
                 # off-domain → expected none
