@@ -1718,13 +1718,15 @@ with safe_expander("A/B compare (strict vs active projected)"):
 
 
 
+
+           
 # ========= F · Helpers & invariants (shared by F1/F2/F3) =========
 from pathlib import Path
 import os, tempfile, copy as _copy
 import json as _json, hashlib as _hash
 import streamlit as st
 import datetime as _dt
-import random as _random  # used by some callers; harmless here
+import random as _random  # harmless; some callers use it
 
 # 1) Schema/version + field (one source of truth for F1/F2/F3)
 SCHEMA_VERSION = "1.1.0"     # coverage_sampling, perturbation_sanity, fence_stress
@@ -1893,7 +1895,7 @@ def _inputs_block_from_session(strict_dims: tuple[int,int] | None = None) -> dic
     lane_mask = [int(x) & 1 for x in (rc.get("lane_mask_k3") or [])]
     return {"hashes": hashes, "dims": {"n2": n2, "n3": n3}, "lane_mask_k3": lane_mask}
 
-# Projector resolution helper (safe; errors are explicit)
+# 6) Projector resolution & policy helpers
 def _resolve_projector_from_rc():
     """
     Returns: (mode, submode, filename, projector_hash, projector_diag or None)
@@ -1924,8 +1926,8 @@ def _resolve_projector_from_rc():
 
     return mode, submode, filename, pj_hash, pj_diag
 
-# Projector normalization helper (call right before building any policy_*)
 def normalize_projector_into_run_ctx():
+    """Stamp projector_hash/projector_filename into run_ctx when resolvable."""
     try:
         mode, sub, fname, pj_hash, pj_diag = _resolve_projector_from_rc()
         rc_here = st.session_state.get("run_ctx") or {}
@@ -1934,10 +1936,9 @@ def normalize_projector_into_run_ctx():
             if fname: rc_here["projector_filename"] = fname
         st.session_state["run_ctx"] = rc_here
     except Exception as e:
-        # keep errors explicit; projected(file) will auto-disable via file_validation_failed()
+        # explicit, but non-fatal (the projected(FILE) path is separately disabled)
         st.caption(f"Π normalize: {e}")
 
-# 6) Policy block from run_ctx (strict / projected(auto|file))
 def _policy_block_from_run_ctx(rc: dict) -> dict:
     mode = str(rc.get("mode", "strict"))
     if mode == "strict":
@@ -1990,33 +1991,12 @@ def _first_tripped_guard(strict_out: dict) -> str:
 def _hash_badge(h: str) -> str:
     return f"wrote CSV + JSON ✓ · hash: {h[:12]}"
 
-# 9) Tiny linalg helpers for residuals (shape-tolerant XOR)
-def _xor_overlap(A: list[list[int]], B: list[list[int]]) -> list[list[int]]:
-    """XOR two matrices over their common (min) shape.
-    If one input is empty, return a copy of the other (shape-preserving fallback)."""
-    if not A and not B:
-        return []
-    if not A:
-        return [row[:] for row in (B or [])]
-    if not B:
-        return [row[:] for row in (A or [])]
-    rA, cA = len(A), (len(A[0]) if A and A[0] else 0)
-    rB, cB = len(B), (len(B[0]) if B and B[0] else 0)
-    rO, cO = min(rA, rB), min(cA, cB)
-    R = [row[:] for row in A]
-    for i in range(rO):
-        for j in range(cO):
-            R[i][j] = (A[i][j] ^ B[i][j]) & 1
-    return R
-
-DEV_ALLOW_SHAPE_FALLBACK = False  # hard off
-
+# 9) Strict linear algebra (NO fallbacks)
 def _validate_shapes_or_raise(H2, d3, C3):
     rH, cH = (len(H2), len(H2[0]) if (H2 and H2[0]) else 0)
     rD, cD = (len(d3), len(d3[0]) if (d3 and d3[0]) else 0)
     rC, cC = (len(C3), len(C3[0]) if (C3 and C3[0]) else 0)
-    # expected: H2: n3×n2 ; d3: n2×n3 ; C3: n3×n3
-    # infer (n2, n3) from d3
+    # expected: H2: n3×n2 ; d3: n2×n3 ; C3: n3×n3  (infer n2,n3 from d3)
     n2, n3 = rD, cD
     ok = (
         rH == n3 and cH == n2 and
@@ -2029,30 +2009,31 @@ def _validate_shapes_or_raise(H2, d3, C3):
             f"got H2({rH}×{cH}), d3({rD}×{cD}), C3({rC}×{cC})"
         )
 
-
 def _strict_R3(H2: list[list[int]], d3: list[list[int]], C3: list[list[int]]) -> list[list[int]]:
     """Compute R3 = (H2 @ d3) XOR (C3 XOR I3). Strict shape checks; no fallbacks."""
     if not (H2 and d3 and C3):
         raise RuntimeError("R3_INPUTS_MISSING: require non-empty H2, d3, C3.")
     _validate_shapes_or_raise(H2, d3, C3)
-    # H2 @ d3   (caller must provide mul over GF(2))
     if "mul" not in globals() or not callable(globals()["mul"]):
         raise RuntimeError("R3_MUL_MISSING: GF(2) mul(H2,d3) not available.")
     M = mul(H2, d3)  # type: ignore[name-defined]
     n3 = len(C3)
     I3 = [[1 if i == j else 0 for j in range(n3)] for i in range(n3)]
-    # XOR over identical shapes
     C3p = [[(C3[i][j] ^ I3[i][j]) & 1 for j in range(n3)] for i in range(n3)]
     R  = [[(M[i][j] ^ C3p[i][j]) & 1 for j in range(n3)] for i in range(n3)]
     return R
 
-
-def _projected_R3(R3_strict, P_active):
+def _projected_R3(R3_strict: list[list[int]], P_active: list[list[int]] | None):
+    """Multiply R3 by Π when present; strict shape checks."""
     if not (R3_strict and P_active):
         return []
-    if "mul" in globals() and callable(globals()["mul"]):
-        return mul(R3_strict, P_active)  # type: ignore[name-defined]
-    return _xor_overlap(R3_strict, P_active)
+    rR, cR = len(R3_strict), len(R3_strict[0]) if R3_strict and R3_strict[0] else 0
+    rP, cP = len(P_active), len(P_active[0]) if P_active and P_active[0] else 0
+    if "mul" not in globals() or not callable(globals()["mul"]):
+        raise RuntimeError("R3P_MUL_MISSING: GF(2) mul(R3, Π) not available.")
+    if cR != rP:
+        raise RuntimeError(f"R3P_SHAPE: expected R3({rR}×{cR})·Π({rP}×{cP}) with {cR}=={rP}.")
+    return mul(R3_strict, P_active)  # type: ignore[name-defined]
 
 def _lane_mask_from_d3_matrix(d3: list[list[int]]) -> list[int]:
     if not d3 or not d3[0]:
@@ -2104,7 +2085,6 @@ def _sig_tag_eq(boundaries_obj, cmap_obj, H_used_obj, P_active=None):
         tag_p, eq_p = None, None
 
     return lm, tag_s, bool(eq_s), tag_p, (None if eq_p is None else bool(eq_p))
-
 
 # -------- optional carrier (U) mutation hooks ----------
 HAS_U_HOOKS = (
@@ -2162,8 +2142,10 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
             # ───────────────────────── Baseline (no mutation) ─────────────────────────
             lm0, tag_s0, eq_s0, tag_p0, eq_p0 = _sig_tag_eq(B0, C0, H0, P_active)
 
-            # lanes-only: allowed columns = 1-bits in current lane mask
-            allowed_cols_set = {j for j, b in enumerate(lm0 or []) if int(b) & 1}
+            # lanes-only: allowed columns = 1-bits in current lane mask (strict domain)
+            inputs_ps_tmp = _inputs_block_from_session(strict_dims=(n2, n3))
+            lane_mask = [int(x) & 1 for x in inputs_ps_tmp.get("lane_mask_k3", [])]
+            allowed_cols_set = {j for j, b in enumerate(lane_mask) if b == 1}
 
             # Deterministic flip generator
             import hashlib as _hashlib
@@ -2176,26 +2158,17 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     i = (i + 1 + (h % 3)) % (n2_ or 1)
                     j = (j + 2 + ((h >> 5) % 5)) % (n3_ or 1)
 
-            # Minimal guard classifier consistent with our enum
-            def _first_tripped_guard_min(lm_before, lm_after, k3_before: bool, k3_after: bool) -> str:
-                if lm_before != lm_after:
-                    return "grid"
-                if (not k3_after) and bool(k3_before):
-                    return "echo"
-                return "none"
-
             # ───────────────── Perturbation: flips + CSV + JSON ─────────────────
             rows = []       # CSV rows
             ps_results = [] # JSON results[]
             matches = 0
             mismatches = 0
-
-            inputs_ps_tmp = _inputs_block_from_session(strict_dims=(n2, n3))
-            lane_mask = [int(x)&1 for x in inputs_ps_tmp.get("lane_mask_k3", [])]
-            allowed_cols_set = {j for j,b in enumerate(lane_mask) if b == 1}
-
+            total_flips = 0
+            in_domain_flips = 0
 
             for (r, c, k) in _flip_targets_lanes_only(n2, n3, int(max_flips), seed_txt):
+                total_flips += 1
+
                 # Empty fixture → no-op row
                 if not (n2 and n3):
                     rows.append([k, 0, "none", "empty fixture"])
@@ -2215,15 +2188,9 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     continue
 
                 lane_col = (c in allowed_cols_set)
-                if not lane_col:
-                    # expected none + no counts
-                    rows.append([k, 0, "none", "off-domain (ker column)"])
-                    ps_results.append({... "expected_guard":"none", "flip_spec":{..., "lane_col":False, "skip_reason":"off-domain"}, ...})
-                    continue
-
                 bit_before = int(d3_base[r][c]) if (r < len(d3_base) and c < len(d3_base[0])) else 0
 
-                # off-domain → expected none
+                # off-domain → expected none; do NOT count toward matches/mismatches
                 if not lane_col:
                     rows.append([k, 0, "none", "off-domain (ker column)"])
                     ps_results.append({
@@ -2241,7 +2208,8 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     })
                     continue
 
-                # In-bounds mutation
+                # In-domain mutation
+                in_domain_flips += 1
                 d3_mut = [row[:] for row in d3_base]
                 if r >= len(d3_mut) or (len(d3_mut) and c >= len(d3_mut[0])):
                     rows.append([k, 0, "none", f"skip flip out-of-range r={r},c={c}"])
@@ -2270,9 +2238,11 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
 
                 lmK, tag_sK, eq_sK, tag_pK, eq_pK = _sig_tag_eq(Bk, C0, H0, P_active)
 
-                guard = _first_tripped_guard_min(lm0, lmK, bool(eq_s0), bool(eq_sK))
-                expected_guard = "grid"  # lanes-only flip is expected to alter grammar
+                # Guard mapping (single enum set)
+                strict_out = {"3": {"eq": bool(eq_sK)}}
+                guard = _first_tripped_guard(strict_out)
 
+                expected_guard = "grid"  # lanes-only in-domain flip should alter grammar
                 rows.append([k, 1 if guard != "none" else 0, expected_guard, ""])
                 ok = (guard == expected_guard)
                 matches += int(ok)
@@ -2301,7 +2271,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     "flip_spec": {
                         "row": int(r), "col": int(c),
                         "bit_before": int(bit_before), "bit_after": int(bit_after),
-                        "lane_col": bool(lane_col),
+                        "lane_col": True,
                     },
                     "k_status_before": {"2": True, "3": bool(eq_s0)},   # k2 placeholder=true here
                     "k_status_after":  {"2": True, "3": bool(eq_sK)},
@@ -2342,11 +2312,17 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
 
             policy_ps = _policy_block_from_run_ctx(rc_ps)
             inputs_ps = _inputs_block_from_session(strict_dims=(n2, n3))
-
-            # lane-mask vs n3 heads-up
             lm_bits_ps = "".join("1" if int(x) else "0" for x in inputs_ps.get("lane_mask_k3", []))
             if lm_bits_ps and len(lm_bits_ps) != int(n3):
                 st.caption(f"⚠︎ lane_mask_k3 has {len(lm_bits_ps)} bits but n₃={n3}")
+
+            summary_ps = {
+                "matches": int(matches),
+                "mismatches": int(mismatches),
+                "off_domain_count": int(total_flips - in_domain_flips),
+                "policy_tag": policy_ps.get("policy_tag",""),
+                "projector_hash": policy_ps.get("projector_hash",""),
+            }
 
             perturb_json = {
                 "schema_version": SCHEMA_VERSION,
@@ -2362,7 +2338,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 "inputs": inputs_ps,
                 "anchor": {
                     "id": rc_ps.get("fixture_nonce", ""),
-                    "hashes": inputs_ps.get("hashes", {}),
+                    "hashes": inputs_ps.get("hashes", {}),           # SSOT copy
                     "lane_mask_k3": inputs_ps.get("lane_mask_k3", []),
                 },
                 "run": {
@@ -2373,21 +2349,17 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     "guard_order": GUARD_ENUM,
                 },
                 "results": ps_results,
-                "summary": {
-                    "matches": int(matches),
-                    "mismatches": int(mismatches),
-                    "policy_tag": policy_ps.get("policy_tag",""),
-                    "projector_hash": policy_ps.get("projector_hash",""),
-                },
+                "summary": summary_ps,
                 "integrity": {"content_hash": ""},
             }
             perturb_json["integrity"]["content_hash"] = _hash_json(perturb_json)
 
-            # Persist + downloads
+            # Persist + downloads + badge
             try:
                 h12 = perturb_json["integrity"]["content_hash"][:12]
                 h8  = perturb_json["integrity"]["content_hash"][:8]
-                pert_json_path = REPORTS_DIR / f"perturbation_sanity__{h12}.json"
+                basename = f"perturbation_sanity__{h12}.json"
+                pert_json_path = REPORTS_DIR / basename
                 _atomic_write_json(pert_json_path, perturb_json)
                 st.session_state.setdefault("last_report_paths", {})["perturbation_sanity"] = {
                     "csv": str(PERTURB_OUT_PATH), "json": str(pert_json_path)
@@ -2396,13 +2368,13 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 import io as _io
                 mem = _io.BytesIO(_json.dumps(perturb_json, ensure_ascii=False, indent=2).encode("utf-8"))
                 st.download_button("Download perturbation_sanity.json", mem,
-                                   file_name=f"perturbation_sanity__{h12}.json",
-                                   key=f"dl_ps_json_{h8}")
+                                   file_name=basename, key=f"dl_ps_json_{h8}")
                 with open(PERTURB_OUT_PATH, "rb") as fcsv:
                     st.download_button("Download perturbation_sanity.csv", fcsv,
                                        file_name=f"perturbation_sanity__{h12}.csv",
                                        key=f"dl_ps_csv_{h8}")
-                st.info(_hash_badge(perturb_json["integrity"]["content_hash"]))
+                st.info(f"wrote JSON ✓ · hash: {h12} · saved as {basename}")
+                st.info(f"lanes-only flips: {in_domain_flips}/{total_flips} · mismatches: {mismatches}")
             except Exception as e:
                 st.info(f"(Perturbation JSON/Downloads issue: {e})")
 
@@ -2417,9 +2389,11 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 H2 = (H0.blocks.__root__.get("2") or [])
                 C3 = (C0.blocks.__root__.get("3") or [])
                 R3_base = _strict_R3(H2, d3, C3)
-                eq_base = int((not R3_base) or all(all((x & 1) == 0 for x in row) for row in R3_base))
-                rows_fs.append(["U_min", f"[1,{eq_base}]", "baseline"])
+                k2_base = 1
+                k3_base = int((not R3_base) or all(all((x & 1) == 0 for x in row) for row in R3_base))
+                rows_fs.append(["U_min", f"[{k2_base},{k3_base}]", "baseline"])
 
+                # Variants
                 if HAS_U_HOOKS:
                     # Carrier mask mutate
                     U_mask = get_carrier_mask(U0)  # type: ignore[name-defined]
@@ -2438,12 +2412,12 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                         for i in range(rU): U_plus[i][0]  = 1; U_plus[i][-1] = 1
 
                     # Minimal semantics: record deltas; fence outcome may remain unchanged
-                    eq_shrink = eq_base
-                    eq_plus   = eq_base
+                    k2_s = 1; k3_s = k3_base
+                    k2_p = 1; k3_p = k3_base
 
                     rows_fs.append([
                         "U_shrink",
-                        f"[1,{eq_shrink}]",
+                        f"[{k2_s},{k3_s}]",
                         _json.dumps({"delta_U": {
                             "added": 0,
                             "removed": int(_count1(U_mask) - _count1(U_shrink)),
@@ -2453,7 +2427,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     ])
                     rows_fs.append([
                         "U_plus",
-                        f"[1,{eq_plus}]",
+                        f"[{k2_p},{k3_p}]",
                         _json.dumps({"delta_U": {
                             "added": int(_count1(U_plus) - _count1(U_mask)),
                             "removed": 0,
@@ -2472,23 +2446,23 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
 
                     R3_shrink = _strict_R3(H2_shrink, d3, C3)
                     R3_plus   = _strict_R3(H2_plus,   d3, C3)
-                    eq_shrink = int((not R3_shrink) or all(all((x & 1) == 0 for x in row) for row in R3_shrink))
-                    eq_plus   = int((not R3_plus)   or all(all((x & 1) == 0 for x in row) for row in R3_plus))
+                    k2_s = 1; k3_s = int((not R3_shrink) or all(all((x & 1) == 0 for x in row) for row in R3_shrink))
+                    k2_p = 1; k3_p = int((not R3_plus)   or all(all((x & 1) == 0 for x in row) for row in R3_plus))
 
-                    def _unchanged_note(eq_before, eq_after):
-                        return "H2-row change only; fence unchanged" if int(eq_before) == int(eq_after) else ""
+                    def _unchanged_note(k3_before, k3_after):
+                        return "H2-row change only; fence unchanged" if int(k3_before) == int(k3_after) else ""
 
                     rows_fs.append([
                         "H2_shrink",
-                        f"[1,{eq_shrink}]",
+                        f"[{k2_s},{k3_s}]",
                         _json.dumps({"delta_H2":{"rows_before": len(H2), "rows_after": len(H2_shrink)},
-                                     "note": _unchanged_note(eq_base, eq_shrink)}, separators=(",", ":"))
+                                     "note": _unchanged_note(k3_base, k3_s)}, separators=(",", ":"))
                     ])
                     rows_fs.append([
                         "H2_plus",
-                        f"[1,{eq_plus}]",
+                        f"[{k2_p},{k3_p}]",
                         _json.dumps({"delta_H2":{"rows_before": len(H2), "rows_after": len(H2_plus)},
-                                     "note": _unchanged_note(eq_base, eq_plus)}, separators=(",", ":"))
+                                     "note": _unchanged_note(k3_base, k3_p)}, separators=(",", ":"))
                     ])
 
                 # Fence CSV
@@ -2518,6 +2492,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 policy_fs = _policy_block_from_run_ctx(rc_fs)
                 inputs_fs = _inputs_block_from_session(strict_dims=(n2, n3))
 
+                # Map CSV rows to JSON results (and try to decode delta_* objects from note where present)
                 results_fs_json = []
                 for r in rows_fs:
                     U_class = str(r[0]) if len(r) > 0 else "U_unknown"
@@ -2542,6 +2517,13 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                         item.update(delta_obj)
                     results_fs_json.append(item)
 
+                # Fence summary
+                summary_fs = {
+                    "baseline_pass_vec": [bool(k2_base), bool(k3_base)],
+                    "U_shrink_pass_vec": [bool(k2_s), bool(k3_s)],
+                    "U_plus_pass_vec":   [bool(k2_p), bool(k3_p)],
+                }
+
                 fence_json = {
                     "schema_version": SCHEMA_VERSION,
                     "written_at_utc": _utc_iso_z(),
@@ -2559,9 +2541,10 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     "exemplar": {
                         "fixture_id": rc_fs.get("fixture_nonce",""),
                         "lane_mask_k3": inputs_fs.get("lane_mask_k3", []),
-                        "hashes": inputs_fs.get("hashes", {}),
+                        "hashes": inputs_fs.get("hashes", {}),  # SSOT copy
                     },
                     "results": results_fs_json,
+                    "summary": summary_fs,
                     "integrity": {"content_hash": ""},
                 }
                 fence_json["integrity"]["content_hash"] = _hash_json(fence_json)
@@ -2569,7 +2552,8 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 try:
                     h12 = fence_json["integrity"]["content_hash"][:12]
                     h8  = fence_json["integrity"]["content_hash"][:8]
-                    fence_json_path = REPORTS_DIR / f"fence_stress__{h12}.json"
+                    basename = f"fence_stress__{h12}.json"
+                    fence_json_path = REPORTS_DIR / basename
                     _atomic_write_json(fence_json_path, fence_json)
                     st.session_state.setdefault("last_report_paths", {})["fence_stress"] = {
                         "csv": str(FENCE_OUT_PATH), "json": str(fence_json_path)
@@ -2578,13 +2562,13 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     import io as _io
                     mem = _io.BytesIO(_json.dumps(fence_json, ensure_ascii=False, indent=2).encode("utf-8"))
                     st.download_button("Download fence_stress.json", mem,
-                                       file_name=f"fence_stress__{h12}.json",
-                                       key=f"dl_fs_json_{h8}")
+                                       file_name=basename, key=f"dl_fs_json_{h8}")
                     with open(FENCE_OUT_PATH, "rb") as fcsv:
                         st.download_button("Download fence_stress.csv", fcsv,
                                            file_name=f"fence_stress__{h12}.csv",
                                            key=f"dl_fs_csv_{h8}")
-                    st.info(_hash_badge(fence_json["integrity"]["content_hash"]))
+                    st.info(f"wrote JSON ✓ · hash: {h12} · saved as {basename}")
+                    st.info(f"{mode_str} · baseline [k2,k3]=[{k2_base},{k3_base}] → shrink [{k2_s},{k3_s}] · U⁺ [{k2_p},{k3_p}]")
                 except Exception as e:
                     st.info(f"(Fence JSON/Downloads issue: {e})")
 
@@ -2654,7 +2638,6 @@ if "_in_district_guess" not in globals():
 
 
 # =============================== Coverage Sampling (non-blocking) ==============================
-# Standalone: no open try/except should be above this line.
 from pathlib import Path
 
 # Ensure REPORTS_DIR exists for coverage block (defensive bootstrap)
@@ -2729,6 +2712,7 @@ with st.expander("Coverage Sampling"):
                 st.session_state.setdefault("run_ctx", {})["run_id"] = run_id
 
                 counts: dict[str, int] = {}
+
                 # lane_pattern used for quick in_district guess (bitstring)
                 inputs_cov_tmp = _inputs_block_from_session((int(n2), int(n3)))
                 lane_mask_bits = "".join("1" if int(x) else "0" for x in (inputs_cov_tmp.get("lane_mask_k3") or []))
@@ -2799,22 +2783,23 @@ with st.expander("Coverage Sampling"):
                     st.caption(f"⚠︎ lane_mask_k3 has {len(lm_bits_cov)} bits but n₃={n3}")
 
                 known_signatures = (rc_cov.get("known_signatures") or [])
+
                 residual_method = "R3 strict vs R3·Π (lanes/ker/mixed)"
 
                 results_cov = []
                 for sig, cnt, in_d, pctv in rows:
                     results_cov.append({
                         "signature": sig,
-                        "signature_canonical": sig,   # _coverage_signature already canonicalizes
+                        "signature_canonical": sig,          # already canonicalized
                         "count": int(cnt),
                         "pct": float(pctv),
                         "in_district": bool(int(in_d)),
-                        "lane_pattern": lane_mask_bits,
+                        "lane_pattern": lane_mask_bits,       # bitstring for joins
                         "dims": {"n2": int(n2), "n3": int(n3)},
                     })
 
                 payload_cov = {
-                    "schema_version": "1.1.0",
+                    "schema_version": SCHEMA_VERSION,
                     "written_at_utc": _utc_iso_z(),
                     "app_version": APP_VERSION,
                     "field": FIELD,
@@ -2823,7 +2808,7 @@ with st.expander("Coverage Sampling"):
                         "district_id": rc_cov.get("district_id","D3"),
                     },
                     "policy": policy_cov,
-                    "inputs": inputs_cov,
+                    "inputs": inputs_cov,                    # includes hashes from SSOT
                     # top-level additions for quick readers
                     "lane_mask_k3": inputs_cov.get("lane_mask_k3", []),
                     "known_signatures": known_signatures,
@@ -2844,25 +2829,21 @@ with st.expander("Coverage Sampling"):
                         "N": int(num_samples),
                         "unique_signatures": int(len(results_cov)),
                         "in_district_hits": int(sum(1 for r in results_cov if r["in_district"])),
-                        "pct_in_district": (100.0 * sum(1 for r in results_cov if r["in_district"]) / float(num_samples)) if int(num_samples) else 0.0,
+
+                        # pct across all samples (not unique sigs)
+                        "pct_in_district": (
+                            100.0 * sum(1 for r in results_cov if r["in_district"]) / float(len(results_cov))
+                        ) if len(results_cov) else 0.0,
                     },
                     "integrity": {"content_hash": ""},
                 }
 
-                # Lightweight self-check
-                def _coverage_self_check(p):
-                    problems = []
-                    if "lane_mask_k3" not in p: problems.append("lane_mask_k3 missing")
-                    if "known_signatures" not in p: problems.append("known_signatures missing")
-                    if p.get("residual_method","") == "": problems.append("residual_method missing/empty")
-                    summ = p.get("summary", {})
-                    for k in ["N","unique_signatures","pct_in_district"]:
-                        if k not in summ: problems.append(f"summary.{k} missing")
-                    if not p.get("integrity",{}).get("content_hash"): problems.append("integrity.content_hash missing")
-                    return problems
-                issues = _coverage_self_check(payload_cov)
-                if issues:
-                    st.warning("Coverage JSON minor issues: " + "; ".join(issues))
+                # Add top-3 signatures by count (+pct)
+                top = sorted(rows, key=lambda r: (-int(r[1]), r[0]))[:3]
+                payload_cov["summary"]["top_signatures"] = [
+                    {"signature": s, "count": int(c), "pct": float(p)}
+                    for (s, c, _, p) in top
+                ]
 
                 # Integrity (stable)
                 payload_cov["integrity"]["content_hash"] = _hash_json(payload_cov)
@@ -2904,16 +2885,12 @@ with st.expander("Coverage Sampling"):
                 except Exception as e:
                     st.info(f"(Could not build coverage JSON download: {e})")
 
-                # Badge
-                st.info(f"wrote CSV + JSON ✓ · hash: {hash12_cov}")
+                # Badges
+                st.info(f"wrote JSON ✓ · hash: {hash12_cov} · saved as {cov_json_name}")
+                st.info(f"N={payload_cov['summary']['N']} · unique={payload_cov['summary']['unique_signatures']} · in-district={payload_cov['summary']['pct_in_district']:.2f}%")
 
         except Exception as e:
             st.error(f"Coverage sampling failed: {e}")
-
-           
-
-
-
 
 
 
