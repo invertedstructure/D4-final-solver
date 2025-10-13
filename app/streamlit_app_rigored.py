@@ -2162,6 +2162,9 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 st.download_button("Download perturbation_sanity.json", mem, file_name=ps_json_name, key=f"dl_ps_json_{hash12_ps}")
             except Exception:
                 pass
+            except Exception as e:
+                st.error(f"Perturbation/Fence run failed: {e}")
+
             
 
 
@@ -5945,3 +5948,4 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                                         st.success(f"Exported: {zpath}")
                                         with open(zpath, "rb") as fz:
                                             st.download_button("Download report.zip", fz, file_name="report.zip")
+                                           
