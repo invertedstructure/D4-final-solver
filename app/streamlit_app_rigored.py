@@ -3093,52 +3093,51 @@ with st.expander("Coverage Baseline (load + normalize to n₂-bit columns)"):
                 st.session_state["run_ctx"] = rc0
                 st.success(f"Loaded {len(loaded)} canonical signatures (normalized={bool(norm_on)}).")
 
-             # --- Use demo baseline (normalized to n₂-bit columns) ---
-    if st.button("Use demo baseline", key="cov_btn_demo"):
-        # Try to auto-fill dims before we enforce normalization
-        if norm_on:
-            n2_active, n3_active = _autofill_dims_from_session()
-    
-        # Hard guard: we need dims to normalize
-        if norm_on and (n2_active <= 0 or n3_active <= 0):
-            st.error("COVERAGE_BASELINE_DIMS_UNKNOWN: select/load a fixture first (need n₂,n₃).")
-            st.stop()
-    
-        demo = DEMO_BASELINE[:]  # legacy 3-bit tokens; we normalize below
-        norm_full, norm_patt = [], []
-    
-        if norm_on:
-            # Normalize every signature line to exactly n3 tokens, each n2 bits
-            for s in demo:
-                f, p = _normalize_signature_line_to_n2(s, n2=n2_active, n3=n3_active)
-                norm_full.append(f)
-                norm_patt.append(p)
-            demo = _dedupe_keep_order(norm_full)
-            patt_only = set(norm_patt)
-        else:
-            # No normalization → still derive pattern-only strings directly
-            patt_only = set()
-            for s in demo:
-                toks = _extract_pattern_tokens(s)
-                if toks:
-                    patt_only.add(f"pattern=[{','.join(toks)}]")
-    
-        # Final sanity: pattern-only list must be non-empty and dialect-correct
-        if not patt_only:
-            st.error("COVERAGE_BASELINE_EMPTY_AFTER_NORMALIZE: no usable patterns. Check dims or baseline format.")
-            st.stop()
-    
-        # Save into run_ctx
-        rc0 = st.session_state.get("run_ctx") or {}
-        rc0["known_signatures"] = demo
-        rc0["known_signatures_patterns"] = sorted(patt_only)
-        st.session_state["run_ctx"] = rc0
-    
-        st.success(f"Loaded demo baseline ({len(demo)} signatures; normalized={bool(norm_on)}).")
-        st.caption(f"Active fixture dims → n₂={n2_active}, n₃={n3_active}")
-        # Optional: preview up to 5 normalized signatures
-        st.code("\n".join(demo[:5] + (["…"] if len(demo) > 5 else [])), language="text")
-      
+                     # --- Use demo baseline (works even with no fixture loaded) ---
+        if st.button("Use demo baseline", key="cov_btn_demo"):
+            # Prefer existing dims; if missing, seed DEMO dims (D3-style)
+            if norm_on:
+                n2_active, n3_active = _autofill_dims_from_session()
+                if n2_active <= 0 or n3_active <= 0:
+                    # Seed defaults so demo baseline doesn't require a fixture
+                    n2_active, n3_active = 2, 3
+                    rc_seed = st.session_state.get("run_ctx") or {}
+                    rc_seed["n2"], rc_seed["n3"] = n2_active, n3_active
+                    st.session_state["run_ctx"] = rc_seed
+        
+            demo = DEMO_BASELINE[:]  # legacy (3-bit tokens)
+            norm_full, norm_patt = [], []
+        
+            if norm_on:
+                # Normalize every signature line to exactly n3 tokens, each n2 bits
+                for s in demo:
+                    f, p = _normalize_signature_line_to_n2(s, n2=n2_active, n3=n3_active)
+                    norm_full.append(f)
+                    norm_patt.append(p)
+                demo = _dedupe_keep_order(norm_full)
+                patt_only = set(norm_patt)
+            else:
+                patt_only = set()
+                for s in demo:
+                    toks = _extract_pattern_tokens(s)
+                    if toks:
+                        patt_only.add(f"pattern=[{','.join(toks)}]")
+        
+            # Final sanity
+            if not patt_only:
+                st.error("COVERAGE_BASELINE_EMPTY_AFTER_NORMALIZE: no usable patterns.")
+                st.stop()
+        
+            rc0 = st.session_state.get("run_ctx") or {}
+            rc0["known_signatures"] = demo
+            rc0["known_signatures_patterns"] = sorted(patt_only)
+            st.session_state["run_ctx"] = rc0
+        
+            st.success(f"Loaded demo baseline ({len(demo)} signatures; normalized={bool(norm_on)}).")
+            st.caption(f"Active fixture dims → n₂={n2_active}, n₃={n3_active}")
+            st.code("\n".join(demo[:5] + (["…"] if len(demo) > 5 else [])), language="text")
+        
+              
 
 
         if st.button("Clear baseline", key="cov_btn_clear"):
