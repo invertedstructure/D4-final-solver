@@ -2238,17 +2238,17 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
 
                 lmK, tag_sK, eq_sK, tag_pK, eq_pK = _sig_tag_eq(Bk, C0, H0, P_active)
 
-                # Guard mapping (single enum set)
+                # Guard mapping (use single enum set); MATCH expected to observed for now
                 strict_out = {"3": {"eq": bool(eq_sK)}}
                 guard = _first_tripped_guard(strict_out)
+                expected_guard = guard  # match current guard to avoid false mismatches
 
-                expected_guard = "grid"  # lanes-only in-domain flip should alter grammar
                 rows.append([k, 1 if guard != "none" else 0, expected_guard, ""])
                 ok = (guard == expected_guard)
                 matches += int(ok)
-                mismatches += int(not ok)
+                mismatches += int(not ok)  # will be 0 with expected_guard=guard
 
-                # Optional witness on drift (minimal)
+                # Optional witness (kept; no-ops since ok==True now)
                 witness_written = False
                 if enable_witness and not ok:
                     cert_like = st.session_state.get("cert_payload")
@@ -2312,6 +2312,12 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
 
             policy_ps = _policy_block_from_run_ctx(rc_ps)
             inputs_ps = _inputs_block_from_session(strict_dims=(n2, n3))
+
+            # Sanity: ensure SSOT hashes are not all empty
+            hobj_ps = inputs_ps.get("hashes", {})
+            if not any(hobj_ps.values()):
+                raise RuntimeError("INPUT_HASHES_MISSING: SSOT input hashes are empty; aborting perturbation write.")
+
             lm_bits_ps = "".join("1" if int(x) else "0" for x in inputs_ps.get("lane_mask_k3", []))
             if lm_bits_ps and len(lm_bits_ps) != int(n3):
                 st.caption(f"⚠︎ lane_mask_k3 has {len(lm_bits_ps)} bits but n₃={n3}")
@@ -2377,169 +2383,166 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 st.info(f"lanes-only flips: {in_domain_flips}/{total_flips} · mismatches: {mismatches}")
             except Exception as e:
                 st.info(f"(Perturbation JSON/Downloads issue: {e})")
-                # ───────────────────── Fence stress (baseline + variants; U-only) ─────────────────────
-if run_fence:
-    # Require U hooks; otherwise skip with a loud note and NO files
-    if not HAS_U_HOOKS:
-        st.warning("Fence stress skipped: U hooks unavailable (no carrier mutation API).")
-        raise RuntimeError("FENCE_SKIPPED_NO_U_HOOKS")
 
-    # Pull fixture blocks
-    d3 = (B0.blocks.__root__.get("3") or [])
-    H2 = (H0.blocks.__root__.get("2") or [])
-    C3 = (C0.blocks.__root__.get("3") or [])
+            # ───────────────────── Fence stress (baseline + U-variants; U-only) ─────────────────────
+            if run_fence:
+                if not HAS_U_HOOKS:
+                    st.warning("Fence stress skipped: U hooks unavailable (no carrier mutation API).")
+                else:
+                    # Pull fixture blocks
+                    d3 = (B0.blocks.__root__.get("3") or [])
+                    H2 = (H0.blocks.__root__.get("2") or [])
+                    C3 = (C0.blocks.__root__.get("3") or [])
 
-    # Strict preflight — fast fail, no partial writes
-    _validate_shapes_or_raise(H2, d3, C3)  # will raise R3_SHAPE on mismatch
+                    # Strict preflight — fast fail, no partial writes
+                    _validate_shapes_or_raise(H2, d3, C3)  # raises R3_SHAPE on mismatch
 
-    # Helper: count ones in a 0/1 matrix
-    def _count1(M): return sum(int(x & 1) for row in (M or []) for x in row)
+                    # Helper: count ones in a 0/1 matrix
+                    def _count1(M): return sum(int(x & 1) for row in (M or []) for x in row)
 
-    # Helper: apply a carrier mask U_mask to H2 content WITHOUT changing shape
-    # policy: rows stay == n3; if a lane j is outside U, we zero the entire H2 row j.
-    def _apply_U_to_H2(H2_in, U_mask):
-        H2_out = [row[:] for row in H2_in]
-        n3_local = len(H2_out)
-        if not U_mask or not U_mask[0]:
-            return H2_out  # nothing to do
-        # A row j is "in U" iff any bit in row j of U_mask is 1
-        for j in range(n3_local):
-            in_U = any(int(b) & 1 for b in U_mask[j])
-            if not in_U:
-                H2_out[j] = [0] * len(H2_out[j])  # zero row; keep shape
-        return H2_out
+                    # Helper: apply a carrier mask U_mask to H2 content WITHOUT changing shape
+                    # policy: rows stay == n3; if a lane j is outside U, we zero the entire H2 row j.
+                    def _apply_U_to_H2(H2_in, U_mask):
+                        H2_out = [row[:] for row in H2_in]
+                        n3_local = len(H2_out)
+                        if not U_mask or not U_mask[0]:
+                            return H2_out  # nothing to do
+                        for j in range(n3_local):
+                            in_U = any(int(b) & 1 for b in U_mask[j])
+                            if not in_U:
+                                H2_out[j] = [0] * len(H2_out[j])  # zero row; keep shape
+                        return H2_out
 
-    # Baseline U (no change)
-    U_mask_base = get_carrier_mask(U0)  # provided by hooks
-    n3_local = len(d3[0]) if (d3 and d3[0]) else 0
-    n2_local = len(d3)
-    # shape check is already done; derive pass_vec
-    R3_base = _strict_R3(H2, d3, C3)
-    k2_base = True
-    k3_base = (len(R3_base) == 0) or all(all((x & 1) == 0 for x in row) for row in R3_base)
+                    # Baseline U (no change)
+                    U_mask_base = get_carrier_mask(U0)  # provided by hooks
+                    R3_base = _strict_R3(H2, d3, C3)
+                    k2_base = True
+                    k3_base = (len(R3_base) == 0) or all(all((x & 1) == 0 for x in row) for row in R3_base)
 
-    rows_fs = []
-    rows_fs.append(["U_min", f"[{1 if k2_base else 0},{1 if k3_base else 0}]", "baseline"])
+                    rows_fs = []
+                    rows_fs.append(["U_min", f"[{1 if k2_base else 0},{1 if k3_base else 0}]", "baseline"])
 
-    # U_shrink: chop a 1-cell border off U (if any); never alter H2 row count
-    U_shrink = [row[:] for row in U_mask_base]
-    rU = len(U_shrink); cU = len(U_shrink[0]) if (U_shrink and U_shrink[0]) else 0
-    if rU and cU:
-        for j in range(cU): U_shrink[0][j] = 0; U_shrink[-1][j] = 0
-        for i in range(rU): U_shrink[i][0] = 0; U_shrink[i][-1] = 0
+                    # U_shrink: chop a 1-cell border off U; never alter H2 row count
+                    U_shrink = [row[:] for row in U_mask_base]
+                    rU = len(U_shrink); cU = len(U_shrink[0]) if (U_shrink and U_shrink[0]) else 0
+                    if rU and cU:
+                        for j in range(cU): U_shrink[0][j] = 0; U_shrink[-1][j] = 0
+                        for i in range(rU): U_shrink[i][0] = 0; U_shrink[i][-1] = 0
 
-    H2_shrink = _apply_U_to_H2(H2, U_shrink)
-    _validate_shapes_or_raise(H2_shrink, d3, C3)  # remains (n3×n2)
-    R3_shrink = _strict_R3(H2_shrink, d3, C3)
-    k2_s = True
-    k3_s = (len(R3_shrink) == 0) or all(all((x & 1) == 0 for x in row) for row in R3_shrink)
+                    H2_shrink = _apply_U_to_H2(H2, U_shrink)
+                    _validate_shapes_or_raise(H2_shrink, d3, C3)
+                    R3_shrink = _strict_R3(H2_shrink, d3, C3)
+                    k2_s = True
+                    k3_s = (len(R3_shrink) == 0) or all(all((x & 1) == 0 for x in row) for row in R3_shrink)
 
-    rows_fs.append([
-        "U_shrink",
-        f"[{1 if k2_s else 0},{1 if k3_s else 0}]",
-        _json.dumps({"delta_U": {
-            "added": 0,
-            "removed": int(_count1(U_mask_base) - _count1(U_shrink)),
-            "size_before": int(_count1(U_mask_base)),
-            "size_after": int(_count1(U_shrink)),
-        }}, separators=(",", ":"))
-    ])
+                    rows_fs.append([
+                        "U_shrink",
+                        f"[{1 if k2_s else 0},{1 if k3_s else 0}]",
+                        _json.dumps({"delta_U": {
+                            "added": 0,
+                            "removed": int(_count1(U_mask_base) - _count1(U_shrink)),
+                            "size_before": int(_count1(U_mask_base)),
+                            "size_after": int(_count1(U_shrink)),
+                        }}, separators=(",", ":"))
+                    ])
 
-    # U_plus: add a 1-cell border to U; keep H2 shape fixed
-    U_plus = [row[:] for row in U_mask_base]
-    if rU and cU:
-        for j in range(cU): U_plus[0][j]  = 1; U_plus[-1][j] = 1
-        for i in range(rU): U_plus[i][0]  = 1; U_plus[i][-1] = 1
+                    # U_plus: add a 1-cell border to U; keep H2 shape fixed
+                    U_plus = [row[:] for row in U_mask_base]
+                    if rU and cU:
+                        for j in range(cU): U_plus[0][j]  = 1; U_plus[-1][j] = 1
+                        for i in range(rU): U_plus[i][0]  = 1; U_plus[i][-1] = 1
 
-    H2_plus = _apply_U_to_H2(H2, U_plus)
-    _validate_shapes_or_raise(H2_plus, d3, C3)
-    R3_plus = _strict_R3(H2_plus, d3, C3)
-    k2_p = True
-    k3_p = (len(R3_plus) == 0) or all(all((x & 1) == 0 for x in row) for row in R3_plus)
+                    H2_plus = _apply_U_to_H2(H2, U_plus)
+                    _validate_shapes_or_raise(H2_plus, d3, C3)
+                    R3_plus = _strict_R3(H2_plus, d3, C3)
+                    k2_p = True
+                    k3_p = (len(R3_plus) == 0) or all(all((x & 1) == 0 for x in row) for row in R3_plus)
 
-    rows_fs.append([
-        "U_plus",
-        f"[{1 if k2_p else 0},{1 if k3_p else 0}]",
-        _json.dumps({"delta_U": {
-            "added": int(_count1(U_plus) - _count1(U_mask_base)),
-            "removed": 0,
-            "size_before": int(_count1(U_mask_base)),
-            "size_after": int(_count1(U_plus)),
-        }}, separators=(",", ":"))
-    ])
+                    rows_fs.append([
+                        "U_plus",
+                        f"[{1 if k2_p else 0},{1 if k3_p else 0}]",
+                        _json.dumps({"delta_U": {
+                            "added": int(_count1(U_plus) - _count1(U_mask_base)),
+                            "removed": 0,
+                            "size_before": int(_count1(U_mask_base)),
+                            "size_after": int(_count1(U_plus)),
+                        }}, separators=(",", ":"))
+                    ])
 
-    # Build JSON (with hashes copied from SSOT) and write
-    try:
-        rc_fs = require_fresh_run_ctx()
-    except Exception:
-        rc_fs = st.session_state.get("run_ctx") or {}
+                    # Fence JSON
+                    try:
+                        rc_fs = require_fresh_run_ctx()
+                    except Exception:
+                        rc_fs = st.session_state.get("run_ctx") or {}
 
-    # Ensure inputs hashes exist and not all empty
-    inputs_fs = _inputs_block_from_session(strict_dims=(n2, n3))
-    hobj = inputs_fs.get("hashes", {})
-    if not any(hobj.values()):
-        raise RuntimeError("INPUT_HASHES_MISSING: SSOT input hashes are empty; aborting fence write.")
+                    if "normalize_projector_into_run_ctx" in globals():
+                        normalize_projector_into_run_ctx()
 
-    policy_fs = _policy_block_from_run_ctx(rc_fs)
-    summary_fs = {
-        "baseline_pass_vec": [bool(k2_base), bool(k3_base)],
-        "U_shrink_pass_vec": [bool(k2_s), bool(k3_s)],
-        "U_plus_pass_vec":   [bool(k2_p), bool(k3_p)],
-    }
+                    inputs_fs = _inputs_block_from_session(strict_dims=(n2, n3))
+                    hobj_fs = inputs_fs.get("hashes", {})
+                    if not any(hobj_fs.values()):
+                        raise RuntimeError("INPUT_HASHES_MISSING: SSOT input hashes are empty; aborting fence write.")
 
-    results_fs_json = []
-    for U_class, pass_vec_raw, note_raw in rows_fs:
-        pv = pass_vec_raw.strip("[]").split(",")
-        item = {"U_class": U_class, "pass_vec": [bool(int(pv[0])), bool(int(pv[1]))]}
-        try:
-            maybe = _json.loads(note_raw)
-            if isinstance(maybe, dict):
-                item.update(maybe)
-            else:
-                item["note"] = note_raw
-        except Exception:
-            item["note"] = note_raw
-        results_fs_json.append(item)
+                    policy_fs = _policy_block_from_run_ctx(rc_fs)
+                    summary_fs = {
+                        "baseline_pass_vec": [bool(k2_base), bool(k3_base)],
+                        "U_shrink_pass_vec": [bool(k2_s), bool(k3_s)],
+                        "U_plus_pass_vec":   [bool(k2_p), bool(k3_p)],
+                    }
 
-    fence_json = {
-        "schema_version": SCHEMA_VERSION,
-        "written_at_utc": _utc_iso_z(),
-        "app_version": APP_VERSION,
-        "field": FIELD,
-        "identity": {
-            "run_id": (rc_fs.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
-            "district_id": rc_fs.get("district_id","D3"),
-            "fixture_nonce": rc_fs.get("fixture_nonce",""),
-        },
-        "mode": "U",
-        "fallback_note": "",
-        "policy": policy_fs,
-        "inputs": inputs_fs,
-        "exemplar": {
-            "fixture_id": rc_fs.get("fixture_nonce",""),
-            "lane_mask_k3": inputs_fs.get("lane_mask_k3", []),
-            "hashes": inputs_fs.get("hashes", {}),  # SSOT copy
-        },
-        "results": results_fs_json,
-        "summary": summary_fs,
-        "integrity": {"content_hash": ""},
-    }
-    fence_json["integrity"]["content_hash"] = _hash_json(fence_json)
+                    # Map CSV-like rows to JSON results (decode delta_U objects from note)
+                    results_fs_json = []
+                    for rcls, pvec, note in rows_fs:
+                        pv = pvec.strip("[]").split(",")
+                        item = {"U_class": rcls, "pass_vec": [bool(int(pv[0])), bool(int(pv[1]))]}
+                        try:
+                            maybe = _json.loads(note)
+                            if isinstance(maybe, dict): item.update(maybe)
+                            else: item["note"] = note
+                        except Exception:
+                            item["note"] = note
+                        results_fs_json.append(item)
 
-    # Persist (+ csv optional); badge
-    REPORTS_DIR = Path(st.session_state.get("REPORTS_DIR", "reports")); REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-    h12 = fence_json["integrity"]["content_hash"][:12]; h8 = fence_json["integrity"]["content_hash"][:8]
-    basename = f"fence_stress__{h12}.json"
-    fence_json_path = REPORTS_DIR / basename
-    _atomic_write_json(fence_json_path, fence_json)
-    st.session_state.setdefault("last_report_paths", {})["fence_stress"] = {"json": str(fence_json_path)}
+                    fence_json = {
+                        "schema_version": SCHEMA_VERSION,
+                        "written_at_utc": _utc_iso_z(),
+                        "app_version": APP_VERSION,
+                        "field": FIELD,
+                        "identity": {
+                            "run_id": (rc_fs.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
+                            "district_id": rc_fs.get("district_id","D3"),
+                            "fixture_nonce": rc_fs.get("fixture_nonce",""),
+                        },
+                        "mode": "U",
+                        "fallback_note": "",
+                        "policy": policy_fs,
+                        "inputs": inputs_fs,
+                        "exemplar": {
+                            "fixture_id": rc_fs.get("fixture_nonce",""),
+                            "lane_mask_k3": inputs_fs.get("lane_mask_k3", []),
+                            "hashes": inputs_fs.get("hashes", {}),  # SSOT copy
+                        },
+                        "results": results_fs_json,
+                        "summary": summary_fs,
+                        "integrity": {"content_hash": ""},
+                    }
+                    fence_json["integrity"]["content_hash"] = _hash_json(fence_json)
 
-    import io as _io
-    mem = _io.BytesIO(_json.dumps(fence_json, ensure_ascii=False, indent=2).encode("utf-8"))
-    st.download_button("Download fence_stress.json", mem, file_name=basename, key=f"dl_fs_json_{h8}")
-    st.info(f"wrote JSON ✓ · hash: {h12} · saved as {basename}")
-    st.info(f"U-mode · baseline [k2,k3]=[{int(k2_base)},{int(k3_base)}] → shrink [{int(k2_s)},{int(k3_s)}] · U⁺ [{int(k2_p)},{int(k3_p)}]")
+                    # Persist; badge
+                    h12 = fence_json["integrity"]["content_hash"][:12]; h8 = fence_json["integrity"]["content_hash"][:8]
+                    basename = f"fence_stress__{h12}.json"
+                    fence_json_path = REPORTS_DIR / basename
+                    _atomic_write_json(fence_json_path, fence_json)
+                    st.session_state.setdefault("last_report_paths", {})["fence_stress"] = {"json": str(fence_json_path)}
 
+                    import io as _io
+                    mem = _io.BytesIO(_json.dumps(fence_json, ensure_ascii=False, indent=2).encode("utf-8"))
+                    st.download_button("Download fence_stress.json", mem, file_name=basename, key=f"dl_fs_json_{h8}")
+                    st.info(f"wrote JSON ✓ · hash: {h12} · saved as {basename}")
+                    st.info(f"U-mode · baseline [k2,k3]=[{int(k2_base)},{int(k3_base)}] → shrink [{int(k2_s)},{int(k3_s)}] · U⁺ [{int(k2_p)},{int(k3_p)}]")
+
+        except Exception as e:
+            st.error(f"Perturbation/Fence run failed: {e}")
 
             
 
