@@ -2385,8 +2385,8 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     except Exception as e:
                         st.info(f"(Could not build fence JSON download: {e})")
     
-            except Exception as e:
-                st.error(f"Perturbation/Fence run failed: {e}")
+                except Exception as e:
+                    st.error(f"Perturbation/Fence run failed: {e}")
 
 
                
