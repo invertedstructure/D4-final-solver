@@ -1947,7 +1947,7 @@ def _strict_R3(H2: list[list[int]], d3: list[list[int]], C3: list[list[int]]) ->
     I3 = [[1 if i == j else 0 for j in range(n3)] for i in range(n3)] if n3 else []
     C3p = _xor_overlap(C3, I3) if (C3 or I3) else []
     if C3p and len(M) != len(C3p):
-    st.caption(f"⚠︎ R3 row mismatch: H2@d3={len(M)}×{len(M[0]) if M and M[0] else 0}, C3^I3={len(C3p)}×{len(C3p[0]) if C3p and C3p[0] else 0}")
+        st.caption(f"⚠︎ R3 row mismatch: H2@d3={len(M)}×{len(M[0]) if M and M[0] else 0}, C3^I3={len(C3p)}×{len(C3p[0]) if C3p and C3p[0] else 0}")
 
 
     # If no C3p, R3 = M. Otherwise XOR over the overlap.
