@@ -2873,14 +2873,25 @@ if "_coverage_signature" not in globals():
 
 # ---------- Baseline normalization helpers ----------
 if "_extract_pattern_tokens" not in globals():
+    import re as _re
+    _PAT_RE = _re.compile(r"pattern=\[\s*(.*?)\s*\]")
     def _extract_pattern_tokens(sig: str) -> list[str]:
-        """Returns tokens inside pattern=[...]. If missing/malformed → []."""
-        try:
-            body = sig.split("pattern=[", 1)[1].split("]", 1)[0]
-            toks = [t.strip() for t in body.split(",") if t.strip()]
-            return toks
-        except Exception:
+        """
+        Returns tokens inside pattern=[...], trimmed.
+        If missing/malformed → [].
+        """
+        m = _PAT_RE.search(sig or "")
+        if not m:
             return []
+        inner = m.group(1)
+        # split on commas, drop empties, keep only 0/1 chars in each token
+        toks = []
+        for raw in inner.split(","):
+            s = "".join(ch for ch in raw.strip() if ch in "01")
+            if s != "":
+                toks.append(s)
+        return toks
+
 
 if "_rebuild_signature_with_tokens" not in globals():
     import re as _re
@@ -2889,35 +2900,37 @@ if "_rebuild_signature_with_tokens" not in globals():
         if "pattern=[" not in sig:
             return f"pattern=[{','.join(tokens)}]"
         return _re.sub(r"pattern=\[[^\]]*\]", f"pattern=[{','.join(tokens)}]", sig)
-
+        
 if "_normalize_signature_line_to_n2" not in globals():
     def _normalize_signature_line_to_n2(sig: str, *, n2: int, n3: int) -> tuple[str, str]:
         """
-        Convert any pattern whose per-token bit-length != n2 into n2-bit tokens.
-        Keep exactly n3 tokens (columns). For each token:
-          - if len >= n2 → take the TOP n2 bits (leftmost)
-          - if len  < n2 → left-pad with '0' to reach n2
-        Returns: (normalized_full_signature, normalized_pattern_only)
+        Convert pattern=[t1,t2,t3] to n3 tokens, each exactly n2 bits (top-to-bottom).
+        - If token len > n2: keep the TOP n2 bits (leftmost).
+        - If token len < n2: left-pad with '0' to n2.
+        - If token count != n3: pad/truncate with '0'*n2 to exactly n3 tokens.
+        Returns (full_signature_norm, pattern_only_norm).
         """
         toks = _extract_pattern_tokens(sig)
         if not toks:
-            patt = f"pattern=[{','.join(['0'*n2 for _ in range(int(n3))])}]"
-            return patt, patt
-
-        # ensure we have n3 tokens; if fewer/more, truncate/pad with zeros (stable)
-        toks = (toks + (["0"*n2] * max(0, int(n3) - len(toks))))[:int(n3)]
-
+            toks = []
+        # normalize each token to n2 bits
         norm = []
         for t in toks:
             bits = "".join(ch for ch in t if ch in "01")
-            if len(bits) >= int(n2):
-                norm.append(bits[:int(n2)])
+            if len(bits) >= n2:
+                norm.append(bits[:n2])   # keep top rows (leftmost chars)
             else:
-                norm.append(("0" * (int(n2) - len(bits))) + bits)
-
-        full_norm = _rebuild_signature_with_tokens(sig, norm)
+                norm.append(("0"*(n2 - len(bits))) + bits)
+        # enforce exactly n3 tokens
+        while len(norm) < n3:
+            norm.append("0"*n2)
+        if len(norm) > n3:
+            norm = norm[:n3]
         patt_norm = f"pattern=[{','.join(norm)}]"
+        full_norm = _rebuild_signature_with_tokens(sig, norm)
         return full_norm, patt_norm
+
+
 
 if "_dedupe_keep_order" not in globals():
     def _dedupe_keep_order(items: list[str]) -> list[str]:
@@ -2949,7 +2962,7 @@ with st.expander("Coverage Baseline (load + normalize to n₂-bit columns)"):
             if name.lower().endswith(".jsonl"):
                 for line in txt.splitlines():
                     line = line.strip()
-                    if not line: 
+                    if not line:
                         continue
                     try:
                         obj = _json.loads(line)
@@ -3013,25 +3026,55 @@ with st.expander("Coverage Baseline (load + normalize to n₂-bit columns)"):
             if not loaded:
                 st.error("No valid signatures found. Provide .json/.jsonl or paste one-per-line.")
             else:
-                if norm_on and n2_active > 0 and n3_active > 0:
-                    loaded = [_normalize_signature_line_to_n2(s, n2=n2_active, n3=n3_active)[0] for s in loaded]
-                loaded = _dedupe_keep_order(loaded)
+                # C) refuse to normalize until dims are known
+                if norm_on and (n2_active <= 0 or n3_active <= 0):
+                    st.error("COVERAGE_BASELINE_DIMS_UNKNOWN: select/load a fixture first (we need n₂,n₃).")
+                    st.stop()
+
+                # D) store normalized strings for both lists
+                patt_only: set[str] = set()
+                if norm_on:
+                    norm_full, norm_patt = [], []
+                    for s in loaded:
+                        f, p = _normalize_signature_line_to_n2(s, n2=n2_active, n3=n3_active)
+                        norm_full.append(f); norm_patt.append(p)
+                    loaded = _dedupe_keep_order(norm_full)
+                    patt_only = set(norm_patt)
+                else:
+                    # derive pattern-only strings from what you loaded (no-op normalize)
+                    for s in loaded:
+                        toks = _extract_pattern_tokens(s)
+                        if toks:
+                            patt_only.add(f"pattern=[{','.join(toks)}]")
 
                 rc0 = st.session_state.get("run_ctx") or {}
                 rc0["known_signatures"] = loaded
-                # also cache pattern-only normalized set to speed membership checks later
-                patt_only = {_normalize_signature_line_to_n2(s, n2=n2_active, n3=n3_active)[1] for s in loaded}
                 rc0["known_signatures_patterns"] = sorted(patt_only)
                 st.session_state["run_ctx"] = rc0
                 st.success(f"Loaded {len(loaded)} canonical signatures (normalized={bool(norm_on)}).")
 
         if st.button("Use demo baseline", key="cov_btn_demo"):
+            if norm_on and (n2_active <= 0 or n3_active <= 0):
+                st.error("COVERAGE_BASELINE_DIMS_UNKNOWN: select/load a fixture first (we need n₂,n₃).")
+                st.stop()
+
             demo = DEMO_BASELINE[:]
+            patt_only: set[str] = set()
             if norm_on and n2_active > 0 and n3_active > 0:
-                demo = [_normalize_signature_line_to_n2(s, n2=n2_active, n3=n3_active)[0] for s in demo]
+                norm_full, norm_patt = [], []
+                for s in demo:
+                    f, p = _normalize_signature_line_to_n2(s, n2=n2_active, n3=n3_active)
+                    norm_full.append(f); norm_patt.append(p)
+                demo = _dedupe_keep_order(norm_full)
+                patt_only = set(norm_patt)
+            else:
+                for s in demo:
+                    toks = _extract_pattern_tokens(s)
+                    if toks:
+                        patt_only.add(f"pattern=[{','.join(toks)}]")
+
             rc0 = st.session_state.get("run_ctx") or {}
-            rc0["known_signatures"] = _dedupe_keep_order(demo)
-            patt_only = {_normalize_signature_line_to_n2(s, n2=n2_active, n3=n3_active)[1] for s in demo}
+            rc0["known_signatures"] = demo
             rc0["known_signatures_patterns"] = sorted(patt_only)
             st.session_state["run_ctx"] = rc0
             st.success(f"Loaded demo baseline ({len(demo)} signatures; normalized={bool(norm_on)}).")
@@ -3127,15 +3170,26 @@ with st.expander("Coverage Sampling"):
                 rc_cov = st.session_state.get("run_ctx") or {}
             known_signatures = (rc_cov.get("known_signatures") or [])
             base_patterns = set(rc_cov.get("known_signatures_patterns") or [])
+
             if not known_signatures:
                 st.error("COVERAGE_CONFIG_EMPTY: no canonical signatures loaded. Load baseline before sampling.")
                 st.stop()
+
+            # E) enforce dialect before sampling (fail fast)
+            def _ok(p: str) -> bool:
+                toks = _extract_pattern_tokens(p)
+                return (len(toks) == int(n3)) and all(len(t) == int(n2) for t in toks)
+
             if not base_patterns:
                 # recover patterns if only full lines exist
                 base_patterns = {
                     _normalize_signature_line_to_n2(s, n2=int(n2), n3=int(n3))[1]
                     for s in known_signatures
                 }
+
+            if not all(_ok(p) for p in base_patterns):
+                st.error("COVERAGE_BASELINE_DIALECT_MISMATCH: normalize to n₂-bit columns first.")
+                st.stop()
 
             if n3 <= 0 or n2 <= 0:
                 st.warning("Please ensure n₂ and n₃ are both > 0.")
@@ -3149,7 +3203,7 @@ with st.expander("Coverage Sampling"):
 
                 counts: dict[str, int] = {}
 
-                # build lane mask bits (for UI only; not used for membership anymore)
+                # (UI-only) lane mask bits
                 inputs_cov_tmp = _inputs_block_from_session((int(n2), int(n3)))
                 lane_mask_bits = "".join("1" if int(x) else "0" for x in (inputs_cov_tmp.get("lane_mask_k3") or []))
 
@@ -3160,10 +3214,11 @@ with st.expander("Coverage Sampling"):
 
                 total = float(num_samples)
                 rows = []
+                # F) exact membership against normalized patterns
+                base_patterns_set = set(base_patterns)
                 for sig, cnt in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
-                    # membership: normalize sampler signature → pattern-only, then exact match
                     _, patt_only = _normalize_signature_line_to_n2(sig, n2=int(n2), n3=int(n3))
-                    in_d = 1 if patt_only in base_patterns else 0
+                    in_d = 1 if patt_only in base_patterns_set else 0
                     pct = 0.0 if total <= 0 else round(100.0 * (cnt / total), 2)
                     rows.append([sig, cnt, in_d, pct])
 
