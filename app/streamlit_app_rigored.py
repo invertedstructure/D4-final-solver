@@ -2340,212 +2340,212 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 )
             except Exception as e:
                 st.info(f"(Could not build perturbation JSON download: {e})")
-
-           # ── Fence stress (U first; fallback to H2) ────────────────────────────────────
-if run_fence:
-    rows_fs: list[list[str]] = []   # CSV rows
-    notes: list[str] = []
-    mode_fs = "U" if HAS_U_HOOKS else "H2"
-
-    # Helper: k3 under strict (k2 assumed 1 for pass_vec)
-    def _strict_k3_for(boundaries_obj, cmap_obj, H_obj) -> int:
-        d3 = (boundaries_obj.blocks.__root__.get("3") or [])
-        H2 = (H_obj.blocks.__root__.get("2") or [])
-        C3 = (cmap_obj.blocks.__root__.get("3") or [])
-        # Safe R3 even if shapes mismatch
-        try:
-            n3 = len(C3[0]) if (C3 and C3[0]) else 0
-            I3 = [[1 if i == j else 0 for j in range(n3)] for i in range(n3)]
-            C3p = _xor_mat(C3, I3) if (C3 and I3 and len(C3) == len(I3) and len(C3[0]) == len(I3[0])) else (C3 or [])
-            R = _xor_mat(mul(H2, d3), C3p) if (H2 and d3 and C3p) else []
-        except Exception:
-            R = []
-        return int(_is_zero(R))
-
-    # SSOT inputs (hashes/dims/lane mask) + exemplar fixture id
-    try:
-        rc_fs = require_fresh_run_ctx()
-    except Exception:
-        rc_fs = st.session_state.get("run_ctx") or {}
-
-    inputs_fs = _inputs_block_from_session(strict_dims=(n2, n3))
-    exemplar_id = rc_fs.get("fixture_nonce", "")
-    exemplar_hashes = inputs_fs.get("hashes", {})
-
-    # BASELINE first (no mutation) — U_min
-    k3_base = _strict_k3_for(B0, C0, H0)   # k2 is treated as 1 in this stress
-    rows_fs.append(["U_min", f"[1,{k3_base}]", "baseline (no carrier change)"])
-
-    if mode_fs == "U":
-        # ---- U mode: shrink/dilate the carrier ----
-        U_mask = get_carrier_mask(U0)  # type: ignore[name-defined]
-        rU = len(U_mask); cU = (len(U_mask[0]) if (U_mask and U_mask[0]) else 0)
-
-        def _count1(M): return sum(int(x & 1) for row in (M or []) for x in row)
-
-        # Erode 1 ring
-        U_shrink = _copy_mat(U_mask)
-        if rU and cU:
-            for j in range(cU): U_shrink[0][j] = 0; U_shrink[-1][j] = 0
-            for i in range(rU): U_shrink[i][0] = 0; U_shrink[i][-1] = 0
-
-        # Dilate 1 ring
-        U_plus = _copy_mat(U_mask)
-        if rU and cU:
-            for j in range(cU): U_plus[0][j]  = 1; U_plus[-1][j] = 1
-            for i in range(rU): U_plus[i][0]  = 1; U_plus[i][-1] = 1
-
-        # Build shapes objects without mutating global state
-        U_shrink_obj = set_carrier_mask(_json.loads(_json.dumps(U0.dict() if hasattr(U0,"dict") else {"blocks": {}})), U_shrink)  # type: ignore[name-defined]
-        U_plus_obj   = set_carrier_mask(_json.loads(_json.dumps(U0.dict() if hasattr(U0,"dict") else {"blocks": {}})), U_plus)    # type: ignore[name-defined]
-        if not hasattr(U_shrink_obj, "blocks"): U_shrink_obj = io.parse_shapes(U_shrink_obj)
-        if not hasattr(U_plus_obj,   "blocks"): U_plus_obj   = io.parse_shapes(U_plus_obj)
-
-        # Re-use H0/C0/B0 (policy constant)
-        k3_shrink = _strict_k3_for(B0, C0, H0)
-        k3_plus   = _strict_k3_for(B0, C0, H0)
-
-        # CSV rows
-        rows_fs.append(["U_shrink", f"[1,{k3_shrink}]", f"|U|:{_count1(U_mask)}→{_count1(U_shrink)}"])
-        rows_fs.append(["U_plus",   f"[1,{k3_plus}]",   f"|U|:{_count1(U_mask)}→{_count1(U_plus)}"])
-        notes.append("fence target = U (carrier); H fixed")
-
-        # JSON deltas
-        delta_shrink = {
-            "added": 0,
-            "removed": int(_count1(U_mask) - _count1(U_shrink)),
-            "size_before": int(_count1(U_mask)),
-            "size_after": int(_count1(U_shrink)),
-        }
-        delta_plus = {
-            "added": int(_count1(U_plus) - _count1(U_mask)),
-            "removed": 0,
-            "size_before": int(_count1(U_mask)),
-            "size_after": int(_count1(U_plus)),
-        }
-
-        results_fs_json = [
-            {"U_class": "U_min",    "pass_vec": [True, bool(k3_base)],   "note": "baseline"},
-            {"U_class": "U_shrink", "pass_vec": [True, bool(k3_shrink)], "note": rows_fs[1][2], "delta_U": delta_shrink},
-            {"U_class": "U_plus",   "pass_vec": [True, bool(k3_plus)],   "note": rows_fs[2][2], "delta_U": delta_plus},
-        ]
-
-    else:
-        # ---- H2 fallback mode ----
-        H2 = (H0.blocks.__root__.get("2") or [])
-        H2_shrink = _copy_mat(H2[:-1]) if len(H2) >= 1 else _copy_mat(H2)
-        if H2 and H2[0]:
-            zero_row = [0]*len(H2[0]); H2_plus = _copy_mat(H2) + [zero_row]
-        else:
-            H2_plus = _copy_mat(H2)
-
-        # Patch copies into cmap objects
-        H_shrink = _json.loads(_json.dumps(H0.dict() if hasattr(H0,"dict") else {"blocks": {}}))
-        H_plus   = _json.loads(_json.dumps(H0.dict() if hasattr(H0,"dict") else {"blocks": {}}))
-        H_shrink.setdefault("blocks", {})["2"] = H2_shrink
-        H_plus.setdefault("blocks", {})["2"]   = H2_plus
-        H_shrink = io.parse_cmap(H_shrink)
-        H_plus   = io.parse_cmap(H_plus)
-
-        C3 = (C0.blocks.__root__.get("3") or [])
-        d3 = (B0.blocks.__root__.get("3") or [])
-        # Safe strict R3 checks
-        k3_shrink = _strict_k3_for(B0, C0, H_shrink)
-        k3_plus   = _strict_k3_for(B0, C0, H_plus)
-
-        rb, ra_shrink, ra_plus = len(H2), len(H2_shrink), len(H2_plus)
-
-        rows_fs.append(["H2_shrink (fallback)", f"[1,{k3_shrink}]", "drop last H2 row"])
-        rows_fs.append(["H2_plus (fallback)",   f"[1,{k3_plus}]",   "append zero row to H2"])
-        notes.append("fallback: fence target = H2 (no U hooks found)")
-
-        results_fs_json = [
-            {"U_class": "U_min",              "pass_vec": [True, bool(k3_base)],   "note": "baseline"},
-            {"U_class": "H2_shrink (fallback)","pass_vec": [True, bool(k3_shrink)],"note": rows_fs[1][2], "delta_H2": {"rows_before": rb, "rows_after": ra_shrink}},
-            {"U_class": "H2_plus (fallback)",  "pass_vec": [True, bool(k3_plus)],  "note": rows_fs[2][2], "delta_H2": {"rows_before": rb, "rows_after": ra_plus}},
-        ]
-
-    # ----- Write CSV (header+meta) -----
-    fence_header = ["U_class", "pass_vec", "note"]
-    fence_meta = [
-        f"schema_version={SCHEMA_VERSION}",
-        f"saved_at={_utc_iso_z()}",
-        f"run_id={(st.session_state.get('run_ctx') or {}).get('run_id','')}",
-        f"app_version={APP_VERSION}",
-        f"mode={mode_fs}",
-    ] + notes
-    _atomic_write_csv(FENCE_OUT_PATH, fence_header, rows_fs, fence_meta)
-    st.success(f"Fence stress saved → {FENCE_OUT_PATH}")
-
-    # ----- Build JSON companion (content-hashed file name) -----
-    policy_fs = _policy_block_from_run_ctx(rc_fs) if "_policy_block_from_run_ctx" in globals() else {
-        "policy_tag": rc_fs.get("policy_tag","strict"),
-        "projector_mode": ("strict" if rc_fs.get("mode") == "strict" else (rc_fs.get("mode") or "")),
-        "projector_filename": rc_fs.get("projector_filename",""),
-        "projector_hash": rc_fs.get("projector_hash",""),
-    }
-
-    fence_json = {
-        "schema_version": SCHEMA_VERSION,
-        "written_at_utc": _utc_iso_z(),
-        "app_version": APP_VERSION,
-        "identity": {
-            "field": FIELD,
-            "run_id": (rc_fs.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
-            "district_id": rc_fs.get("district_id","D3"),
-            "fixture_nonce": exemplar_id,
-        },
-        "policy": policy_fs,
-        "mode": mode_fs,  # "U" or "H2"
-        "inputs": inputs_fs,  # includes hashes/dims/lane_mask_k3
-        "exemplar": {
-            "fixture_id": exemplar_id,
-            "hashes": exemplar_hashes,       # duplicate the five hashes here
-            "lane_mask_k3": inputs_fs.get("lane_mask_k3") or [],
-        },
-        "results": results_fs_json,
-        "integrity": {"content_hash": ""},
-    }
-    if mode_fs == "H2":
-        fence_json["fallback_note"] = "U hooks unavailable; used H2"
-
-    fence_json["integrity"]["content_hash"] = _hash_json(fence_json)
-    h12 = fence_json["integrity"]["content_hash"][:12]
-    fence_json_name = f"fence_stress__{h12}.json"
-    fence_json_path = REPORTS_DIR / fence_json_name
-    try:
-        _atomic_write_json(fence_json_path, fence_json)
-        st.session_state.setdefault("last_report_paths", {})["fence_stress"] = {
-            "csv": str(FENCE_OUT_PATH), "json": str(fence_json_path)
-        }
-    except Exception as e:
-        st.info(f"(Could not write fence JSON: {e})")
-
-    # ----- Downloads (unique keys from hash) -----
-    try:
-        import io as _io, json as _json
-        mem = _io.BytesIO(_json.dumps(fence_json, ensure_ascii=False, indent=2).encode("utf-8"))
-        st.download_button(
-            "Download fence_stress.json",
-            mem,
-            file_name=fence_json_name,
-            key=f"dl_fs_json_{h12[:8]}",
-        )
-    except Exception:
-        pass
-    try:
-        with open(FENCE_OUT_PATH, "rb") as fcsv:
-            st.download_button(
-                "Download fence_stress.csv",
-                fcsv,
-                file_name="fence_stress.csv",
-                key=f"dl_fs_csv_{h12[:8]}",
-            )
-    except Exception:
-        pass
-
-    # Badge
-    st.info(_hash_badge(fence_json["integrity"]["content_hash"]))
+            
+                       # ── Fence stress (U first; fallback to H2) ────────────────────────────────────
+            if run_fence:
+                rows_fs: list[list[str]] = []   # CSV rows
+                notes: list[str] = []
+                mode_fs = "U" if HAS_U_HOOKS else "H2"
+            
+                # Helper: k3 under strict (k2 assumed 1 for pass_vec)
+                def _strict_k3_for(boundaries_obj, cmap_obj, H_obj) -> int:
+                    d3 = (boundaries_obj.blocks.__root__.get("3") or [])
+                    H2 = (H_obj.blocks.__root__.get("2") or [])
+                    C3 = (cmap_obj.blocks.__root__.get("3") or [])
+                    # Safe R3 even if shapes mismatch
+                    try:
+                        n3 = len(C3[0]) if (C3 and C3[0]) else 0
+                        I3 = [[1 if i == j else 0 for j in range(n3)] for i in range(n3)]
+                        C3p = _xor_mat(C3, I3) if (C3 and I3 and len(C3) == len(I3) and len(C3[0]) == len(I3[0])) else (C3 or [])
+                        R = _xor_mat(mul(H2, d3), C3p) if (H2 and d3 and C3p) else []
+                    except Exception:
+                        R = []
+                    return int(_is_zero(R))
+            
+                # SSOT inputs (hashes/dims/lane mask) + exemplar fixture id
+                try:
+                    rc_fs = require_fresh_run_ctx()
+                except Exception:
+                    rc_fs = st.session_state.get("run_ctx") or {}
+            
+                inputs_fs = _inputs_block_from_session(strict_dims=(n2, n3))
+                exemplar_id = rc_fs.get("fixture_nonce", "")
+                exemplar_hashes = inputs_fs.get("hashes", {})
+            
+                # BASELINE first (no mutation) — U_min
+                k3_base = _strict_k3_for(B0, C0, H0)   # k2 is treated as 1 in this stress
+                rows_fs.append(["U_min", f"[1,{k3_base}]", "baseline (no carrier change)"])
+            
+                if mode_fs == "U":
+                    # ---- U mode: shrink/dilate the carrier ----
+                    U_mask = get_carrier_mask(U0)  # type: ignore[name-defined]
+                    rU = len(U_mask); cU = (len(U_mask[0]) if (U_mask and U_mask[0]) else 0)
+            
+                    def _count1(M): return sum(int(x & 1) for row in (M or []) for x in row)
+            
+                    # Erode 1 ring
+                    U_shrink = _copy_mat(U_mask)
+                    if rU and cU:
+                        for j in range(cU): U_shrink[0][j] = 0; U_shrink[-1][j] = 0
+                        for i in range(rU): U_shrink[i][0] = 0; U_shrink[i][-1] = 0
+            
+                    # Dilate 1 ring
+                    U_plus = _copy_mat(U_mask)
+                    if rU and cU:
+                        for j in range(cU): U_plus[0][j]  = 1; U_plus[-1][j] = 1
+                        for i in range(rU): U_plus[i][0]  = 1; U_plus[i][-1] = 1
+            
+                    # Build shapes objects without mutating global state
+                    U_shrink_obj = set_carrier_mask(_json.loads(_json.dumps(U0.dict() if hasattr(U0,"dict") else {"blocks": {}})), U_shrink)  # type: ignore[name-defined]
+                    U_plus_obj   = set_carrier_mask(_json.loads(_json.dumps(U0.dict() if hasattr(U0,"dict") else {"blocks": {}})), U_plus)    # type: ignore[name-defined]
+                    if not hasattr(U_shrink_obj, "blocks"): U_shrink_obj = io.parse_shapes(U_shrink_obj)
+                    if not hasattr(U_plus_obj,   "blocks"): U_plus_obj   = io.parse_shapes(U_plus_obj)
+            
+                    # Re-use H0/C0/B0 (policy constant)
+                    k3_shrink = _strict_k3_for(B0, C0, H0)
+                    k3_plus   = _strict_k3_for(B0, C0, H0)
+            
+                    # CSV rows
+                    rows_fs.append(["U_shrink", f"[1,{k3_shrink}]", f"|U|:{_count1(U_mask)}→{_count1(U_shrink)}"])
+                    rows_fs.append(["U_plus",   f"[1,{k3_plus}]",   f"|U|:{_count1(U_mask)}→{_count1(U_plus)}"])
+                    notes.append("fence target = U (carrier); H fixed")
+            
+                    # JSON deltas
+                    delta_shrink = {
+                        "added": 0,
+                        "removed": int(_count1(U_mask) - _count1(U_shrink)),
+                        "size_before": int(_count1(U_mask)),
+                        "size_after": int(_count1(U_shrink)),
+                    }
+                    delta_plus = {
+                        "added": int(_count1(U_plus) - _count1(U_mask)),
+                        "removed": 0,
+                        "size_before": int(_count1(U_mask)),
+                        "size_after": int(_count1(U_plus)),
+                    }
+            
+                    results_fs_json = [
+                        {"U_class": "U_min",    "pass_vec": [True, bool(k3_base)],   "note": "baseline"},
+                        {"U_class": "U_shrink", "pass_vec": [True, bool(k3_shrink)], "note": rows_fs[1][2], "delta_U": delta_shrink},
+                        {"U_class": "U_plus",   "pass_vec": [True, bool(k3_plus)],   "note": rows_fs[2][2], "delta_U": delta_plus},
+                    ]
+            
+                else:
+                    # ---- H2 fallback mode ----
+                    H2 = (H0.blocks.__root__.get("2") or [])
+                    H2_shrink = _copy_mat(H2[:-1]) if len(H2) >= 1 else _copy_mat(H2)
+                    if H2 and H2[0]:
+                        zero_row = [0]*len(H2[0]); H2_plus = _copy_mat(H2) + [zero_row]
+                    else:
+                        H2_plus = _copy_mat(H2)
+            
+                    # Patch copies into cmap objects
+                    H_shrink = _json.loads(_json.dumps(H0.dict() if hasattr(H0,"dict") else {"blocks": {}}))
+                    H_plus   = _json.loads(_json.dumps(H0.dict() if hasattr(H0,"dict") else {"blocks": {}}))
+                    H_shrink.setdefault("blocks", {})["2"] = H2_shrink
+                    H_plus.setdefault("blocks", {})["2"]   = H2_plus
+                    H_shrink = io.parse_cmap(H_shrink)
+                    H_plus   = io.parse_cmap(H_plus)
+            
+                    C3 = (C0.blocks.__root__.get("3") or [])
+                    d3 = (B0.blocks.__root__.get("3") or [])
+                    # Safe strict R3 checks
+                    k3_shrink = _strict_k3_for(B0, C0, H_shrink)
+                    k3_plus   = _strict_k3_for(B0, C0, H_plus)
+            
+                    rb, ra_shrink, ra_plus = len(H2), len(H2_shrink), len(H2_plus)
+            
+                    rows_fs.append(["H2_shrink (fallback)", f"[1,{k3_shrink}]", "drop last H2 row"])
+                    rows_fs.append(["H2_plus (fallback)",   f"[1,{k3_plus}]",   "append zero row to H2"])
+                    notes.append("fallback: fence target = H2 (no U hooks found)")
+            
+                    results_fs_json = [
+                        {"U_class": "U_min",              "pass_vec": [True, bool(k3_base)],   "note": "baseline"},
+                        {"U_class": "H2_shrink (fallback)","pass_vec": [True, bool(k3_shrink)],"note": rows_fs[1][2], "delta_H2": {"rows_before": rb, "rows_after": ra_shrink}},
+                        {"U_class": "H2_plus (fallback)",  "pass_vec": [True, bool(k3_plus)],  "note": rows_fs[2][2], "delta_H2": {"rows_before": rb, "rows_after": ra_plus}},
+                    ]
+            
+                # ----- Write CSV (header+meta) -----
+                fence_header = ["U_class", "pass_vec", "note"]
+                fence_meta = [
+                    f"schema_version={SCHEMA_VERSION}",
+                    f"saved_at={_utc_iso_z()}",
+                    f"run_id={(st.session_state.get('run_ctx') or {}).get('run_id','')}",
+                    f"app_version={APP_VERSION}",
+                    f"mode={mode_fs}",
+                ] + notes
+                _atomic_write_csv(FENCE_OUT_PATH, fence_header, rows_fs, fence_meta)
+                st.success(f"Fence stress saved → {FENCE_OUT_PATH}")
+            
+                # ----- Build JSON companion (content-hashed file name) -----
+                policy_fs = _policy_block_from_run_ctx(rc_fs) if "_policy_block_from_run_ctx" in globals() else {
+                    "policy_tag": rc_fs.get("policy_tag","strict"),
+                    "projector_mode": ("strict" if rc_fs.get("mode") == "strict" else (rc_fs.get("mode") or "")),
+                    "projector_filename": rc_fs.get("projector_filename",""),
+                    "projector_hash": rc_fs.get("projector_hash",""),
+                }
+            
+                fence_json = {
+                    "schema_version": SCHEMA_VERSION,
+                    "written_at_utc": _utc_iso_z(),
+                    "app_version": APP_VERSION,
+                    "identity": {
+                        "field": FIELD,
+                        "run_id": (rc_fs.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
+                        "district_id": rc_fs.get("district_id","D3"),
+                        "fixture_nonce": exemplar_id,
+                    },
+                    "policy": policy_fs,
+                    "mode": mode_fs,  # "U" or "H2"
+                    "inputs": inputs_fs,  # includes hashes/dims/lane_mask_k3
+                    "exemplar": {
+                        "fixture_id": exemplar_id,
+                        "hashes": exemplar_hashes,       # duplicate the five hashes here
+                        "lane_mask_k3": inputs_fs.get("lane_mask_k3") or [],
+                    },
+                    "results": results_fs_json,
+                    "integrity": {"content_hash": ""},
+                }
+                if mode_fs == "H2":
+                    fence_json["fallback_note"] = "U hooks unavailable; used H2"
+            
+                fence_json["integrity"]["content_hash"] = _hash_json(fence_json)
+                h12 = fence_json["integrity"]["content_hash"][:12]
+                fence_json_name = f"fence_stress__{h12}.json"
+                fence_json_path = REPORTS_DIR / fence_json_name
+                try:
+                    _atomic_write_json(fence_json_path, fence_json)
+                    st.session_state.setdefault("last_report_paths", {})["fence_stress"] = {
+                        "csv": str(FENCE_OUT_PATH), "json": str(fence_json_path)
+                    }
+                except Exception as e:
+                    st.info(f"(Could not write fence JSON: {e})")
+            
+                # ----- Downloads (unique keys from hash) -----
+                try:
+                    import io as _io, json as _json
+                    mem = _io.BytesIO(_json.dumps(fence_json, ensure_ascii=False, indent=2).encode("utf-8"))
+                    st.download_button(
+                        "Download fence_stress.json",
+                        mem,
+                        file_name=fence_json_name,
+                        key=f"dl_fs_json_{h12[:8]}",
+                    )
+                except Exception:
+                    pass
+                try:
+                    with open(FENCE_OUT_PATH, "rb") as fcsv:
+                        st.download_button(
+                            "Download fence_stress.csv",
+                            fcsv,
+                            file_name="fence_stress.csv",
+                            key=f"dl_fs_csv_{h12[:8]}",
+                        )
+                except Exception:
+                    pass
+            
+                # Badge
+                st.info(_hash_badge(fence_json["integrity"]["content_hash"]))
 
 
 
