@@ -1804,12 +1804,12 @@ with safe_expander("A/B compare (strict vs active projected)"):
 
 
 
-
-           
 # ========= F · Helpers & invariants (shared by F1/F2/F3) =========
 from pathlib import Path
-import os, tempfile, copy as _copy
-import json as _json, hashlib as _hash
+import os, tempfile
+import copy as _copy
+import json as _json
+import hashlib as _hash
 import streamlit as st
 import datetime as _dt
 import random as _random  # harmless; some callers use it
@@ -1824,7 +1824,7 @@ GUARD_ENUM = ["grid", "wiggle", "echo", "fence", "ker_guard", "none", "error"]
 # --- Evidence preflight helpers (display-only status + run-time guards) ---
 def _hashes_status():
     ib = st.session_state.get("_inputs_block") or {}
-    h = [ib.get(k,"") for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")]
+    h = [ib.get(k, "") for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")]
     return "OK" if all(h) else "MISSING"
 
 def _projector_status():
@@ -1866,9 +1866,7 @@ def _disallow_auto_for_evidence():
     if (st.session_state.get("run_ctx") or {}).get("mode") == "projected(auto)":
         raise RuntimeError("P3_AUTO_DISALLOWED: use strict or projected(file) for evidence reports.")
 
-
 # ===== Minimal safety shims (no-ops when real impls are loaded) =====
-
 if "APP_VERSION" not in globals():
     APP_VERSION = "v0.1-core"  # safe default; your app can overwrite
 
@@ -1884,7 +1882,6 @@ if "require_fresh_run_ctx" not in globals():
         if not rc:
             raise RuntimeError("RUN_CTX_MISSING: run Overlap first.")
         return rc
-
 
 if "rectify_run_ctx_mask_from_d3" not in globals():
     def rectify_run_ctx_mask_from_d3():
@@ -1943,7 +1940,7 @@ if "_ensure_inputs_hashes" not in globals():
         return merged
 _ensure_inputs_hashes()
 
-        # ===== Strict mode toggles =====
+# ===== Strict mode toggles =====
 DEV_ALLOW_INPUT_HASH_BACKFILL = False   # no dev backfill in evidence runs
 
 # ===== SSOT preflights (copy-only; fail-fast) =====
@@ -1976,7 +1973,7 @@ def _require_lane_mask_ssot() -> list[int]:
     """
     rc = st.session_state.get("run_ctx") or {}
     lm = rc.get("lane_mask_k3")
-    if not isinstance(lm, list) or any((int(x) & 1) not in (0,1) for x in (lm or [])):
+    if not isinstance(lm, list) or any((int(x) & 1) not in (0, 1) for x in (lm or [])):
         raise RuntimeError("LANE_MASK_MISSING: compute lane_mask_k3 at Cert/Overlap stage and stash in run_ctx.")
     return [int(x) & 1 for x in lm]
 
@@ -1997,19 +1994,7 @@ def _require_projector_file_if_needed():
     # if strict → nothing to enforce here
     return
 
-# (Your _strict_R3 already fails on shape mismatches — good. No _xor_overlap, no dev fallbacks.)
-
-
 # 3) Canonical content hashing (ints not bools; sorted keys; ASCII; no spaces)
-import hashlib
-import copy as _copy
-
-# optional: keep backward-compat alias if other code references `_hash`
-try:
-    _hash  # noqa: F821
-except NameError:
-    _hash = hashlib
-
 def _deep_intify(o):
     """Convert True/False to 1/0 recursively so GF(2) matrices hash stably."""
     if isinstance(o, bool):
@@ -2023,11 +2008,10 @@ def _deep_intify(o):
 def _hash_json(obj) -> str:
     canon = _deep_intify(_copy.deepcopy(obj))
     s = _json.dumps(canon, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-    return hashlib.sha256(s).hexdigest()
+    return _hash.sha256(s).hexdigest()
 
 def _sha256_hex(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
-
+    return _hash.sha256(b).hexdigest()
 
 # 4) Atomic writers (JSON + CSV-with-meta)
 def _atomic_write_json(path: Path, payload: dict) -> None:
@@ -2051,7 +2035,7 @@ def _atomic_write_csv(path: Path, header: list[str], rows: list[list], meta_line
     os.replace(tmp, path)
 
 # 5) Inputs SSOT (no recompute). Pull exactly what certs/save in run_ctx.
-def _inputs_block_from_session(strict_dims: tuple[int,int] | None = None) -> dict:
+def _inputs_block_from_session(strict_dims: tuple[int, int] | None = None) -> dict:
     """
     Returns:
       {
@@ -2276,8 +2260,10 @@ def _sig_tag_eq(boundaries_obj, cmap_obj, H_used_obj, P_active=None):
     if P_active:
         R3p   = _projected_R3(R3s, P_active)
         if "residual_tag" in globals() and callable(globals()["residual_tag"]):
-            try: tag_p = residual_tag(R3p, lm)  # type: ignore[name-defined]
-            except Exception: tag_p = "error"
+            try:
+                tag_p = residual_tag(R3p, lm)  # type: ignore[name-defined]
+            except Exception:
+                tag_p = "error"
         else:
             tag_p = tag_s
         eq_p  = (len(R3p) == 0) or all(all((x & 1) == 0 for x in row) for row in R3p)
@@ -2286,10 +2272,8 @@ def _sig_tag_eq(boundaries_obj, cmap_obj, H_used_obj, P_active=None):
 
     return lm, tag_s, bool(eq_s), tag_p, (None if eq_p is None else bool(eq_p))
 
-
 # -------- optional carrier (U) mutation hooks (fallback implementation) --------
 # If your project already defines get_carrier_mask / set_carrier_mask, this block is a no-op.
-
 if "get_carrier_mask" not in globals():
     def get_carrier_mask(U_obj=None):
         """
@@ -2339,6 +2323,9 @@ HAS_U_HOOKS = (
     "get_carrier_mask" in globals() and "set_carrier_mask" in globals()
     and callable(globals()["get_carrier_mask"]) and callable(globals()["set_carrier_mask"])
 )
+
+           
+
 
 
 # ============================ Reports: Perturbation & Fence ============================
