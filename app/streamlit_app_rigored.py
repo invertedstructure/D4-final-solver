@@ -2419,7 +2419,7 @@ def _in_district_guess(signature: str, *, current_lane_pattern: str) -> int:
     except Exception:
         return 0
 
-        with st.expander("Coverage Sampling", expanded=False):
+with st.expander("Coverage Sampling", expanded=False):
     # --- Freshness (soft-guard; never stop before button) ---
     rc = None
     try:
