@@ -2592,23 +2592,23 @@ def _in_district_guess(signature: str, *, current_lane_pattern: str) -> int:
 
 
 
-            # =========================[ · Gallery Append & Dedupe (cert-required) ]=========================
-            
-            GALLERY_PATH = (LOGS_DIR / "gallery.jsonl")
-            GALLERY_PATH.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Ensure the dedupe key matches spec
-            def gallery_key(row: dict) -> tuple:
-                pol = row.get("policy") or {}
-                h   = row.get("hashes") or {}
-                return (
-                    str(row.get("district", "")),
-                    str(pol.get("policy_tag", "")),
-                    str(h.get("boundaries_hash", "")),
-                    str(h.get("C_hash", "")),
-                    str(h.get("H_hash", "")),
-                    str(h.get("U_hash", "")),
-                )
+# =========================[ · Gallery Append & Dedupe (cert-required) ]=========================
+
+GALLERY_PATH = (LOGS_DIR / "gallery.jsonl")
+GALLERY_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+# Ensure the dedupe key matches spec
+def gallery_key(row: dict) -> tuple:
+    pol = row.get("policy") or {}
+    h   = row.get("hashes") or {}
+    return (
+        str(row.get("district", "")),
+        str(pol.get("policy_tag", "")),
+        str(h.get("boundaries_hash", "")),
+        str(h.get("C_hash", "")),
+        str(h.get("H_hash", "")),
+        str(h.get("U_hash", "")),
+    )
             
             # Shared meta helper (define if missing)
             if "_std_meta" not in globals():
