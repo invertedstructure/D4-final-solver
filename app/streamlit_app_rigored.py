@@ -1719,7 +1719,6 @@ with safe_expander("A/B compare (strict vs active projected)"):
 
 
 # ========= F · Helpers & invariants (shared by F1/F2/F3) =========
-from __future__ import annotations
 from pathlib import Path
 import os, tempfile, copy as _copy
 import json as _json, hashlib as _hash
