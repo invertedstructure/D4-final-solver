@@ -2316,6 +2316,9 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     _atomic_write_json(fs_json_path, payload_fs)
                 except Exception as e:
                     st.warning(f"(Could not write fence JSON: {e})")
+                except Exception as e:
+                    st.error(f"Perturbation/Fence run failed: {e}")
+
                 
                 try:
                     import io as _io, json as _json
