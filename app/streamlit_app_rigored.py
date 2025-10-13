@@ -2888,7 +2888,7 @@ with st.expander("Coverage Sampling"):
         H2_rows = 0
     n2_default = H2_rows
 
-    c1, c2, c3, c4 = st.columns([1,1,1,2])
+    c1, c2, c3, c4 = st.columns([1, 1, 1, 2])
     with c1:
         num_samples = st.number_input("Samples", min_value=1, max_value=10000,
                                       value=250, step=50, key="cov_nsamples")
@@ -2914,45 +2914,42 @@ with st.expander("Coverage Sampling"):
     cov_help = " ".join(tips) or "Generate coverage_sampling.csv with meta header."
 
     if st.button("Coverage Sample", key="btn_coverage_sample",
-             disabled=cov_disabled, help=cov_help):
+                 disabled=cov_disabled, help=cov_help):
 
-    # publish SSOT (idempotent) + ensure hashes
-    if "_publish_ssot_if_pending" in globals():
-        _publish_ssot_if_pending()
-    if "_ensure_inputs_hashes" in globals():
-        _ensure_inputs_hashes()
+        # publish SSOT (idempotent) + ensure hashes
+        if "_publish_ssot_if_pending" in globals():
+            _publish_ssot_if_pending()
+        if "_ensure_inputs_hashes" in globals():
+            _ensure_inputs_hashes()
 
-    try:
-        # evidence-only guards (CLICK-TIME)
-        _require_inputs_hashes_strict_for_run()
-        _require_lane_mask_for_run()
-        _disallow_auto_for_evidence()
-        _require_projected_file_allowed_for_run()
-
-        # require a non-empty canonical baseline
         try:
-            rc_cov = require_fresh_run_ctx()
-        except Exception:
-            rc_cov = st.session_state.get("run_ctx") or {}
-        known_signatures = (rc_cov.get("known_signatures") or [])
-        if not known_signatures:
-            st.error("COVERAGE_CONFIG_EMPTY: no canonical signatures loaded. Load phase-U baseline before sampling.")
-            st.stop()
+            # evidence-only guards (CLICK-TIME)
+            _require_inputs_hashes_strict_for_run()
+            _require_lane_mask_for_run()
+            _disallow_auto_for_evidence()
+            _require_projected_file_allowed_for_run()
 
-        if n3 <= 0 or n2 <= 0:
-            st.warning("Please ensure n₂ and n₃ are both > 0.")
-        else:
-            import csv, tempfile, os, random, uuid
-            rng = random.Random(); rng.seed(seed_txt)
+            # require a non-empty canonical baseline
+            try:
+                rc_cov = require_fresh_run_ctx()
+            except Exception:
+                rc_cov = st.session_state.get("run_ctx") or {}
+            known_signatures = (rc_cov.get("known_signatures") or [])
+            if not known_signatures:
+                st.error("COVERAGE_CONFIG_EMPTY: no canonical signatures loaded. Load phase-U baseline before sampling.")
+                st.stop()
 
-            # Stamp a run_id (non-destructive)
-            run_id = (st.session_state.get("run_ctx") or {}).get("run_id") or str(uuid.uuid4())
-            st.session_state.setdefault("run_ctx", {})["run_id"] = run_id
+            if n3 <= 0 or n2 <= 0:
+                st.warning("Please ensure n₂ and n₃ are both > 0.")
+            else:
+                import csv, tempfile, os, random, uuid, io as _io, json as _json
+                rng = random.Random(); rng.seed(seed_txt)
 
-            # ... (your existing sampling/counting/writes continue here) ...
+                # Stamp a run_id (non-destructive)
+                run_id = (st.session_state.get("run_ctx") or {}).get("run_id") or str(uuid.uuid4())
+                st.session_state.setdefault("run_ctx", {})["run_id"] = run_id
 
-
-            
+                counts: dict[str, int] = {}
 
                 # lane_pattern used for quick in_district guess (bitstring)
                 inputs_cov_tmp = _inputs_block_from_session((int(n2), int(n3)))
@@ -3021,7 +3018,6 @@ with st.expander("Coverage Sampling"):
                 if lm_bits_cov and len(lm_bits_cov) != int(n3):
                     st.caption(f"⚠︎ lane_mask_k3 has {len(lm_bits_cov)} bits but n₃={n3}")
 
-                known_signatures = (rc_cov.get("known_signatures") or [])
                 residual_method = "R3 strict vs R3·Π (lanes/ker/mixed)"
 
                 results_cov = []
@@ -3103,7 +3099,6 @@ with st.expander("Coverage Sampling"):
                     pass
 
                 try:
-                    import io as _io, json as _json
                     mem = _io.BytesIO(_json.dumps(payload_cov, ensure_ascii=False, indent=2).encode("utf-8"))
                     st.download_button(
                         "Download coverage_sampling.json",
@@ -3120,6 +3115,7 @@ with st.expander("Coverage Sampling"):
 
         except Exception as e:
             st.error(f"Coverage sampling failed: {e}")
+
 
 
 
