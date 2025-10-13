@@ -2000,52 +2000,80 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     i = (i + 1 + (h % 3)) % (n2_ or 1)
                     j = (j + 2 + ((h >> 5) % 5)) % (n3_ or 1)
 
-            rows = []
+            rows_csv = []           # CSV rows
+            rows_json = []          # rich JSON rows with provenance
             drift_witnessed = False
-
-                        # --- Perturbation sanity: flip d3 bits, detect grammar drift
-            # Add the strict-only guard here
-            if (rc or {}).get("mode") != "strict":
-                st.warning("Perturbation runs under strict only. Switch policy to strict and try again.")
-                st.stop()
             
-            for (r, c, k) in _flip_targets(n2, n3, int(max_flips), seed_txt):
-                if not (n2 and n3):
-                    rows.append([k, 0, "grammar", "empty fixture"])
+            # baseline facts
+            lane_mask0 = lm0[:] if isinstance(lm0, list) else (rc.get("lane_mask_k3") or [])
+            k3_before_baseline = bool(eq_s0)
+            d3_rows, d3_cols = n2, n3
+            
+            # deterministic, lanes-only flips: if ker column picked, advance deterministically
+            def _next_lane_col(j0: int) -> int:
+                if d3_cols <= 0: return 0
+                j = j0
+                for _ in range(d3_cols):
+                    if j < len(lane_mask0) and int(lane_mask0[j]) == 1:
+                        return j
+                    j = (j + 1) % d3_cols
+                return j0  # fallback (degenerate mask)
+            
+            for (r, cj, k) in _flip_targets(n2, n3, int(max_flips), seed_txt):
+                if not (d3_rows and d3_cols):
+                    rows_csv.append([k, "none", "grid", "empty fixture"])
+                    rows_json.append({
+                        "flip_id": k, "where": {"row": r, "col": cj}, "lane_col": False,
+                        "before_bit": 0, "after_bit": 0,
+                        "k3_before": k3_before_baseline, "k3_after": k3_before_baseline,
+                        "residual_tag_after": "error",
+                        "guard_tripped": "none", "expected_guard": "grid", "note": "empty fixture"
+                    })
                     continue
             
-                d3_mut = _copy_mat(d3_base)
-                d3_mut[r][c] ^= 1  # GF(2) flip
+                c = _next_lane_col(cj)  # enforce lanes-only
+                lane_col = bool(int(lane_mask0[c]) if c < len(lane_mask0) else 0)
             
+                d3_mut = _copy_mat(d3_base)
+                before_bit = int(d3_mut[r][c] & 1)
+                d3_mut[r][c] ^= 1
+                after_bit = int(d3_mut[r][c] & 1)
+            
+                # rebuild B with mutated d3
                 dB = B0.dict() if hasattr(B0, "dict") else {"blocks": {}}
                 dB = json.loads(json.dumps(dB))
                 dB.setdefault("blocks", {})["3"] = d3_mut
                 Bk = io.parse_boundaries(dB)
             
+                # strict re-check
                 lmK, tag_sK, eq_sK, tag_pK, eq_pK = _sig_tag_eq(Bk, C0, H0, P_active)
+                strict_out = _pp_one_leg(Bk, C0, H0, None)          # <- your gate, strict
+                guard_tripped = _first_tripped_guard(strict_out)    # enum from our helper
+                expected_guard = "grid"  # replace with your expected source if you have one
             
-                guard_tripped = int(lmK != lm0)   # grammar drift = lane mask change
-                expected_guard = "grammar"        # consistent guard name
+                # drift: lane mask change
                 note = ""
+                if (lmK or []) != (lane_mask0 or []):
+                    note = "lane_mask_changed"
+                    if not drift_witnessed:
+                        drift_witnessed = True
+                        # (optional) append_witness_row(...)
             
-                if guard_tripped and not drift_witnessed:
-                    drift_witnessed = True
-                    cert_like = st.session_state.get("cert_payload")
-                    if cert_like and "append_witness_row" in globals():
-                        try:
-                            append_witness_row(
-                                cert_like,
-                                reason="grammar-drift",
-                                residual_tag_val=(tag_sK or "none"),
-                                note=f"flip#{k} at (r={r}, c={c})"
-                            )
-                            note = "lane_mask_changed → auto-witness logged"
-                        except Exception:
-                            note = "lane_mask_changed (witness append failed)"
-                    else:
-                        note = "lane_mask_changed"
-            
-                rows.append([k, guard_tripped, expected_guard, note])
+                rows_csv.append([k, guard_tripped, expected_guard, note])
+                rows_json.append({
+                    "flip_id": k,
+                    "where": {"row": int(r), "col": int(c)},
+                    "lane_col": bool(lane_col),
+                    "before_bit": int(before_bit),
+                    "after_bit": int(after_bit),
+                    "k3_before": bool(k3_before_baseline),
+                    "k3_after": bool(eq_sK),
+                    "residual_tag_after": str(tag_sK or "none"),
+                    "guard_tripped": str(guard_tripped),
+                    "expected_guard": str(expected_guard),
+                    "note": note,
+                })
+
 
             # Emit CSV for Perturbation Sanity (3c header)
             header = ["flip_id", "guard_tripped", "expected_guard", "note"]
@@ -2062,141 +2090,79 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
             ]
             _atomic_write_csv(PERTURB_OUT_PATH, header, rows, meta)
             st.success(f"Perturbation sanity saved → {PERTURB_OUT_PATH}")
-                        # ---- JSON companion for Perturbation Sanity ----
+
+                        # —— JSON payload for Perturbation Sanity ——
             try:
                 rc_ps = require_fresh_run_ctx()
             except Exception:
                 rc_ps = st.session_state.get("run_ctx") or {}
             
-            policy_ps = _policy_block_from_run_ctx(rc_ps)
-            inputs_ps = _inputs_block_from_session()
-            
-            # Build JSON results mirroring your CSV
-            # CSV 'rows' you built: [flip_id, guard_tripped, expected_guard, note]
-            matches = 0
-            mismatches = 0
-            results_ps = []
-            for flip_id, guard_tripped, expected_guard, note in rows:
-                ok = (bool(guard_tripped) == True)  # grammar drift expected in your current logic
-                matches += int(ok)
-                mismatches += int(not ok)
-                # flip coordinates: you log them in note; keep flip_id only if coords aren’t tracked
-                results_ps.append({
-                    "flip_id": int(flip_id),
-                    "guard_tripped": ("grammar" if guard_tripped else "none"),
-                    "expected_guard": str(expected_guard),
-                    "note": str(note or "")
-                })
-            
-            perturb_json = {
-                "schema_version": PERTURB_SCHEMA_VERSION,
-                "written_at_utc": _utc_iso_z(),
-                "app_version": APP_VER,
-                "identity": {
-                    "run_id": (rc_ps.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
-                    "fixture_nonce": rc_ps.get("fixture_nonce", ""),
-                },
-                "policy": policy_ps,  # strict
-                "inputs": inputs_ps,  # hashes + dims
-                "anchor": {
-                    "id": rc_ps.get("fixture_nonce", ""),
-                    "lane_mask_k3": rc_ps.get("lane_mask_k3") or [],
-                },
-                "run": {
-                    "max_flips": int(max_flips),
-                    "flip_domain": "lanes-only",
-                    "ker_guard": "enforced",
-                    "seed": str(seed_txt),
-                },
-                "results": results_ps,
-                "summary": {
-                    "matches": int(matches),
-                    "mismatches": int(mismatches),
-                },
-                "integrity": {"content_hash": ""},
+            policy_ps = _policy_block_from_run_ctx(rc_ps) if " _policy_block_from_run_ctx" in globals() else {
+                "policy_tag": rc_ps.get("policy_tag","strict"),
+                "projector_mode": ("strict" if rc_ps.get("mode") == "strict" else (rc_ps.get("mode") or "")),
+                "projector_filename": rc_ps.get("projector_filename",""),
+                "projector_hash": rc_ps.get("projector_hash",""),
             }
             
-            perturb_json["integrity"]["content_hash"] = _hash_json(perturb_json)
-            perturb_json_path = REPORTS_DIR / "perturbation_sanity.json"
-            _atomic_write_json(perturb_json_path, perturb_json)
-            
-            st.session_state.setdefault("last_report_paths", {})["perturbation_sanity"] = {
-                "csv": str(PERTURB_OUT_PATH),
-                "json": str(perturb_json_path),
+            inputs_ps = _inputs_block_from_session() if "_inputs_block_from_session" in globals() else {
+                "hashes": {
+                    "boundaries_hash": rc_ps.get("boundaries_hash",""),
+                    "C_hash": rc_ps.get("C_hash",""),
+                    "H_hash": rc_ps.get("H_hash",""),
+                    "U_hash": rc_ps.get("U_hash",""),
+                    "shapes_hash": rc_ps.get("shapes_hash",""),
+                },
+                "dims": {"n2": int(n2), "n3": int(n3)},
+                "lane_mask_k3": rc_ps.get("lane_mask_k3", []),
             }
-                        # ---- JSON companion for Perturbation Sanity (robust) ----
-            try:
-                rc_ps = require_fresh_run_ctx()
-            except Exception:
-                rc_ps = st.session_state.get("run_ctx") or {}
             
-            policy_ps = _policy_block_from_run_ctx(rc_ps)
-            inputs_ps = _inputs_block_from_session()
-            
-            matches = 0
-            mismatches = 0
-            results_ps = []
-            for row in rows:
-                flip_id        = int(row[0]) if len(row) > 0 else -1
-                guard_tripped  = int(row[1]) if len(row) > 1 else 0
-                expected_guard = str(row[2]) if len(row) > 2 else "grammar"
-                note           = str(row[3]) if len(row) > 3 else ""
-                ok = bool(guard_tripped)  # grammar drift expected → guard_tripped==1
-                matches    += int(ok)
-                mismatches += int(not ok)
-                results_ps.append({
-                    "flip_id": flip_id,
-                    "guard_tripped": ("grammar" if guard_tripped else "none"),
-                    "expected_guard": expected_guard,
-                    "note": note,
-                })
-            
-            perturb_json = {
-                "schema_version": PERTURB_SCHEMA_VERSION,
-                "written_at_utc": _utc_iso_z(),
-                "app_version": APP_VER,
+            payload_ps = {
                 "identity": {
-                    "run_id": (rc_ps.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
-                    "fixture_nonce": rc_ps.get("fixture_nonce", ""),
+                    "run_id": (rc_ps.get("run_id") or ""),
+                    "district_id": rc_ps.get("district_id","D3"),
+                    "fixture_id": (inputs_ps.get("hashes",{}).get("C_hash","")[:8] + "+" +
+                                   inputs_ps.get("hashes",{}).get("H_hash","")[:8]),
                 },
                 "policy": policy_ps,
                 "inputs": inputs_ps,
-                "anchor": {
-                    "id": rc_ps.get("fixture_nonce", ""),
-                    "lane_mask_k3": rc_ps.get("lane_mask_k3") or [],
-                },
                 "run": {
                     "max_flips": int(max_flips),
                     "flip_domain": "lanes-only",
-                    "ker_guard": "enforced",
+                    "ker_guard": True,
+                    "guard_order": list(_GUARD_ORDER),
                     "seed": str(seed_txt),
+                    "dims": {"n2": int(n2), "n3": int(n3)},
                 },
-                "results": results_ps,
-                "summary": {"matches": matches, "mismatches": mismatches},
-                "integrity": {"content_hash": ""},
+                "results": rows_json,
+                "summary": {
+                    "total_flips": len(rows_json),
+                    "mismatches": sum(1 for r in rows_json if r["guard_tripped"] != r["expected_guard"]),
+                },
+                "integrity": {},  # filled below
+                "schema_version": SCHEMA_VERSION,
+                "app_version": APP_VERSION,
+                "written_at_utc": _utc_iso_z() if " _utc_iso_z" in globals() else datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
-            perturb_json["integrity"]["content_hash"] = _hash_json(perturb_json)
-            perturb_json_path = REPORTS_DIR / "perturbation_sanity.json"
-            _atomic_write_json(perturb_json_path, perturb_json)
-            st.session_state.setdefault("last_report_paths", {})["perturbation_sanity"] = {
-                "csv": str(PERTURB_OUT_PATH), "json": str(perturb_json_path)
-            }
+            payload_ps["integrity"]["content_hash"] = _hash_json(payload_ps)
             
-                        
-            st.info(f"perturbation: matches={matches} · mismatches={mismatches} · {_badge_ok()}")
-           
+            # file names with content hash
+            hash12_ps = payload_ps["integrity"]["content_hash"][:12]
+            ps_json_name = f"perturbation_sanity__{hash12_ps}.json"
+            ps_json_path = REPORTS_DIR / ps_json_name
+            
+            # write JSON + offer download
             try:
-                import io as _io
-                h8 = perturb_json["integrity"]["content_hash"][:8]
-                mem = _io.BytesIO(_json.dumps(perturb_json, ensure_ascii=False, indent=2).encode("utf-8"))
-                st.download_button(
-                    "Download perturbation_sanity.json",
-                    mem,
-                    file_name="perturbation_sanity.json",
-                    key=f"dl_ps_json_{h8}",
-                )
+                _atomic_write_json(ps_json_path, payload_ps)
             except Exception as e:
-                st.info(f"(Could not build perturbation JSON download: {e})")
+                st.warning(f"(Could not write perturbation JSON: {e})")
+            
+            try:
+                import io as _io, json as _json
+                mem = _io.BytesIO(_json.dumps(payload_ps, ensure_ascii=False, indent=2).encode("utf-8"))
+                st.download_button("Download perturbation_sanity.json", mem, file_name=ps_json_name, key=f"dl_ps_json_{hash12_ps}")
+            except Exception:
+                pass
+            
 
 
 
@@ -2288,180 +2254,77 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 _atomic_write_csv(FENCE_OUT_PATH, fence_header, rows_fs, fence_meta)
                 st.success(f"Fence stress saved → {FENCE_OUT_PATH}")
                 
-                                     
-                                # ---- JSON companion for Fence Stress ----
+                                          # —— JSON payload for Fence Stress ——
                 try:
                     rc_fs = require_fresh_run_ctx()
                 except Exception:
                     rc_fs = st.session_state.get("run_ctx") or {}
                 
-                policy_fs = _policy_block_from_run_ctx(rc_fs)
-                inputs_fs = _inputs_block_from_session()
-                
-                results_fs = []
-                # rows_fs entries you create look like:
-                #   ["U_shrink", "[k2,k3]", "|U|:old→new"]  (or fallback H2_* rows)
-                for row in rows_fs:
-                    U_class = str(row[0])
-                    pv_text = str(row[1])        # like "[1,0]" or "[1,1]"
-                    note    = str(row[2]) if len(row) > 2 else ""
-                
-                    # parse pass_vec robustly
-                    k2_k3 = (pv_text.strip().lstrip("[").rstrip("]").split(",") if pv_text else [])
-                    try:
-                        k2v = bool(int(k2_k3[0])) if len(k2_k3) > 0 else False
-                        k3v = bool(int(k2_k3[1])) if len(k2_k3) > 1 else False
-                    except Exception:
-                        k2v, k3v = False, False
-                
-                    entry = {
-                        "U_class": ("shrink" if "shrink" in U_class else ("plus" if "plus" in U_class else U_class)),
-                        "pass_vec": [k2v, k3v],
-                        "note": note,
-                    }
-                
-                    # Optional: extract |U| deltas when present in note: "|U|:a→b"
-                    if "|U|" in note:
-                        try:
-                            seg = note.split("|U|:", 1)[1]
-                            a_str, b_str = seg.split("→", 1)
-                            a = int("".join(ch for ch in a_str if ch.isdigit()))
-                            b = int("".join(ch for ch in b_str if ch.isdigit()))
-                            entry["mask_delta"] = {"removed": max(0, a - b), "added": max(0, b - a)}
-                        except Exception:
-                            pass
-                
-                    results_fs.append(entry)
-                
-                fence_json = {
-                    "schema_version": FENCE_SCHEMA_VERSION,
-                    "written_at_utc": _utc_iso_z(),
-                    "app_version": APP_VER,
-                    "identity": {
-                        "run_id": (rc_fs.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
-                        "fixture_nonce": rc_fs.get("fixture_nonce", ""),
-                    },
-                    "policy": policy_fs,   # strict OR projected (<- provenance included)
-                    "inputs": inputs_fs,   # hashes + dims
-                    "exemplar": {
-                        "fixture_id": rc_fs.get("fixture_nonce", ""),
-                        "lane_mask_k3": rc_fs.get("lane_mask_k3") or [],
-                    },
-                    "results": results_fs,
-                    "integrity": {"content_hash": ""},
+                policy_fs = _policy_block_from_run_ctx(rc_fs) if "_policy_block_from_run_ctx" in globals() else {
+                    "policy_tag": rc_fs.get("policy_tag","strict"),
+                    "projector_mode": ("strict" if rc_fs.get("mode") == "strict" else (rc_fs.get("mode") or "")),
+                    "projector_filename": rc_fs.get("projector_filename",""),
+                    "projector_hash": rc_fs.get("projector_hash",""),
                 }
                 
-                fence_json["integrity"]["content_hash"] = _hash_json(fence_json)
-                fence_json_path = REPORTS_DIR / "fence_stress.json"
-                _atomic_write_json(fence_json_path, fence_json)
-                
-                st.session_state.setdefault("last_report_paths", {})["fence_stress"] = {
-                    "csv": str(FENCE_OUT_PATH),
-                    "json": str(fence_json_path),
+                inputs_fs = _inputs_block_from_session() if "_inputs_block_from_session" in globals() else {
+                    "hashes": {
+                        "boundaries_hash": rc_fs.get("boundaries_hash",""),
+                        "C_hash": rc_fs.get("C_hash",""),
+                        "H_hash": rc_fs.get("H_hash",""),
+                        "U_hash": rc_fs.get("U_hash",""),
+                        "shapes_hash": rc_fs.get("shapes_hash",""),
+                    },
+                    "dims": {"n2": int(n2), "n3": int(n3)},
+                    "lane_mask_k3": rc_fs.get("lane_mask_k3", []),
                 }
-                # ---- JSON companion for Fence Stress (robust) ----
-                try:
-                    rc_fs = require_fresh_run_ctx()
-                except Exception:
-                    rc_fs = st.session_state.get("run_ctx") or {}
                 
-                policy_fs = _policy_block_from_run_ctx(rc_fs)
-                inputs_fs = _inputs_block_from_session()
+                # normalize rows into dicts
+                rows_fs_json = []
+                for cls, passvec, note in rows_fs:
+                    # passvec is like "[1,1]"
+                    k2k3 = [int(x) for x in passvec.strip("[]").split(",")] if isinstance(passvec, str) else list(passvec)
+                    rows_fs_json.append({
+                        "U_class": str(cls),
+                        "pass_vec": [int(k2k3[0]), int(k2k3[1])] if len(k2k3) == 2 else [0,0],
+                        "note": str(note),
+                    })
                 
-                def _parse_pass_vec(text: str) -> tuple[bool,bool]:
-                    try:
-                        t = (text or "").strip()
-                        if t.startswith("[") and t.endswith("]"):
-                            parts = [p.strip() for p in t[1:-1].split(",")]
-                        else:
-                            parts = [p.strip() for p in t.split(",")]
-                        k2v = bool(int(parts[0])) if len(parts) > 0 else False
-                        k3v = bool(int(parts[1])) if len(parts) > 1 else False
-                        return k2v, k3v
-                    except Exception:
-                        return False, False
-                
-                results_fs = []
-                for row in rows_fs:
-                    U_class = str(row[0]) if len(row) > 0 else "unknown"
-                    pv_text = str(row[1]) if len(row) > 1 else ""
-                    note    = str(row[2]) if len(row) > 2 else ""
-                    k2v, k3v = _parse_pass_vec(pv_text)
-                
-                    entry = {
-                        "U_class": ("shrink" if "shrink" in U_class else ("plus" if "plus" in U_class else U_class)),
-                        "pass_vec": [k2v, k3v],
-                        "note": note,
-                    }
-                    if "|U|" in note:
-                        try:
-                            seg = note.split("|U|:", 1)[1]
-                            a_str, b_str = seg.split("→", 1)
-                            a = int("".join(ch for ch in a_str if ch.isdigit()))
-                            b = int("".join(ch for ch in b_str if ch.isdigit()))
-                            entry["mask_delta"] = {"removed": max(0, a - b), "added": max(0, b - a)}
-                        except Exception:
-                            pass
-                
-                    results_fs.append(entry)
-                
-                fence_json = {
-                    "schema_version": FENCE_SCHEMA_VERSION,
-                    "written_at_utc": _utc_iso_z(),
-                    "app_version": APP_VER,
+                payload_fs = {
                     "identity": {
-                        "run_id": (rc_fs.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
-                        "fixture_nonce": rc_fs.get("fixture_nonce", ""),
+                        "run_id": (rc_fs.get("run_id") or ""),
+                        "district_id": rc_fs.get("district_id","D3"),
+                        "fixture_id": (inputs_fs.get("hashes",{}).get("C_hash","")[:8] + "+" +
+                                       inputs_fs.get("hashes",{}).get("H_hash","")[:8]),
                     },
                     "policy": policy_fs,
                     "inputs": inputs_fs,
-                    "exemplar": {
-                        "fixture_id": rc_fs.get("fixture_nonce", ""),
-                        "lane_mask_k3": rc_fs.get("lane_mask_k3") or [],
-                    },
-                    "results": results_fs,
-                    "integrity": {"content_hash": ""},
+                    "exemplar": {"lane_mask_k3": inputs_fs.get("lane_mask_k3", [])},
+                    "results": rows_fs_json,
+                    "summary": {"num_cases": len(rows_fs_json)},
+                    "integrity": {},
+                    "schema_version": FENCE_SCHEMA_VERSION,
+                    "app_version": APP_VER,
+                    "written_at_utc": _utc_iso_z() if " _utc_iso_z" in globals() else datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                 }
-                fence_json["integrity"]["content_hash"] = _hash_json(fence_json)
-                fence_json_path = REPORTS_DIR / "fence_stress.json"
-                _atomic_write_json(fence_json_path, fence_json)
-                st.session_state.setdefault("last_report_paths", {})["fence_stress"] = {
-                    "csv": str(FENCE_OUT_PATH), "json": str(fence_json_path)
-                }
+                payload_fs["integrity"]["content_hash"] = _hash_json(payload_fs)
+                hash12_fs = payload_fs["integrity"]["content_hash"][:12]
+                fs_json_name = f"fence_stress__{hash12_fs}.json"
+                fs_json_path = REPORTS_DIR / fs_json_name
                 
-                                
-                st.info(f"fence: {len(results_fs)} actions · {_badge_ok()}")
-            try:
-                import io as _io
-                h8 = fence_json["integrity"]["content_hash"][:8]
-                mem = _io.BytesIO(_json.dumps(fence_json, ensure_ascii=False, indent=2).encode("utf-8"))
-                st.download_button(
-                    "Download fence_stress.json",
-                    mem,
-                    file_name="fence_stress.json",
-                    key=f"dl_fence_json_{h8}",
-                )
-            except Exception as e:
-                st.info(f"(Could not build fence JSON download: {e})")
-
-                                
-        
-
-            # Quick downloads
-            try:
-                with open(PERTURB_OUT_PATH, "rb") as f:
-                    st.download_button("Download perturbation_sanity.csv", f, file_name="perturbation_sanity.csv", key="dl_ps_csv")
-            except Exception:
-                pass
-            if run_fence and FENCE_OUT_PATH.exists():
                 try:
-                    with open(FENCE_OUT_PATH, "rb") as f2:
-                        st.download_button("Download fence_stress.csv", f2, file_name="fence_stress.csv", key="dl_fence_csv")
+                    _atomic_write_json(fs_json_path, payload_fs)
+                except Exception as e:
+                    st.warning(f"(Could not write fence JSON: {e})")
+                
+                try:
+                    import io as _io, json as _json
+                    mem = _io.BytesIO(_json.dumps(payload_fs, ensure_ascii=False, indent=2).encode("utf-8"))
+                    st.download_button("Download fence_stress.json", mem, file_name=fs_json_name, key=f"dl_fence_json_{hash12_fs}")
                 except Exception:
                     pass
-
-        except Exception as e:
-            st.error(f"Perturbation/Fence run failed: {e}")
+                           
+                                
 
 # =============================== Coverage Sampling (non-blocking) ==============================
 
@@ -2628,29 +2491,52 @@ with st.expander("Coverage Sampling"):
                                        key="dl_coverage_csv")
             except Exception:
                 pass
-                            # ---- JSON companion for Coverage Sampling ----
+                          
+            # —— JSON payload for Coverage Sampling ——
             try:
-                rc_cov = require_fresh_run_ctx()  # safe: you already guarded above
+                rc_cov = require_fresh_run_ctx()
             except Exception:
                 rc_cov = st.session_state.get("run_ctx") or {}
             
-            policy_cov = _policy_block_from_run_ctx(rc_cov)
-            inputs_cov = _inputs_block_from_session()
+            policy_cov = _policy_block_from_run_ctx(rc_cov) if "_policy_block_from_run_ctx" in globals() else {
+                "policy_tag": rc_cov.get("policy_tag","strict"),
+                "projector_mode": ("strict" if rc_cov.get("mode") == "strict" else (rc_cov.get("mode") or "")),
+                "projector_filename": rc_cov.get("projector_filename",""),
+                "projector_hash": rc_cov.get("projector_hash",""),
+            }
             
-            # Build JSON rows from the CSV rows you just computed
+            inputs_cov = _inputs_block_from_session() if "_inputs_block_from_session" in globals() else {
+                "hashes": {
+                    "boundaries_hash": rc_cov.get("boundaries_hash",""),
+                    "C_hash": rc_cov.get("C_hash",""),
+                    "H_hash": rc_cov.get("H_hash",""),
+                    "U_hash": rc_cov.get("U_hash",""),
+                    "shapes_hash": rc_cov.get("shapes_hash",""),
+                },
+                "dims": {"n2": int(n2), "n3": int(n3)},
+                "lane_mask_k3": rc_cov.get("lane_mask_k3", []),
+            }
+            
+            lane_mask_bits = "".join("1" if int(x) else "0" for x in (inputs_cov.get("lane_mask_k3") or []))
+            
+            # Rebuild JSON results from your computed rows list (signature,count,in_district,pct)
             results_cov = []
-            for sig, cnt in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
-                in_d = _in_district_guess(sig, current_lane_pattern=lane_pattern)
-                pctv = 0.0 if num_samples <= 0 else (cnt / float(num_samples))
-                results_cov.append({"signature": sig, "count": int(cnt), "in_district": bool(in_d), "pct": float(pctv)})
+            for sig, cnt, in_d, pctv in rows:
+                results_cov.append({
+                    "signature": sig,
+                    "signature_canonical": sig,   # your _coverage_signature is already canonical (sorted)
+                    "count": int(cnt),
+                    "pct": float(pctv),
+                    "in_district": bool(int(in_d)),
+                    "lane_mask": lane_mask_bits,
+                    "dims": {"n2": int(n2), "n3": int(n3)},
+                })
             
-            coverage_json = {
-                "schema_version": SCHEMA_VERSION,
-                "written_at_utc": _utc_iso_z(),
-                "app_version": APP_VERSION,
+            known_signatures = (rc_cov.get("known_signatures") or [])  # keep wire; can be []
+            payload_cov = {
                 "identity": {
-                    "run_id": (rc_cov.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
-                    "fixture_nonce": rc_cov.get("fixture_nonce", ""),
+                    "run_id": (rc_cov.get("run_id") or ""),
+                    "district_id": rc_cov.get("district_id","D3"),
                 },
                 "policy": policy_cov,
                 "inputs": inputs_cov,
@@ -2658,120 +2544,43 @@ with st.expander("Coverage Sampling"):
                     "num_samples": int(num_samples),
                     "bit_density": float(bit_density),
                     "seed": str(seed_txt),
+                    "canonicalization": {
+                        "columns": "top-to-bottom bits",
+                        "sort": "lexicographic",
+                        "domain": "d3 support",
+                    },
+                    "lane_mask_k3": inputs_cov.get("lane_mask_k3", []),
+                    "known_signatures": known_signatures,
                 },
                 "results": results_cov,
                 "summary": {
                     "total": int(num_samples),
                     "distinct_signatures": int(len(results_cov)),
+                    "in_district_hits": int(sum(1 for r in results_cov if r["in_district"])),
+                    "hit_rate_pct": (100.0 * sum(1 for r in results_cov if r["in_district"]) / float(num_samples)) if int(num_samples) else 0.0,
                 },
-                "integrity": {"content_hash": ""},
+                "integrity": {},
+                "schema_version": SCHEMA_VERSION,
+                "app_version": APP_VERSION,
+                "written_at_utc": _utc_iso_z() if " _utc_iso_z" in globals() else datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
             }
+            payload_cov["integrity"]["content_hash"] = _hash_json(payload_cov)
             
-            coverage_json["integrity"]["content_hash"] = _hash_json(coverage_json)
-            cov_json_path = REPORTS_DIR / "coverage_sampling.json"
-            _atomic_write_json(cov_json_path, coverage_json)
+            hash12_cov = payload_cov["integrity"]["content_hash"][:12]
+            cov_json_name = f"coverage_sampling__{hash12_cov}.json"
+            cov_json_path = REPORTS_DIR / cov_json_name
             
-            # Session pointer for snapshotters
-            last_paths = st.session_state.setdefault("last_report_paths", {})
-            last_paths["coverage_sampling"] = {"csv": str(COVERAGE_CSV_PATH), "json": str(cov_json_path)}
-            
-            st.info(f"coverage: {len(results_cov)} signatures · {_badge_ok()}")
-                        # ---- JSON companion for Coverage Sampling ----
             try:
-                # Try to get a fresh run_ctx; fall back to session snapshot
-                try:
-                    rc_cov = require_fresh_run_ctx()
-                except Exception:
-                    rc_cov = st.session_state.get("run_ctx") or {}
-            
-                policy_cov = _policy_block_from_run_ctx(rc_cov) if "_policy_block_from_run_ctx" in globals() else {
-                    "policy_tag": rc_cov.get("policy_tag") or rc_cov.get("mode") or "",
-                    "projector_mode": ("strict" if rc_cov.get("mode") == "strict"
-                                       else ("auto" if "auto" in str(rc_cov.get("mode","")) else
-                                             ("file" if "file" in str(rc_cov.get("mode","")) else ""))),
-                    "projector_filename": rc_cov.get("projector_filename","") or "",
-                    "projector_hash": rc_cov.get("projector_hash","") or "",
-                }
-                inputs_cov = _inputs_block_from_session() if "_inputs_block_from_session" in globals() else {
-                    "filenames": {
-                        "boundaries": (rc_cov.get("boundaries_path") or ""),
-                        "cmap":       (rc_cov.get("cmap_path") or ""),
-                        "H":          (rc_cov.get("H_path") or ""),
-                        "shapes":     (rc_cov.get("shapes_path") or ""),
-                    },
-                    "hashes": {
-                        "boundaries_hash": (rc_cov.get("boundaries_hash") or ""),
-                        "c_hash":          (rc_cov.get("c_hash") or ""),
-                        "h_hash":          (rc_cov.get("h_hash") or ""),
-                        "u_hash":          (rc_cov.get("u_hash") or ""),
-                        "shapes_hash":     (rc_cov.get("shapes_hash") or ""),
-                    },
-                    "dims": {"n2": int(n2), "n3": int(n3)},
-                }
-            
-                # Rebuild the results in sorted order to mirror CSV
-                results_cov = []
-                for sig, cnt in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0])):
-                    in_d = _in_district_guess(sig, current_lane_pattern=lane_pattern)
-                    pct  = 0.0 if float(num_samples) <= 0 else round(100.0 * (cnt / float(num_samples)), 2)
-                    results_cov.append({
-                        "signature": sig,
-                        "count": int(cnt),
-                        "in_district": bool(in_d),
-                        "pct": pct,
-                    })
-            
-                coverage_json = {
-                    "schema_version": SCHEMA_VERSION,
-                    "written_at_utc": _utc_iso_z(),
-                    "app_version": APP_VERSION,
-                    "identity": {
-                        "run_id": (rc_cov.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
-                        "fixture_nonce": rc_cov.get("fixture_nonce",""),
-                    },
-                    "policy": policy_cov,
-                    "inputs": inputs_cov,
-                    "sampling": {
-                        "num_samples": int(num_samples),
-                        "bit_density": float(bit_density),
-                        "n2": int(n2),
-                        "n3": int(n3),
-                        "seed": str(seed_txt),
-                    },
-                    "results": results_cov,
-                    "summary": {
-                        "total": int(num_samples),
-                        "distinct_signatures": int(len(results_cov)),
-                    },
-                    "integrity": {"content_hash": ""},
-                }
-                # Stable hash
-                if "_hash_json" in globals():
-                    coverage_json["integrity"]["content_hash"] = _hash_json(coverage_json)
-                else:
-                    _canon = _json.dumps(coverage_json, sort_keys=True, separators=(",",":")).encode("utf-8")
-                    coverage_json["integrity"]["content_hash"] = _sha256_hex(_canon)
-            
-                cov_json_path = REPORTS_DIR / "coverage_sampling.json"
-                _atomic_write_json(cov_json_path, coverage_json)
-            
-                # Remember paths for snapshotters
-                st.session_state.setdefault("last_report_paths", {})["coverage_sampling"] = {
-                    "csv": str(COVERAGE_CSV_PATH), "json": str(cov_json_path)
-                }
-            
-                # Download button (unique key from hash)
-                import io as _io
-                h8 = coverage_json["integrity"]["content_hash"][:8]
-                mem = _io.BytesIO(_json.dumps(coverage_json, ensure_ascii=False, indent=2).encode("utf-8"))
-                st.download_button(
-                    "Download coverage_sampling.json",
-                    mem,
-                    file_name="coverage_sampling.json",
-                    key=f"dl_coverage_json_{h8}",
-                )
+                _atomic_write_json(cov_json_path, payload_cov)
             except Exception as e:
-                st.info(f"(Could not build coverage JSON/download: {e})")
+                st.warning(f"(Could not write coverage JSON: {e})")
+            
+            try:
+                import io as _io, json as _json
+                mem = _io.BytesIO(_json.dumps(payload_cov, ensure_ascii=False, indent=2).encode("utf-8"))
+                st.download_button("Download coverage_sampling.json", mem, file_name=cov_json_name, key=f"dl_cov_json_{hash12_cov}")
+            except Exception:
+                pass
 
 
 
