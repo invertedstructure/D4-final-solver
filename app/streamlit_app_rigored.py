@@ -2878,6 +2878,120 @@ if "_in_district_guess" not in globals():
             return int(any(bs == current_lane_pattern for bs in col_bitstrings))
         except Exception:
             return 0
+# =========================== Coverage · Baseline Loader (Phase-U) ===========================
+with st.expander("Coverage Baseline (load Phase-U signatures)"):
+    colL, colR = st.columns([2, 1])
+
+    with colL:
+        st.caption("Provide canonical signatures (strings like: rk=…;ker=…;pattern=[…]).")
+        up = st.file_uploader("Upload baseline (.json or .jsonl)", type=["json", "jsonl"], key="cov_baseline_up")
+        pasted = st.text_area("Or paste signatures (one per line)", value="", key="cov_baseline_paste")
+
+    with colR:
+        def _parse_json_baseline(bytes_data: bytes, name: str) -> list[str]:
+            try:
+                txt = bytes_data.decode("utf-8", errors="ignore")
+            except Exception:
+                return []
+            sigs: list[str] = []
+            try:
+                if name.lower().endswith(".jsonl"):
+                    # each line is JSON: either a string or { "signature": "..." }
+                    for line in txt.splitlines():
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            obj = _json.loads(line)
+                            if isinstance(obj, str):
+                                sigs.append(obj.strip())
+                            elif isinstance(obj, dict) and "signature" in obj:
+                                sigs.append(str(obj["signature"]).strip())
+                        except Exception:
+                            # allow raw line fallback if it already looks like a signature
+                            if "rk=" in line and "pattern=[" in line:
+                                sigs.append(line)
+                else:
+                    obj = _json.loads(txt)
+                    if isinstance(obj, list):
+                        for v in obj:
+                            if isinstance(v, str):
+                                sigs.append(v.strip())
+                            elif isinstance(v, dict) and "signature" in v:
+                                sigs.append(str(v["signature"]).strip())
+                    elif isinstance(obj, dict) and "signatures" in obj and isinstance(obj["signatures"], list):
+                        for v in obj["signatures"]:
+                            if isinstance(v, str):
+                                sigs.append(v.strip())
+                            elif isinstance(v, dict) and "signature" in v:
+                                sigs.append(str(v["signature"]).strip())
+            except Exception:
+                pass
+            # keep only plausible signature strings
+            sigs = [s for s in sigs if isinstance(s, str) and ("rk=" in s) and ("pattern=[" in s)]
+            return sigs
+
+        def _parse_pasted(p: str) -> list[str]:
+            sigs = []
+            for line in (p or "").splitlines():
+                s = line.strip()
+                if s and ("rk=" in s) and ("pattern=[" in s):
+                    sigs.append(s)
+            return sigs
+
+        def _dedupe_keep_order(items: list[str]) -> list[str]:
+            seen = set()
+            out = []
+            for s in items:
+                if s not in seen:
+                    seen.add(s); out.append(s)
+            return out
+
+        # demo set (safe defaults; matches your signature grammar)
+        DEMO_BASELINE = [
+            "rk=2;ker=1;pattern=[110,110,000]",
+            "rk=2;ker=1;pattern=[101,101,000]",
+            "rk=2;ker=1;pattern=[011,011,000]",
+            "rk=3;ker=0;pattern=[111,111,111]",
+            "rk=1;ker=2;pattern=[100,000,000]",
+        ]
+
+        # buttons
+        if st.button("Load from upload / paste", key="cov_btn_load"):
+            loaded: list[str] = []
+            if up is not None:
+                loaded.extend(_parse_json_baseline(up.getvalue(), up.name))
+            loaded.extend(_parse_pasted(pasted))
+            loaded = _dedupe_keep_order([s for s in loaded if s])
+
+            if not loaded:
+                st.error("No valid signatures found. Provide a .json/.jsonl or paste one-per-line.")
+            else:
+                rc0 = st.session_state.get("run_ctx") or {}
+                rc0["known_signatures"] = loaded
+                st.session_state["run_ctx"] = rc0
+                st.success(f"Loaded {len(loaded)} canonical signatures.")
+
+        if st.button("Use demo baseline", key="cov_btn_demo"):
+            rc0 = st.session_state.get("run_ctx") or {}
+            rc0["known_signatures"] = DEMO_BASELINE[:]
+            st.session_state["run_ctx"] = rc0
+            st.success(f"Loaded demo baseline ({len(DEMO_BASELINE)} signatures).")
+
+        if st.button("Clear baseline", key="cov_btn_clear"):
+            rc0 = st.session_state.get("run_ctx") or {}
+            rc0["known_signatures"] = []
+            st.session_state["run_ctx"] = rc0
+            st.info("Cleared known_signatures.")
+
+    # status preview
+    rc_view = st.session_state.get("run_ctx") or {}
+    ks = list(rc_view.get("known_signatures") or [])
+    if ks:
+        st.caption(f"Baseline active: {len(ks)} signatures.")
+        st.code("\n".join(ks[:5] + (["…"] if len(ks) > 5 else [])), language="text")
+    else:
+        st.caption("Baseline inactive (known_signatures is empty).")
 
 
 # =============================== Coverage Sampling (non-blocking) ==============================
