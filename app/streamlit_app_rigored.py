@@ -2531,95 +2531,95 @@ def _in_district_guess(signature: str, *, current_lane_pattern: str) -> int:
                     except Exception:
                         pass
                   
-    # —— JSON payload for Coverage Sampling ——
-    try:
-        rc_cov = require_fresh_run_ctx()
-    except Exception:
-        rc_cov = st.session_state.get("run_ctx") or {}
-    
-    policy_cov = _policy_block_from_run_ctx(rc_cov) if "_policy_block_from_run_ctx" in globals() else {
-        "policy_tag": rc_cov.get("policy_tag","strict"),
-        "projector_mode": ("strict" if rc_cov.get("mode") == "strict" else (rc_cov.get("mode") or "")),
-        "projector_filename": rc_cov.get("projector_filename",""),
-        "projector_hash": rc_cov.get("projector_hash",""),
-    }
-    
-    inputs_cov = _inputs_block_from_session() if "_inputs_block_from_session" in globals() else {
-        "hashes": {
-            "boundaries_hash": rc_cov.get("boundaries_hash",""),
-            "C_hash": rc_cov.get("C_hash",""),
-            "H_hash": rc_cov.get("H_hash",""),
-            "U_hash": rc_cov.get("U_hash",""),
-            "shapes_hash": rc_cov.get("shapes_hash",""),
-        },
-        "dims": {"n2": int(n2), "n3": int(n3)},
-        "lane_mask_k3": rc_cov.get("lane_mask_k3", []),
-    }
-    
-    lane_mask_bits = "".join("1" if int(x) else "0" for x in (inputs_cov.get("lane_mask_k3") or []))
-    
-    # Rebuild JSON results from your computed rows list (signature,count,in_district,pct)
-    results_cov = []
-    for sig, cnt, in_d, pctv in rows:
-        results_cov.append({
-            "signature": sig,
-            "signature_canonical": sig,   # your _coverage_signature is already canonical (sorted)
-            "count": int(cnt),
-            "pct": float(pctv),
-            "in_district": bool(int(in_d)),
-            "lane_mask": lane_mask_bits,
-            "dims": {"n2": int(n2), "n3": int(n3)},
-        })
-    
-    known_signatures = (rc_cov.get("known_signatures") or [])  # keep wire; can be []
-    payload_cov = {
-        "identity": {
-            "run_id": (rc_cov.get("run_id") or ""),
-            "district_id": rc_cov.get("district_id","D3"),
-        },
-        "policy": policy_cov,
-        "inputs": inputs_cov,
-        "sampling": {
-            "num_samples": int(num_samples),
-            "bit_density": float(bit_density),
-            "seed": str(seed_txt),
-            "canonicalization": {
-                "columns": "top-to-bottom bits",
-                "sort": "lexicographic",
-                "domain": "d3 support",
-            },
-            "lane_mask_k3": inputs_cov.get("lane_mask_k3", []),
-            "known_signatures": known_signatures,
-        },
-        "results": results_cov,
-        "summary": {
-            "total": int(num_samples),
-            "distinct_signatures": int(len(results_cov)),
-            "in_district_hits": int(sum(1 for r in results_cov if r["in_district"])),
-            "hit_rate_pct": (100.0 * sum(1 for r in results_cov if r["in_district"]) / float(num_samples)) if int(num_samples) else 0.0,
-        },
-        "integrity": {},
-        "schema_version": SCHEMA_VERSION,
-        "app_version": APP_VERSION,
-        "written_at_utc": _utc_iso_z() if " _utc_iso_z" in globals() else datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }
-    payload_cov["integrity"]["content_hash"] = _hash_json(payload_cov)
-    
-    hash12_cov = payload_cov["integrity"]["content_hash"][:12]
-    cov_json_name = f"coverage_sampling__{hash12_cov}.json"
-    cov_json_path = REPORTS_DIR / cov_json_name
-    
-    try:
-        _atomic_write_json(cov_json_path, payload_cov)
-    except Exception as e:
-        st.warning(f"(Could not write coverage JSON: {e})")
-    
-    try:
-        import io as _io, json as _json
-        mem = _io.BytesIO(_json.dumps(payload_cov, ensure_ascii=False, indent=2).encode("utf-8"))
-        st.download_button("Download coverage_sampling.json", mem, file_name=cov_json_name, key=f"dl_cov_json_{hash12_cov}")
-    except Exception:
-        pass
+                    # —— JSON payload for Coverage Sampling ——
+                    try:
+                        rc_cov = require_fresh_run_ctx()
+                    except Exception:
+                        rc_cov = st.session_state.get("run_ctx") or {}
+                    
+                    policy_cov = _policy_block_from_run_ctx(rc_cov) if "_policy_block_from_run_ctx" in globals() else {
+                        "policy_tag": rc_cov.get("policy_tag","strict"),
+                        "projector_mode": ("strict" if rc_cov.get("mode") == "strict" else (rc_cov.get("mode") or "")),
+                        "projector_filename": rc_cov.get("projector_filename",""),
+                        "projector_hash": rc_cov.get("projector_hash",""),
+                    }
+                    
+                    inputs_cov = _inputs_block_from_session() if "_inputs_block_from_session" in globals() else {
+                        "hashes": {
+                            "boundaries_hash": rc_cov.get("boundaries_hash",""),
+                            "C_hash": rc_cov.get("C_hash",""),
+                            "H_hash": rc_cov.get("H_hash",""),
+                            "U_hash": rc_cov.get("U_hash",""),
+                            "shapes_hash": rc_cov.get("shapes_hash",""),
+                        },
+                        "dims": {"n2": int(n2), "n3": int(n3)},
+                        "lane_mask_k3": rc_cov.get("lane_mask_k3", []),
+                    }
+                    
+                    lane_mask_bits = "".join("1" if int(x) else "0" for x in (inputs_cov.get("lane_mask_k3") or []))
+                    
+                    # Rebuild JSON results from your computed rows list (signature,count,in_district,pct)
+                    results_cov = []
+                    for sig, cnt, in_d, pctv in rows:
+                        results_cov.append({
+                            "signature": sig,
+                            "signature_canonical": sig,   # your _coverage_signature is already canonical (sorted)
+                            "count": int(cnt),
+                            "pct": float(pctv),
+                            "in_district": bool(int(in_d)),
+                            "lane_mask": lane_mask_bits,
+                            "dims": {"n2": int(n2), "n3": int(n3)},
+                        })
+                    
+                    known_signatures = (rc_cov.get("known_signatures") or [])  # keep wire; can be []
+                    payload_cov = {
+                        "identity": {
+                            "run_id": (rc_cov.get("run_id") or ""),
+                            "district_id": rc_cov.get("district_id","D3"),
+                        },
+                        "policy": policy_cov,
+                        "inputs": inputs_cov,
+                        "sampling": {
+                            "num_samples": int(num_samples),
+                            "bit_density": float(bit_density),
+                            "seed": str(seed_txt),
+                            "canonicalization": {
+                                "columns": "top-to-bottom bits",
+                                "sort": "lexicographic",
+                                "domain": "d3 support",
+                            },
+                            "lane_mask_k3": inputs_cov.get("lane_mask_k3", []),
+                            "known_signatures": known_signatures,
+                        },
+                        "results": results_cov,
+                        "summary": {
+                            "total": int(num_samples),
+                            "distinct_signatures": int(len(results_cov)),
+                            "in_district_hits": int(sum(1 for r in results_cov if r["in_district"])),
+                            "hit_rate_pct": (100.0 * sum(1 for r in results_cov if r["in_district"]) / float(num_samples)) if int(num_samples) else 0.0,
+                        },
+                        "integrity": {},
+                        "schema_version": SCHEMA_VERSION,
+                        "app_version": APP_VERSION,
+                        "written_at_utc": _utc_iso_z() if " _utc_iso_z" in globals() else datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    }
+                    payload_cov["integrity"]["content_hash"] = _hash_json(payload_cov)
+                    
+                    hash12_cov = payload_cov["integrity"]["content_hash"][:12]
+                    cov_json_name = f"coverage_sampling__{hash12_cov}.json"
+                    cov_json_path = REPORTS_DIR / cov_json_name
+                    
+                    try:
+                        _atomic_write_json(cov_json_path, payload_cov)
+                    except Exception as e:
+                        st.warning(f"(Could not write coverage JSON: {e})")
+                    
+                    try:
+                        import io as _io, json as _json
+                        mem = _io.BytesIO(_json.dumps(payload_cov, ensure_ascii=False, indent=2).encode("utf-8"))
+                        st.download_button("Download coverage_sampling.json", mem, file_name=cov_json_name, key=f"dl_cov_json_{hash12_cov}")
+                    except Exception:
+                        pass
 
 
 
