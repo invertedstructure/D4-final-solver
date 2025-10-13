@@ -2323,13 +2323,18 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     st.download_button("Download fence_stress.json", mem, file_name=fs_json_name, key=f"dl_fence_json_{hash12_fs}")
                 except Exception:
                     pass
+                 except Exception as e:
+                    st.error(f"Perturbation/Fence run failed: {e}")
                            
                                 
 
 # =============================== Coverage Sampling (non-blocking) ==============================
 
-COVERAGE_CSV_PATH = REPORTS_DIR / "coverage_sampling.csv"
+# Paths for coverage artifacts (top-level, not inside any try/with)
+COVERAGE_CSV_PATH  = REPORTS_DIR / "coverage_sampling.csv"
+COVERAGE_JSON_PATH = REPORTS_DIR / "coverage_sampling.json"
 COVERAGE_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
+
 
 def _rand_gf2_matrix(rows: int, cols: int, density: float, rng: random.Random) -> list[list[int]]:
     density = max(0.0, min(1.0, float(density)))
