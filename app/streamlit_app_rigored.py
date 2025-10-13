@@ -2997,7 +2997,6 @@ def _add_normalized_pattern_to_baseline(pattern_str: str, rk: str|None=None, ker
     return full_norm, patt_norm
 
 
-
 # =========================== Coverage · Baseline Loader (load + normalize) ===========================
 with st.expander("Coverage Baseline (load + normalize to n₂-bit columns)"):
     rc_dims = st.session_state.get("run_ctx") or {}
@@ -3273,12 +3272,12 @@ with st.expander("Coverage Sampling"):
             _disallow_auto_for_evidence()
             _require_projected_file_allowed_for_run()
 
-            # require a non-empty canonical baseline
+            # require a non-empty canonical baseline (full + patterns)
             try:
                 rc_cov = require_fresh_run_ctx()
             except Exception:
                 rc_cov = st.session_state.get("run_ctx") or {}
-            known_signatures = (rc_cov.get("known_signatures") or [])
+            known_signatures = list(rc_cov.get("known_signatures") or [])
             base_patterns = set(rc_cov.get("known_signatures_patterns") or [])
 
             if not known_signatures:
@@ -3303,15 +3302,16 @@ with st.expander("Coverage Sampling"):
             if n3 <= 0 or n2 <= 0:
                 st.warning("Please ensure n₂ and n₃ are both > 0.")
             else:
-                import csv, tempfile, os, random, uuid, io as _io, json as _json
+                import csv, tempfile, os, random, uuid, io as _io, json as _json, collections as _collections, copy as _copy
                 rng = random.Random(); rng.seed(seed_txt)
 
                 # Stamp a run_id (non-destructive)
                 run_id = (st.session_state.get("run_ctx") or {}).get("run_id") or str(uuid.uuid4())
                 st.session_state.setdefault("run_ctx", {})["run_id"] = run_id
 
-                counts: dict[str, int] = {}
-                pattern_counts: dict[str, int] = {}     # pattern=[..] → count
+                # ------------------ Stage 1: sample → counts only ------------------
+                counts: dict[str, int] = {}                # full signature → count
+                pattern_counts: dict[str, int] = {}        # pattern=[..] → count
                 pattern_meta: dict[str, tuple[str, str]] = {}  # pattern -> (rk, ker)
 
                 # lane mask bits (UI only)
@@ -3322,18 +3322,102 @@ with st.expander("Coverage Sampling"):
                     d_k1 = _rand_gf2_matrix(int(n2), int(n3), float(bit_density), rng)
                     sig = _coverage_signature(d_k1, n_k=int(n3))
                     counts[sig] = counts.get(sig, 0) + 1
-                    # derive pattern-only + store rk/ker for this sig
+                    # normalize to pattern-only; store rk/ker seen for display
                     _, patt_only = _normalize_signature_line_to_n2(sig, n2=int(n2), n3=int(n3))
                     pattern_counts[patt_only] = pattern_counts.get(patt_only, 0) + 1
-                    rk = None; ker = None
+                    rk = ker = None
                     try:
                         for part in sig.split(";"):
                             part = part.strip()
-                            if part.startswith("rk="): rk = part[3:]
+                            if part.startswith("rk="):  rk = part[3:]
                             elif part.startswith("ker="): ker = part[4:]
                     except Exception:
                         pass
                     pattern_meta.setdefault(patt_only, (rk or "?", ker or "?"))
+
+                # ------------------ Stage 2: unmatched UI (add / auto-add) ------------------
+                base_patterns_set = set(base_patterns)
+                unmatched = [p for p, c in pattern_counts.items() if p not in base_patterns_set]
+                topN = _collections.Counter({p: pattern_counts[p] for p in unmatched}).most_common(10)
+
+                st.subheader("Top unmatched patterns")
+                if not topN:
+                    st.info("All sampled signatures are in the baseline. Nothing to add.")
+                else:
+                    for i, (patt, cnt) in enumerate(topN, start=1):
+                        rk, ker = pattern_meta.get(patt, ("—", "—"))
+                        cols = st.columns([6, 2, 2, 2])
+                        cols[0].markdown(f"**{patt}**  \ncount: {cnt}")
+                        cols[1].markdown(f"rk={rk}")
+                        cols[2].markdown(f"ker={ker}")
+                        if cols[3].button("➕ Add", key=f"add_base_{i}"):
+                            _add_normalized_pattern_to_baseline(
+                                patt,
+                                rk=None if rk in ("—","?") else str(rk),
+                                ker=None if ker in ("—","?") else str(ker)
+                            )
+                            st.success(f"Added {patt} to baseline.")
+
+                st.divider()
+                st.subheader("Auto-add unmatched until target coverage")
+                target = st.slider("Target weighted coverage (%)", 50, 100, 95, 1, key="cov_target_pct")
+                max_add = st.number_input("Max patterns to add this run", min_value=1, max_value=100,
+                                          value=10, step=1, key="cov_max_add")
+
+                sample_counts = dict(pattern_counts)  # pattern -> count
+                known_set = set((st.session_state.get("run_ctx") or {}).get("known_signatures_patterns") or [])
+
+                def _compute_weighted_coverage(sample_counts: dict[str,int], known: set[str]) -> float:
+                    matched = sum(c for p,c in sample_counts.items() if p in known)
+                    total   = sum(sample_counts.values()) or 1
+                    return 100.0 * matched / total
+
+                if st.button("Auto-add top unmatched", key="cov_auto_add"):
+                    items = sorted(((p,c) for p,c in sample_counts.items() if p not in known_set),
+                                   key=lambda x: x[1], reverse=True)
+                    added = 0
+                    for patt, cnt in items:
+                        cov_now = _compute_weighted_coverage(sample_counts, known_set)
+                        if cov_now >= float(target) or added >= int(max_add):
+                            break
+                        _add_normalized_pattern_to_baseline(patt)  # rk/ker optional
+                        rc_after = st.session_state.get("run_ctx") or {}
+                        known_set = set(rc_after.get("known_signatures_patterns") or [])
+                        added += 1
+                    st.success(f"Auto-added {added} pattern(s). Current weighted coverage ≈ {_compute_weighted_coverage(sample_counts, known_set):.1f}%")
+
+                col_run, col_exp = st.columns([1,1])
+                if col_run.button("Re-run coverage with updated baseline", key="cov_rerun"):
+                    st.session_state["trigger_coverage_run"] = True
+                    st.experimental_rerun() if hasattr(st, "experimental_rerun") else None
+
+                if col_exp.button("Export current baseline", key="cov_export"):
+                    rcx = st.session_state.get("run_ctx") or {}
+                    base = list(rcx.get("known_signatures") or [])
+                    patt = list(rcx.get("known_signatures_patterns") or [])
+                    import io as _io
+                    mem_json = _io.BytesIO(_json.dumps(base, ensure_ascii=False, indent=2).encode("utf-8"))
+                    st.download_button("Download baseline_signatures.json", mem_json, file_name="baseline_signatures.json")
+                    mem_txt = _io.BytesIO(("\n".join(patt)).encode("utf-8"))
+                    st.download_button("Download baseline_patterns.txt", mem_txt, file_name="baseline_patterns.txt")
+
+                # ------------------ Stage 3: REFRESH baseline from session, then compute membership ------------------
+                rc_now = st.session_state.get("run_ctx") or {}
+                known_signatures = list(rc_now.get("known_signatures") or [])
+                base_patterns = set(rc_now.get("known_signatures_patterns") or [])
+                if not base_patterns:
+                    base_patterns = {
+                        _normalize_signature_line_to_n2(s, n2=int(n2), n3=int(n3))[1]
+                        for s in known_signatures
+                    }
+
+                # final dialect check (post-add)
+                def _ok_final(p: str) -> bool:
+                    toks = _extract_pattern_tokens(p)
+                    return (len(toks) == int(n3)) and all(len(t) == int(n2) for t in toks)
+                if not all(_ok_final(p) for p in base_patterns):
+                    st.error("COVERAGE_BASELINE_DIALECT_MISMATCH: normalize to n₂-bit columns first.")
+                    st.stop()
 
                 total = float(num_samples)
                 rows = []
@@ -3350,7 +3434,6 @@ with st.expander("Coverage Sampling"):
                     pct = 0.0 if total <= 0 else round(100.0 * (cnt / total), 2)
                     rows.append([sig, cnt, in_d, pct])
 
-                # coverage metrics
                 total_unique = len(pattern_counts)
                 matched_unique = len(matched_patterns_set)
                 pct_in_district_unique = (100.0 * matched_unique / total_unique) if total_unique else 0.0
@@ -3395,71 +3478,7 @@ with st.expander("Coverage Sampling"):
                 except Exception:
                     pass
 
-                # ---------- Top unmatched table + [+] add-to-baseline (using your helper) ----------
-                import collections as _collections
-                unmatched = [p for p, c in pattern_counts.items() if p not in base_patterns_set]
-                topN = _collections.Counter({p: pattern_counts[p] for p in unmatched}).most_common(10)
-
-                st.subheader("Top unmatched patterns")
-                if not topN:
-                    st.info("All sampled signatures are in the baseline. Nothing to add.")
-                else:
-                    for i, (patt, cnt) in enumerate(topN, start=1):
-                        rk, ker = pattern_meta.get(patt, ("—", "—"))
-                        cols = st.columns([6, 2, 2, 2])
-                        cols[0].markdown(f"**{patt}**  \ncount: {cnt}")
-                        cols[1].markdown(f"rk={rk}")
-                        cols[2].markdown(f"ker={ker}")
-                        if cols[3].button("➕ Add", key=f"add_base_{i}"):
-                            _add_normalized_pattern_to_baseline(patt, rk=None if rk in ("—","?") else str(rk),
-                                                                     ker=None if ker in ("—","?") else str(ker))
-                            st.success(f"Added {patt} to baseline.")
-
-                # ---------- Auto-add unmatched until target (weighted) ----------
-                st.divider()
-                st.subheader("Auto-add unmatched until target coverage")
-                target = st.slider("Target weighted coverage (%)", 50, 100, 95, 1, key="cov_target_pct")
-                max_add = st.number_input("Max patterns to add this run", min_value=1, max_value=100, value=10, step=1, key="cov_max_add")
-
-                sample_counts = dict(pattern_counts)  # pattern -> count
-                known_set = set((st.session_state.get("run_ctx") or {}).get("known_signatures_patterns") or [])
-
-                def _compute_weighted_coverage(sample_counts: dict[str,int], known: set[str]) -> float:
-                    matched = sum(c for p,c in sample_counts.items() if p in known)
-                    total   = sum(sample_counts.values()) or 1
-                    return 100.0 * matched / total
-
-                if st.button("Auto-add top unmatched", key="cov_auto_add"):
-                    items = sorted(((p,c) for p,c in sample_counts.items() if p not in known_set),
-                                   key=lambda x: x[1], reverse=True)
-                    added = 0
-                    for patt, cnt in items:
-                        cov_now = _compute_weighted_coverage(sample_counts, known_set)
-                        if cov_now >= float(target) or added >= int(max_add):
-                            break
-                        _add_normalized_pattern_to_baseline(patt)  # rk/ker optional
-                        rc = st.session_state.get("run_ctx") or {}
-                        known_set = set(rc.get("known_signatures_patterns") or [])
-                        added += 1
-                    st.success(f"Auto-added {added} pattern(s). Current weighted coverage ≈ {_compute_weighted_coverage(sample_counts, known_set):.1f}%")
-
-                # ---------- Re-run & Export ----------
-                col_run, col_exp = st.columns([1,1])
-                if col_run.button("Re-run coverage with updated baseline", key="cov_rerun"):
-                    st.session_state["trigger_coverage_run"] = True
-
-                if col_exp.button("Export current baseline", key="cov_export"):
-                    rcx = st.session_state.get("run_ctx") or {}
-                    base = list(rcx.get("known_signatures") or [])
-                    patt = list(rcx.get("known_signatures_patterns") or [])
-                    # export as proper JSON list for signatures
-                    import io as _io
-                    mem_json = _io.BytesIO(_json.dumps(base, ensure_ascii=False, indent=2).encode("utf-8"))
-                    st.download_button("Download baseline_signatures.json", mem_json, file_name="baseline_signatures.json")
-                    mem_txt = _io.BytesIO(("\n".join(patt)).encode("utf-8"))
-                    st.download_button("Download baseline_patterns.txt", mem_txt, file_name="baseline_patterns.txt")
-
-                # ---------- Build JSON payload (auditable; embeds baseline and patterns) ----------
+                # ---------- Build JSON payload (auditable; embeds *refreshed* baseline) ----------
                 try:
                     rc_cov = require_fresh_run_ctx()
                 except Exception:
@@ -3498,6 +3517,11 @@ with st.expander("Coverage Sampling"):
                         "dims": {"n2": int(n2), "n3": int(n3)},
                     })
 
+                # refresh baseline one more time for payload fidelity
+                rc_payload = st.session_state.get("run_ctx") or {}
+                payload_known_full  = list(rc_payload.get("known_signatures") or [])
+                payload_known_patts = sorted(set(rc_payload.get("known_signatures_patterns") or []))
+
                 payload_cov = {
                     "schema_version": SCHEMA_VERSION,
                     "written_at_utc": _utc_iso_z(),
@@ -3510,8 +3534,8 @@ with st.expander("Coverage Sampling"):
                     "policy": policy_cov,
                     "inputs": inputs_cov_clean,  # SSOT hashes with U_hash=""
                     "lane_mask_k3": inputs_cov_clean.get("lane_mask_k3", []),
-                    "known_signatures": list(known_signatures),
-                    "known_signatures_patterns": sorted(base_patterns),
+                    "known_signatures": payload_known_full,
+                    "known_signatures_patterns": payload_known_patts,
                     "residual_method": residual_method,
                     "sampling": {
                         "num_samples": int(num_samples),
@@ -3526,7 +3550,7 @@ with st.expander("Coverage Sampling"):
                     "results": results_cov,
                     "summary": {
                         "N": int(num_samples),
-                        "unique_signatures": int(len(results_cov)),
+                        "unique_signatures": int(len(pattern_counts)),
                         "in_district_hits_unique": int(matched_unique),
                         "in_district_hits_weighted": int(matched_samples),
                         "pct_in_district_unique": float(round(pct_in_district_unique, 2)),
@@ -3584,6 +3608,8 @@ with st.expander("Coverage Sampling"):
 
         except Exception as e:
             st.error(f"Coverage sampling failed: {e}")
+
+
 
 
 
