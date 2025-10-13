@@ -1781,6 +1781,68 @@ def _inputs_block_from_session() -> dict:
 def _badge_ok() -> str:
     return "CSV + JSON ✓"
 
+# ─── Shared helpers (hashing, integrity, guard order, residual) ───────────────
+
+def _sha256_hex(b: bytes) -> str:
+    import hashlib
+    return hashlib.sha256(b).hexdigest()
+
+def _hash_json(obj: dict) -> str:
+    # canonical JSON → sha256 hex
+    import json as _json
+    payload = _json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return _sha256_hex(payload)
+
+def _atomic_write_json(path: "Path", obj: dict) -> None:
+    import json as _json, os, tempfile
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", delete=False, dir=str(path.parent), encoding="utf-8") as tmp:
+        _json.dump(obj, tmp, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        tmp.flush(); os.fsync(tmp.fileno())
+        tmp_name = tmp.name
+    os.replace(tmp_name, path)
+
+# fixed order we’ll publish at run-level
+_GUARD_ORDER = ["grid", "ker_guard", "wiggle", "echo", "fence"]
+
+def _first_tripped_guard(strict_out: dict) -> str:
+    """
+    Map your overlap gate output to our guard enums (first failure wins).
+    Adjust the predicates if your gate uses different field names.
+    """
+    try:
+        # examples — adapt to your actual fields if needed
+        if strict_out.get("grid_fail"):   return "grid"
+        if strict_out.get("ker_guard"):   return "ker_guard"
+        if strict_out.get("wiggle_fail"): return "wiggle"
+        if strict_out.get("echo_fail"):   return "echo"
+        if strict_out.get("fence_fail"):  return "fence"
+        # if none above, but you expose eq flags:
+        if strict_out.get("3", {}).get("eq") is True:  # passed k3
+            return "none"
+        # if k3 failed but no specific guard reported, call it fence by default
+        if strict_out.get("3", {}).get("eq") is False:
+            return "fence"
+    except Exception:
+        pass
+    return "none"
+
+def _residual_tag_strict(R3: list[list[int]], lane_mask: list[int]) -> str:
+    # reuse your classifier if present, otherwise small local
+    if "residual_tag" in globals() and callable(globals()["residual_tag"]):
+        try: return residual_tag(R3, lane_mask)  # type: ignore[name-defined]
+        except Exception: pass
+    if not R3: return "none"
+    m = len(R3)
+    def _nzcol(j): return any(R3[i][j] & 1 for i in range(m))
+    lanes = any(_nzcol(j) for j, mbit in enumerate(lane_mask) if mbit)
+    ker   = any(_nzcol(j) for j, mbit in enumerate(lane_mask) if not mbit)
+    if lanes and ker: return "mixed"
+    if lanes:         return "lanes"
+    if ker:           return "ker"
+    return "none"
+
+
 
 
 
