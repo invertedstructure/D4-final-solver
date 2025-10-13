@@ -1731,6 +1731,72 @@ FIELD          = "GF(2)"     # identity.field in all JSON payloads
 # 2) Guard enum (must match certs / parity)
 GUARD_ENUM = ["grid", "wiggle", "echo", "fence", "ker_guard", "none", "error"]
 
+# ===== Minimal safety shims (no-ops when real impls are loaded) =====
+import datetime as _dt
+
+if "APP_VERSION" not in globals():
+    APP_VERSION = "v0.1-core"  # safe default; your app can overwrite
+
+if "_utc_iso_z" not in globals():
+    def _utc_iso_z() -> str:
+        # 2025-10-13T07:42:12Z
+        return _dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+# Session guards
+if "require_fresh_run_ctx" not in globals():
+    def require_fresh_run_ctx():
+        rc = st.session_state.get("run_ctx")
+        if not rc:
+            raise RuntimeError("RUN_CTX_MISSING: run Overlap first.")
+        return rc
+
+if "rectify_run_ctx_mask_from_d3" not in globals():
+    def rectify_run_ctx_mask_from_d3():
+        rc = st.session_state.get("run_ctx") or {}
+        try:
+            B = st.session_state.get("boundaries")
+            d3 = (B.blocks.__root__.get("3") or []) if B else []
+            lm = _lane_mask_from_d3_matrix(d3)
+            if lm:
+                rc["lane_mask_k3"] = lm
+                st.session_state["run_ctx"] = rc
+        except Exception:
+            pass
+        return rc
+
+if "file_validation_failed" not in globals():
+    def file_validation_failed() -> bool:
+        # Only disable if projected(file) is selected but invalid helpers/file
+        rc = st.session_state.get("run_ctx") or {}
+        if rc.get("mode") == "projected(file)":
+            return not bool(rc.get("projector_filename")) or not bool(rc.get("projector_hash"))
+        return False
+
+# IO helpers
+if "io" not in globals():
+    class _IO_STUB:
+        @staticmethod
+        def parse_cmap(d):      # minimal pydantic-like stub
+            class _X: 
+                def __init__(self, d): self.blocks = type("B", (), {"__root__": d.get("blocks", {})})
+                def dict(self): return {"blocks": self.blocks.__root__}
+            return _X(d or {"blocks": {}})
+        @staticmethod
+        def parse_boundaries(d):
+            return _IO_STUB.parse_cmap(d)
+    io = _IO_STUB()
+
+if "_load_h_local" not in globals():
+    def _load_h_local():
+        return st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
+
+# Optional witness appender
+if "append_witness_row" not in globals():
+    def append_witness_row(*args, **kwargs):
+        # no-op when witness system isn’t loaded
+        return False
+
+
 # 3) Canonical content hashing (ints not bools; sorted keys; ASCII; no spaces)
 def _deep_intify(o):
     """Convert True/False to 1/0 recursively so GF(2) matrices hash stably."""
