@@ -2289,104 +2289,104 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     ]
                     notes.append("fallback: fence target = H2 (no U hooks found)")
 
-                # Write CSV
-                fence_header = ["U_class", "pass_vec", "note"]
-                fence_meta = [
-                    f"schema_version={SCHEMA_VERSION}",
-                    f"saved_at={_utc_iso_z()}",
-                    f"run_id={(st.session_state.get('run_ctx') or {}).get('run_id','')}",
-                    f"app_version={APP_VERSION}",
-                ] + notes
-                _atomic_write_csv(FENCE_OUT_PATH, fence_header, rows_fs, fence_meta)
-                st.success(f"Fence stress saved → {FENCE_OUT_PATH}")
-
-                # JSON companion for Fence (content-hashed)
-                try:
-                    rc_fs = require_fresh_run_ctx()
-                except Exception:
-                    rc_fs = st.session_state.get("run_ctx") or {}
-
-                policy_fs = _policy_block_from_run_ctx(rc_fs) if "_policy_block_from_run_ctx" in globals() else {
-                    "policy_tag": rc_fs.get("policy_tag","strict"),
-                    "projector_mode": ("strict" if rc_fs.get("mode") == "strict" else (rc_fs.get("mode") or "")),
-                    "projector_filename": rc_fs.get("projector_filename",""),
-                    "projector_hash": rc_fs.get("projector_hash",""),
-                }
-                inputs_fs = _inputs_block_from_session() if "_inputs_block_from_session" in globals() else {
-                    "hashes": {
-                        "boundaries_hash": rc_fs.get("boundaries_hash",""),
-                        "C_hash": rc_fs.get("C_hash",""),
-                        "H_hash": rc_fs.get("H_hash",""),
-                        "U_hash": rc_fs.get("U_hash",""),
-                        "shapes_hash": rc_fs.get("shapes_hash",""),
-                    },
-                    "dims": {"n2": int(n2), "n3": int(n3)},
-                    "lane_mask_k3": rc_fs.get("lane_mask_k3", []),
-                }
-
-                results_fs_json = []
-                for r in rows_fs:
-                    U_class = str(r[0]) if len(r) > 0 else "U_unknown"
-                    pass_vec = str(r[1]) if len(r) > 1 else "[?,?]"
-                    note     = str(r[2]) if len(r) > 2 else ""
+                    # Write CSV
+                    fence_header = ["U_class", "pass_vec", "note"]
+                    fence_meta = [
+                        f"schema_version={SCHEMA_VERSION}",
+                        f"saved_at={_utc_iso_z()}",
+                        f"run_id={(st.session_state.get('run_ctx') or {}).get('run_id','')}",
+                        f"app_version={APP_VERSION}",
+                    ] + notes
+                    _atomic_write_csv(FENCE_OUT_PATH, fence_header, rows_fs, fence_meta)
+                    st.success(f"Fence stress saved → {FENCE_OUT_PATH}")
+    
+                    # JSON companion for Fence (content-hashed)
                     try:
-                        pv = pass_vec.strip("[]").split(",")
-                        k2b = bool(int(str(pv[0]).strip()))
-                        k3b = bool(int(str(pv[1]).strip()))
+                        rc_fs = require_fresh_run_ctx()
                     except Exception:
-                        k2b = False; k3b = False
-                    results_fs_json.append({
-                        "U_class": U_class,
-                        "pass_vec": [k2b, k3b],
-                        "note": note,
-                    })
-
-                fence_json = {
-                    "schema_version": SCHEMA_VERSION,
-                    "written_at_utc": _utc_iso_z(),
-                    "app_version": APP_VERSION,
-                    "identity": {
-                        "run_id": (rc_fs.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
-                        "district_id": rc_fs.get("district_id","D3"),
-                        "fixture_nonce": rc_fs.get("fixture_nonce",""),
-                    },
-                    "policy": policy_fs,
-                    "inputs": inputs_fs,
-                    "exemplar": {
-                        "fixture_id": rc_fs.get("fixture_nonce",""),
-                        "lane_mask_k3": rc_fs.get("lane_mask_k3") or [],
-                    },
-                    "results": results_fs_json,
-                    "integrity": {"content_hash": ""},
-                }
-                fence_json["integrity"]["content_hash"] = _hash_json(fence_json)
-
-                # Write JSON (content-hashed name) + offer download
-                try:
-                    h12 = fence_json["integrity"]["content_hash"][:12]
-                    fence_json_name = f"fence_stress__{h12}.json"
-                    fence_json_path = REPORTS_DIR / fence_json_name
-                    _atomic_write_json(fence_json_path, fence_json)
-                    st.session_state.setdefault("last_report_paths", {})["fence_stress"] = {
-                        "csv": str(FENCE_OUT_PATH), "json": str(fence_json_path)
+                        rc_fs = st.session_state.get("run_ctx") or {}
+    
+                    policy_fs = _policy_block_from_run_ctx(rc_fs) if "_policy_block_from_run_ctx" in globals() else {
+                        "policy_tag": rc_fs.get("policy_tag","strict"),
+                        "projector_mode": ("strict" if rc_fs.get("mode") == "strict" else (rc_fs.get("mode") or "")),
+                        "projector_filename": rc_fs.get("projector_filename",""),
+                        "projector_hash": rc_fs.get("projector_hash",""),
                     }
-                except Exception as e:
-                    st.info(f"(Could not write fence JSON: {e})")
-
-                try:
-                    import io as _io, json as _json
-                    mem = _io.BytesIO(_json.dumps(fence_json, ensure_ascii=False, indent=2).encode("utf-8"))
-                    st.download_button(
-                        "Download fence_stress.json",
-                        mem,
-                        file_name=(fence_json_name if 'fence_json_name' in locals() else "fence_stress.json"),
-                        key=f"dl_fence_json_{fence_json['integrity']['content_hash'][:8]}",
-                    )
-                except Exception as e:
-                    st.info(f"(Could not build fence JSON download: {e})")
-
-        except Exception as e:
-            st.error(f"Perturbation/Fence run failed: {e}")
+                    inputs_fs = _inputs_block_from_session() if "_inputs_block_from_session" in globals() else {
+                        "hashes": {
+                            "boundaries_hash": rc_fs.get("boundaries_hash",""),
+                            "C_hash": rc_fs.get("C_hash",""),
+                            "H_hash": rc_fs.get("H_hash",""),
+                            "U_hash": rc_fs.get("U_hash",""),
+                            "shapes_hash": rc_fs.get("shapes_hash",""),
+                        },
+                        "dims": {"n2": int(n2), "n3": int(n3)},
+                        "lane_mask_k3": rc_fs.get("lane_mask_k3", []),
+                    }
+    
+                    results_fs_json = []
+                    for r in rows_fs:
+                        U_class = str(r[0]) if len(r) > 0 else "U_unknown"
+                        pass_vec = str(r[1]) if len(r) > 1 else "[?,?]"
+                        note     = str(r[2]) if len(r) > 2 else ""
+                        try:
+                            pv = pass_vec.strip("[]").split(",")
+                            k2b = bool(int(str(pv[0]).strip()))
+                            k3b = bool(int(str(pv[1]).strip()))
+                        except Exception:
+                            k2b = False; k3b = False
+                        results_fs_json.append({
+                            "U_class": U_class,
+                            "pass_vec": [k2b, k3b],
+                            "note": note,
+                        })
+    
+                    fence_json = {
+                        "schema_version": SCHEMA_VERSION,
+                        "written_at_utc": _utc_iso_z(),
+                        "app_version": APP_VERSION,
+                        "identity": {
+                            "run_id": (rc_fs.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
+                            "district_id": rc_fs.get("district_id","D3"),
+                            "fixture_nonce": rc_fs.get("fixture_nonce",""),
+                        },
+                        "policy": policy_fs,
+                        "inputs": inputs_fs,
+                        "exemplar": {
+                            "fixture_id": rc_fs.get("fixture_nonce",""),
+                            "lane_mask_k3": rc_fs.get("lane_mask_k3") or [],
+                        },
+                        "results": results_fs_json,
+                        "integrity": {"content_hash": ""},
+                    }
+                    fence_json["integrity"]["content_hash"] = _hash_json(fence_json)
+    
+                    # Write JSON (content-hashed name) + offer download
+                    try:
+                        h12 = fence_json["integrity"]["content_hash"][:12]
+                        fence_json_name = f"fence_stress__{h12}.json"
+                        fence_json_path = REPORTS_DIR / fence_json_name
+                        _atomic_write_json(fence_json_path, fence_json)
+                        st.session_state.setdefault("last_report_paths", {})["fence_stress"] = {
+                            "csv": str(FENCE_OUT_PATH), "json": str(fence_json_path)
+                        }
+                    except Exception as e:
+                        st.info(f"(Could not write fence JSON: {e})")
+    
+                    try:
+                        import io as _io, json as _json
+                        mem = _io.BytesIO(_json.dumps(fence_json, ensure_ascii=False, indent=2).encode("utf-8"))
+                        st.download_button(
+                            "Download fence_stress.json",
+                            mem,
+                            file_name=(fence_json_name if 'fence_json_name' in locals() else "fence_stress.json"),
+                            key=f"dl_fence_json_{fence_json['integrity']['content_hash'][:8]}",
+                        )
+                    except Exception as e:
+                        st.info(f"(Could not build fence JSON download: {e})")
+    
+            except Exception as e:
+                st.error(f"Perturbation/Fence run failed: {e}")
 
 
                
