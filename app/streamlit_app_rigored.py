@@ -2328,12 +2328,12 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                            
                                 
 
-    # =============================== Coverage Sampling (non-blocking) ==============================
-    
-    # Paths for coverage artifacts (top-level, not inside any try/with)
-    COVERAGE_CSV_PATH  = REPORTS_DIR / "coverage_sampling.csv"
-    COVERAGE_JSON_PATH = REPORTS_DIR / "coverage_sampling.json"
-    COVERAGE_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
+        # =============================== Coverage Sampling (non-blocking) ==============================
+        
+        # Paths for coverage artifacts (top-level, not inside any try/with)
+        COVERAGE_CSV_PATH  = REPORTS_DIR / "coverage_sampling.csv"
+        COVERAGE_JSON_PATH = REPORTS_DIR / "coverage_sampling.json"
+        COVERAGE_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
 def _rand_gf2_matrix(rows: int, cols: int, density: float, rng: random.Random) -> list[list[int]]:
