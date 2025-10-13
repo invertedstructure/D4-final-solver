@@ -2179,227 +2179,227 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
             lm0, tag_s0, eq_s0, tag_p0, eq_p0 = _sig_tag_eq(B0, C0, H0, P_active)
 
             # --- Perturbation: flips + JSON (lanes-only, provenance, guard enum)
-GUARD_ENUM = ["grid","wiggle","echo","fence","ker_guard","none","error"]
-
-def _first_tripped_guard_min(lm_before, lm_after, k3_before, k3_after) -> str:
-    # Minimal, deterministic guard classification:
-    # 1) lane-mask change → "grid"
-    # 2) k3 flips false (fail) from true → "echo" (placeholder enum)
-    # 3) else "none"
-    if lm_before != lm_after:
-        return "grid"
-    if (not k3_after) and bool(k3_before):
-        return "echo"
-    return "none"
-
-# lanes-only: allowed columns = 1-bits in current lane mask
-allowed_cols = [j for j, b in enumerate(lm0 or []) if int(b) & 1]
-allowed_cols_set = set(allowed_cols)
-
-def _flip_targets_lanes_only(n2_, n3_, budget, seed_str, allowed_cols_):
-    # Same deterministic stepping, but only emit columns in allowed set.
-    h = int(hashlib.sha256(seed_str.encode("utf-8")).hexdigest(), 16)
-    i = (h % max(1, n2_)) if n2_ else 0
-    j = ((h >> 8) % max(1, n3_)) if n3_ else 0
-    for k in range(int(budget)):
-        yield (i, j, k)
-        i = (i + 1 + (h % 3)) % (n2_ or 1)
-        j = (j + 2 + ((h >> 5) % 5)) % (n3_ or 1)
-
-rows = []  # CSV rows (keep for your CSV writer)
-ps_results = []  # JSON results[]
-matches = 0
-mismatches = 0
-drift_witnessed = False
-
-for (r, c, k) in _flip_targets_lanes_only(n2, n3, int(max_flips), seed_txt, allowed_cols_set):
-    # default "no-op" row if fixture dims empty
-    if not (n2 and n3):
-        rows.append([k, 0, "none", "empty fixture"])
-        ps_results.append({
-            "flip_id": int(k),
-            "guard_tripped": "none",
-            "expected_guard": "none",
-            "flip_spec": {"row": int(r), "col": int(c), "bit_before": None, "bit_after": None, "lane_col": False, "skip_reason": "empty-fixture"},
-            "k_status_before": {"2": True, "3": bool(eq_s0)},
-            "k_status_after": {"2": True, "3": bool(eq_s0)},
-            "residual_tag_after": str(tag_s0 or "none"),
-            "witness_written": False,
-            "note": "empty fixture"
-        })
-        continue
-
-    lane_col = (c in allowed_cols_set)
-    bit_before = int(d3_base[r][c]) if (r < len(d3_base) and c < len(d3_base[0])) else 0
-
-    # off-domain flips (ker columns) → expected_guard = "none", mark skip
-    if not lane_col:
-        rows.append([k, 0, "none", "off-domain (ker column)"])
-        ps_results.append({
-            "flip_id": int(k),
-            "guard_tripped": "none",
-            "expected_guard": "none",
-            "flip_spec": {"row": int(r), "col": int(c), "bit_before": bit_before, "bit_after": bit_before, "lane_col": False, "skip_reason": "off-domain"},
-            "k_status_before": {"2": True, "3": bool(eq_s0)},
-            "k_status_after": {"2": True, "3": bool(eq_s0)},
-            "residual_tag_after": str(tag_s0 or "none"),
-            "witness_written": False,
-            "note": "off-domain (ker column)"
-        })
-        continue
-
-    # Build a mutated boundaries with a single bit flip
-    d3_mut = _copy_mat(d3_base)
-    if r >= len(d3_mut) or (len(d3_mut) and c >= len(d3_mut[0])):
-        rows.append([k, 0, "none", f"skip flip out-of-range r={r},c={c}"])
-        ps_results.append({
-            "flip_id": int(k),
-            "guard_tripped": "none",
-            "expected_guard": "none",
-            "flip_spec": {"row": int(r), "col": int(c), "bit_before": bit_before, "bit_after": bit_before, "lane_col": True, "skip_reason": "out-of-range"},
-            "k_status_before": {"2": True, "3": bool(eq_s0)},
-            "k_status_after": {"2": True, "3": bool(eq_s0)},
-            "residual_tag_after": str(tag_s0 or "none"),
-            "witness_written": False,
-            "note": "flip skipped: out-of-range"
-        })
-        continue
-
-    d3_mut[r][c] ^= 1
-    bit_after = int(d3_mut[r][c])
-
-    dB = B0.dict() if hasattr(B0, "dict") else {"blocks": {}}
-    dB = json.loads(json.dumps(dB))
-    dB.setdefault("blocks", {})["3"] = d3_mut
-    Bk = io.parse_boundaries(dB)
-
-    # Evaluate strict on the mutated fixture
-    lmK, tag_sK, eq_sK, tag_pK, eq_pK = _sig_tag_eq(Bk, C0, H0, P_active)
-
-    # Guard classification (enum)
-    guard = _first_tripped_guard_min(lm0, lmK, bool(eq_s0), bool(eq_sK))
-    expected_guard = "grid"  # flipping a lane bit is expected to alter grammar; adjust here if you want looser expectation
-
-    rows.append([k, 1 if guard != "none" else 0, expected_guard, ""])
-    ok = (guard == expected_guard)
-    matches += int(ok)
-    mismatches += int(not ok)
-
-    # Optional witness on drift (expected != observed)
-    witness_written = False
-    if not ok:
-        cert_like = st.session_state.get("cert_payload")
-        if cert_like and "append_witness_row" in globals():
-            try:
-                append_witness_row(
-                    cert_like,
-                    reason="grammar-drift",
-                    residual_tag_val=(tag_sK or "none"),
-                    note=f"flip#{k} at (r={r}, c={c}) guard:{guard} expected:{expected_guard}"
-                )
-                witness_written = True
-            except Exception:
+            GUARD_ENUM = ["grid","wiggle","echo","fence","ker_guard","none","error"]
+            
+            def _first_tripped_guard_min(lm_before, lm_after, k3_before, k3_after) -> str:
+                # Minimal, deterministic guard classification:
+                # 1) lane-mask change → "grid"
+                # 2) k3 flips false (fail) from true → "echo" (placeholder enum)
+                # 3) else "none"
+                if lm_before != lm_after:
+                    return "grid"
+                if (not k3_after) and bool(k3_before):
+                    return "echo"
+                return "none"
+            
+            # lanes-only: allowed columns = 1-bits in current lane mask
+            allowed_cols = [j for j, b in enumerate(lm0 or []) if int(b) & 1]
+            allowed_cols_set = set(allowed_cols)
+            
+            def _flip_targets_lanes_only(n2_, n3_, budget, seed_str, allowed_cols_):
+                # Same deterministic stepping, but only emit columns in allowed set.
+                h = int(hashlib.sha256(seed_str.encode("utf-8")).hexdigest(), 16)
+                i = (h % max(1, n2_)) if n2_ else 0
+                j = ((h >> 8) % max(1, n3_)) if n3_ else 0
+                for k in range(int(budget)):
+                    yield (i, j, k)
+                    i = (i + 1 + (h % 3)) % (n2_ or 1)
+                    j = (j + 2 + ((h >> 5) % 5)) % (n3_ or 1)
+            
+            rows = []  # CSV rows (keep for your CSV writer)
+            ps_results = []  # JSON results[]
+            matches = 0
+            mismatches = 0
+            drift_witnessed = False
+            
+            for (r, c, k) in _flip_targets_lanes_only(n2, n3, int(max_flips), seed_txt, allowed_cols_set):
+                # default "no-op" row if fixture dims empty
+                if not (n2 and n3):
+                    rows.append([k, 0, "none", "empty fixture"])
+                    ps_results.append({
+                        "flip_id": int(k),
+                        "guard_tripped": "none",
+                        "expected_guard": "none",
+                        "flip_spec": {"row": int(r), "col": int(c), "bit_before": None, "bit_after": None, "lane_col": False, "skip_reason": "empty-fixture"},
+                        "k_status_before": {"2": True, "3": bool(eq_s0)},
+                        "k_status_after": {"2": True, "3": bool(eq_s0)},
+                        "residual_tag_after": str(tag_s0 or "none"),
+                        "witness_written": False,
+                        "note": "empty fixture"
+                    })
+                    continue
+            
+                lane_col = (c in allowed_cols_set)
+                bit_before = int(d3_base[r][c]) if (r < len(d3_base) and c < len(d3_base[0])) else 0
+            
+                # off-domain flips (ker columns) → expected_guard = "none", mark skip
+                if not lane_col:
+                    rows.append([k, 0, "none", "off-domain (ker column)"])
+                    ps_results.append({
+                        "flip_id": int(k),
+                        "guard_tripped": "none",
+                        "expected_guard": "none",
+                        "flip_spec": {"row": int(r), "col": int(c), "bit_before": bit_before, "bit_after": bit_before, "lane_col": False, "skip_reason": "off-domain"},
+                        "k_status_before": {"2": True, "3": bool(eq_s0)},
+                        "k_status_after": {"2": True, "3": bool(eq_s0)},
+                        "residual_tag_after": str(tag_s0 or "none"),
+                        "witness_written": False,
+                        "note": "off-domain (ker column)"
+                    })
+                    continue
+            
+                # Build a mutated boundaries with a single bit flip
+                d3_mut = _copy_mat(d3_base)
+                if r >= len(d3_mut) or (len(d3_mut) and c >= len(d3_mut[0])):
+                    rows.append([k, 0, "none", f"skip flip out-of-range r={r},c={c}"])
+                    ps_results.append({
+                        "flip_id": int(k),
+                        "guard_tripped": "none",
+                        "expected_guard": "none",
+                        "flip_spec": {"row": int(r), "col": int(c), "bit_before": bit_before, "bit_after": bit_before, "lane_col": True, "skip_reason": "out-of-range"},
+                        "k_status_before": {"2": True, "3": bool(eq_s0)},
+                        "k_status_after": {"2": True, "3": bool(eq_s0)},
+                        "residual_tag_after": str(tag_s0 or "none"),
+                        "witness_written": False,
+                        "note": "flip skipped: out-of-range"
+                    })
+                    continue
+            
+                d3_mut[r][c] ^= 1
+                bit_after = int(d3_mut[r][c])
+            
+                dB = B0.dict() if hasattr(B0, "dict") else {"blocks": {}}
+                dB = json.loads(json.dumps(dB))
+                dB.setdefault("blocks", {})["3"] = d3_mut
+                Bk = io.parse_boundaries(dB)
+            
+                # Evaluate strict on the mutated fixture
+                lmK, tag_sK, eq_sK, tag_pK, eq_pK = _sig_tag_eq(Bk, C0, H0, P_active)
+            
+                # Guard classification (enum)
+                guard = _first_tripped_guard_min(lm0, lmK, bool(eq_s0), bool(eq_sK))
+                expected_guard = "grid"  # flipping a lane bit is expected to alter grammar; adjust here if you want looser expectation
+            
+                rows.append([k, 1 if guard != "none" else 0, expected_guard, ""])
+                ok = (guard == expected_guard)
+                matches += int(ok)
+                mismatches += int(not ok)
+            
+                # Optional witness on drift (expected != observed)
                 witness_written = False
-
-    ps_results.append({
-        "flip_id": int(k),
-        "guard_tripped": guard,
-        "expected_guard": expected_guard,
-        "flip_spec": {
-            "row": int(r), "col": int(c),
-            "bit_before": int(bit_before), "bit_after": int(bit_after),
-            "lane_col": bool(lane_col)
-        },
-        "k_status_before": {"2": True, "3": bool(eq_s0)},     # k2 placeholder=true; keep if you don't compute k2 in strict here
-        "k_status_after":  {"2": True, "3": bool(eq_sK)},
-        "residual_tag_after": str(tag_sK or "none"),
-        "witness_written": bool(witness_written),
-        "note": ""
-    })
-
-# ---- JSON companion for Perturbation Sanity (1.1.0) ----
-try:
-    rc_ps = require_fresh_run_ctx()
-except Exception:
-    rc_ps = st.session_state.get("run_ctx") or {}
-
-policy_ps = _policy_block_from_run_ctx(rc_ps) if "_policy_block_from_run_ctx" in globals() else {
-    "policy_tag": rc_ps.get("policy_tag","strict"),
-    "projector_mode": ("strict" if rc_ps.get("mode") == "strict" else (rc_ps.get("mode") or "")),
-    "projector_filename": rc_ps.get("projector_filename",""),
-    "projector_hash": rc_ps.get("projector_hash",""),
-    "ker_guard": "enforced",
-}
-inputs_ps = _inputs_block_from_session() if "_inputs_block_from_session" in globals() else {
-    "hashes": {
-        "boundaries_hash": rc_ps.get("boundaries_hash",""),
-        "C_hash": rc_ps.get("C_hash",""),
-        "H_hash": rc_ps.get("H_hash",""),
-        "U_hash": rc_ps.get("U_hash",""),
-        "shapes_hash": rc_ps.get("shapes_hash",""),
-    },
-    "dims": {"n2": int(n2), "n3": int(n3)},
-    "lane_mask_k3": rc_ps.get("lane_mask_k3", []),
-}
-
-perturb_json = {
-    "schema_version": "1.1.0",
-    "written_at_utc": _utc_iso_z(),
-    "app_version": APP_VERSION,
-    "field": "GF(2)",
-    "identity": {
-        "run_id": (rc_ps.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
-        "district_id": rc_ps.get("district_id","D3"),
-        "fixture_nonce": rc_ps.get("fixture_nonce",""),
-    },
-    "policy": policy_ps,
-    "inputs": inputs_ps,
-    "anchor": {
-        "id": rc_ps.get("fixture_nonce", ""),
-        "hashes": inputs_ps.get("hashes", {}),
-        "lane_mask_k3": rc_ps.get("lane_mask_k3") or [],
-    },
-    "run": {
-        "max_flips": int(max_flips),
-        "flip_domain": "lanes-only",
-        "ker_guard": "enforced",
-        "seed": str(seed_txt),
-        "guard_order": GUARD_ENUM,
-    },
-    "results": ps_results,
-    "summary": {
-        "matches": int(matches),
-        "mismatches": int(mismatches),
-        "policy_tag": policy_ps.get("policy_tag",""),
-        "projector_hash": policy_ps.get("projector_hash",""),
-    },
-    "integrity": {"content_hash": ""},
-}
-perturb_json["integrity"]["content_hash"] = _hash_json(perturb_json)
-
-# Persist + download
-try:
-    h12 = perturb_json["integrity"]["content_hash"][:12]
-    pert_json_name = f"perturbation_sanity__{h12}.json"
-    pert_json_path = REPORTS_DIR / pert_json_name
-    _atomic_write_json(pert_json_path, perturb_json)
-    st.session_state.setdefault("last_report_paths", {})["perturbation_sanity"] = {
-        "csv": str(PERTURB_OUT_PATH), "json": str(pert_json_path)
-    }
-except Exception as e:
-    st.info(f"(Could not write perturbation JSON: {e})")
-
-try:
-    import io as _io, json as _json
-    mem = _io.BytesIO(_json.dumps(perturb_json, ensure_ascii=False, indent=2).encode("utf-8"))
-    st.download_button(
-        "Download perturbation_sanity.json",
-        mem,
-        file_name=pert_json_name,
-        key=f"dl_ps_json_{perturb_json['integrity']['content_hash'][:8]}",
-    )
-except Exception as e:
-    st.info(f"(Could not build perturbation JSON download: {e})")
+                if not ok:
+                    cert_like = st.session_state.get("cert_payload")
+                    if cert_like and "append_witness_row" in globals():
+                        try:
+                            append_witness_row(
+                                cert_like,
+                                reason="grammar-drift",
+                                residual_tag_val=(tag_sK or "none"),
+                                note=f"flip#{k} at (r={r}, c={c}) guard:{guard} expected:{expected_guard}"
+                            )
+                            witness_written = True
+                        except Exception:
+                            witness_written = False
+            
+                ps_results.append({
+                    "flip_id": int(k),
+                    "guard_tripped": guard,
+                    "expected_guard": expected_guard,
+                    "flip_spec": {
+                        "row": int(r), "col": int(c),
+                        "bit_before": int(bit_before), "bit_after": int(bit_after),
+                        "lane_col": bool(lane_col)
+                    },
+                    "k_status_before": {"2": True, "3": bool(eq_s0)},     # k2 placeholder=true; keep if you don't compute k2 in strict here
+                    "k_status_after":  {"2": True, "3": bool(eq_sK)},
+                    "residual_tag_after": str(tag_sK or "none"),
+                    "witness_written": bool(witness_written),
+                    "note": ""
+                })
+            
+            # ---- JSON companion for Perturbation Sanity (1.1.0) ----
+            try:
+                rc_ps = require_fresh_run_ctx()
+            except Exception:
+                rc_ps = st.session_state.get("run_ctx") or {}
+            
+            policy_ps = _policy_block_from_run_ctx(rc_ps) if "_policy_block_from_run_ctx" in globals() else {
+                "policy_tag": rc_ps.get("policy_tag","strict"),
+                "projector_mode": ("strict" if rc_ps.get("mode") == "strict" else (rc_ps.get("mode") or "")),
+                "projector_filename": rc_ps.get("projector_filename",""),
+                "projector_hash": rc_ps.get("projector_hash",""),
+                "ker_guard": "enforced",
+            }
+            inputs_ps = _inputs_block_from_session() if "_inputs_block_from_session" in globals() else {
+                "hashes": {
+                    "boundaries_hash": rc_ps.get("boundaries_hash",""),
+                    "C_hash": rc_ps.get("C_hash",""),
+                    "H_hash": rc_ps.get("H_hash",""),
+                    "U_hash": rc_ps.get("U_hash",""),
+                    "shapes_hash": rc_ps.get("shapes_hash",""),
+                },
+                "dims": {"n2": int(n2), "n3": int(n3)},
+                "lane_mask_k3": rc_ps.get("lane_mask_k3", []),
+            }
+            
+            perturb_json = {
+                "schema_version": "1.1.0",
+                "written_at_utc": _utc_iso_z(),
+                "app_version": APP_VERSION,
+                "field": "GF(2)",
+                "identity": {
+                    "run_id": (rc_ps.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
+                    "district_id": rc_ps.get("district_id","D3"),
+                    "fixture_nonce": rc_ps.get("fixture_nonce",""),
+                },
+                "policy": policy_ps,
+                "inputs": inputs_ps,
+                "anchor": {
+                    "id": rc_ps.get("fixture_nonce", ""),
+                    "hashes": inputs_ps.get("hashes", {}),
+                    "lane_mask_k3": rc_ps.get("lane_mask_k3") or [],
+                },
+                "run": {
+                    "max_flips": int(max_flips),
+                    "flip_domain": "lanes-only",
+                    "ker_guard": "enforced",
+                    "seed": str(seed_txt),
+                    "guard_order": GUARD_ENUM,
+                },
+                "results": ps_results,
+                "summary": {
+                    "matches": int(matches),
+                    "mismatches": int(mismatches),
+                    "policy_tag": policy_ps.get("policy_tag",""),
+                    "projector_hash": policy_ps.get("projector_hash",""),
+                },
+                "integrity": {"content_hash": ""},
+            }
+            perturb_json["integrity"]["content_hash"] = _hash_json(perturb_json)
+            
+            # Persist + download
+            try:
+                h12 = perturb_json["integrity"]["content_hash"][:12]
+                pert_json_name = f"perturbation_sanity__{h12}.json"
+                pert_json_path = REPORTS_DIR / pert_json_name
+                _atomic_write_json(pert_json_path, perturb_json)
+                st.session_state.setdefault("last_report_paths", {})["perturbation_sanity"] = {
+                    "csv": str(PERTURB_OUT_PATH), "json": str(pert_json_path)
+                }
+            except Exception as e:
+                st.info(f"(Could not write perturbation JSON: {e})")
+            
+            try:
+                import io as _io, json as _json
+                mem = _io.BytesIO(_json.dumps(perturb_json, ensure_ascii=False, indent=2).encode("utf-8"))
+                st.download_button(
+                    "Download perturbation_sanity.json",
+                    mem,
+                    file_name=pert_json_name,
+                    key=f"dl_ps_json_{perturb_json['integrity']['content_hash'][:8]}",
+                )
+            except Exception as e:
+                st.info(f"(Could not build perturbation JSON download: {e})")
 
 
             # ── Fence stress: perturb U (carrier) if hooks; else H2 fallback
