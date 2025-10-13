@@ -1718,6 +1718,127 @@ with safe_expander("A/B compare (strict vs active projected)"):
 
 
 
+# ========= F · Helpers & invariants (shared by F1/F2/F3) =========
+
+# 1) Schema/version bump (these override older defaults safely)
+SCHEMA_VERSION = "1.1.0"                 # for coverage, perturbation, fence
+FIELD = "GF(2)"                          # identity.field for all three
+
+# 2) Guard enum: single source of truth
+GUARD_ENUM = ["grid", "wiggle", "echo", "fence", "ker_guard", "none", "error"]
+
+# 3) Stable JSON hashing (canonical; matrices use ints, not bools)
+import json as _json, hashlib as _hashlib, copy as _copy
+
+def _deep_intify(o):
+    """Recursively convert True/False to 1/0 inside lists/dicts to keep GF(2) payloads stable."""
+    if isinstance(o, bool):
+        return 1 if o else 0
+    if isinstance(o, list):
+        return [_deep_intify(x) for x in o]
+    if isinstance(o, dict):
+        return {k: _deep_intify(v) for k, v in o.items()}
+    return o
+
+def _hash_json(obj) -> str:
+    """Canonical content hash: sorted keys, ASCII, no spaces, ints for GF(2)."""
+    canon = _deep_intify(_copy.deepcopy(obj))
+    s = _json.dumps(canon, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return _hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+# 4) Inputs SSOT (no recompute). Pull exactly what certs stored.
+def _inputs_block_from_session(strict_dims: tuple[int, int] | None = None) -> dict:
+    """
+    Returns:
+      {
+        "hashes": {
+          "boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"
+        },
+        "dims": {"n2": int, "n3": int},
+        "lane_mask_k3": [...]
+      }
+    Priority for dims: strict_dims arg → run_ctx → shapes/H/boundaries fallback.
+    Lane-mask is taken from run_ctx (rectified) as SSOT.
+    """
+    import streamlit as st
+
+    rc = st.session_state.get("run_ctx") or {}
+    # Preferred place if your cert pipeline already saved a block
+    inputs_ssot = st.session_state.get("inputs_hashes") or {}
+
+    def _grab(key: str) -> str:
+        return (
+            inputs_ssot.get(key)
+            or rc.get(key)
+            or st.session_state.get(key)
+            or ""
+        )
+
+    # Hashes (SSOT)
+    hashes = {
+        "boundaries_hash": _grab("boundaries_hash"),
+        "C_hash":          _grab("C_hash"),
+        "H_hash":          _grab("H_hash"),
+        "U_hash":          _grab("U_hash"),
+        "shapes_hash":     _grab("shapes_hash"),
+    }
+
+    # Dims (prefer explicit strict_dims, else run_ctx)
+    n2 = None
+    n3 = None
+    if strict_dims is not None:
+        n2, n3 = int(strict_dims[0]), int(strict_dims[1])
+    else:
+        try:
+            n2 = int(rc.get("n2")) if rc.get("n2") is not None else None
+            n3 = int(rc.get("n3")) if rc.get("n3") is not None else None
+        except Exception:
+            n2, n3 = None, None
+
+    # As a safe fallback (won’t be used if run_ctx is fresh)
+    if (n2 is None) or (n3 is None):
+        try:
+            H_local = st.session_state.get("overlap_H")
+            n2 = n2 if n2 is not None else len((H_local.blocks.__root__.get("2") or []))
+        except Exception:
+            n2 = n2 if n2 is not None else 0
+        try:
+            B_local = st.session_state.get("boundaries") or None
+            d3 = (B_local.blocks.__root__.get("3") or []) if B_local else []
+            n3 = n3 if n3 is not None else (len(d3[0]) if (d3 and d3[0]) else 0)
+        except Exception:
+            n3 = n3 if n3 is not None else 0
+
+    # Lane mask SSOT (rectified previously)
+    lane_mask = (rc.get("lane_mask_k3") or [])
+
+    return {
+        "hashes": hashes,
+        "dims": {"n2": int(n2 or 0), "n3": int(n3 or 0)},
+        "lane_mask_k3": [int(x) & 1 for x in lane_mask],
+    }
+
+# 5) Guard mapping wrapper (keeps enums consistent)
+def _first_tripped_guard(strict_out) -> str:
+    """
+    Adapter to your existing guard checker. Must return a value in GUARD_ENUM.
+    If no checker available, default to "none".
+    """
+    if "first_tripped_guard" in globals() and callable(globals()["first_tripped_guard"]):
+        try:
+            g = first_tripped_guard(strict_out)
+            return g if g in GUARD_ENUM else "error"
+        except Exception:
+            return "error"
+    return "none"
+
+# 6) Tiny badge helper (optional, for consistent success messages)
+def _hash_badge(h: str) -> str:
+    return f"wrote CSV + JSON ✓ · hash: {h[:12]}"
+
+
+
+
 
 # ===== Shared helpers for Coverage / Perturbation / Fence =====
 
