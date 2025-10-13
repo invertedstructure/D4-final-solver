@@ -2610,19 +2610,19 @@ def gallery_key(row: dict) -> tuple:
         str(h.get("U_hash", "")),
     )
             
-            # Shared meta helper (define if missing)
-            if "_std_meta" not in globals():
-                def _std_meta(run_id=None):
-                    return {
-                        "schema_version": SCHEMA_VERSION,
-                        "written_at_utc": _utc_iso_z(),
-                        "app_version":    APP_VERSION,
-                        **({"run_id": run_id} if run_id else {}),
-                    }
-            
-            ss = st.session_state
-            ss.setdefault("_gallery_keys", set())
-            ss.setdefault("_gallery_bootstrapped", False)
+    # Shared meta helper (define if missing)
+    if "_std_meta" not in globals():
+        def _std_meta(run_id=None):
+            return {
+                "schema_version": SCHEMA_VERSION,
+                "written_at_utc": _utc_iso_z(),
+                "app_version":    APP_VERSION,
+                **({"run_id": run_id} if run_id else {}),
+            }
+    
+    ss = st.session_state
+    ss.setdefault("_gallery_keys", set())
+    ss.setdefault("_gallery_bootstrapped", False)
             
             with safe_expander("Gallery"):
                 rc   = ss.get("run_ctx") or {}
