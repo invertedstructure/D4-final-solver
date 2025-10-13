@@ -2878,105 +2878,187 @@ if "_in_district_guess" not in globals():
             return int(any(bs == current_lane_pattern for bs in col_bitstrings))
         except Exception:
             return 0
-# =========================== Coverage · Baseline Loader (Phase-U) ===========================
-with st.expander("Coverage Baseline (load Phase-U signatures)"):
+
+# =========================== Coverage · Baseline Loader (with normalization) ===========================
+with st.expander("Coverage Baseline (load + normalize to n₂-bit columns)"):
+    # Pull current fixture dims from run_ctx (fallback to 0)
+    rc_dims = st.session_state.get("run_ctx") or {}
+    n2_active = int(rc_dims.get("n2") or 0)
+    n3_active = int(rc_dims.get("n3") or 0)
+    st.caption(f"Active fixture dims detected → n₂={n2_active}, n₃={n3_active}")
+
     colL, colR = st.columns([2, 1])
 
+    # ---------- helpers ----------
+    def _parse_sig_line(sig: str) -> tuple[str | None, str | None, list[str]]:
+        """
+        Return (rk_str, ker_str, cols) for a line like:
+          rk=2;ker=1;pattern=[110,110,000]
+        If rk/ker missing, returns (None, None, cols).
+        """
+        s = (sig or "").strip()
+        rk = None
+        ker = None
+        try:
+            # very tolerant parse
+            parts = [p.strip() for p in s.split(";")]
+            for p in parts:
+                if p.startswith("rk="):
+                    rk = p[3:].strip()
+                elif p.startswith("ker="):
+                    ker = p[4:].strip()
+            # extract pattern=[...]
+            if "pattern=[" in s:
+                inside = s.split("pattern=[", 1)[1].split("]", 1)[0]
+                cols = [c.strip() for c in inside.split(",") if c.strip()]
+            else:
+                cols = []
+            return rk, ker, cols
+        except Exception:
+            return None, None, []
+
+    def _emit_sig_line(rk: str | None, ker: str | None, cols: list[str]) -> str:
+        rk_part = f"rk={rk};" if rk is not None else ""
+        ker_part = f"ker={ker};" if ker is not None else ""
+        patt = f"pattern=[{','.join(cols)}]"
+        # keep the standard rk;ker;pattern order if present
+        return f"{rk_part}{ker_part}{patt}".strip(";")
+
+    def _norm_cols_to_n2(cols: list[str], n2: int, n3: int) -> list[str]:
+        """
+        Normalize each column bitstring to length n2.
+        Rules:
+          - If token length == n2 → keep.
+          - If token length == n3 (square legacy) → take top n2 bits.
+          - If token length >  n2 → take top n2 bits.
+          - If token length <  n2 → pad with '0' at bottom to reach n2.
+        We do *not* reorder columns; we preserve the n3 columns order.
+        """
+        out: list[str] = []
+        for token in cols:
+            bits = "".join(ch for ch in token if ch in "01")
+            L = len(bits)
+            if L == n2:
+                nb = bits
+            elif L == n3 and n2 > 0:
+                nb = bits[:n2]  # top-to-bottom → take the top n2 rows
+            elif L > n2 and n2 > 0:
+                nb = bits[:n2]
+            else:
+                nb = bits + ("0" * max(0, n2 - L))
+            out.append(nb)
+        return out
+
+    def _normalize_signature_to_n2(sig: str, n2: int, n3: int) -> str:
+        rk, ker, cols = _parse_sig_line(sig)
+        if not cols or n2 <= 0 or n3 <= 0:
+            return sig  # nothing to do
+        # If column count mismatches n3, we still normalize each token length to n2.
+        cols_n = _norm_cols_to_n2(cols, n2, n3)
+        return _emit_sig_line(rk, ker, cols_n)
+
+    def _parse_json_baseline(bytes_data: bytes, name: str) -> list[str]:
+        """Accept .json (list[str] / {"signatures":[...]}) or .jsonl (string per line or {"signature":...})."""
+        try:
+            txt = bytes_data.decode("utf-8", errors="ignore")
+        except Exception:
+            return []
+        sigs: list[str] = []
+        try:
+            if name.lower().endswith(".jsonl"):
+                for line in txt.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = _json.loads(line)
+                        if isinstance(obj, str):
+                            sigs.append(obj.strip())
+                        elif isinstance(obj, dict) and "signature" in obj:
+                            sigs.append(str(obj["signature"]).strip())
+                    except Exception:
+                        # allow raw legacy line if it already looks like a signature
+                        if "pattern=[" in line:
+                            sigs.append(line)
+            else:
+                obj = _json.loads(txt)
+                if isinstance(obj, list):
+                    for v in obj:
+                        if isinstance(v, str):
+                            sigs.append(v.strip())
+                        elif isinstance(v, dict) and "signature" in v:
+                            sigs.append(str(v["signature"]).strip())
+                elif isinstance(obj, dict) and "signatures" in obj and isinstance(obj["signatures"], list):
+                    for v in obj["signatures"]:
+                        if isinstance(v, str):
+                            sigs.append(v.strip())
+                        elif isinstance(v, dict) and "signature" in v:
+                            sigs.append(str(v["signature"]).strip())
+        except Exception:
+            pass
+        # keep only plausible lines
+        sigs = [s for s in sigs if ("pattern=[" in s)]
+        return sigs
+
+    def _parse_pasted(p: str) -> list[str]:
+        sigs = []
+        for line in (p or "").splitlines():
+            s = line.strip()
+            if s and ("pattern=[" in s):
+                sigs.append(s)
+        return sigs
+
+    def _dedupe_keep_order(items: list[str]) -> list[str]:
+        seen = set()
+        out = []
+        for s in items:
+            if s not in seen:
+                seen.add(s); out.append(s)
+        return out
+
+    DEMO_BASELINE = [
+        # legacy square (3-bit columns) examples — will be normalized to n2-bit columns
+        "rk=2;ker=1;pattern=[110,110,000]",
+        "rk=2;ker=1;pattern=[101,101,000]",
+        "rk=2;ker=1;pattern=[011,011,000]",
+        "rk=3;ker=0;pattern=[111,111,111]",
+        "rk=1;ker=2;pattern=[100,000,000]",
+    ]
+
     with colL:
-        st.caption("Provide canonical signatures (strings like: rk=…;ker=…;pattern=[…]).")
-        up = st.file_uploader("Upload baseline (.json or .jsonl)", type=["json", "jsonl"], key="cov_baseline_up")
+        st.caption("Provide canonical signatures (any mix of legacy or native dialects is OK; we normalize).")
+        up = st.file_uploader("Upload baseline (.json / .jsonl)", type=["json", "jsonl"], key="cov_baseline_up")
         pasted = st.text_area("Or paste signatures (one per line)", value="", key="cov_baseline_paste")
 
     with colR:
-        def _parse_json_baseline(bytes_data: bytes, name: str) -> list[str]:
-            try:
-                txt = bytes_data.decode("utf-8", errors="ignore")
-            except Exception:
-                return []
-            sigs: list[str] = []
-            try:
-                if name.lower().endswith(".jsonl"):
-                    # each line is JSON: either a string or { "signature": "..." }
-                    for line in txt.splitlines():
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            obj = _json.loads(line)
-                            if isinstance(obj, str):
-                                sigs.append(obj.strip())
-                            elif isinstance(obj, dict) and "signature" in obj:
-                                sigs.append(str(obj["signature"]).strip())
-                        except Exception:
-                            # allow raw line fallback if it already looks like a signature
-                            if "rk=" in line and "pattern=[" in line:
-                                sigs.append(line)
-                else:
-                    obj = _json.loads(txt)
-                    if isinstance(obj, list):
-                        for v in obj:
-                            if isinstance(v, str):
-                                sigs.append(v.strip())
-                            elif isinstance(v, dict) and "signature" in v:
-                                sigs.append(str(v["signature"]).strip())
-                    elif isinstance(obj, dict) and "signatures" in obj and isinstance(obj["signatures"], list):
-                        for v in obj["signatures"]:
-                            if isinstance(v, str):
-                                sigs.append(v.strip())
-                            elif isinstance(v, dict) and "signature" in v:
-                                sigs.append(str(v["signature"]).strip())
-            except Exception:
-                pass
-            # keep only plausible signature strings
-            sigs = [s for s in sigs if isinstance(s, str) and ("rk=" in s) and ("pattern=[" in s)]
-            return sigs
+        norm_on = st.checkbox("Normalize to n₂-bit columns on load", value=True, key="cov_norm_on")
 
-        def _parse_pasted(p: str) -> list[str]:
-            sigs = []
-            for line in (p or "").splitlines():
-                s = line.strip()
-                if s and ("rk=" in s) and ("pattern=[" in s):
-                    sigs.append(s)
-            return sigs
-
-        def _dedupe_keep_order(items: list[str]) -> list[str]:
-            seen = set()
-            out = []
-            for s in items:
-                if s not in seen:
-                    seen.add(s); out.append(s)
-            return out
-
-        # demo set (safe defaults; matches your signature grammar)
-        DEMO_BASELINE = [
-            "rk=2;ker=1;pattern=[110,110,000]",
-            "rk=2;ker=1;pattern=[101,101,000]",
-            "rk=2;ker=1;pattern=[011,011,000]",
-            "rk=3;ker=0;pattern=[111,111,111]",
-            "rk=1;ker=2;pattern=[100,000,000]",
-        ]
-
-        # buttons
         if st.button("Load from upload / paste", key="cov_btn_load"):
             loaded: list[str] = []
             if up is not None:
                 loaded.extend(_parse_json_baseline(up.getvalue(), up.name))
             loaded.extend(_parse_pasted(pasted))
-            loaded = _dedupe_keep_order([s for s in loaded if s])
+            loaded = [s for s in loaded if s]
 
             if not loaded:
                 st.error("No valid signatures found. Provide a .json/.jsonl or paste one-per-line.")
             else:
+                if norm_on and n2_active > 0 and n3_active > 0:
+                    loaded = [_normalize_signature_to_n2(s, n2_active, n3_active) for s in loaded]
+                loaded = _dedupe_keep_order(loaded)
                 rc0 = st.session_state.get("run_ctx") or {}
                 rc0["known_signatures"] = loaded
                 st.session_state["run_ctx"] = rc0
-                st.success(f"Loaded {len(loaded)} canonical signatures.")
+                st.success(f"Loaded {len(loaded)} canonical signatures (normalized={bool(norm_on)}).")
 
         if st.button("Use demo baseline", key="cov_btn_demo"):
+            demo = DEMO_BASELINE[:]
+            if norm_on and n2_active > 0 and n3_active > 0:
+                demo = [_normalize_signature_to_n2(s, n2_active, n3_active) for s in demo]
             rc0 = st.session_state.get("run_ctx") or {}
-            rc0["known_signatures"] = DEMO_BASELINE[:]
+            rc0["known_signatures"] = _dedupe_keep_order(demo)
             st.session_state["run_ctx"] = rc0
-            st.success(f"Loaded demo baseline ({len(DEMO_BASELINE)} signatures).")
+            st.success(f"Loaded demo baseline ({len(demo)} signatures; normalized={bool(norm_on)}).")
 
         if st.button("Clear baseline", key="cov_btn_clear"):
             rc0 = st.session_state.get("run_ctx") or {}
@@ -2988,7 +3070,7 @@ with st.expander("Coverage Baseline (load Phase-U signatures)"):
     rc_view = st.session_state.get("run_ctx") or {}
     ks = list(rc_view.get("known_signatures") or [])
     if ks:
-        st.caption(f"Baseline active: {len(ks)} signatures.")
+        st.caption(f"Baseline active: {len(ks)} signatures. Showing up to 5:")
         st.code("\n".join(ks[:5] + (["…"] if len(ks) > 5 else [])), language="text")
     else:
         st.caption("Baseline inactive (known_signatures is empty).")
