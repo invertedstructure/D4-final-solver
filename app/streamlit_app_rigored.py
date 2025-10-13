@@ -2816,8 +2816,8 @@ with st.expander("Coverage Sampling"):
     if st.button("Coverage Sample", key="btn_coverage_sample",
                  disabled=cov_disabled, help=cov_help):
                    # make sure SSOT hashes are published (copy-only; no recompute)
-    if "_ensure_inputs_hashes" in globals():
-        _ensure_inputs_hashes()
+        if "_ensure_inputs_hashes" in globals():
+            _ensure_inputs_hashes()
   
         try:
             # evidence-only guards (CLICK-TIME)
