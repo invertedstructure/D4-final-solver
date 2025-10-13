@@ -2677,7 +2677,6 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                         normalize_projector_into_run_ctx()
 
                     inputs_fs = _inputs_block_from_session(strict_dims=(n2, n3))
-                    # accept either nested `hashes` or top-level five fields
                     _hash_fields = ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")
                     hobj_fs = inputs_fs.get("hashes") or {k: inputs_fs.get(k, "") for k in _hash_fields}
                     if not all(hobj_fs.get(k, "") for k in _hash_fields):
@@ -2685,6 +2684,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                         raise RuntimeError(
                             f"INPUT_HASHES_MISSING: wire SSOT from Cert/Overlap; backfill disabled (missing: {', '.join(missing)})"
                         )
+
                     
 
                     policy_fs = _policy_block_from_run_ctx(rc_fs)
