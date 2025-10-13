@@ -2341,7 +2341,8 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
             except Exception as e:
                 st.info(f"(Could not build perturbation JSON download: {e})")
             
-                       # ── Fence stress (U first; fallback to H2) ────────────────────────────────────
+                       
+            # ── Fence stress (U first; fallback to H2) ────────────────────────────────────
             if run_fence:
                 rows_fs: list[list[str]] = []   # CSV rows
                 notes: list[str] = []
