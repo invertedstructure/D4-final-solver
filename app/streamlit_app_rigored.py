@@ -2337,55 +2337,55 @@ COVERAGE_JSON_PATH = REPORTS_DIR / "coverage_sampling.json"
 COVERAGE_CSV_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
-        def _rand_gf2_matrix(rows: int, cols: int, density: float, rng: random.Random) -> list[list[int]]:
-            density = max(0.0, min(1.0, float(density)))
-            return [[1 if rng.random() < density else 0 for _ in range(cols)] for _ in range(rows)]
-        
-        def _gf2_rank(M: list[list[int]]) -> int:
-            if not M: return 0
-            A = [row[:] for row in M]
-            m, n = len(A), len(A[0])
-            r, c = 0, 0
-            while r < m and c < n:
-                pivot = None
-                for i in range(r, m):
-                    if A[i][c] & 1: pivot = i; break
-                if pivot is None:
-                    c += 1; continue
-                if pivot != r:
-                    A[r], A[pivot] = A[pivot], A[r]
-                for i in range(r+1, m):
-                    if A[i][c] & 1:
-                        A[i] = [(A[i][j] ^ A[r][j]) for j in range(n)]
-                r += 1; c += 1
-            return r
-        
-        def _col_support_pattern(M: list[list[int]]) -> list[str]:
-            if not M: return []
-            rows, cols = len(M), len(M[0])
-            cols_bits = []
-            for j in range(cols):
-                bits = ''.join('1' if (M[i][j] & 1) else '0' for i in range(rows))
-                cols_bits.append(bits)
-            cols_bits.sort()
-            return cols_bits
-        
-        def _lane_pattern_from_mask(mask: list[int]) -> str:
-            return ''.join(str(int(x) & 1) for x in (mask or []))
-        
-        def _coverage_signature(d_k1: list[list[int]], n_k: int) -> str:
-            rk = _gf2_rank(d_k1)
-            ker = max(0, int(n_k) - rk)
-            patt = _col_support_pattern(d_k1)
-            return f"rk={rk};ker={ker};pattern=[{','.join(patt)}]"
-        
-        def _in_district_guess(signature: str, *, current_lane_pattern: str) -> int:
-            try:
-                bracket = signature.split("pattern=[", 1)[1].split("]", 1)[0]
-                col_bitstrings = [s.strip() for s in bracket.split(",") if s.strip()]
-                return int(any(bs == current_lane_pattern for bs in col_bitstrings))
-            except Exception:
-                return 0
+def _rand_gf2_matrix(rows: int, cols: int, density: float, rng: random.Random) -> list[list[int]]:
+    density = max(0.0, min(1.0, float(density)))
+    return [[1 if rng.random() < density else 0 for _ in range(cols)] for _ in range(rows)]
+
+def _gf2_rank(M: list[list[int]]) -> int:
+    if not M: return 0
+    A = [row[:] for row in M]
+    m, n = len(A), len(A[0])
+    r, c = 0, 0
+    while r < m and c < n:
+        pivot = None
+        for i in range(r, m):
+            if A[i][c] & 1: pivot = i; break
+        if pivot is None:
+            c += 1; continue
+        if pivot != r:
+            A[r], A[pivot] = A[pivot], A[r]
+        for i in range(r+1, m):
+            if A[i][c] & 1:
+                A[i] = [(A[i][j] ^ A[r][j]) for j in range(n)]
+        r += 1; c += 1
+    return r
+
+def _col_support_pattern(M: list[list[int]]) -> list[str]:
+    if not M: return []
+    rows, cols = len(M), len(M[0])
+    cols_bits = []
+    for j in range(cols):
+        bits = ''.join('1' if (M[i][j] & 1) else '0' for i in range(rows))
+        cols_bits.append(bits)
+    cols_bits.sort()
+    return cols_bits
+
+def _lane_pattern_from_mask(mask: list[int]) -> str:
+    return ''.join(str(int(x) & 1) for x in (mask or []))
+
+def _coverage_signature(d_k1: list[list[int]], n_k: int) -> str:
+    rk = _gf2_rank(d_k1)
+    ker = max(0, int(n_k) - rk)
+    patt = _col_support_pattern(d_k1)
+    return f"rk={rk};ker={ker};pattern=[{','.join(patt)}]"
+
+def _in_district_guess(signature: str, *, current_lane_pattern: str) -> int:
+    try:
+        bracket = signature.split("pattern=[", 1)[1].split("]", 1)[0]
+        col_bitstrings = [s.strip() for s in bracket.split(",") if s.strip()]
+        return int(any(bs == current_lane_pattern for bs in col_bitstrings))
+    except Exception:
+        return 0
 
         with st.expander("Coverage Sampling"):
             # Freshness — do not stop the render if missing
