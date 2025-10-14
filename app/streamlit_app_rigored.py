@@ -3013,7 +3013,166 @@ def _add_normalized_pattern_to_baseline(pattern_str: str, rk: str|None=None, ker
 
 
 
-   
+  # ================== Coverage Baseline (load + normalize to n₂-bit columns) ==================
+with st.expander("Coverage Baseline (load + normalize to n₂-bit columns)",
+                 expanded=st.session_state.get("_cov_baseline_open", True)):
+    st.session_state["_cov_baseline_open"] = True
+
+    n2_active, n3_active = _autofill_dims_from_session()
+    st.caption(f"Active fixture dims → n₂={n2_active}, n₃={n3_active}")
+
+    up = st.file_uploader("Upload baseline (.json / .jsonl)", type=["json", "jsonl"], key="cov_baseline_up")
+    pasted = st.text_area("Or paste signatures (JSON list or one-per-line)", value="", key="cov_baseline_paste")
+    norm_on = st.checkbox("Normalize to n₂-bit columns on load", value=True, key="cov_norm_on")
+
+    DEMO_BASELINE = [
+        "rk=2;ker=1;pattern=[110,110,000]",
+        "rk=2;ker=1;pattern=[101,101,000]",
+        "rk=2;ker=1;pattern=[011,011,000]",
+        "rk=3;ker=0;pattern=[111,111,111]",
+        "rk=1;ker=2;pattern=[100,000,000]",
+    ]
+    CANONICAL_D2D3 = [
+        "rk=2;ker=1;pattern=[11,11,00]",
+        "rk=2;ker=1;pattern=[10,10,00]",
+        "rk=2;ker=1;pattern=[01,01,00]",
+        "rk=2;ker=1;pattern=[00,01,11]",
+        "rk=2;ker=1;pattern=[01,11,10]",
+        "rk=2;ker=1;pattern=[11,10,01]",
+        "rk=3;ker=0;pattern=[11,11,11]",
+        "rk=1;ker=2;pattern=[11,00,00]",
+        "rk=1;ker=2;pattern=[00,11,00]",
+        "rk=1;ker=2;pattern=[00,00,11]",
+    ]
+
+    def _parse_json_baseline(bytes_data: bytes, name: str) -> list[str]:
+        try:
+            txt = bytes_data.decode("utf-8", errors="ignore")
+        except Exception:
+            return []
+        sigs = []
+        try:
+            if name.lower().endswith(".jsonl"):
+                for line in txt.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = _json.loads(line)
+                        if isinstance(obj, str):
+                            sigs.append(obj.strip())
+                        elif isinstance(obj, dict) and "signature" in obj:
+                            sigs.append(str(obj["signature"]).strip())
+                    except Exception:
+                        if "pattern=[" in line:
+                            sigs.append(line)
+            else:
+                obj = _json.loads(txt)
+                if isinstance(obj, list):
+                    for v in obj:
+                        if isinstance(v, str):
+                            sigs.append(v.strip())
+                        elif isinstance(v, dict) and "signature" in v:
+                            sigs.append(str(v["signature"]).strip())
+                elif isinstance(obj, dict) and isinstance(obj.get("signatures"), list):
+                    for v in obj["signatures"]:
+                        if isinstance(v, str):
+                            sigs.append(v.strip())
+                        elif isinstance(v, dict) and "signature" in v:
+                            sigs.append(str(v["signature"]).strip())
+        except Exception:
+            pass
+        return [s for s in sigs if "pattern=[" in s]
+
+    def _parse_pasted_any(p: str) -> list[str]:
+        try:
+            maybe = _json.loads(p or "")
+            if isinstance(maybe, list):
+                out = []
+                for v in maybe:
+                    if isinstance(v, str) and "pattern=[" in v:
+                        out.append(v.strip())
+                if out:
+                    return out
+        except Exception:
+            pass
+        out = []
+        for line in (p or "").splitlines():
+            s = line.strip()
+            if s and "pattern=[" in s:
+                out.append(s)
+        return out
+
+    def _save_baseline_lines(lines: list[str], *, norm: bool):
+        # Seed demo dims if needed so loader never hard-stops UI
+        n2, n3 = _autofill_dims_from_session()
+        if (n2 <= 0 or n3 <= 0) and norm:
+            # seed (2,3) so canonical/demo always works even w/o fixture
+            rc_seed = st.session_state.get("run_ctx") or {}
+            rc_seed["n2"], rc_seed["n3"] = 2, 3
+            st.session_state["run_ctx"] = rc_seed
+            n2, n3 = 2, 3
+
+        if norm:
+            norm_full, norm_patt = [], []
+            for s in lines:
+                f, p = _normalize_signature_line_to_n2(s, n2=int(n2), n3=int(n3))
+                norm_full.append(f); norm_patt.append(p)
+            lines = _dedupe_keep_order(norm_full)
+            patt_only = set(norm_patt)
+        else:
+            patt_only = set()
+            for s in lines:
+                toks = _extract_pattern_tokens(s)
+                if toks:
+                    patt_only.add(f"pattern=[{','.join(toks)}]")
+
+        if not patt_only:
+            st.warning("No usable patterns found after parsing/normalize.")
+            return
+
+        rc0 = st.session_state.get("run_ctx") or {}
+        rc0["known_signatures"] = list(lines)
+        rc0["known_signatures_patterns"] = sorted(patt_only)
+        st.session_state["run_ctx"] = rc0
+        st.success(f"Loaded baseline ({len(lines)} signatures; normalized={norm}).")
+        st.caption(f"Baseline now has {len(patt_only)} patterns.")
+
+    cols = st.columns(4)
+    if cols[0].button("Load from upload / paste", key="cov_btn_load", on_click=lambda: st.session_state.update(_cov_baseline_open=True)):
+        loaded = []
+        if up is not None:
+            loaded.extend(_parse_json_baseline(up.getvalue(), up.name))
+        loaded.extend(_parse_pasted_any(pasted))
+        loaded = [s for s in loaded if s]
+        if not loaded:
+            st.error("No valid signatures found.")
+        else:
+            _save_baseline_lines(loaded, norm=norm_on)
+
+    if cols[1].button("Load canonical D2/D3 list", key="cov_btn_canonical", on_click=lambda: st.session_state.update(_cov_baseline_open=True)):
+        _save_baseline_lines(CANONICAL_D2D3[:], norm=True)
+
+    if cols[2].button("Use demo baseline (legacy → normalize)", key="cov_btn_demo", on_click=lambda: st.session_state.update(_cov_baseline_open=True)):
+        _save_baseline_lines(DEMO_BASELINE[:], norm=True)
+
+    if cols[3].button("Clear baseline", key="cov_btn_clear", on_click=lambda: st.session_state.update(_cov_baseline_open=True)):
+        rc0 = st.session_state.get("run_ctx") or {}
+        rc0["known_signatures"] = []
+        rc0["known_signatures_patterns"] = []
+        st.session_state["run_ctx"] = rc0
+        st.info("Cleared baseline.")
+
+    # Preview
+    rc_view = st.session_state.get("run_ctx") or {}
+    ks = list(rc_view.get("known_signatures") or [])
+    if ks:
+        st.caption(f"Baseline active: {len(ks)} signatures. Showing up to 5:")
+        st.code("\n".join(ks[:5] + (["…"] if len(ks) > 5 else [])), language="text")
+    else:
+        st.caption("Baseline inactive (known_signatures is empty).")
+# ================== /Coverage Baseline ==================
+ 
 
 
 # ===================== Coverage · Normalizer self-test (gate sampling) =====================
@@ -3058,32 +3217,37 @@ with st.expander("Coverage Sampling", expanded=st.session_state.get("_cov_sampli
     policy       = c4.selectbox("policy", options=["strict"], index=0, help="Coverage uses strict.", key="cov_policy_sel")
 
        
-
-    # ---------- Guards: dims + baseline ----------
+    # ---------- Guards: dims + baseline (soft gate; no hard stop) ----------
     n2, n3 = _autofill_dims_from_session()
-    if n2 <= 0 or n3 <= 0:
-        st.error("COVERAGE_BASELINE_DIMS_UNKNOWN")
-        st.stop()
-
     rc = st.session_state.get("run_ctx") or {}
+    
     # Rehydrate banner if baseline was restored
     if rc.get("known_signatures_patterns"):
         st.caption(f"🔵 Baseline restored: {len(rc['known_signatures_patterns'])} patterns "
                    f"(dialect n₂={int(rc.get('n2') or n2)}, n₃={int(rc.get('n3') or n3)})")
+    
+    if n2 <= 0 or n3 <= 0:
+        st.info("Fixture dims not set (n₂/n₃). Use **Coverage Baseline** above to seed demo dims or load canonical D2/D3.")
+        # Don’t render the rest of this expander content
+    else:
+        known_patterns = rc.get("known_signatures_patterns") or []
+        if not known_patterns:
+            st.info("Baseline empty. Load or paste a baseline in **Coverage Baseline** above.")
+            # Don’t render the rest of this expander content
+        else:
+            def _dialect_ok(p: str) -> bool:
+                toks = _extract_pattern_tokens(p)
+                return (len(toks) == int(n3)) and all(len(t) == int(n2) for t in toks)
+    
+            if not all(_dialect_ok(p) for p in known_patterns):
+                st.warning("COVERAGE_BASELINE_DIALECT_MISMATCH: normalize to n₂-bit columns in the Baseline loader.")
+                # Don’t render the rest of this expander content
+            else:
+                # … keep your existing sampling UI & logic here …
+                # (Sampling, snapshot, unmatched add, auto-add, exports, etc.)
+                pass
 
-    known_patterns = rc.get("known_signatures_patterns") or []
-    if not known_patterns:
-        st.error("COVERAGE_CONFIG_EMPTY")
-        st.stop()
-
-    def _dialect_ok(p: str) -> bool:
-        toks = _extract_pattern_tokens(p)
-        return (len(toks) == int(n3)) and all(len(t) == int(n2) for t in toks)
-
-    if not all(_dialect_ok(p) for p in known_patterns):
-        st.error("COVERAGE_BASELINE_DIALECT_MISMATCH")
-        st.stop()
-
+    
     # Lane mask provenance (derive from inputs; fallback with note)
     inputs_cov_tmp = _inputs_block_from_session((int(n2), int(n3)))
     lane_mask_k3 = inputs_cov_tmp.get("lane_mask_k3")
