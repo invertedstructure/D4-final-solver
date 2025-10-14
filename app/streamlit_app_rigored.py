@@ -6038,13 +6038,14 @@ with safe_expander("Cert & provenance", expanded=True):
     c1, c2, c3, c4 = st.columns([2,2,3,3])
     with c1:
         if inputs_complete:
-             st.success("Inputs OK")
-             _chip("b", inputs_sig[0]); _chip("C", inputs_sig[1])
-             _chip("H", inputs_sig[2]); _chip("U", inputs_sig[3]); _chip("S", inputs_sig[4])
-                    show_hashes = st.checkbox("Show copyable hashes", value=False, key="copy_hashes_toggle")
-           if show_hashes:
-              _copybox(",".join(inputs_sig), key="copy_inputs_sig")
-            else:
+            st.success("Inputs OK")
+            _chip("b", inputs_sig[0]); _chip("C", inputs_sig[1])
+            _chip("H", inputs_sig[2]); _chip("U", inputs_sig[3]); _chip("S", inputs_sig[4])
+    
+            show_hashes = st.checkbox("Show copyable hashes", value=False, key="copy_hashes_toggle")
+            if show_hashes:
+                _copybox(",".join(inputs_sig), key="copy_inputs_sig")
+        else:
                 missing = [k for k,v in zip(("b","C","H","S"), [inputs_sig[0],inputs_sig[1],inputs_sig[2],inputs_sig[4]]) if not v]
                 st.error(f"Inputs MISSING · {','.join(missing)}")
     with c2:
