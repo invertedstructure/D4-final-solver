@@ -5884,7 +5884,8 @@ with st.expander("Parity pairs: import/export"):
 
 
 
-# ============================== Cert & Provenance — GOD BLOCK ==============================
+
+# ============================== Cert & Provenance — GOD BLOCK (final) ==============================
 with safe_expander("Cert & provenance", expanded=True):
     import os, json, hashlib, platform, time
     from pathlib import Path
@@ -5893,9 +5894,7 @@ with safe_expander("Cert & provenance", expanded=True):
     # ---------- constants ----------
     SCHEMA_VERSION = "1.0.0"
     APP_VERSION    = globals().get("APP_VERSION", "v0.1-core")
-    FIELD          = globals().get("FIELD", "GF(2)")
 
-    # reason codes (stable; UI text maps from these)
     class REASON:
         WROTE_CERT               = "WROTE_CERT"
         SKIP_NO_MATERIAL_CHANGE  = "SKIP_NO_MATERIAL_CHANGE"
@@ -5946,20 +5945,53 @@ with safe_expander("Cert & provenance", expanded=True):
         except Exception:
             pass
 
+    # ---------- UI helpers (chips / copy-friendly) ----------
+    def _chip(label: str, value: str, *, short=8):
+        vshort = (value or "")[:short]
+        st.markdown(
+            f"<span style='display:inline-block;padding:2px 6px;border-radius:8px;"
+            f"border:1px solid #ddd;font-size:12px;white-space:nowrap;"
+            f"margin-right:6px;background:#fafafa'>{label}: <b>{vshort}</b></span>",
+            unsafe_allow_html=True
+        )
+
+    def _copybox(value: str, key: str):
+        st.text_input(label="copy", value=value or "", key=key,
+                      label_visibility="collapsed", disabled=True)
+
+    def _delta_line(last_key, write_key):
+        if not last_key:
+            return "Δ first-write"
+        (li, lp, lv, lpj) = last_key
+        (ci, cp, cv, cpj) = write_key
+        parts = []
+        if lp != cp:
+            parts.append(f"Δ policy: {lp}→{cp}")
+        if lv != cv:
+            parts.append(f"Δ pass: {int(lv[0])}{int(lv[1])}→{int(cv[0])}{int(cv[1])}")
+        names = ["b_hash","C_hash","H_hash","U_hash","S_hash"]
+        for idx, (a,b) in enumerate(zip(li, ci)):
+            if a != b:
+                parts.append(f"Δ {names[idx]}")
+        if lpj != cpj and (cp == "projected:file" or lp == "projected:file"):
+            parts.append("Δ projector_hash")
+        return "; ".join(parts) or "Δ —"
+
     # ---------- freeze snapshot (single read) ----------
     ss           = st.session_state
     rc           = dict(ss.get("run_ctx") or {})
     out          = dict(ss.get("overlap_out") or {})
     H_obj        = ss.get("overlap_H") or io.parse_cmap({"blocks": {}})
+    C_obj        = ss.get("overlap_C") or io.parse_cmap({"blocks": {}})
     ib           = dict(ss.get("_inputs_block") or {})
     ab_pin       = dict(ss.get("ab_pin") or {"state":"idle","payload":None,"consumed":False})
-    write_armed  = bool(ss.get("write_armed", True))
+    write_armed  = bool(ss.get("write_armed", False))  # default False (must be armed by hooks)
 
-    # FILE Π validity (SSOT flag if present; else permissive unless FILE)
+    # FILE Π validity only matters in FILE mode
     file_pi_valid   = bool(ss.get("file_pi_valid", True))
     file_pi_reasons = list(ss.get("file_pi_reasons", []) or [])
 
-    # ---------- inputs signature (5-tuple) ----------
+    # ---------- inputs signature (U optional) ----------
     if "hashes" in ib:
         hin = dict(ib["hashes"] or {})
     else:
@@ -5974,10 +6006,12 @@ with safe_expander("Cert & provenance", expanded=True):
         hin.get("boundaries_hash",""),
         hin.get("C_hash",""),
         hin.get("H_hash",""),
-        hin.get("U_hash",""),
+        hin.get("U_hash",""),        # optional for completeness gate
         hin.get("shapes_hash",""),
     )
-    inputs_complete = all(isinstance(x, str) and x for x in inputs_sig)
+    # completeness = 4-of-5 (U optional)
+    req = [hin.get("boundaries_hash"), hin.get("C_hash"), hin.get("H_hash"), hin.get("shapes_hash")]
+    inputs_complete = all(isinstance(x, str) and x for x in req)
 
     # ---------- policy & pass vec ----------
     policy_raw   = rc.get("policy_tag") or rc.get("mode") or "strict"
@@ -5996,9 +6030,13 @@ with safe_expander("Cert & provenance", expanded=True):
     c1, c2, c3, c4 = st.columns([2,2,3,3])
     with c1:
         if inputs_complete:
-            st.success(f"Inputs OK · b:{_short(inputs_sig[0])} C:{_short(inputs_sig[1])} H:{_short(inputs_sig[2])} U:{_short(inputs_sig[3])} S:{_short(inputs_sig[4])}")
+            st.success("Inputs OK")
+            _chip("b", inputs_sig[0]); _chip("C", inputs_sig[1])
+            _chip("H", inputs_sig[2]); _chip("U", inputs_sig[3]); _chip("S", inputs_sig[4])
+            with st.expander("copy full hashes", expanded=False):
+                _copybox(",".join(inputs_sig), key="copy_inputs_sig")
         else:
-            missing = [k for k,v in zip(("b","C","H","U","S"), inputs_sig) if not v]
+            missing = [k for k,v in zip(("b","C","H","S"), [inputs_sig[0],inputs_sig[1],inputs_sig[2],inputs_sig[4]]) if not v]
             st.error(f"Inputs MISSING · {','.join(missing)}")
     with c2:
         if policy_canon == "projected:file":
@@ -6007,8 +6045,10 @@ with safe_expander("Cert & provenance", expanded=True):
             else:
                 st.error("Mode: FILE · Π INVALID")
                 if file_pi_reasons: st.caption(" · ".join(file_pi_reasons[:3]))
+        elif policy_canon == "projected:auto":
+            st.info("Mode: AUTO")
         else:
-            st.info("Mode: STRICT" if policy_canon=="strict" else "Mode: AUTO")
+            st.info("Mode: STRICT")
     with c3:
         if ab_pin.get("state") == "pinned":
             ab = ab_pin.get("payload") or {}
@@ -6028,7 +6068,12 @@ with safe_expander("Cert & provenance", expanded=True):
         else:
             st.success("Write: Armed (1×)" if last_key != write_key else "Write: Armed (but no change)")
 
-    # ---------- hard skip cases (self-debug witness) ----------
+    if write_armed:
+        st.caption(_delta_line(last_key, write_key))
+
+    # ---------- always emit a witness (inputs gate / FILE gate / no-change / write) decisions below ----------
+
+    # hard gate: inputs incomplete (non-fatal skip)
     if not inputs_complete:
         _append_witness({
             "ts": _utc_now_z(),
@@ -6041,12 +6086,13 @@ with safe_expander("Cert & provenance", expanded=True):
                 "pv": f"{int(pass_vec[0])}{int(pass_vec[1])}",
                 "pj": _short(proj_hash)
             },
-            "ab": ("NONE" if ab_pin.get("state")!="pinned" else "PINNED"),
-            "file_pi": {"mode": policy_canon.split(":")[-1] if ":" in policy_canon else policy_canon, "valid": file_pi_valid, "reasons": file_pi_reasons[:3]}
+            "ab": ("PINNED" if ab_pin.get("state")=="pinned" else "NONE"),
+            "file_pi": {"mode": ("file" if policy_canon=="projected:file" else policy_canon), "valid": file_pi_valid, "reasons": file_pi_reasons[:3]}
         })
         st.caption("Inputs incomplete — skipping write.")
         st.stop()
 
+    # hard gate: FILE Π invalid only in FILE mode
     if policy_canon == "projected:file" and not file_pi_valid:
         _append_witness({
             "ts": _utc_now_z(),
@@ -6057,13 +6103,13 @@ with safe_expander("Cert & provenance", expanded=True):
                 "inputs": _sha256_hex(":".join(inputs_sig).encode())[:8],
                 "pol": policy_canon, "pv": f"{int(pass_vec[0])}{int(pass_vec[1])}", "pj": _short(proj_hash)
             },
-            "ab": ("NONE" if ab_pin.get("state")!="pinned" else "PINNED"),
+            "ab": ("PINNED" if ab_pin.get("state")=="pinned" else "NONE"),
             "file_pi": {"mode": "file", "valid": False, "reasons": file_pi_reasons[:3]}
         })
         st.caption("FILE Π invalid — fix Π or re-freeze from AUTO.")
         st.stop()
 
-    # ---------- write decision ----------
+    # write decision (4-tuple gate + arming)
     should_write = write_armed and (write_key != last_key)
     if not should_write:
         _append_witness({
@@ -6075,13 +6121,12 @@ with safe_expander("Cert & provenance", expanded=True):
                 "inputs": _sha256_hex(":".join(inputs_sig).encode())[:8],
                 "pol": policy_canon, "pv": f"{int(pass_vec[0])}{int(pass_vec[1])}", "pj": _short(proj_hash)
             },
-            "ab": ("NONE" if ab_pin.get("state")!="pinned" else "PINNED"),
-            "file_pi": {"mode": policy_canon.split(":")[-1] if ":" in policy_canon else policy_canon, "valid": True, "reasons": []}
+            "ab": ("PINNED" if ab_pin.get("state")=="pinned" else "NONE"),
+            "file_pi": {"mode": ("file" if policy_canon=="projected:file" else policy_canon), "valid": True, "reasons": []}
         })
         st.caption("Cert unchanged — skipping rewrite.")
-        # still render tail below
     else:
-        # ----- ensure stable run_id per inputs_sig -----
+        # ----- stable run_id per inputs_sig -----
         if ss.get("_last_inputs_sig") != inputs_sig:
             seed = _sha256_hex((":".join(inputs_sig) + f"|{int(time.time())}").encode())[:8]
             ss["_last_inputs_sig"] = inputs_sig
@@ -6096,7 +6141,7 @@ with safe_expander("Cert & provenance", expanded=True):
         n3 = int((ib.get("dims") or {}).get("n3") or rc.get("n3") or 0)
         lane_mask = list(rc.get("lane_mask_k3") or [])
 
-        # quick lane vectors (bottom-row masked) — pure GF(2), no numpy
+        # GF(2) diagnostics (guarded shapes)
         def _bottom_row(M): return M[-1] if (M and len(M)) else []
         def _xor(A,B):
             if not A: return [r[:] for r in (B or [])]
@@ -6108,15 +6153,15 @@ with safe_expander("Cert & provenance", expanded=True):
 
         H2 = (H_obj.blocks.__root__.get("2") or [])
         d3 = rc.get("d3", [])
-        C3 = (cmap.blocks.__root__.get("3") or [])
+        C3 = (C_obj.blocks.__root__.get("3") or [])
         I3 = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
-        try:
-            H2d3  = [[sum(H2[i][k]&d3[k][j] for k in range(len(d3)))&1 for j in range(len(d3[0]))] for i in range(len(H2))] if (H2 and d3 and len(H2[0])==len(d3)) else []
-        except Exception:
+        if H2 and d3 and len(H2[0]) == len(d3):
+            H2d3 = [[sum(H2[i][k] & d3[k][j] for k in range(len(d3))) & 1 for j in range(len(d3[0]))] for i in range(len(H2))]
+        else:
             H2d3 = []
         C3pI3 = _xor(C3, I3) if C3 else []
 
-        # A/B freshness (does not clear pin here)
+        # A/B freshness
         ab_status = REASON.AB_NONE
         ab_fresh = False
         ab = ab_pin.get("payload") or {}
@@ -6131,7 +6176,6 @@ with safe_expander("Cert & provenance", expanded=True):
                 ab_fresh = True
                 ab_status = REASON.AB_EMBEDDED
 
-        # identity / policy / inputs
         identity = {
             "district_id":   district_id,
             "run_id":        ss.get("last_run_id","00000000"),
@@ -6158,7 +6202,7 @@ with safe_expander("Cert & provenance", expanded=True):
 
         inputs = {
             "dims": {"n2": n2, "n3": n3},
-            "lane_mask_k3": lane_mask[:],            # provenance lives in inputs & diagnostics
+            "lane_mask_k3": lane_mask[:],
             "filenames": filenames,
             "hashes": {
                 "boundaries_hash": inputs_sig[0],
@@ -6191,7 +6235,7 @@ with safe_expander("Cert & provenance", expanded=True):
         elif ab_pin.get("state") == "pinned":
             ab_embed["stale_reason"] = ab_status
 
-        growth = {"growth_bumps": int(ss.get("growth_bumps", 0)), "H_diff": ss.get("H_diff","")}
+        growth  = {"growth_bumps": int(ss.get("growth_bumps", 0)), "H_diff": ss.get("H_diff","")}
         gallery = {"projected_green": bool(ss.get("projected_green", pass_vec[1])),
                    "tag": ss.get("gallery_tag",""), "strictify": ss.get("gallery_strictify","tbd")}
 
@@ -6210,13 +6254,13 @@ with safe_expander("Cert & provenance", expanded=True):
             "hashes":     {},
         }
 
-        # invariants -> warnings only
+        # non-blocking warnings
         warns = []
         if len(lane_mask) != max(n3,0): warns.append("CERT_INVAR_WARN: lane_mask_k3 length != n3")
         if policy_canon == "projected:file" and not proj_hash: warns.append("CERT_INVAR_WARN: projector_hash missing for projected:file")
         if warns: cert["_warnings"] = warns
 
-        # timestamps & content hash (UTC stamp not in dedupe)
+        # UTC stamp & strict JSON hash (timestamp not in dedupe)
         cert["written_at_utc"] = _utc_now_z()
         cert_blob = json.dumps(cert, sort_keys=True, separators=(",", ":")).encode("utf-8")
         cert["hashes"]["content_hash"] = _sha256_hex(cert_blob)
@@ -6231,11 +6275,11 @@ with safe_expander("Cert & provenance", expanded=True):
 
         _write_json_atomic(fpath, cert)
 
-        # session updates (dedupe + single-flight)
+        # session updates
         ss["_last_cert_write_key"] = write_key
         ss["last_cert_path"] = str(fpath)
         ss["cert_payload"]   = cert
-        ss["write_armed"]    = False
+        ss["write_armed"]    = False  # single-flight consumed
 
         # clear pin only after successful embedded write
         if ab_fresh and ab_pin.get("state") == "pinned":
@@ -6252,13 +6296,14 @@ with safe_expander("Cert & provenance", expanded=True):
                 "pol": policy_canon, "pv": f"{int(pass_vec[0])}{int(pass_vec[1])}", "pj": _short(proj_hash)
             },
             "ab": (REASON.AB_EMBEDDED if ab_fresh else (REASON.AB_NONE if ab_pin.get("state")!="pinned" else ab_status)),
-            "file_pi": {"mode": policy_canon.split(":")[-1] if ":" in policy_canon else policy_canon, "valid": True, "reasons": []},
+            "file_pi": {"mode": ("file" if policy_canon=="projected:file" else policy_canon), "valid": True, "reasons": []},
             "path": fpath.as_posix()
         })
 
         # UI receipt
         st.success(f"Cert written → `{fpath.as_posix()}` · {content12}")
-        st.caption(f"A/B: {'embedded' if ab_fresh else ('skipped — ' + (ab_status if ab_pin.get('state')=='pinned' else '—'))}")
+        with st.expander("copy path", expanded=False):
+            _copybox(fpath.as_posix(), key="copy_cert_path")
 
     # ---------- tail (read-only, compact) ----------
     with st.container():
@@ -6266,7 +6311,10 @@ with safe_expander("Cert & provenance", expanded=True):
         try:
             found = list(CERTS_ROOT.rglob("*.json"))
             found.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-            ab_only = st.checkbox("Show only certs with A/B embed", value=(ab_pin.get("state")=="pinned"), key="tail_ab_only_final")
+            ab_default = (ab_pin.get("state") == "pinned")
+            ab_only = st.checkbox("Show only certs with A/B embed",
+                                  value=ab_default,
+                                  key="tail_ab_only_final")
             shown = 0
             st.caption(f"Latest certs — Found {len(found)}")
             for p in found:
@@ -6284,13 +6332,15 @@ with safe_expander("Cert & provenance", expanded=True):
                 k2 = bool(((checks.get("k") or {}).get("2") or {}).get("eq", False))
                 k3 = bool(((checks.get("k") or {}).get("3") or {}).get("eq", False))
                 ts = info.get("written_at_utc","")
-                st.write(f"• {ts} · {ident.get('district_id','?')} · {policy.get('label_raw','?')} · k2/k3={int(k2)}/{int(k3)} · {p.name}{' · [A/B]' if has_ab else ''}")
+                flag = " · [A/B]" if has_ab else ""
+                st.write(f"• {ts} · {ident.get('district_id','?')} · {policy.get('label_raw','?')} · "
+                         f"k2/k3={int(k2)}/{int(k3)} · {p.name}{flag}")
                 shown += 1
             if shown == 0:
                 st.caption("No certs to show with current filter.")
         except Exception as e:
             st.warning(f"Tail listing failed: {e}")
-# ============================== /GOD BLOCK ==============================
+# ============================== /GOD BLOCK (final) ==============================
 
 
 
