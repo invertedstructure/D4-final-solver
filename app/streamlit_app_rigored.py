@@ -2826,6 +2826,19 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
 # ================================== Coverage · Helpers (idempotent) ==================================
 import random as _random
 
+# ---------- Coverage bootstrap (place ABOVE self-test & expanders) ----------
+if "_cov_baseline_open" not in st.session_state:
+    st.session_state["_cov_baseline_open"] = True
+if "_cov_sampling_open" not in st.session_state:
+    st.session_state["_cov_sampling_open"] = True
+if "_cov_defaults" not in st.session_state:
+    st.session_state["_cov_defaults"] = {
+        "random_seed": 1337,
+        "bit_density": 0.40,
+        "sample_count": 200,
+    }
+st.session_state.setdefault("normalizer_ok", True)
+
 if "_rand_gf2_matrix" not in globals():
     def _rand_gf2_matrix(rows: int, cols: int, density: float, rng: _random.Random) -> list[list[int]]:
         density = max(0.0, min(1.0, float(density)))
@@ -2849,6 +2862,8 @@ if "_gf2_rank" not in globals():
                     A[i] = [(A[i][j] ^ A[r][j]) for j in range(n)]
             r += 1; c += 1
         return r
+
+
 
 if "_col_support_pattern" not in globals():
     def _col_support_pattern(M: list[list[int]]) -> list[str]:
@@ -2996,18 +3011,7 @@ def _add_normalized_pattern_to_baseline(pattern_str: str, rk: str|None=None, ker
     st.session_state["run_ctx"] = rc0
     return full_norm, patt_norm
 
-# ---------- Coverage bootstrap (place ABOVE self-test & expanders) ----------
-if "_cov_baseline_open" not in st.session_state:
-    st.session_state["_cov_baseline_open"] = True
-if "_cov_sampling_open" not in st.session_state:
-    st.session_state["_cov_sampling_open"] = True
-if "_cov_defaults" not in st.session_state:
-    st.session_state["_cov_defaults"] = {
-        "random_seed": 1337,
-        "bit_density": 0.40,
-        "sample_count": 200,
-    }
-st.session_state.setdefault("normalizer_ok", True)
+
 
    
 
