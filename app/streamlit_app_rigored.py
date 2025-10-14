@@ -103,6 +103,14 @@ DISTRICT_MAP: dict[str, str] = {
 }
 
 
+def on_policy_change(new_label_raw: str):
+    rc = st.session_state.get("run_ctx") or {}
+    rc["policy_tag"] = new_label_raw
+    st.session_state["run_ctx"] = rc           # assign back to SSOT
+    st.session_state["write_armed"] = True     # arm the write
+    st.session_state["armed_by"]   = "policy_change"
+
+
 # ───────── A/B helpers (inputs sig + projector hashers) ─────────
 def _inputs_sig_now() -> list[str]:
     ib = st.session_state.get("_inputs_block") or {}
