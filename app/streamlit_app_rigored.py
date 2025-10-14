@@ -2863,6 +2863,11 @@ if "_gf2_rank" not in globals():
             r += 1; c += 1
         return r
 
+def _cov_keep_open_sampling():
+    st.session_state["_cov_sampling_open"] = True
+
+def _cov_keep_open_baseline():
+    st.session_state["_cov_baseline_open"] = True
 
 
 if "_col_support_pattern" not in globals():
