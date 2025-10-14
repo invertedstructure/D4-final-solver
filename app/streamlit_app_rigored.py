@@ -1573,6 +1573,8 @@ with st.expander("Debug · d3 & lane mask"):
     except Exception as e:
         st.error(f"Debug probe failed: {e}")
 
+    
+
 # -------------------- Health checks + compact, non-duplicated UI --------------------
 def run_self_tests():
     failures, warnings = [], []
@@ -3180,6 +3182,209 @@ with st.expander("Coverage Baseline (load + normalize to n₂-bit columns)",
  
 
 
+# ============================== Coverage · Bootstrap & Helpers ==============================
+# Keep these idempotent (safe to re-run)
+if "_cov_baseline_open" not in st.session_state:
+    st.session_state["_cov_baseline_open"] = True
+if "_cov_sampling_open" not in st.session_state:
+    st.session_state["_cov_sampling_open"] = True
+if "_cov_defaults" not in st.session_state:
+    st.session_state["_cov_defaults"] = {"random_seed": 1337, "bit_density": 0.40, "sample_count": 200}
+st.session_state.setdefault("normalizer_ok", True)
+st.session_state.setdefault("_cov_snapshots", {})  # key -> snapshot dict
+
+# no-op keep-open for any button inside the expander
+if "_cov_keep_open_sampling" not in globals():
+    def _cov_keep_open_sampling():
+        st.session_state["_cov_sampling_open"] = True
+
+# Small utils
+import datetime as _dt, hashlib as _hashlib, json as _json
+from io import StringIO as _StringIO
+import pandas as _pd
+
+def _now_utc_iso_Z():
+    return _dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+def _sha256_bytes(b: bytes) -> str:
+    return _hashlib.sha256(b).hexdigest()
+
+def _sha256_json(o: dict) -> str:
+    s = _json.dumps(o, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return _sha256_bytes(s)
+
+def _cov_key(n2,n3,seed,density,count,policy):
+    k = _json.dumps({"n2":int(n2),"n3":int(n3),"seed":int(seed),"density":float(density),
+                     "count":int(count),"policy":str(policy)}, sort_keys=True,
+                     separators=(",",":")).encode("utf-8")
+    return _hashlib.sha256(k).hexdigest()[:12]
+
+def _disable_with(msg: str):
+    st.info(msg)
+    return True
+
+# ================================== Coverage Baseline (load + normalize) ==================================
+with st.expander("Coverage Baseline (load + normalize to n₂-bit columns)",
+                 expanded=st.session_state.get("_cov_baseline_open", True)):
+    st.session_state["_cov_baseline_open"] = True
+
+    n2_active, n3_active = _autofill_dims_from_session()
+    st.caption(f"Active fixture dims → n₂={n2_active}, n₃={n3_active}")
+
+    up = st.file_uploader("Upload baseline (.json / .jsonl)", type=["json", "jsonl"], key="cov_baseline_up")
+    pasted = st.text_area("Or paste signatures (JSON list or one-per-line)", value="", key="cov_baseline_paste")
+    norm_on = st.checkbox("Normalize to n₂-bit columns on load", value=True, key="cov_norm_on")
+
+    DEMO_BASELINE = [
+        "rk=2;ker=1;pattern=[110,110,000]",
+        "rk=2;ker=1;pattern=[101,101,000]",
+        "rk=2;ker=1;pattern=[011,011,000]",
+        "rk=3;ker=0;pattern=[111,111,111]",
+        "rk=1;ker=2;pattern=[100,000,000]",
+    ]
+    CANONICAL_D2D3 = [
+        "rk=2;ker=1;pattern=[11,11,00]",
+        "rk=2;ker=1;pattern=[10,10,00]",
+        "rk=2;ker=1;pattern=[01,01,00]",
+        "rk=2;ker=1;pattern=[00,01,11]",
+        "rk=2;ker=1;pattern=[01,11,10]",
+        "rk=2;ker=1;pattern=[11,10,01]",
+        "rk=3;ker=0;pattern=[11,11,11]",
+        "rk=1;ker=2;pattern=[11,00,00]",
+        "rk=1;ker=2;pattern=[00,11,00]",
+        "rk=1;ker=2;pattern=[00,00,11]",
+    ]
+
+    def _parse_json_baseline(bytes_data: bytes, name: str) -> list[str]:
+        try:
+            txt = bytes_data.decode("utf-8", errors="ignore")
+        except Exception:
+            return []
+        sigs = []
+        try:
+            if name.lower().endswith(".jsonl"):
+                for line in txt.splitlines():
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        obj = _json.loads(line)
+                        if isinstance(obj, str):
+                            sigs.append(obj.strip())
+                        elif isinstance(obj, dict) and "signature" in obj:
+                            sigs.append(str(obj["signature"]).strip())
+                    except Exception:
+                        if "pattern=[" in line:
+                            sigs.append(line)
+            else:
+                obj = _json.loads(txt)
+                if isinstance(obj, list):
+                    for v in obj:
+                        if isinstance(v, str):
+                            sigs.append(v.strip())
+                        elif isinstance(v, dict) and "signature" in v:
+                            sigs.append(str(v["signature"]).strip())
+                elif isinstance(obj, dict) and isinstance(obj.get("signatures"), list):
+                    for v in obj["signatures"]:
+                        if isinstance(v, str):
+                            sigs.append(v.strip())
+                        elif isinstance(v, dict) and "signature" in v:
+                            sigs.append(str(v["signature"]).strip())
+        except Exception:
+            pass
+        return [s for s in sigs if "pattern=[" in s]
+
+    def _parse_pasted_any(p: str) -> list[str]:
+        try:
+            maybe = _json.loads(p or "")
+            if isinstance(maybe, list):
+                out = []
+                for v in maybe:
+                    if isinstance(v, str) and "pattern=[" in v:
+                        out.append(v.strip())
+                if out:
+                    return out
+        except Exception:
+            pass
+        out = []
+        for line in (p or "").splitlines():
+            s = line.strip()
+            if s and "pattern=[" in s:
+                out.append(s)
+        return out
+
+    def _save_baseline_lines(lines: list[str], *, norm: bool):
+        # Seed demo dims if needed so loader never hard-stops UI
+        n2, n3 = _autofill_dims_from_session()
+        if (n2 <= 0 or n3 <= 0) and norm:
+            rc_seed = st.session_state.get("run_ctx") or {}
+            rc_seed["n2"], rc_seed["n3"] = 2, 3
+            st.session_state["run_ctx"] = rc_seed
+            n2, n3 = 2, 3
+
+        if norm:
+            norm_full, norm_patt = [], []
+            for s in lines:
+                f, p = _normalize_signature_line_to_n2(s, n2=int(n2), n3=int(n3))
+                norm_full.append(f); norm_patt.append(p)
+            lines = _dedupe_keep_order(norm_full)
+            patt_only = set(norm_patt)
+        else:
+            patt_only = set()
+            for s in lines:
+                toks = _extract_pattern_tokens(s)
+                if toks:
+                    patt_only.add(f"pattern=[{','.join(toks)}]")
+
+        if not patt_only:
+            st.warning("No usable patterns found after parsing/normalize.")
+            return
+
+        rc0 = st.session_state.get("run_ctx") or {}
+        rc0["known_signatures"] = list(lines)
+        rc0["known_signatures_patterns"] = sorted(patt_only)
+        st.session_state["run_ctx"] = rc0
+        st.success(f"Loaded baseline ({len(lines)} signatures; normalized={norm}).")
+        st.caption(f"Baseline now has {len(patt_only)} patterns.")
+
+    cols = st.columns(4)
+    if cols[0].button("Load from upload / paste", key="cov_btn_load",
+                      on_click=lambda: st.session_state.update(_cov_baseline_open=True)):
+        loaded = []
+        if up is not None:
+            loaded.extend(_parse_json_baseline(up.getvalue(), up.name))
+        loaded.extend(_parse_pasted_any(pasted))
+        loaded = [s for s in loaded if s]
+        if not loaded:
+            st.error("No valid signatures found.")
+        else:
+            _save_baseline_lines(loaded, norm=norm_on)
+
+    if cols[1].button("Load canonical D2/D3 list", key="cov_btn_canonical",
+                      on_click=lambda: st.session_state.update(_cov_baseline_open=True)):
+        _save_baseline_lines(CANONICAL_D2D3[:], norm=True)
+
+    if cols[2].button("Use demo baseline (legacy → normalize)", key="cov_btn_demo",
+                      on_click=lambda: st.session_state.update(_cov_baseline_open=True)):
+        _save_baseline_lines(DEMO_BASELINE[:], norm=True)
+
+    if cols[3].button("Clear baseline", key="cov_btn_clear",
+                      on_click=lambda: st.session_state.update(_cov_baseline_open=True)):
+        rc0 = st.session_state.get("run_ctx") or {}
+        rc0["known_signatures"] = []
+        rc0["known_signatures_patterns"] = []
+        st.session_state["run_ctx"] = rc0
+        st.info("Cleared baseline.")
+
+    # Preview
+    rc_view = st.session_state.get("run_ctx") or {}
+    ks = list(rc_view.get("known_signatures") or [])
+    if ks:
+        st.caption(f"Baseline active: {len(ks)} signatures. Showing up to 5:")
+        st.code("\n".join(ks[:5] + (["…"] if len(ks) > 5 else [])), language="text")
+    else:
+        st.caption("Baseline inactive (known_signatures is empty).")
+
 # ===================== Coverage · Normalizer self-test (gate sampling) =====================
 normalizer_ok = True
 with st.expander("Coverage · Normalizer self-test", expanded=False):
@@ -3198,17 +3403,14 @@ with st.expander("Coverage · Normalizer self-test", expanded=False):
         if patt != expect:
             normalizer_ok = False
 
-    # IMPORTANT: avoid a bare ternary, which Streamlit's "magic" tries to render.
     if normalizer_ok:
         st.success("Normalizer OK")
     else:
         st.error("COVERAGE_NORMALIZER_FAILED")
 
-# optionally persist for gating later sections
 st.session_state["normalizer_ok"] = normalizer_ok
 
-
-# ===================== Coverage Sampling (snapshot-based; sticky UI) =====================
+# ===================== Coverage Sampling (snapshot-based; sticky UI, non-blocking) =====================
 with st.expander("Coverage Sampling", expanded=st.session_state.get("_cov_sampling_open", True)):
     st.session_state["_cov_sampling_open"] = True
 
@@ -3221,350 +3423,307 @@ with st.expander("Coverage Sampling", expanded=st.session_state.get("_cov_sampli
     sample_count = c3.number_input("sample_count", min_value=1, value=int(dflt["sample_count"]), step=50, key="cov_samples_num")
     policy       = c4.selectbox("policy", options=["strict"], index=0, help="Coverage uses strict.", key="cov_policy_sel")
 
-       
-    # ---------- Guards: dims + baseline (soft gate; no hard stop) ----------
+    # ---------- Soft guards (never st.stop) ----------
     n2, n3 = _autofill_dims_from_session()
     rc = st.session_state.get("run_ctx") or {}
-    
-    # Rehydrate banner if baseline was restored
+
+    # Rehydrate banner if baseline exists
     if rc.get("known_signatures_patterns"):
         st.caption(f"🔵 Baseline restored: {len(rc['known_signatures_patterns'])} patterns "
                    f"(dialect n₂={int(rc.get('n2') or n2)}, n₃={int(rc.get('n3') or n3)})")
-    
+
+    disable_ui = False
     if n2 <= 0 or n3 <= 0:
-        st.info("Fixture dims not set (n₂/n₃). Use **Coverage Baseline** above to seed demo dims or load canonical D2/D3.")
-        # Don’t render the rest of this expander content
-    else:
-        known_patterns = rc.get("known_signatures_patterns") or []
-        if not known_patterns:
-            st.info("Baseline empty. Load or paste a baseline in **Coverage Baseline** above.")
-            # Don’t render the rest of this expander content
-        else:
-            def _dialect_ok(p: str) -> bool:
-                toks = _extract_pattern_tokens(p)
-                return (len(toks) == int(n3)) and all(len(t) == int(n2) for t in toks)
-    
-            if not all(_dialect_ok(p) for p in known_patterns):
-                st.warning("COVERAGE_BASELINE_DIALECT_MISMATCH: normalize to n₂-bit columns in the Baseline loader.")
-                # Don’t render the rest of this expander content
-            else:
-                # … keep your existing sampling UI & logic here …
-                # (Sampling, snapshot, unmatched add, auto-add, exports, etc.)
-                pass
+        disable_ui = _disable_with("Fixture dims unknown. Use **Coverage Baseline** above (demo/canonical) to seed n₂=2, n₃=3.")
+    known_patterns = rc.get("known_signatures_patterns") or []
+    if not disable_ui and not known_patterns:
+        disable_ui = _disable_with("Baseline empty. Load/paste or use canonical D2/D3 above.")
+    if not disable_ui and known_patterns:
+        def _dialect_ok(p: str) -> bool:
+            toks = _extract_pattern_tokens(p)
+            return (len(toks) == int(n3)) and all(len(t) == int(n2) for t in toks)
+        if not all(_dialect_ok(p) for p in known_patterns):
+            disable_ui = _disable_with("COVERAGE_BASELINE_DIALECT_MISMATCH: normalize to n₂-bit columns in loader.")
 
-    
-    # Lane mask provenance (derive from inputs; fallback with note)
-    inputs_cov_tmp = _inputs_block_from_session((int(n2), int(n3)))
-    lane_mask_k3 = inputs_cov_tmp.get("lane_mask_k3")
-    lane_mask_note = ""
-    if not lane_mask_k3:
-        lane_mask_k3 = [1, 1, 0]
-        lane_mask_note = "fallback-default"
+    # Lane mask provenance
+    inputs_cov_tmp = _inputs_block_from_session((int(n2 or 2), int(n3 or 3)))
+    lane_mask_k3 = inputs_cov_tmp.get("lane_mask_k3") or [1, 1, 0]
+    lane_mask_note = "" if inputs_cov_tmp.get("lane_mask_k3") else "fallback-default"
 
-    # ---------- Snapshot helpers ----------
-    import datetime as _dt, hashlib as _hashlib, json as _json
-    from io import StringIO as _StringIO
-    import pandas as _pd
+    # Snapshot cache key
+    key = _cov_key(n2 or 2, n3 or 3, random_seed, bit_density, sample_count, policy)
+    snap = st.session_state["_cov_snapshots"].get(key)
 
-    def _now_utc_iso_Z():
-        return _dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
-
-    def _sha256_bytes(b: bytes) -> str:
-        return _hashlib.sha256(b).hexdigest()
-
-    def _sha256_json(o: dict) -> str:
-        s = _json.dumps(o, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        return _sha256_bytes(s)
-
-    def _set_cov_snapshot(**kwargs):
-        snap = dict(kwargs)
-        if "written_at_utc" not in snap or not snap["written_at_utc"]:
-            snap["written_at_utc"] = _now_utc_iso_Z()   # deterministic per snapshot
-        st.session_state["cov_snapshot"] = snap
-
-    def _get_cov_snapshot():
-        return st.session_state.get("cov_snapshot")
-
-    # ---------- Sample (compute & persist snapshot) ----------
-    if st.button("Coverage Sample", key="btn_cov_sample", on_click=_cov_keep_open_sampling):
+    # ---------- Sample (compute & persist snapshot; buttons disabled if guard is on) ----------
+    if st.button("Coverage Sample", key="btn_cov_sample", disabled=disable_ui, on_click=_cov_keep_open_sampling):
         if not normalizer_ok:
-            st.error("COVERAGE_NORMALIZER_FAILED"); st.stop()
-        try:
-            import random as _random
-            rng = _random.Random(int(random_seed))
+            st.error("COVERAGE_NORMALIZER_FAILED")
+        else:
+            try:
+                import random as _random
+                rng = _random.Random(int(random_seed))
 
-            counts = {}       # full signature -> count
-            patt_counts = {}  # normalized pattern=[..] -> count
-            patt_meta = {}    # pattern -> (rk, ker)
+                counts = {}       # full signature -> count
+                patt_counts = {}  # normalized pattern=[..] -> count
+                patt_meta = {}    # pattern -> (rk, ker)
 
-            for _ in range(int(sample_count)):
-                d_k1 = _rand_gf2_matrix(int(n2), int(n3), float(bit_density), rng)
-                sig  = _coverage_signature(d_k1, n_k=int(n3))
-                counts[sig] = counts.get(sig, 0) + 1
+                for _ in range(int(sample_count)):
+                    d_k1 = _rand_gf2_matrix(int(n2), int(n3), float(bit_density), rng)
+                    sig  = _coverage_signature(d_k1, n_k=int(n3))
+                    counts[sig] = counts.get(sig, 0) + 1
+                    _, patt_only = _normalize_signature_line_to_n2(sig, n2=int(n2), n3=int(n3))
+                    patt_counts[patt_only] = patt_counts.get(patt_only, 0) + 1
+                    rk = ker = ""
+                    try:
+                        for part in sig.split(";"):
+                            P = part.strip()
+                            if P.startswith("rk="):  rk = P[3:]
+                            elif P.startswith("ker="): ker = P[4:]
+                    except Exception:
+                        pass
+                    patt_meta.setdefault(patt_only, (rk, ker))
 
-                # normalized pattern for stable keys
-                _, patt_only = _normalize_signature_line_to_n2(sig, n2=int(n2), n3=int(n3))
-                patt_counts[patt_only] = patt_counts.get(patt_only, 0) + 1
+                st.session_state["_cov_snapshots"][key] = {
+                    "written_at_utc": _now_utc_iso_Z(),
+                    "n2": int(n2), "n3": int(n3),
+                    "random_seed": int(random_seed), "bit_density": float(bit_density),
+                    "sample_count": int(sample_count), "policy": str(policy),
+                    "lane_mask_k3": list(lane_mask_k3), "lane_mask_note": lane_mask_note,
+                    "counts": counts, "patt_counts": patt_counts, "patt_meta": patt_meta,
+                }
+                snap = st.session_state["_cov_snapshots"][key]
+                st.success("Sampling snapshot saved. Manage unmatched below and export when ready.")
+            except Exception as e:
+                st.error(f"COVERAGE_SAMPLER_ERROR: {e}")
 
-                # rk/ker for convenience
-                rk = ker = ""
-                try:
-                    for part in sig.split(";"):
-                        P = part.strip()
-                        if P.startswith("rk="):  rk = P[3:]
-                        elif P.startswith("ker="): ker = P[4:]
-                except Exception:
-                    pass
-                patt_meta.setdefault(patt_only, (rk, ker))
-
-            _set_cov_snapshot(
-                n2=int(n2), n3=int(n3),
-                random_seed=int(random_seed), bit_density=float(bit_density), sample_count=int(sample_count),
-                policy=str(policy),
-                lane_mask_k3=list(lane_mask_k3), lane_mask_note=str(lane_mask_note),
-                counts=counts, patt_counts=patt_counts, patt_meta=patt_meta,
-            )
-            st.success("Sampling snapshot saved. Manage unmatched below and export when ready.")
-        except Exception as e:
-            st.error(f"COVERAGE_SAMPLER_ERROR: {e}")
-
-    # ---------- Render from snapshot (sticky) ----------
-    snap = _get_cov_snapshot()
+    # ---------- Render from snapshot (non-blocking; if absent, just hint) ----------
     if not snap:
         st.info("No snapshot yet. Click **Coverage Sample** to generate one.")
-        st.stop()
-
-    # Build membership set once per render
-    known_set = set((st.session_state.get("run_ctx") or {}).get("known_signatures_patterns") or [])
-    counts      = snap["counts"]
-    patt_counts = snap["patt_counts"]
-    patt_meta   = snap["patt_meta"]
-    total_samples = int(snap["sample_count"])
-
-    # Unique rows (normalize each sample sig before membership compare!)
-    unique_rows = []
-    matched_samples = 0
-    for sig, cnt in counts.items():
-        _, patt_norm = _normalize_signature_line_to_n2(sig, n2=int(snap["n2"]), n3=int(snap["n3"]))
-        in_district  = (patt_norm in known_set)
-        unique_rows.append({"signature": sig, "count": int(cnt), "in_district": bool(in_district)})
-        if in_district:
-            matched_samples += int(cnt)
-
-    total_unique = int(len(patt_counts))
-    matched_unique = sum(1 for p in patt_counts.keys() if p in known_set)
-    pct_unique   = (100.0 * matched_unique / total_unique) if total_unique else 0.0
-    pct_weighted = (100.0 * matched_samples / total_samples) if total_samples else 0.0
-
-    # Banner
-    if pct_weighted >= 95.0:
-        st.success(f"Coverage ≥95% (weighted): {pct_weighted:.1f}% • Unique: {pct_unique:.1f}%")
     else:
-        st.warning(f"Coverage <95% (weighted): {pct_weighted:.1f}% • Unique: {pct_unique:.1f}%")
+        # Build membership set once per render from current baseline (no resample required)
+        known_set = set((st.session_state.get("run_ctx") or {}).get("known_signatures_patterns") or [])
+        counts      = snap["counts"]
+        patt_counts = snap["patt_counts"]
+        patt_meta   = snap["patt_meta"]
+        total_samples = int(snap["sample_count"])
 
-    # Table
-    df = _pd.DataFrame(unique_rows).sort_values("count", ascending=False).reset_index(drop=True)
-    st.caption("Unique signatures (descending by count)")
-    st.dataframe(df, use_container_width=True, hide_index=True)
+        # Unique rows (normalize per sample before membership compare)
+        unique_rows = []
+        matched_samples = 0
+        for sig, cnt in counts.items():
+            _, patt_norm = _normalize_signature_line_to_n2(sig, n2=int(snap["n2"]), n3=int(snap["n3"]))
+            in_district  = (patt_norm in known_set)
+            unique_rows.append({"signature": sig, "count": int(cnt), "in_district": bool(in_district)})
+            if in_district:
+                matched_samples += int(cnt)
 
-    # ---------- Top unmatched (from snapshot) ----------
-    st.subheader("Top unmatched patterns")
-    unmatched = [p for p,_c in patt_counts.items() if p not in known_set]
-    topN = sorted(((p, patt_counts[p]) for p in unmatched), key=lambda x: x[1], reverse=True)[:10]
+        total_unique  = int(len(patt_counts))
+        matched_unique = sum(1 for p in patt_counts.keys() if p in known_set)
+        pct_unique   = (100.0 * matched_unique / total_unique) if total_unique else 0.0
+        pct_weighted = (100.0 * matched_samples / total_samples) if total_samples else 0.0
 
-    if not topN:
-        st.info("All sampled signatures are in the baseline. Nothing to add.")
-    else:
-        if st.button("➕ Add all shown (top unmatched)", key="cov_add_all", on_click=_cov_keep_open_sampling):
-            added = []
-            for patt, _cnt in topN:
-                rk, ker = patt_meta.get(patt, ("", ""))
-                _add_normalized_pattern_to_baseline(patt, rk=str(rk) if rk else None, ker=str(ker) if ker else None)
-                added.append(patt)
-            # Audit
-            rc_hist = st.session_state.setdefault("run_ctx", {})
-            hist = list(rc_hist.get("baseline_history") or [])
-            hist.append({
-                "when_utc": snap["written_at_utc"],
-                "method": "manual-add-all",
-                "added_patterns": added,
-            })
-            rc_hist["baseline_history"] = hist
-            st.caption(f"Baseline now has {len(rc_hist.get('known_signatures_patterns') or [])} patterns.")
+        # Banner
+        if pct_weighted >= 95.0:
+            st.success(f"Coverage ≥95% (weighted): {pct_weighted:.1f}% • Unique: {pct_unique:.1f}%")
+        else:
+            st.warning(f"Coverage <95% (weighted): {pct_weighted:.1f}% • Unique: {pct_unique:.1f}%")
 
-        # Per-row add
-        for i, (patt, cnt) in enumerate(topN, start=1):
-            rk, ker = patt_meta.get(patt, ("", ""))
-            cA, cB, cC, cD = st.columns([6, 2, 2, 2])
-            cA.markdown(f"**{patt}**  \ncount: {int(cnt)}")
-            cB.markdown(f"rk={rk or '—'}")
-            cC.markdown(f"ker={ker or '—'}")
-            if cD.button("➕ Add", key=f"add_base_{i}", on_click=_cov_keep_open_sampling):
-                _add_normalized_pattern_to_baseline(patt, rk=str(rk) if rk else None, ker=str(ker) if ker else None)
+        # Table
+        df = _pd.DataFrame(unique_rows).sort_values("count", ascending=False).reset_index(drop=True)
+        st.caption("Unique signatures (descending by count)")
+        st.dataframe(df, use_container_width=True, hide_index=True)
+
+        # ---------- Top unmatched (from snapshot) ----------
+        st.subheader("Top unmatched patterns")
+        unmatched = [p for p,_c in patt_counts.items() if p not in known_set]
+        topN = sorted(((p, patt_counts[p]) for p in unmatched), key=lambda x: x[1], reverse=True)[:10]
+
+        if not topN:
+            st.info("All sampled signatures are in the baseline. Nothing to add.")
+        else:
+            if st.button("➕ Add all shown (top unmatched)", key="cov_add_all", disabled=disable_ui, on_click=_cov_keep_open_sampling):
+                added = []
+                for patt, _cnt in topN:
+                    rk, ker = patt_meta.get(patt, ("", ""))
+                    _add_normalized_pattern_to_baseline(patt, rk=str(rk) if rk else None, ker=str(ker) if ker else None)
+                    added.append(patt)
                 # Audit
                 rc_hist = st.session_state.setdefault("run_ctx", {})
                 hist = list(rc_hist.get("baseline_history") or [])
-                hist.append({
-                    "when_utc": snap["written_at_utc"],
-                    "method": "manual-add-one",
-                    "added_patterns": [patt],
-                })
+                hist.append({"when_utc": snap["written_at_utc"], "method": "manual-add-all", "added_patterns": added})
                 rc_hist["baseline_history"] = hist
-                st.success(f"Added {patt} to baseline.")
                 st.caption(f"Baseline now has {len(rc_hist.get('known_signatures_patterns') or [])} patterns.")
 
-    # ---------- Auto-add controller (no resample) ----------
-    st.divider()
-    st.subheader("Auto-add unmatched until target coverage")
-    target = st.slider("Target weighted coverage (%)", 50, 100, 95, 1, key="cov_target_pct")
-    max_add = st.number_input("Max patterns to add this run", min_value=1, max_value=100, value=10, step=1, key="cov_max_add")
+            # Per-row add
+            for i, (patt, cnt) in enumerate(topN, start=1):
+                rk, ker = patt_meta.get(patt, ("", ""))
+                cA, cB, cC, cD = st.columns([6, 2, 2, 2])
+                cA.markdown(f"**{patt}**  \ncount: {int(cnt)}")
+                cB.markdown(f"rk={rk or '—'}")
+                cC.markdown(f"ker={ker or '—'}")
+                if cD.button("➕ Add", key=f"add_base_{i}", disabled=disable_ui, on_click=_cov_keep_open_sampling):
+                    _add_normalized_pattern_to_baseline(patt, rk=str(rk) if rk else None, ker=str(ker) if ker else None)
+                    # Audit
+                    rc_hist = st.session_state.setdefault("run_ctx", {})
+                    hist = list(rc_hist.get("baseline_history") or [])
+                    hist.append({"when_utc": snap["written_at_utc"], "method": "manual-add-one", "added_patterns": [patt]})
+                    rc_hist["baseline_history"] = hist
+                    st.success(f"Added {patt} to baseline.")
+                    st.caption(f"Baseline now has {len(rc_hist.get('known_signatures_patterns') or [])} patterns.")
 
-    def _compute_weighted_coverage(pcounts: dict, known: set) -> float:
-        matched = sum(int(c) for p,c in pcounts.items() if p in known)
-        total   = sum(int(c) for c in pcounts.values()) or 1
-        return 100.0 * matched / total
+        # ---------- Auto-add controller (no resample) ----------
+        st.divider()
+        st.subheader("Auto-add unmatched until target coverage")
+        target = st.slider("Target weighted coverage (%)", 50, 100, 95, 1, key="cov_target_pct")
+        max_add = st.number_input("Max patterns to add this run", min_value=1, max_value=100, value=10, step=1, key="cov_max_add")
 
-    if st.button("Auto-add top unmatched", key="cov_auto_add", on_click=_cov_keep_open_sampling):
-        rc_live = st.session_state.get("run_ctx") or {}
-        known_set_live = set(rc_live.get("known_signatures_patterns") or [])
-        items = sorted(((p, c) for p, c in patt_counts.items() if p not in known_set_live),
-                       key=lambda x: x[1], reverse=True)
-        added = []
-        for patt, _cnt in items:
-            cov_now = _compute_weighted_coverage(patt_counts, known_set_live)
-            if cov_now >= float(target) or len(added) >= int(max_add):
-                break
-            _add_normalized_pattern_to_baseline(patt)  # rk/ker optional
+        def _compute_weighted_coverage(pcounts: dict, known: set) -> float:
+            matched = sum(int(c) for p,c in pcounts.items() if p in known)
+            total   = sum(int(c) for c in pcounts.values()) or 1
+            return 100.0 * matched / total
+
+        if st.button("Auto-add top unmatched", key="cov_auto_add", disabled=disable_ui, on_click=_cov_keep_open_sampling):
             rc_live = st.session_state.get("run_ctx") or {}
             known_set_live = set(rc_live.get("known_signatures_patterns") or [])
-            added.append(patt)
+            items = sorted(((p, c) for p, c in patt_counts.items() if p not in known_set_live),
+                           key=lambda x: x[1], reverse=True)
+            added = []
+            for patt, _cnt in items:
+                cov_now = _compute_weighted_coverage(patt_counts, known_set_live)
+                if cov_now >= float(target) or len(added) >= int(max_add):
+                    break
+                _add_normalized_pattern_to_baseline(patt)  # rk/ker optional
+                rc_live = st.session_state.get("run_ctx") or {}
+                known_set_live = set(rc_live.get("known_signatures_patterns") or [])
+                added.append(patt)
 
-        # Audit
-        rc_hist = st.session_state.setdefault("run_ctx", {})
-        hist = list(rc_hist.get("baseline_history") or [])
-        result_cov = _compute_weighted_coverage(patt_counts, set(rc_hist.get("known_signatures_patterns") or []))
-        hist.append({
-            "when_utc": snap["written_at_utc"],
-            "method": "auto-add",
-            "target_pct": float(target),
-            "max_add": int(max_add),
-            "added_patterns": added,
-            "result_pct": round(float(result_cov), 3),
-        })
-        rc_hist["baseline_history"] = hist
+            rc_hist = st.session_state.setdefault("run_ctx", {})
+            hist = list(rc_hist.get("baseline_history") or [])
+            result_cov = _compute_weighted_coverage(patt_counts, set(rc_hist.get("known_signatures_patterns") or []))
+            hist.append({
+                "when_utc": snap["written_at_utc"],
+                "method": "auto-add",
+                "target_pct": float(target),
+                "max_add": int(max_add),
+                "added_patterns": added,
+                "result_pct": round(float(result_cov), 3),
+            })
+            rc_hist["baseline_history"] = hist
 
-        st.success(f"Auto-added {len(added)} pattern(s). Current weighted coverage (est.) ≈ {result_cov:.1f}%")
-        st.caption(f"Baseline now has {len(rc_hist.get('known_signatures_patterns') or [])} patterns.")
+            st.success(f"Auto-added {len(added)} pattern(s). Current weighted coverage (est.) ≈ {result_cov:.1f}%")
+            st.caption(f"Baseline now has {len(rc_hist.get('known_signatures_patterns') or [])} patterns.")
 
-    # ---------- Re-run (new sample) & Export baseline ----------
-    col_run, col_exp = st.columns([1, 1])
-    if col_run.button("Re-run coverage with updated baseline", key="cov_rerun", on_click=_cov_keep_open_sampling):
-        st.session_state["trigger_coverage_run"] = True
-        if hasattr(st, "experimental_rerun"):
-            st.experimental_rerun()
+        # ---------- Re-run (new sample) & Export baseline/artifacts ----------
+        col_run, col_exp = st.columns([1, 1])
+        if col_run.button("Re-run coverage with updated baseline", key="cov_rerun", disabled=disable_ui, on_click=_cov_keep_open_sampling):
+            st.session_state["trigger_coverage_run"] = True
+            if hasattr(st, "experimental_rerun"):
+                st.experimental_rerun()
 
-    if col_exp.button("Export current baseline", key="cov_export", on_click=_cov_keep_open_sampling):
-        rcx  = st.session_state.get("run_ctx") or {}
-        base = list(rcx.get("known_signatures") or [])
-        patt = list(rcx.get("known_signatures_patterns") or [])
-        mem_json = _StringIO(); mem_json.write(_json.dumps(base, ensure_ascii=False, indent=2))
-        st.download_button("Download baseline_signatures.json", data=mem_json.getvalue().encode("utf-8"),
-                           file_name="baseline_signatures.json", mime="application/json")
-        mem_txt = _StringIO(); mem_txt.write("\n".join(patt))
-        st.download_button("Download baseline_patterns.txt", data=mem_txt.getvalue().encode("utf-8"),
-                           file_name="baseline_patterns.txt", mime="text/plain")
+        if col_exp.button("Export current baseline", key="cov_export", disabled=False, on_click=_cov_keep_open_sampling):
+            rcx  = st.session_state.get("run_ctx") or {}
+            base = list(rcx.get("known_signatures") or [])
+            patt = list(rcx.get("known_signatures_patterns") or [])
+            mem_json = _StringIO(); mem_json.write(_json.dumps(base, ensure_ascii=False, indent=2))
+            st.download_button("Download baseline_signatures.json", data=mem_json.getvalue().encode("utf-8"),
+                               file_name="baseline_signatures.json", mime="application/json")
+            mem_txt = _StringIO(); mem_txt.write("\n".join(patt))
+            st.download_button("Download baseline_patterns.txt", data=mem_txt.getvalue().encode("utf-8"),
+                               file_name="baseline_patterns.txt", mime="text/plain")
 
-    # ---------- Artifact JSON + CSV (snapshot + refreshed baseline) ----------
-    # Re-read baseline atomically to avoid race with adds
-    rc_payload = st.session_state.get("run_ctx") or {}
-    ks_full  = list(rc_payload.get("known_signatures") or [])
-    ks_patt  = list(rc_payload.get("known_signatures_patterns") or [])
-    if not ks_full or not ks_patt:
-        st.error("COVERAGE_CONFIG_EMPTY"); st.stop()
-    if not all(_dialect_ok(p) for p in ks_patt):
-        st.error("COVERAGE_BASELINE_DIALECT_MISMATCH"); st.stop()
+        # ---------- Artifact JSON + CSV (snapshot + refreshed baseline) ----------
+        rc_payload = st.session_state.get("run_ctx") or {}
+        ks_full  = list(rc_payload.get("known_signatures") or [])
+        ks_patt  = list(rc_payload.get("known_signatures_patterns") or [])
+        if not ks_full or not ks_patt:
+            st.warning("COVERAGE_CONFIG_EMPTY: baseline cleared during session. Reload baseline to export artifacts.")
+        else:
+            # Final dialect check before export
+            def _ok_pattern(p: str) -> bool:
+                toks = _extract_pattern_tokens(p)
+                return (len(toks) == int(snap["n3"])) and all(len(t) == int(snap["n2"]) for t in toks)
+            if not all(_ok_pattern(p) for p in ks_patt):
+                st.warning("COVERAGE_BASELINE_DIALECT_MISMATCH: normalize to n₂-bit columns in loader before exporting.")
+            else:
+                shapes_bytes = (st.session_state.get("shapes_raw_bytes") or b"")
+                shapes_hash  = _sha256_bytes(shapes_bytes) if shapes_bytes else (rc_payload.get("shapes_hash") or "")
+                U_hash = ""  # coverage has no carrier
 
-    # Hashes
-    shapes_bytes = (st.session_state.get("shapes_raw_bytes") or b"")
-    shapes_hash  = _sha256_bytes(shapes_bytes) if shapes_bytes else (rc_payload.get("shapes_hash") or "")
-    U_hash = ""  # coverage has no carrier
+                artifact = {
+                    "schema_version": "1.0.0",
+                    "written_at_utc": snap["written_at_utc"],
+                    "app_version": st.session_state.get("app_version") or "",
+                    "params": {
+                        "n2": int(snap["n2"]),
+                        "n3": int(snap["n3"]),
+                        "lane_mask_k3": list(snap["lane_mask_k3"]),
+                        "lane_mask_note": snap["lane_mask_note"],
+                        "policy": snap["policy"],
+                        "random_seed": int(snap["random_seed"]),
+                        "bit_density": float(snap["bit_density"]),
+                        "sample_count": int(snap["sample_count"]),
+                    },
+                    "baseline": {
+                        "count": int(len(ks_full)),
+                        "known_signatures": ks_full,
+                        "known_signatures_patterns": ks_patt,
+                    },
+                    "samples": sorted(
+                        [{"signature": r["signature"], "count": int(r["count"]), "in_district": bool(r["in_district"])}
+                         for r in unique_rows],
+                        key=lambda x: x["count"], reverse=True
+                    ),
+                    "summary": {
+                        "unique_total": int(total_unique),
+                        "unique_matched": int(matched_unique),
+                        "pct_in_district_unique": round(float(pct_unique), 3),
+                        "samples_total": int(total_samples),
+                        "samples_matched": int(matched_samples),
+                        "pct_in_district_weighted": round(float(pct_weighted), 3),
+                    },
+                    "hashes": {"shapes_hash": str(shapes_hash), "U_hash": str(U_hash)},
+                }
+                content_hash = _sha256_json(artifact)
+                artifact["hashes"]["content_hash"] = content_hash
 
-    written_at_utc = snap["written_at_utc"]  # deterministic per snapshot
-    artifact = {
-        "schema_version": "1.0.0",
-        "written_at_utc": written_at_utc,
-        "app_version": st.session_state.get("app_version") or "",
-        "params": {
-            "n2": int(snap["n2"]),
-            "n3": int(snap["n3"]),
-            "lane_mask_k3": list(snap["lane_mask_k3"]),
-            "lane_mask_note": snap["lane_mask_note"],
-            "policy": snap["policy"],
-            "random_seed": int(snap["random_seed"]),
-            "bit_density": float(snap["bit_density"]),
-            "sample_count": int(snap["sample_count"]),
-        },
-        "baseline": {
-            "count": int(len(ks_full)),
-            "known_signatures": ks_full,
-            "known_signatures_patterns": ks_patt,
-        },
-        "samples": sorted(
-            [{"signature": r["signature"], "count": int(r["count"]), "in_district": bool(r["in_district"])}
-             for r in unique_rows],
-            key=lambda x: x["count"], reverse=True
-        ),
-        "summary": {
-            "unique_total": int(total_unique),
-            "unique_matched": int(matched_unique),
-            "pct_in_district_unique": round(float(pct_unique), 3),
-            "samples_total": int(total_samples),
-            "samples_matched": int(matched_samples),
-            "pct_in_district_weighted": round(float(pct_weighted), 3),
-        },
-        "hashes": {"shapes_hash": str(shapes_hash), "U_hash": str(U_hash)},
-    }
-    content_hash = _sha256_json(artifact)
-    artifact["hashes"]["content_hash"] = content_hash
+                # deterministic filenames
+                district = (st.session_state.get("run_ctx") or {}).get("district_id")
+                tag = ( (district + "__") if district else "" ) + ((st.session_state.get("run_ctx") or {}).get("run_id") or content_hash[:8])
 
-    # Filenames (prefix with district if present)
-    district = (st.session_state.get("run_ctx") or {}).get("district_id")
-    tag = ( (district + "__") if district else "" ) + ((st.session_state.get("run_ctx") or {}).get("run_id") or content_hash[:8])
+                json_str = _json.dumps(artifact, indent=2, sort_keys=False)
+                st.download_button("Download coverage_report.json",
+                                   data=json_str.encode("utf-8"),
+                                   file_name=f"coverage_report__{tag}.json",
+                                   mime="application/json")
 
-    json_str = _json.dumps(artifact, indent=2, sort_keys=False)
-    st.download_button("Download coverage_report.json",
-                       data=json_str.encode("utf-8"),
-                       file_name=f"coverage_report__{tag}.json",
-                       mime="application/json")
+                # CSV (unique signatures) with rk/ker
+                def _rk_ker(sig: str):
+                    rk = ker = ""
+                    try:
+                        for part in sig.split(";"):
+                            P = part.strip()
+                            if P.startswith("rk="): rk = P[3:]
+                            elif P.startswith("ker="): ker = P[4:]
+                    except Exception:
+                        pass
+                    return rk, ker
 
-    # CSV (unique signatures) with rk/ker
-    def _rk_ker(sig: str):
-        rk = ker = ""
-        try:
-            for part in sig.split(";"):
-                P = part.strip()
-                if P.startswith("rk="): rk = P[3:]
-                elif P.startswith("ker="): ker = P[4:]
-        except Exception:
-            pass
-    # build CSV rows
-        return rk, ker
+                df_csv = _pd.DataFrame({
+                    "signature":   [r["signature"] for r in unique_rows],
+                    "count":       [int(r["count"]) for r in unique_rows],
+                    "in_district": [bool(r["in_district"]) for r in unique_rows],
+                    "pct":         [ (float(r["count"])/float(total_samples)) if total_samples else 0.0 for r in unique_rows ],
+                    "rk":          [_rk_ker(r["signature"])[0] for r in unique_rows],
+                    "ker":         [_rk_ker(r["signature"])[1] for r in unique_rows],
+                }).sort_values("count", ascending=False)
 
-    df_csv = _pd.DataFrame({
-        "signature":   [r["signature"] for r in unique_rows],
-        "count":       [int(r["count"]) for r in unique_rows],
-        "in_district": [bool(r["in_district"]) for r in unique_rows],
-        "pct":         [ (float(r["count"])/float(total_samples)) if total_samples else 0.0 for r in unique_rows ],
-        "rk":          [_rk_ker(r["signature"])[0] for r in unique_rows],
-        "ker":          [_rk_ker(r["signature"])[1] for r in unique_rows],
-    }).sort_values("count", ascending=False)
+                csv_buf = _StringIO(); df_csv.to_csv(csv_buf, index=False)
+                st.download_button("Download coverage_summary.csv",
+                                   data=csv_buf.getvalue().encode("utf-8"),
+                                   file_name=f"coverage_summary__{tag}.csv",
+                                   mime="text/csv")
+# ===================== /Coverage Sampling =====================
 
-    csv_buf = _StringIO(); df_csv.to_csv(csv_buf, index=False)
-    st.download_button("Download coverage_summary.csv",
-                       data=csv_buf.getvalue().encode("utf-8"),
-                       file_name=f"coverage_summary__{tag}.csv",
-                       mime="text/csv")
-# ===================== /Coverage Sampling (snapshot-based) =====================
 
 
 # =========================[ · Gallery Append & Dedupe (cert-required) ]=========================
