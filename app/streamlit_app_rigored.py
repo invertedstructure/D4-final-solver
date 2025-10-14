@@ -3009,12 +3009,22 @@ with st.expander("Coverage · Normalizer self-test", expanded=False):
     n2t, n3t = _autofill_dims_from_session()
     if n2t == 0 or n3t == 0:
         n2t, n3t = 2, 3
+
     for raw, expect in tests:
         _, patt = _normalize_signature_line_to_n2(raw, n2=int(n2t), n3=int(n3t))
         st.text(f"{raw} -> {patt} (expect {expect})")
         if patt != expect:
             normalizer_ok = False
-    st.success("Normalizer OK") if normalizer_ok else st.error("COVERAGE_NORMALIZER_FAILED")
+
+    # IMPORTANT: avoid a bare ternary, which Streamlit's "magic" tries to render.
+    if normalizer_ok:
+        st.success("Normalizer OK")
+    else:
+        st.error("COVERAGE_NORMALIZER_FAILED")
+
+# optionally persist for gating later sections
+st.session_state["normalizer_ok"] = normalizer_ok
+
 
 # ===================== Coverage Sampling (snapshot-based; sticky UI) =====================
 with st.expander("Coverage Sampling", expanded=st.session_state.get("_cov_sampling_open", True)):
