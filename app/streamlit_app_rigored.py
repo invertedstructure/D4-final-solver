@@ -6345,87 +6345,89 @@ with safe_expander("Cert & provenance", expanded=True):  # safe_expander is alre
                     f"Embedded A/B → {cert_payload.get('ab_pair_tag','A/B')}"
                     if cert_payload.get("ab_embedded") else "Embedded A/B → —"
                 )
+
+
+# --- Bundle (cert + extras) ---
+with st.container():  # was: st.expander("Bundle (cert + extras)")
+    st.markdown("### Bundle (cert + extras)")
+    extras = [
+        "policy.json",
+        "reports/residual.json",
+        "reports/parity_report.json",
+        "reports/coverage_sampling.csv",
+        "logs/gallery.jsonl",
+        "logs/witnesses.jsonl",
+    ]
+    if _rc.get("mode")=="projected(file)" and _rc.get("projector_filename"):
+        extras.append(_rc.get("projector_filename"))
+
+    disabled = _file_mode_invalid_now()
+    tip = "Disabled because projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π."
+    if st.button(
+        "Build Cert Bundle",
+        key="build_cert_bundle_btn_final",
+        disabled=disabled,
+        help=(tip if disabled else "Zip cert + selected artifacts")
+    ):
+        try:
+            bp = build_cert_bundle(
+                district_id=district_id, policy_tag=policy_now,
+                cert_path=st.session_state.get("last_cert_path",""),
+                content_hash=full_hash, extras=extras
+            )
+            st.success(f"Bundle ready → {bp}")
+            try:
+                with open(bp,"rb") as fz:
+                    st.download_button(
+                        "Download cert bundle", fz,
+                        file_name=os.path.basename(bp),
+                        key="dl_cert_bundle_zip_final"
+                    )
+            except Exception:
+                pass
+        except Exception as e:
+            st.error(f"Bundle build failed: {e}")
+# ───────────────────────── Certs on disk (last 5) ─────────────────────────
+CERTS_DIR = Path(globals().get("CERTS_DIR","certs"))
+CERTS_DIR.mkdir(parents=True, exist_ok=True)
+
+with st.container():  # was: st.expander("Certs on disk (last 5)", expanded=False)
+    st.markdown("### Certs on disk (last 5)")
+    all_certs = sorted(CERTS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+    st.caption(f"Found {len(all_certs)} certs in `{CERTS_DIR.as_posix()}`.")
+    ab_only = st.checkbox("Show only certs with A/B embed", value=False, key="tail_ab_only_final")
+
+    def _fmt_ts(ts):
+        from datetime import datetime as _dt
+        try: return _dt.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%SZ")
+        except Exception: return ""
+
+    shown = 0
+    for p in all_certs:
+        if shown >= 5:
+            break
+        try:
+            info = _json.loads(p.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        ident  = info.get("identity") or {}
+        policy = info.get("policy") or {}
+        tag    = policy.get("policy_tag") or "strict"
+        has_ab = bool(
+            info.get("ab_embedded") or
+            ("ab_pair_tag" in info) or
+            ("projected_snapshot" in policy and "strict_snapshot" in policy)
+        )
+        if ab_only and not has_ab:
+            continue
+        ab_label = f" · [A/B: {info.get('ab_pair_tag') or policy.get('ab_pair_tag') or 'A/B'}]" if has_ab else ""
+        st.write(f"• {_fmt_ts(p.stat().st_mtime)} · {ident.get('district_id','UNKNOWN')} · {tag} · {p.name}{ab_label}")
+        shown += 1
+
             
-                            # --- Bundle (cert + extras) ---
-                with st.container():  # was: st.expander("Bundle (cert + extras)")
-                    st.markdown("### Bundle (cert + extras)")
-                    extras = [
-                        "policy.json",
-                        "reports/residual.json",
-                        "reports/parity_report.json",
-                        "reports/coverage_sampling.csv",
-                        "logs/gallery.jsonl",
-                        "logs/witnesses.jsonl",
-                    ]
-                    if _rc.get("mode")=="projected(file)" and _rc.get("projector_filename"):
-                        extras.append(_rc.get("projector_filename"))
-                
-                    disabled = _file_mode_invalid_now()
-                    tip = "Disabled because projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π."
-                    if st.button(
-                        "Build Cert Bundle",
-                        key="build_cert_bundle_btn_final",
-                        disabled=disabled,
-                        help=(tip if disabled else "Zip cert + selected artifacts")
-                    ):
-                        try:
-                            bp = build_cert_bundle(
-                                district_id=district_id, policy_tag=policy_now,
-                                cert_path=st.session_state.get("last_cert_path",""),
-                                content_hash=full_hash, extras=extras
-                            )
-                            st.success(f"Bundle ready → {bp}")
-                            try:
-                                with open(bp,"rb") as fz:
-                                    st.download_button(
-                                        "Download cert bundle", fz,
-                                        file_name=os.path.basename(bp),
-                                        key="dl_cert_bundle_zip_final"
-                                    )
-                            except Exception:
-                                pass
-                        except Exception as e:
-                            st.error(f"Bundle build failed: {e}")
     
                             
-                                # ───────────────────────── Certs on disk (last 5) ─────────────────────────
-                            CERTS_DIR = Path(globals().get("CERTS_DIR","certs"))
-                            CERTS_DIR.mkdir(parents=True, exist_ok=True)
-                            
-                            with st.container():  # was: st.expander("Certs on disk (last 5)", expanded=False)
-                                st.markdown("### Certs on disk (last 5)")
-                                all_certs = sorted(CERTS_DIR.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-                                st.caption(f"Found {len(all_certs)} certs in `{CERTS_DIR.as_posix()}`.")
-                                ab_only = st.checkbox("Show only certs with A/B embed", value=False, key="tail_ab_only_final")
-                            
-                                def _fmt_ts(ts):
-                                    from datetime import datetime as _dt
-                                    try: return _dt.utcfromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%SZ")
-                                    except Exception: return ""
-                            
-                                shown = 0
-                                for p in all_certs:
-                                    if shown >= 5:
-                                        break
-                                    try:
-                                        info = _json.loads(p.read_text(encoding="utf-8"))
-                                    except Exception:
-                                        continue
-                                    ident  = info.get("identity") or {}
-                                    policy = info.get("policy") or {}
-                                    tag    = policy.get("policy_tag") or "strict"
-                                    has_ab = bool(
-                                        info.get("ab_embedded") or
-                                        ("ab_pair_tag" in info) or
-                                        ("projected_snapshot" in policy and "strict_snapshot" in policy)
-                                    )
-                                    if ab_only and not has_ab:
-                                        continue
-                                    ab_label = f" · [A/B: {info.get('ab_pair_tag') or policy.get('ab_pair_tag') or 'A/B'}]" if has_ab else ""
-                                    st.write(f"• {_fmt_ts(p.stat().st_mtime)} · {ident.get('district_id','UNKNOWN')} · {tag} · {p.name}{ab_label}")
-                                    shown += 1
-                        
-                        # ------------------------ /Cert writer ------------------------
+                       
        
                
 
