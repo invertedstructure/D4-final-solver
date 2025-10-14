@@ -2996,6 +2996,20 @@ def _add_normalized_pattern_to_baseline(pattern_str: str, rk: str|None=None, ker
     st.session_state["run_ctx"] = rc0
     return full_norm, patt_norm
 
+# ---------- Coverage bootstrap (place ABOVE self-test & expanders) ----------
+if "_cov_baseline_open" not in st.session_state:
+    st.session_state["_cov_baseline_open"] = True
+if "_cov_sampling_open" not in st.session_state:
+    st.session_state["_cov_sampling_open"] = True
+if "_cov_defaults" not in st.session_state:
+    st.session_state["_cov_defaults"] = {
+        "random_seed": 1337,
+        "bit_density": 0.40,
+        "sample_count": 200,
+    }
+st.session_state.setdefault("normalizer_ok", True)
+
+   
 
 
 # ===================== Coverage · Normalizer self-test (gate sampling) =====================
@@ -3038,6 +3052,8 @@ with st.expander("Coverage Sampling", expanded=st.session_state.get("_cov_sampli
                                    value=float(dflt["bit_density"]), step=0.05, format="%.2f", key="cov_density_num")
     sample_count = c3.number_input("sample_count", min_value=1, value=int(dflt["sample_count"]), step=50, key="cov_samples_num")
     policy       = c4.selectbox("policy", options=["strict"], index=0, help="Coverage uses strict.", key="cov_policy_sel")
+
+       
 
     # ---------- Guards: dims + baseline ----------
     n2, n3 = _autofill_dims_from_session()
