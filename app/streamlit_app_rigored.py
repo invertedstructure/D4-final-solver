@@ -5928,6 +5928,7 @@ with safe_expander("Cert & provenance", expanded=True):
     import os, json, hashlib, platform, time
     from pathlib import Path
     from datetime import datetime
+st.caption(f"cert.arm={bool(st.session_state.get('write_armed', False))} · by={st.session_state.get('armed_by','')}")
 
     # ---------- constants ----------
     SCHEMA_VERSION = "1.0.0"
