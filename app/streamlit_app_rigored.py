@@ -1704,53 +1704,65 @@ else:
     st.caption("A/B snapshot: —")
 
 # ====================== A/B Compare (strict vs ACTIVE projected) ======================
+
+# --- tiny helpers (local, side-effect free) ---
 def _inputs_sig_now_from_ib(ib: dict) -> list[str]:
     return [
-        str(ib.get("boundaries_hash","")),
-        str(ib.get("C_hash","")),
-        str(ib.get("H_hash","")),
-        str(ib.get("U_hash","")),
-        str(ib.get("shapes_hash","")),
+        str((ib or {}).get("boundaries_hash","")),
+        str((ib or {}).get("C_hash","")),
+        str((ib or {}).get("H_hash","")),
+        str((ib or {}).get("U_hash","")),
+        str((ib or {}).get("shapes_hash","")),
     ]
 
 def _canonical_policy_tag(rc: dict) -> str:
     try:
-        return str(rc.get("policy_tag") or policy_label_from_cfg(cfg_active))
+        return str((rc or {}).get("policy_tag") or policy_label_from_cfg(cfg_active))
     except Exception:
-        return str(rc.get("policy_tag") or "strict")
+        return str((rc or {}).get("policy_tag") or "strict")
 
 def _ab_is_fresh(ab: dict, *, rc: dict, ib: dict) -> bool:
     if not ab: return False
     if ab.get("inputs_sig") != _inputs_sig_now_from_ib(ib): return False
     if (ab.get("projected") or {}).get("policy_tag") != _canonical_policy_tag(rc): return False
-    if str(rc.get("mode","")).startswith("projected(file)"):
-        if (ab.get("projected") or {}).get("projector_hash","") != (rc.get("projector_hash","") or ""):
+    if str((rc or {}).get("mode","")).startswith("projected(file)"):
+        if (ab.get("projected") or {}).get("projector_hash","") != ((rc or {}).get("projector_hash","") or ""):
             return False
     return True
 
-with safe_expander("A/B compare (strict vs active projected)"):
+with safe_expander("A/B compare (strict vs active projected)", expanded=False):
+    # Current snapshot pill (optional)
+    _ab_snap = st.session_state.get("ab_compare") or {}
+    if _ab_snap:
+        fresh = _ab_is_fresh(_ab_snap, rc=st.session_state.get("run_ctx") or {}, ib=st.session_state.get("_inputs_block") or {})
+        st.caption("A/B snapshot: " + ("🟢 fresh (will embed in cert)" if fresh else "🟡 stale (won’t embed)"))
+    else:
+        st.caption("A/B snapshot: —")
+
+    # Main action
     if st.button("Run A/B compare", key="ab_run_btn_final"):
         try:
             ss = st.session_state
             rc = ss.get("run_ctx") or {}
             out_active = ss.get("overlap_out") or {}
-            ib = ss.get("_inputs_block") or {}
+            ib_block   = ss.get("_inputs_block") or {}
 
             mode_now = str(rc.get("mode","strict"))
             if mode_now == "strict":
                 st.warning("Active policy is strict — run Overlap in projected(auto/file) first to compare.")
                 st.stop()
 
+            # Use currently loaded/staged objects
             boundaries_obj = boundaries
             cmap_obj = cmap
             H_used = ss.get("overlap_H") or _load_h_local()
 
-            # strict leg (fresh)
+            # strict leg (fresh recompute)
             out_strict = overlap_gate.overlap_check(boundaries_obj, cmap_obj, H_used)
             label_strict = "strict"
 
-            # projected leg = ACTIVE run’s result (no recompute)
-            out_proj = out_active
+            # projected leg = ACTIVE run’s published result (no recompute)
+            out_proj  = out_active
             label_proj = _canonical_policy_tag(rc)
 
             pj_hash = rc.get("projector_hash","") if mode_now.startswith("projected") else ""
@@ -1782,13 +1794,15 @@ with safe_expander("A/B compare (strict vs active projected)"):
             lane_vec_H2d3 = _mask(_bottom_row(H2d3), lane_mask)
             lane_vec_C3I  = _mask(_bottom_row(C3pI3), lane_mask)
 
-            inputs_sig = _inputs_sig_now_from_ib(ib)
-            pair_tag = f"{label_strict}__VS__{label_proj}"
+            inputs_sig = _inputs_sig_now_from_ib(ib_block)
+            pair_tag   = f"{label_strict}__VS__{label_proj}"
 
             ab_payload = {
                 "pair_tag": pair_tag,
                 "inputs_sig": inputs_sig,
                 "lane_mask_k3": lane_mask,
+                # top-level policy tag for freshness checks
+                "policy_tag": label_proj,                      # <-- NEW: make freshness trivial
                 "strict": {
                     "label": label_strict,
                     "cfg":   cfg_strict(),
@@ -1820,15 +1834,22 @@ with safe_expander("A/B compare (strict vs active projected)"):
                 },
             }
 
+            # UI snapshot (keep)
             ss["ab_compare"] = ab_payload
-            ss["should_write_cert"] = True
-            ss.pop("_last_cert_write_key", None)
+
+            # PIN for cert embed + single-flight arm
+            ss["ab_pin"] = {"state": "pinned", "payload": ab_payload, "consumed": False}  # <-- NEW
+            ss["write_armed"] = True                                                      # <-- NEW
+            ss["armed_by"] = "ab_pinned"                                                  # <-- NEW
+            ss.pop("_last_cert_write_key", None)                                          # <-- NEW: force 1 write now
 
             s_ok = bool(out_strict.get("3",{}).get("eq", False))
             p_ok = bool(out_proj.get("3",{}).get("eq", False))
             st.success(f"A/B updated → strict={'✅' if s_ok else '❌'} · projected={'✅' if p_ok else '❌'} · {pair_tag}")
 
-            with safe_expander("A/B snapshot (details)"):
+            # Optional details without nesting expanders
+            show_ab = st.checkbox("Show A/B snapshot payload", value=False, key="ab_show_payload")
+            if show_ab:
                 st.json(ab_payload)
 
         except Exception as e:
@@ -1840,6 +1861,8 @@ with safe_expander("A/B compare (strict vs active projected)"):
         if st.button("Clear stale A/B", key="btn_ab_clear_final"):
             st.session_state.pop("ab_compare", None)
             st.success("Cleared A/B snapshot. Re-run A/B to refresh.")
+# ======================================================================================
+
 
 
 
