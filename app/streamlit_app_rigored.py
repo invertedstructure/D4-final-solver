@@ -1349,59 +1349,26 @@ cfg_active = _cfg_from_policy(
 # Display active policy label
 st.caption(f"Active policy: `{policy_label_from_cfg(cfg_active)}`")
 
-# ------------------------------ Run Overlap (SSOT staging + freshness) ------------------------------
-def _truth_mask_from_d3(d3: list[list[int]]) -> list[int]:
-    """Column-wise OR over GF(2); returns length n3 mask with values in {0,1}."""
-    if not d3 or not d3[0]:
-        return []
-    rows, n3 = len(d3), len(d3[0])
-    return [1 if any(d3[i][j] & 1 for i in range(rows)) else 0 for j in range(n3)]
-
-def _shape(M):
-    return (len(M), len(M[0]) if (M and M[0]) else 0)
-
-def _guard_r3_shapes(H2, d3, C3):
-    rH, cH = _shape(H2)
-    rD, cD = _shape(d3)
-    rC, cC = _shape(C3)
-    # Expect: H2 is (n3 x n2), d3 is (n2 x n3), C3 is (n3 x n3)
-    if not (rH and cH and rD and cD and rC and cC):
-        # Allow empty when inputs are empty; exploration may still show UI
-        return
-    n3 = rH
-    n2 = cH
-    exp = f"H2({n3}×{n2})·d3({n2}×{n3}) and (C3⊕I3)({n3}×{n3})"
-    ok = (rD == n2 and cD == n3 and rC == n3 and cC == n3)
-    if not ok:
-        raise RuntimeError(
-            f"R3_SHAPE: expected {exp}, got H2({rH}×{cH}), d3({rD}×{cD}), C3({rC}×{cC})"
-        )
+# ------------------------------ Run Overlap (SSOT-staging; cert-aligned) ------------------------------
 
 def run_overlap():
     # Ensure a fixture nonce exists
     _ensure_fixture_nonce()
 
-    # Clear previous artifacts for a clean run
+    # Clear only per-run artifacts (keep A/B pins, inputs cache, etc.)
     for k in ("proj_meta","run_ctx","residual_tags","overlap_out",
-              "overlap_H","overlap_cfg","overlap_policy_label"):
+              "overlap_H","overlap_cfg","overlap_policy_label","_file_mode_error"):
         st.session_state.pop(k, None)
 
-    # --- Bind projector (fail-fast on FILE) ---
+    # --- Bind projector (resolve Π; FILE may raise) ---
     try:
-        st.session_state.pop("_file_mode_error", None)  # clear previous FILE error
         P_active, meta = projector_choose_active(cfg_active, boundaries)
     except ValueError as e:
+        # Build a minimal RC so the cert block can render state & reason
         code = getattr(e, "code", None) or "P3_ERROR"
         pjfn = (cfg_active.get("projector_files", {}) or {}).get("3", "")
-
-        st.session_state["_file_mode_error"] = {
-            "code": code,
-            "message": str(e),
-            "projector_filename": pjfn,
-        }
-
-        st.error(str(e))
         d3_now = (boundaries.blocks.__root__.get("3") or [])
+        n3_now = len(d3_now[0]) if (d3_now and d3_now[0]) else 0
 
         _policy_label = (policy_label_from_state({"mode": "projected(file)"}, cfg_active)
                          if "policy_label_from_state" in globals()
@@ -1412,8 +1379,8 @@ def run_overlap():
             "mode": "projected(file)",
             "fixture_nonce": st.session_state.get("_fixture_nonce", 0),
             "d3": d3_now,
-            "n3": len(d3_now[0]) if (d3_now and d3_now[0]) else 0,
-            "lane_mask_k3": [],
+            "n3": n3_now,
+            "lane_mask_k3": _truth_mask_from_d3(d3_now),
             "P_active": [],
             "projector_filename": pjfn,
             "projector_hash": "",
@@ -1421,22 +1388,60 @@ def run_overlap():
             "source": (cfg_active.get("source") or {}),
             "errors": [str(e)],
         }
-        st.stop()
 
-    # Context from projector resolver (authoritative d3/n3/mode)
+        # FILE validity flags for the cert guard
+        st.session_state["file_pi_valid"]   = False
+        st.session_state["file_pi_reasons"] = [str(code), str(e)[:140]]
+
+        # Stage dims/hash shells minimally so the cert block can show a coherent “skip” reason.
+        try:
+            H_local = _load_h_local()
+            H2 = (H_local.blocks.__root__.get("2") or [])
+            st.session_state["overlap_H"]  = H_local
+            st.session_state["overlap_out"] = {"3": {"eq": False, "n_k": n3_now}, "2": {"eq": True}}
+            st.session_state["overlap_cfg"] = cfg_active
+            st.session_state["overlap_policy_label"] = _policy_label
+
+            # Pending SSOT hashes (best-effort)
+            def _stable_blocks_sha(obj) -> str:
+                data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (obj if isinstance(obj, dict) else {"blocks": {}})
+                s = _json.dumps(_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+                return _hash.sha256(s).hexdigest()
+            st.session_state["_inputs_hashes_pending"] = {
+                "boundaries_hash": _stable_blocks_sha(boundaries),
+                "C_hash":          _stable_blocks_sha(cmap),
+                "H_hash":          _stable_blocks_sha(H_local),
+                "U_hash":          _stable_blocks_sha(shapes),
+                "shapes_hash":     _stable_blocks_sha(shapes),
+            }
+            st.session_state["_dims_pending"] = {"n2": len(H2) if H2 else 0, "n3": n3_now}
+            st.session_state.setdefault("_filenames_pending", {
+                "boundaries": st.session_state.get("fname_boundaries","boundaries.json"),
+                "C":          st.session_state.get("fname_cmap","cmap.json"),
+                "H":          st.session_state.get("fname_h","H.json"),
+                "U":          st.session_state.get("fname_shapes","shapes.json"),
+            })
+        except Exception:
+            pass
+
+        # ARM cert writer so it logs SKIP_FILE_PI_INVALID with reasons
+        st.session_state["write_armed"] = True
+        st.session_state["armed_by"]    = "file_invalid"
+
+        # Surface the error to the user (but don’t st.stop so the cert block can render)
+        st.error(f"Projected(FILE) validation failed [{code}]: {e}")
+        return  # let the script continue to the cert block
+
+    # --- Success path: derive d3/n3/mode from meta (authoritative) ---
     d3   = meta.get("d3") if "d3" in meta else (boundaries.blocks.__root__.get("3") or [])
     n3   = meta.get("n3") if "n3" in meta else (len(d3[0]) if (d3 and d3[0]) else 0)
     mode = meta.get("mode", _derive_mode_from_cfg(cfg_active))
 
-    # SSOT lane mask from THIS d3
+    # Lane mask from current d3 (SSOT)
     lm_truth = _truth_mask_from_d3(d3)
     assert len(lm_truth) == n3, f"lane_mask_k3 length {len(lm_truth)} != n3 {n3}"
 
-    # Per-run id
-    run_id = str(uuid4())
-    st.session_state["last_run_id"] = run_id
-
-    # Strict residuals (with explicit shape guard; no soft fallback)
+    # Strict residuals (guard shape; keep UI responsive)
     H_local = _load_h_local()
     H2 = (H_local.blocks.__root__.get("2") or [])
     C3 = (cmap.blocks.__root__.get("3") or [])
@@ -1447,9 +1452,9 @@ def run_overlap():
         R3_strict = _xor_mat(mul(H2, d3), _xor_mat(C3, I3))
     except Exception as e:
         st.error(f"Shape guard failed at k=3: {e}")
-        # Keep UI responsive; mark as error but continue to stage SSOT + RC
         R3_strict = []
 
+    # Helpers
     def _is_zero(M):
         return (not M) or all(all((x & 1) == 0 for x in row) for row in M)
 
@@ -1469,7 +1474,7 @@ def run_overlap():
     tag_strict = _residual_tag(R3_strict, lm_truth)
     eq3_strict = _is_zero(R3_strict)
 
-    # Projected leg (when enabled)
+    # Projected leg (if enabled)
     if cfg_active.get("enabled_layers"):
         R3_proj  = mul(R3_strict, P_active) if (R3_strict and P_active) else []
         eq3_proj = _is_zero(R3_proj)
@@ -1480,7 +1485,7 @@ def run_overlap():
         out = {"3": {"eq": bool(eq3_strict), "n_k": n3}, "2": {"eq": True}}
         st.session_state["residual_tags"] = {"strict": tag_strict}
 
-    # Persist run context
+    # Persist run context (SSOT that the cert block freezes)
     _policy_label = (policy_label_from_state({"mode": mode}, cfg_active)
                      if "policy_label_from_state" in globals()
                      else policy_label_from_cfg(cfg_active))
@@ -1499,22 +1504,17 @@ def run_overlap():
         "projector_hash": meta.get("projector_hash", ""),
         "projector_consistent_with_d": meta.get("projector_consistent_with_d", None),
         "source": (cfg_active.get("source") or {}),
-        "run_id": run_id,
-        "errors": [],
+        # note: do NOT set/override last_run_id here; cert block manages it
     }
 
-    # Run-stamp banner
-    ib = st.session_state.get("_inputs_block") or {}
-    B = ib.get("boundaries_hash",""); C = ib.get("C_hash",""); Hh = ib.get("H_hash",""); U = ib.get("U_hash","")
-    P_hash = meta.get("projector_hash","") if mode.startswith("projected") else ""
-    _short = lambda h: (h or "")[:12]
-    st.caption(
-        f"run ⟂ { _policy_label } | n3={n3} | "
-        f"B:{_short(B)} C:{_short(C)} H:{_short(Hh)} U:{_short(U)} | "
-        f"P:{_short(P_hash)} | id:{_short(run_id)}"
+    # FILE validity flags (always set so the cert block has a single source of truth)
+    st.session_state["file_pi_valid"] = bool(
+        (mode == "projected(file)") and meta.get("projector_consistent_with_d", False)
+        or (mode != "projected(file)")
     )
+    st.session_state["file_pi_reasons"] = []  # clear any prior reasons on success
 
-    # --- Stage SSOT inputs (pending; Cert will publish) ----
+    # --- Stage SSOT inputs (pending; cert will publish) ---
     def _stable_blocks_sha(obj) -> str:
         try:
             data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (obj if isinstance(obj, dict) else {"blocks": {}})
@@ -1546,7 +1546,7 @@ def run_overlap():
     except Exception as e:
         st.warning(f"(Could not stage SSOT inputs for Cert: {e})")
 
-    # Minimal debug & status
+    # Minimal status (optional)
     st.json(out)
     if mode == "projected(file)":
         if meta.get("projector_consistent_with_d", False):
@@ -1554,10 +1554,16 @@ def run_overlap():
         else:
             st.warning("Projected(file) is not consistent with current d3 (check shape/idempotence/diag/lane).")
 
+    # --- ARM the cert writer (single-flight) ---
+    st.session_state["write_armed"] = True
+    st.session_state["armed_by"]    = "overlap_run"
+
+
 # ---- Single canonical button ----
 if st.button("Run Overlap", key="btn_run_overlap_main"):
-    soft_reset_before_overlap()  # global helper (deduped earlier)
+    soft_reset_before_overlap()  # your helper
     run_overlap()
+
 
 # (optional) minimal debug expander; safe to remove
 with st.expander("Debug · d3 & lane mask"):
