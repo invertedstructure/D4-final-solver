@@ -6130,30 +6130,30 @@ with safe_expander("Cert & provenance", expanded=True):
         else:
             st.info("Mode: STRICT")
     with c3:
-    ab_pin_local = ss.get("ab_pin") or {}
-    is_ab_pinned = (ab_pin_local.get("state") == "pinned")
+        ab_pin_local = ss.get("ab_pin") or {}
+        is_ab_pinned = (ab_pin_local.get("state") == "pinned")
 
-    if is_ab_pinned:
-        ab = ab_pin_local.get("payload") or {}
-        stale = None
-
-        # Freshness checks (ordered + exclusive)
-        if tuple(ab.get("inputs_sig") or ()) != inputs_sig:
-            stale = REASON.AB_STALE_INPUTS_SIG
-        elif _canon_policy(ab.get("policy_tag", "")) != policy_canon:
-            stale = REASON.AB_STALE_POLICY
-        elif (
-            policy_canon == "projected:file"
-            and (ab.get("projected", {}) or {}).get("projector_hash", "") != proj_hash
-        ):
-            stale = REASON.AB_STALE_PROJECTOR_HASH
-
-        if stale is None:
-            st.success("A/B: Pinned · Fresh")
+        if is_ab_pinned:
+            ab = ab_pin_local.get("payload") or {}
+            stale = None
+    
+            # Freshness checks (ordered + exclusive)
+            if tuple(ab.get("inputs_sig") or ()) != inputs_sig:
+                stale = REASON.AB_STALE_INPUTS_SIG
+            elif _canon_policy(ab.get("policy_tag", "")) != policy_canon:
+                stale = REASON.AB_STALE_POLICY
+            elif (
+                policy_canon == "projected:file"
+                and (ab.get("projected", {}) or {}).get("projector_hash", "") != proj_hash
+            ):
+                stale = REASON.AB_STALE_PROJECTOR_HASH
+    
+            if stale is None:
+                st.success("A/B: Pinned · Fresh")
+            else:
+                st.warning(f"A/B: Pinned · Stale ({stale})")
         else:
-            st.warning(f"A/B: Pinned · Stale ({stale})")
-    else:
-        st.caption("A/B: —")
+            st.caption("A/B: —")
 
     with c4:
         if not write_armed:
