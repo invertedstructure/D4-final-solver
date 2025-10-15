@@ -6121,13 +6121,18 @@ with safe_expander("Cert & provenance", expanded=True):
             stale = None
             if tuple(ab.get("inputs_sig") or ()) != inputs_sig:
                 stale = REASON.AB_STALE_INPUTS_SIG
-            elif _canon_policy(ab.get("policy_tag","")) != policy_canon:
+            elif _canon_policy(policy_raw) != policy_canon:
                 stale = REASON.AB_STALE_POLICY
             elif policy_canon == "projected:file" and (ab.get("projected",{}) or {}).get("projector_hash","") != proj_hash:
                 stale = REASON.AB_STALE_PROJECTOR_HASH
-            st.success("A/B: Pinned · Fresh") if not stale else st.warning(f"A/B: Pinned · Stale ({stale})")
+    
+            if stale:
+                st.warning(f"A/B: Pinned · Stale ({stale})")
+            else:
+                st.success("A/B: Pinned · Fresh")
         else:
             st.caption("A/B: —")
+
     with c4:
         if not write_armed:
             st.caption("Write: Idle")
