@@ -3634,348 +3634,196 @@ with st.expander("Coverage Sampling", expanded=st.session_state.get("_cov_sampli
 # ===================== /Coverage Sampling =====================
 
 
+# =========================[ · Gallery Append & Dedupe (cert-required, canonical schema) ]=========================
 
-# =========================[ · Gallery Append & Dedupe (cert-required) ]=========================
+from pathlib import Path
+import os, json
 
-GALLERY_PATH = (LOGS_DIR / "gallery.jsonl")
-GALLERY_PATH.parent.mkdir(parents=True, exist_ok=True)
+LOGS_DIR = Path("logs")
+GALLERY_JSONL = LOGS_DIR / "gallery.jsonl"
+GALLERY_JSONL.parent.mkdir(parents=True, exist_ok=True)
 
-# Ensure the dedupe key matches spec
-def gallery_key(row: dict) -> tuple:
-    pol = row.get("policy") or {}
-    h   = row.get("hashes") or {}
-    return (
-        str(row.get("district", "")),
-        str(pol.get("policy_tag", "")),
-        str(h.get("boundaries_hash", "")),
-        str(h.get("C_hash", "")),
-        str(h.get("H_hash", "")),
-        str(h.get("U_hash", "")),
-    )
+# --- Canonical schema (same as build_b2_gallery) ---
+# district,fixture,projected,hash_d,hash_U,hash_suppC,hash_suppH,
+# growth,tag,strictify,lane_vec_H2,lane_vec_C3pI3,ab_embedded,content_hash
 
-# ---- Safe helpers (define only if missing in this file) ----
-if "safe_expander" not in globals():
-    def safe_expander(label: str, expanded: bool=False):
-        # Tiny wrapper to ensure we never hard-stop this section
-        return st.expander(label, expanded=expanded)
+def _gallery_row_from_cert(cert: dict) -> dict:
+    """Project a cert payload to the canonical B2 row schema."""
+    if not cert:
+        return {}
 
-if "_std_meta" not in globals():
-    def _std_meta(run_id=None):
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "written_at_utc": _utc_iso_z(),
-            "app_version":    APP_VERSION,
-            **({"run_id": run_id} if run_id else {}),
-        }
+    identity   = cert.get("identity", {}) or {}
+    policy     = cert.get("policy",   {}) or {}
+    inputs     = cert.get("inputs",   {}) or {}
+    hashes     = (inputs.get("hashes") or {})
+    diags      = cert.get("diagnostics", {}) or {}
+    gallery    = cert.get("gallery", {}) or {}
+    ab_embed   = cert.get("ab_embed", {}) or {}
+    h          = cert.get("hashes", {}) or {}
 
-if "_read_jsonl_tail" not in globals():
-    def _read_jsonl_tail(path: Path, N: int = 100) -> list[dict]:
-        out = []
+    district   = identity.get("district_id", "UNKNOWN")
+    fixture    = identity.get("fixture_label", "") or ""   # required for row, may be blank
+    projected  = str(policy.get("canon", "strict"))
+
+    hash_d     = str(policy.get("projector_hash", "")) if projected == "projected:file" else ""
+    hash_U     = str(hashes.get("U_hash", "")) or ""
+    hash_C     = str(hashes.get("C_hash", "")) or ""
+    hash_H     = str(hashes.get("H_hash", "")) or ""
+
+    growth     = gallery.get("growth_bumps", cert.get("growth", {}).get("growth_bumps", 0))
+    tag        = str(gallery.get("tag", ""))
+    strictify  = str(gallery.get("strictify", "tbd"))
+
+    # diagnostics vectors; store JSON-strings per spec
+    lv_H2      = diags.get("lane_vec_H2@d3", [])
+    lv_C3pI3   = diags.get("lane_vec_C3+I3", [])
+
+    ab_emb     = bool(ab_embed.get("fresh", False))
+    content_h  = str(h.get("content_hash", ""))
+
+    # ensure stable JSON text for vector columns
+    def _as_json(v): 
         try:
-            if not path.exists():
-                return out
-            with open(path, "r", encoding="utf-8") as f:
-                # simple tail: read last ~N lines
-                lines = f.readlines()[-N:]
-            for ln in lines:
-                ln = ln.strip()
-                if not ln:
-                    continue
-                try:
-                    out.append(json.loads(ln))
-                except Exception:
-                    continue
+            return json.dumps(v, separators=(",", ":"), ensure_ascii=True)
         except Exception:
-            pass
-        return out
+            return "[]"
 
-if "_atomic_append_jsonl" not in globals():
-    def _atomic_append_jsonl(path: Path, row: dict):
-        blob = (json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        with open(tmp, "ab") as f:
-            f.write(blob)
-            f.flush()
-            os.fsync(f.fileno())
-        # append by rename (preserves existing) — if rename fails, fall back to append
-        with open(path, "ab") as f:
-            f.write(blob)
-
-# Session caches
-ss = st.session_state
-ss.setdefault("_gallery_keys", set())
-ss.setdefault("_gallery_bootstrapped", False)
-
-with safe_expander("Gallery"):
-    rc   = ss.get("run_ctx") or {}
-    cert = ss.get("cert_payload") or {}
-
-    has_cert = bool(cert)
-    if not has_cert:
-        st.info("No cert in memory yet. Run Overlap (let cert writer emit) before adding to gallery.")
-
-    # ---- Pull fields from the cert (SSOT)
-    identity = (cert.get("identity") or {}) if has_cert else {}
-    policy   = (cert.get("policy")   or {}) if has_cert else {}
-    inputs   = (cert.get("inputs")   or {}) if has_cert else {}
-
-    # HASHES SOURCE OF TRUTH: artifact_hashes, then inputs.hashes
-    artifacts   = (cert.get("artifact_hashes") or {}) if has_cert else {}
-    inputs_hash = (inputs.get("hashes") or {}) if has_cert else {}
-
-    h_boundaries = artifacts.get("boundaries_hash") or inputs_hash.get("boundaries_hash","")
-    h_C          = artifacts.get("C_hash")          or inputs_hash.get("C_hash","")
-    h_H          = artifacts.get("H_hash")          or inputs_hash.get("H_hash","")
-    h_U          = artifacts.get("U_hash")          or inputs_hash.get("U_hash","")
-    h_shapes     = artifacts.get("shapes_hash")     or inputs_hash.get("shapes_hash","") or h_U
-
-    district_id    = identity.get("district_id", "UNKNOWN")
-    policy_tag     = policy.get("policy_tag", rc.get("policy_tag", rc.get("mode", "strict")))
-    projector_hash = policy.get("projector_hash", "")
-    pj_consistent  = policy.get("projector_consistent_with_d", None)  # True/False/None
-    cert_hash      = (cert.get("integrity") or {}).get("content_hash", "") or ""
-
-    # ---- Optional UI fields
-    c1, c2, c3 = st.columns([1,1,2])
-    with c1:
-        growth_bumps = st.number_input("growth_bumps", min_value=0, value=0, step=1, key="gal_growth_bumps")
-    with c2:
-        strictify = st.selectbox("strictify", options=["tbd", "no", "yes"], index=0, key="gal_strictify")
-    with c3:
-        tag = st.text_input("tag (optional)", value="", key="gal_tag")
-
-    # ---- Row (meta first)
-    row = {
-        **_std_meta(run_id=(ss.get("run_ctx") or {}).get("run_id")),
-        "district": district_id,
-        "policy": {
-            "policy_tag":     policy_tag,
-            "projector_hash": projector_hash,
-            **({"projector_consistent_with_d": bool(pj_consistent)} if pj_consistent is not None else {}),
-        },
-        "hashes": {
-            "boundaries_hash": h_boundaries,
-            "C_hash":          h_C,
-            "H_hash":          h_H,
-            "U_hash":          h_U,
-            "shapes_hash":     h_shapes,
-        },
-        "growth_bumps":      int(growth_bumps),
-        "strictify":         str(strictify),
-        "tag":               tag or "",
-        "cert_content_hash": cert_hash,
+    return {
+        "district":        district,
+        "fixture":         fixture,
+        "projected":       projected,
+        "hash_d":          hash_d,
+        "hash_U":          hash_U,
+        "hash_suppC":      hash_C,
+        "hash_suppH":      hash_H,
+        "growth":          int(growth) if isinstance(growth, (int, float)) else 0,
+        "tag":             tag,
+        "strictify":       strictify,
+        "lane_vec_H2":     _as_json(lv_H2),
+        "lane_vec_C3pI3":  _as_json(lv_C3pI3),
+        "ab_embedded":     bool(ab_emb),
+        "content_hash":    content_h,
     }
 
-    # ---- Dedupe key (district, policy_tag, B, C, H, U)
-    try:
-        key = gallery_key(row)
-    except Exception:
-        key = None
+def _atomic_append_jsonl(path: Path, row: dict) -> None:
+    blob = (json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
+    tmp  = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "ab") as f:
+        f.write(blob); f.flush(); os.fsync(f.fileno())
+    # append to real file
+    with open(path, "ab") as f:
+        f.write(blob)
 
-    # ---- Bootstrap dedupe cache from tail (once)
+def _read_jsonl_tail(path: Path, N: int = 100) -> list[dict]:
+    out = []
+    try:
+        if not path.exists():
+            return out
+        with open(path, "r", encoding="utf-8") as f:
+            for ln in f.readlines()[-N:]:
+                ln = ln.strip()
+                if ln:
+                    try:
+                        out.append(json.loads(ln))
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return out
+
+# session caches for dedupe
+ss = st.session_state
+ss.setdefault("_gallery_seen_keys", set())
+ss.setdefault("_gallery_bootstrapped", False)
+
+def _gallery_key(row: dict) -> tuple:
+    # minimal, deterministic dedupe: same cert for same fixture once
+    return (row.get("district",""), row.get("fixture",""), row.get("content_hash",""))
+
+with safe_expander("Gallery (canonical)", expanded=False):
+    cert = ss.get("cert_payload") or {}
+    has_cert = bool(cert)
+    if not has_cert:
+        st.info("No cert in memory yet. Run Overlap until a cert is written, then append here.")
+
+    # Assemble canonical row from cert
+    row = _gallery_row_from_cert(cert) if has_cert else {}
+
+    # UI: lightweight overrides (optional)
+    c1, c2, c3 = st.columns([1,1,2])
+    with c1:
+        if has_cert:
+            row["growth"] = st.number_input("growth_bumps", min_value=0, value=int(row.get("growth",0)), step=1, key="gal_growth_bumps_v2")
+    with c2:
+        if has_cert:
+            row["strictify"] = st.selectbox("strictify", options=["tbd","no","yes"],
+                                            index=["tbd","no","yes"].index(row.get("strictify","tbd")),
+                                            key="gal_strictify_v2")
+    with c3:
+        if has_cert:
+            row["tag"] = st.text_input("tag (optional)", value=row.get("tag",""), key="gal_tag_v2")
+
+    # Bootstrap dedupe cache from tail once
     if not ss["_gallery_bootstrapped"]:
-        for tail_row in _read_jsonl_tail(GALLERY_PATH, N=200):
+        for tail_row in _read_jsonl_tail(GALLERY_JSONL, N=200):
             try:
-                ss["_gallery_keys"].add(gallery_key(tail_row))
+                ss["_gallery_seen_keys"].add(_gallery_key(tail_row))
             except Exception:
                 continue
         ss["_gallery_bootstrapped"] = True
 
-    # ---- Button (disabled when no cert)
-    tip = ("Append current cert to gallery.jsonl" if has_cert
-           else "Disabled until a cert is written this run.")
-    if st.button("Add to Gallery", key="btn_gallery_append", disabled=not has_cert, help=tip):
+    # Append button (disabled w/o cert or missing fixture)
+    disabled = (not has_cert) or (not row.get("fixture"))
+    tip = None if has_cert else "Disabled until a cert is available."
+    if not row.get("fixture"):
+        st.warning("This cert has no fixture_label. Set identity.fixture_label in your cert flow to log gallery rows.")
+
+    if st.button("Add to Gallery", key="btn_gallery_append_v2", disabled=disabled, help=tip or "Append row to gallery.jsonl"):
         try:
-            if key is None:
-                st.warning("Could not compute dedupe key; skipping append.")
-            elif key in ss["_gallery_keys"]:
-                st.info("Duplicate skipped (same district/policy/hashes).")
+            k = _gallery_key(row)
+            if k in ss["_gallery_seen_keys"]:
+                st.info("Duplicate skipped (same district/fixture/content_hash).")
             else:
-                _atomic_append_jsonl(GALLERY_PATH, row)
-                ss["_gallery_keys"].add(key)
+                _atomic_append_jsonl(GALLERY_JSONL, row)
+                ss["_gallery_seen_keys"].add(k)
                 st.success("Gallery row appended.")
+                # keep CSV in sync, if builder is present
+                try:
+                    build_b2_gallery(debounce=True)
+                except Exception as e:
+                    st.info(f"(B2 gallery build skipped: {e})")
         except Exception as e:
             st.error(f"Gallery append failed: {e}")
 
-    # ---- Tail view
+    # Tail view (compact)
     try:
-        tail = _read_jsonl_tail(GALLERY_PATH, N=8)
+        tail = _read_jsonl_tail(GALLERY_JSONL, N=8)
         if tail:
             import pandas as pd
             view = []
             for r in tail:
                 view.append({
-                    "when":      r.get("written_at_utc",""),
-                    "district":  r.get("district",""),
-                    "policy_tag": (r.get("policy") or {}).get("policy_tag",""),
-                    "proj[:12]": ((r.get("policy") or {}).get("projector_hash","") or "")[:12],
-                    "P_consist": (r.get("policy") or {}).get("projector_consistent_with_d", None),
-                    "B[:8]":     (r.get("hashes") or {}).get("boundaries_hash","")[:8],
-                    "C[:8]":     (r.get("hashes") or {}).get("C_hash","")[:8],
-                    "H[:8]":     (r.get("hashes") or {}).get("H_hash","")[:8],
-                    "U[:8]":     (r.get("hashes") or {}).get("U_hash","")[:8],
-                    "strictify": r.get("strictify",""),
-                    "tag":       r.get("tag",""),
+                    "when":        r.get("written_at_utc",""),
+                    "district":    r.get("district",""),
+                    "fixture":     r.get("fixture",""),
+                    "proj":        r.get("projected",""),
+                    "d[:8]":       (r.get("hash_d","") or "")[:8],
+                    "U[:8]":       (r.get("hash_U","") or "")[:8],
+                    "C[:8]":       (r.get("hash_suppC","") or "")[:8],
+                    "H[:8]":       (r.get("hash_suppH","") or "")[:8],
+                    "ab":          bool(r.get("ab_embedded", False)),
+                    "tag":         r.get("tag",""),
+                    "strictify":   r.get("strictify",""),
+                    "content[:12]":(r.get("content_hash","") or "")[:12],
                 })
             st.dataframe(pd.DataFrame(view), use_container_width=True, hide_index=True)
         else:
             st.caption("Gallery is empty.")
     except Exception as e:
         st.warning(f"Could not render gallery tail: {e}")
+# ======================= end Gallery (canonical) =======================
 
-# =========================[ STEP 3 · Witness on Stubborn RED ]=========================
 
-WITNESS_PATH = (LOGS_DIR / "witnesses.jsonl")
-WITNESS_PATH.parent.mkdir(parents=True, exist_ok=True)
-
-ss.setdefault("_witness_keys", set())
-ss.setdefault("_witness_bootstrapped", False)
-
-def witness_key(row: dict):
-    h = row.get("hashes") or {}
-    return (
-        str(row.get("district","UNKNOWN")),
-        str(row.get("reason","")),
-        str(row.get("residual_tag","")),
-        str((row.get("policy") or {}).get("policy_tag","")),
-        str(h.get("boundaries_hash","")),
-        str(h.get("C_hash","")),
-        str(h.get("H_hash","")),
-        str(h.get("U_hash","")),
-    )
-
-with safe_expander("Witness logger"):
-    # --- Freshness attempt; never st.stop() here ---
-    rc, rc_ok = None, True
-    try:
-        rc = require_fresh_run_ctx()
-        rc = rectify_run_ctx_mask_from_d3()
-    except Exception:
-        rc_ok = False
-        st.info("Run Overlap first (witness logging will be disabled).")
-
-    out = ss.get("overlap_out") or {}
-    eq3 = bool(((out.get("3") or {}).get("eq", False))) if rc_ok else True  # default to not-eligible
-    eligible_red = bool(rc_ok and (eq3 is False))
-
-    # FILE Π invalid should only block in projected(file)
-    def _file_pi_invalid_for_mode(_rc) -> bool:
-        try:
-            return (str((_rc or {}).get("mode","")) == "projected(file)") and file_validation_failed()
-        except Exception:
-            return False
-
-    fm_bad = _file_pi_invalid_for_mode(rc)
-    help_txt = "Disabled because projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π."
-
-    # Residual tag selection (strict vs projected)
-    tags = ss.get("residual_tags") or {}
-    mode = str((rc or {}).get("mode","strict"))
-    residual_tag_val = tags.get("projected" if mode.startswith("projected") else "strict", "none")
-
-    # Cert optional (for content hash)
-    cert = ss.get("cert_payload") or {}
-    cert_hash = (cert.get("integrity") or {}).get("content_hash","") or ""
-
-    # Canonical hashes (prefer nested)
-    inputs = cert.get("inputs", {}) or {}
-    hashes = inputs.get("hashes") or {
-        "boundaries_hash": inputs.get("boundaries_hash",""),
-        "C_hash":          inputs.get("C_hash",""),
-        "H_hash":          inputs.get("H_hash",""),
-        "U_hash":          inputs.get("U_hash",""),
-        "shapes_hash":     inputs.get("shapes_hash",""),
-    }
-
-    identity = cert.get("identity", {}) or {}
-    district_id = identity.get("district_id", "UNKNOWN")
-    policy = cert.get("policy", {}) or {}
-    policy_tag = policy.get("policy_tag", (rc or {}).get("policy_tag",""))
-    projector_hash = policy.get("projector_hash","") or ((rc or {}).get("projector_hash","") or "")
-
-    # UI controls
-    c1, c2 = st.columns([1,3])
-    with c1:
-        reason = st.selectbox(
-            "reason",
-            options=["lanes-persist","policy-mismatch","needs-new-R","grammar-drift","other"],
-            index=0,
-            key="w_reason",
-        )
-    with c2:
-        note = st.text_input("note (optional)", value="", key="w_note")
-
-    # Build row per spec (meta first)
-    row = {
-        **_std_meta(run_id=(st.session_state.get("run_ctx") or {}).get("run_id")),
-        "district":       district_id,
-        "reason":         reason,
-        "residual_tag":   residual_tag_val,
-        "policy": {
-            "policy_tag":     policy_tag,
-            "projector_hash": projector_hash,
-        },
-        "hashes": {
-            "boundaries_hash": hashes.get("boundaries_hash",""),
-            "C_hash":          hashes.get("C_hash",""),
-            "H_hash":          hashes.get("H_hash",""),
-            "U_hash":          hashes.get("U_hash",""),
-            "shapes_hash":     hashes.get("shapes_hash",""),
-        },
-        "cert_content_hash": cert_hash,
-        "note":              note or "",
-    }
-
-    # Bootstrap dedupe cache from tail once
-    if not ss["_witness_bootstrapped"]:
-        for tail_row in _read_jsonl_tail(WITNESS_PATH, N=200):
-            try:
-                ss["_witness_keys"].add(witness_key(tail_row))
-            except Exception:
-                continue
-        ss["_witness_bootstrapped"] = True
-
-    k = witness_key(row)
-    disabled = bool(fm_bad or (not eligible_red))
-    tip = help_txt if fm_bad else (None if eligible_red else "Enabled only when k=3 is RED (eq=False).")
-
-    # --- Button: Log Witness (strict-aware gating) ---
-    if st.button("Log Witness", key="btn_witness_append", disabled=disabled, help=(tip or "Append witness to witnesses.jsonl")):
-        try:
-            if k in ss["_witness_keys"]:
-                st.info("Duplicate skipped (same district/reason/tag/policy/hashes).")
-            else:
-                _atomic_append_jsonl(WITNESS_PATH, row)
-                ss["_witness_keys"].add(k)
-                st.success("Witness logged.")
-        except Exception as e:
-            st.error(f"Witness append failed: {e}")
-
-    # --- Tail view ---
-    try:
-        tail = _read_jsonl_tail(WITNESS_PATH, N=8)
-        if tail:
-            import pandas as pd
-            view = []
-            for r in tail:
-                view.append({
-                    "when":       r.get("written_at_utc",""),
-                    "district":   r.get("district",""),
-                    "reason":     r.get("reason",""),
-                    "tag":        r.get("residual_tag",""),
-                    "policy_tag": (r.get("policy") or {}).get("policy_tag",""),
-                    "proj[:12]":  ((r.get("policy") or {}).get("projector_hash","") or "")[:12],
-                    "B[:8]":      (r.get("hashes") or {}).get("boundaries_hash","")[:8],
-                    "C[:8]":      (r.get("hashes") or {}).get("C_hash","")[:8],
-                    "H[:8]":      (r.get("hashes") or {}).get("H_hash","")[:8],
-                    "U[:8]":      (r.get("hashes") or {}).get("U_hash","")[:8],
-                })
-            st.dataframe(pd.DataFrame(view), use_container_width=True, hide_index=True)
-        else:
-            st.caption("No witnesses logged yet.")
-    except Exception as e:
-        st.warning(f"Could not render witnesses tail: {e}")
-# ======================= end JSONL
 
 
 # -------------------------- FREEZER HELPERS -------------------------------------------
