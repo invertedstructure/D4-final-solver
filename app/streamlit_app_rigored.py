@@ -5928,7 +5928,7 @@ with safe_expander("Cert & provenance", expanded=True):
     import os, json, hashlib, platform, time
     from pathlib import Path
     from datetime import datetime
-st.caption(f"cert.arm={bool(st.session_state.get('write_armed', False))} · by={st.session_state.get('armed_by','')}")
+
 
     # ---------- constants ----------
     SCHEMA_VERSION = "1.0.0"
@@ -6025,6 +6025,8 @@ st.caption(f"cert.arm={bool(st.session_state.get('write_armed', False))} · by={
     ib           = dict(ss.get("_inputs_block") or {})
     ab_pin       = dict(ss.get("ab_pin") or {"state":"idle","payload":None,"consumed":False})
     write_armed  = bool(ss.get("write_armed", False))  # default False (must be armed by hooks)
+    st.caption(f"cert.arm={bool(st.session_state.get('write_armed', False))} · by={st.session_state.get('armed_by','')}")
+
 
     # FILE Π validity only matters in FILE mode
     file_pi_valid   = bool(ss.get("file_pi_valid", True))
