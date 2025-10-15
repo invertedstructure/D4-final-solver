@@ -1568,6 +1568,44 @@ def run_overlap():
         st.session_state["overlap_out"] = {"3": {"eq": False, "n_k": n3_now}, "2": {"eq": True}}
         st.session_state["overlap_cfg"] = cfg_active
         st.session_state["overlap_policy_label"] = _policy_label
+            # --- Fixture resolution (no arming) ------------------------------------------
+    try:
+        ss = st.session_state
+        rc = ss.get("run_ctx") or {}
+    
+        district_id  = (ss.get("_district_info") or {}).get("district_id", ss.get("district_id","UNKNOWN"))
+        policy_canon = (_canon_policy if " _canon_policy" in globals() else (lambda s: ("strict" if "strict" in (s or "").lower() else ("projected:file" if ("projected" in (s or "").lower() and "file" in (s or "").lower()) else "projected:auto"))))(rc.get("policy_tag") or rc.get("mode") or "strict")
+    
+        # Use the SAME bottom vectors you already built for cert diagnostics:
+        lane_mask   = list(rc.get("lane_mask_k3") or [])
+        H_bottom    = list((st.session_state.get("_cert_diag_H2d3_bottom") or [])) if "_cert_diag_H2d3_bottom" in st.session_state else list(st.session_state.get("diag_lane_vec_H2d3") or [])
+        CplusI_bot  = list((st.session_state.get("_cert_diag_C3pI3_bottom") or [])) if "_cert_diag_C3pI3_bottom" in st.session_state else list(st.session_state.get("diag_lane_vec_C3pI3") or [])
+    
+        strict_eq3  = bool((st.session_state.get("overlap_out") or {}).get("3",{}).get("eq", False))
+    
+        fx = match_fixture(
+            district_id=district_id,
+            policy_canon=policy_canon,
+            lane_mask_k3=lane_mask,
+            H_bottom=H_bottom,
+            C_plus_I_bottom=CplusI_bot,
+            strict_eq3=strict_eq3,
+            growth_bumps=int(ss.get("growth_bumps", 0)),
+        )
+    
+        # Publish into session + run_ctx (freeze before cert)
+        ss["fixture_label"]      = fx["fixture_label"]
+        ss["gallery_tag"]        = fx["tag"]
+        ss["gallery_strictify"]  = fx["strictify"]
+        ss["growth_bumps"]       = int(fx["growth_bumps"])
+    
+        rc["fixture_label"]      = fx["fixture_label"]
+        rc["fixture_code"]       = fx.get("fixture_code","")
+        ss["run_ctx"]            = rc
+    except Exception as _e_fx:
+        # Non-fatal
+        st.info(f"(Fixture auto-label skipped: {_e_fx})")
+
 
         # Stage minimal SSOT hashes/dims
         import json as _json, hashlib as _hash
