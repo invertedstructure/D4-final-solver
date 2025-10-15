@@ -6139,7 +6139,11 @@ with safe_expander("Cert & provenance", expanded=True):
                 stale = REASON.AB_STALE_POLICY
             elif policy_canon == "projected:file" and (ab.get("projected",{}) or {}).get("projector_hash","") != proj_hash:
                 stale = REASON.AB_STALE_PROJECTOR_HASH
-            st.success("A/B: Pinned · Fresh") if not stale else st.warning(f"A/B: Pinned · Stale ({stale})")
+            if not stale:
+                st.success("A/B: Pinned · Fresh")
+            else:
+                st.warning(f"A/B: Pinned · Stale ({stale})")
+
         else:
             st.caption("A/B: —")
     with c4:
@@ -6430,12 +6434,6 @@ with safe_expander("Cert & provenance", expanded=True):
             st.warning(f"Tail listing failed: {e}")
 # ============================== /GOD BLOCK (final) ==============================
 
-
-
-
-
-
-    
 
 # ============================== B2 Gallery Compiler (final) ==============================
 import os, json, re, csv, hashlib
