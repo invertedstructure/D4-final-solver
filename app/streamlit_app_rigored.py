@@ -102,6 +102,168 @@ DISTRICT_MAP: dict[str, str] = {
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
 
+# ─── Fixtures registry: load + cache + invalidate ─────────────────────────────
+from pathlib import Path
+import json, hashlib, os
+
+def _sha256_bytes(b: bytes) -> str:
+    import hashlib as _h
+    return _h.sha256(b).hexdigest()
+
+def load_fixtures_registry() -> dict | None:
+    """
+    Reads configs/fixtures.json, caches parsed result in session, and invalidates
+    cache whenever the file's SHA256 changes. Returns a dict with keys:
+    {version, ordering, fixtures, __hash, __path}
+    or None if file missing/unreadable.
+    """
+    ss = st.session_state
+    fx_path = Path("configs") / "fixtures.json"
+    try:
+        fx_bytes = fx_path.read_bytes()
+        fx_hash  = _sha256_bytes(fx_bytes)
+    except Exception:
+        # No file or unreadable → clear cache and return None
+        ss.pop("_fixtures_cache", None)
+        ss.pop("_fixtures_bytes_hash", None)
+        return None
+
+    if ss.get("_fixtures_bytes_hash") != fx_hash:
+        try:
+            data = json.loads(fx_bytes.decode("utf-8"))
+            cache = {
+                "version":   str(data.get("version","")),
+                "ordering":  list(data.get("ordering") or []),
+                "fixtures":  list(data.get("fixtures") or []),
+                "__hash":    fx_hash,
+                "__path":    fx_path.as_posix(),
+            }
+            ss["_fixtures_cache"]      = cache
+            ss["_fixtures_bytes_hash"] = fx_hash
+        except Exception:
+            # Corrupt file → do not keep stale cache
+            ss.pop("_fixtures_cache", None)
+            ss["_fixtures_bytes_hash"] = fx_hash
+            return None
+    return ss.get("_fixtures_cache")
+
+# ─── Matching utilities ───────────────────────────────────────────────────────
+def _norm_vec(v): 
+    return [int(x) for x in (v or [])]
+
+def _eq_vec(a, b):
+    a, b = _norm_vec(a), _norm_vec(b)
+    return (len(a) == len(b)) and all(x == y for x, y in zip(a, b))
+
+def _append_matchlog(line: dict):
+    try:
+        p = Path("logs") / "fixtures.matchlog.jsonl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(line, separators=(",", ":")) + "\n")
+    except Exception:
+        pass
+
+def match_fixture(*, district_id: str, policy_canon: str,
+                  lane_mask_k3: list[int],
+                  H_bottom: list[int],
+                  C_plus_I_bottom: list[int],
+                  strict_eq3: bool,
+                  growth_bumps: int | None = None) -> dict:
+    """
+    Returns a dict:
+      {fixture_code, fixture_label, tag, strictify, growth_bumps}
+    First-match-wins based on configs/fixtures.json ordering.
+    Falls back to a synthesized label if nothing matches or dims are empty.
+    """
+    cache = load_fixtures_registry()
+    # Quick sanity (dims / empty vectors → fallback)
+    if not lane_mask_k3 or not (H_bottom or C_plus_I_bottom):
+        return {
+            "fixture_code": "",
+            "fixture_label": f"{district_id} • lanes={_norm_vec(lane_mask_k3)}"
+                              f" • H={_norm_vec(H_bottom)} • C+I={_norm_vec(C_plus_I_bottom)}"
+                              f" • growth={int(growth_bumps or 0)}",
+            "tag": "novelty", "strictify": "tbd",
+            "growth_bumps": int(growth_bumps or 0),
+        }
+
+    candidates = (cache or {}).get("fixtures", [])
+    ordering   = (cache or {}).get("ordering", [])
+    reasons_all = []
+
+    for fx in candidates:
+        code       = str(fx.get("code",""))
+        fx_dist    = fx.get("district")
+        label      = str(fx.get("label", code or ""))
+        tag        = str(fx.get("tag","tbd"))
+        strictify  = str(fx.get("strictify","tbd"))
+        bumps      = int(fx.get("growth_bumps", growth_bumps or 0))
+        match      = fx.get("match") or {}
+
+        # Collect reasons (only first few kept for log)
+        reasons = []
+
+        # District gate (if provided)
+        if fx_dist and str(fx_dist) != str(district_id):
+            reasons.append("district_mismatch")
+
+        # Policy gate (default = any)
+        allowed = match.get("policy_canon_any")
+        if allowed and (policy_canon not in [str(x) for x in allowed]):
+            reasons.append("policy_mismatch")
+
+        # Lanes
+        if "lanes" in match and not _eq_vec(match["lanes"], lane_mask_k3):
+            reasons.append("lanes_mismatch")
+
+        # H bottom
+        if "H_bottom" in match and not _eq_vec(match["H_bottom"], H_bottom):
+            reasons.append("H_bottom_mismatch")
+
+        # C+I bottom
+        if "C3_plus_I3_bottom" in match and not _eq_vec(match["C3_plus_I3_bottom"], C_plus_I_bottom):
+            reasons.append("CplusI_bottom_mismatch")
+
+        # Strict pass flag
+        if "strict_eq3" in match and (bool(strict_eq3) != bool(match["strict_eq3"])):
+            reasons.append("strict_eq3_mismatch")
+
+        # Optional: C3_any_of — ignore if you don't compute raw C3 pattern
+        # (We tolerate absence silently)
+        # if "C3_any_of" in match: ... (skip)
+
+        if not reasons:
+            # FIRST MATCH WINS
+            return {
+                "fixture_code": code,
+                "fixture_label": label or code or f"{district_id} • curated",
+                "tag": tag, "strictify": strictify, "growth_bumps": bumps,
+            }
+        else:
+            reasons_all.append({"code": code, "reasons": reasons})
+
+    # Fallback (no match)
+    fallback = {
+        "fixture_code": "",
+        "fixture_label": f"{district_id} • lanes={_norm_vec(lane_mask_k3)}"
+                          f" • H={_norm_vec(H_bottom)} • C+I={_norm_vec(C_plus_I_bottom)}"
+                          f" • growth={int(growth_bumps or 0)}",
+        "tag": "novelty", "strictify": "tbd",
+        "growth_bumps": int(growth_bumps or 0),
+    }
+    # Log brief reasons for audit
+    _append_matchlog({
+        "district": district_id,
+        "policy": policy_canon,
+        "lanes": _norm_vec(lane_mask_k3),
+        "H_bottom": _norm_vec(H_bottom),
+        "CplusI_bottom": _norm_vec(C_plus_I_bottom),
+        "strict_eq3": bool(strict_eq3),
+        "top_failures": reasons_all[:3],
+    })
+    return fallback
+
 
 def on_policy_change(new_label_raw: str):
     rc = st.session_state.get("run_ctx") or {}
