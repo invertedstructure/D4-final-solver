@@ -1840,8 +1840,19 @@ with safe_expander("A/B compare (strict vs active projected)", expanded=False):
             # PIN for cert embed + single-flight arm
             ss["ab_pin"] = {"state": "pinned", "payload": ab_payload, "consumed": False}  # <-- NEW
             ss["write_armed"] = True                                                      # <-- NEW
-            ss["armed_by"] = "ab_pinned"                                                  # <-- NEW
-            ss.pop("_last_cert_write_key", None)                                          # <-- NEW: force 1 write now
+            ss["armed_by"] = "ab_pinned" 
+                        # PIN for cert embed + single-flight arm
+            ss["ab_pin"] = {"state": "pinned", "payload": ab_payload, "consumed": False}
+            
+            # one-shot ticket to dedupe the embed write (NEW)
+            ss["ab_write_ticket"]   = int(ss.get("ab_write_ticket", 0)) + 1
+            ss["_ab_ticket_pending"] = ss["ab_write_ticket"]
+            
+            # arm exactly once; do NOT clear _last_cert_write_key anymore
+            ss["write_armed"] = True
+            ss["armed_by"]    = "ab_pinned"
+
+                                                
 
             s_ok = bool(out_strict.get("3",{}).get("eq", False))
             p_ok = bool(out_proj.get("3",{}).get("eq", False))
@@ -6047,6 +6058,8 @@ with safe_expander("Cert & provenance", expanded=True):
     C_obj        = ss.get("overlap_C") or io.parse_cmap({"blocks": {}})
     ib           = dict(ss.get("_inputs_block") or {})
     ab_pin       = dict(ss.get("ab_pin") or {"state":"idle","payload":None,"consumed":False})
+    ab_ticket_pending = ss.get("_ab_ticket_pending")
+    last_ab_ticket_written = ss.get("_last_ab_ticket_written")
     write_armed  = bool(ss.get("write_armed", False))  # default False (must be armed by hooks)
     st.caption(f"cert.arm={bool(st.session_state.get('write_armed', False))} · by={st.session_state.get('armed_by','')}")
 
@@ -6158,6 +6171,11 @@ with safe_expander("Cert & provenance", expanded=True):
                 "pj": _short(proj_hash)
             },
             "ab": ("PINNED" if ab_pin.get("state")=="pinned" else "NONE"),
+            if is_ab_pinned and (ab_ticket_pending == last_ab_ticket_written):
+                reason = "SKIP_AB_TICKET_ALREADY_WRITTEN"
+            else:
+                reason = REASON.SKIP_NO_MATERIAL_CHANGE
+
             "file_pi": {"mode": ("file" if policy_canon=="projected:file" else policy_canon), "valid": file_pi_valid, "reasons": file_pi_reasons[:3]}
         })
         st.caption("Inputs incomplete — skipping write.")
@@ -6355,6 +6373,14 @@ with safe_expander("Cert & provenance", expanded=True):
         # clear pin only after successful embedded write
         if ab_fresh and ab_pin.get("state") == "pinned":
             ss["ab_pin"] = {"state":"idle","payload":None,"consumed":True}
+            # record ticket so reruns don't write again
+        if is_ab_pinned and (ab_ticket_pending is not None):
+            ss["_last_ab_ticket_written"] = ab_ticket_pending
+        
+        # clear pin only if we actually embedded this write (your condition is good)
+        if ab_fresh and ab_pin.get("state") == "pinned":
+            ss["ab_pin"] = {"state":"idle","payload":None,"consumed":True}
+
 
         # witness (write)
         _append_witness({
