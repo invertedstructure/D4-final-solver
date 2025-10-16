@@ -7143,8 +7143,10 @@ with safe_expander("Cert & provenance", expanded=True):
                 k3 = bool(((checks.get("k") or {}).get("3") or {}).get("eq", False))
                 ts = info.get("written_at_utc","")
                 flag = " · [A/B]" if has_ab else ""
-                st.write(f"• {ts} · {ident.get("district_id","?")} · {policy.get("label_raw","?")} · "
-                         f"k2/k3={int(k2)}/{int(k3)} · {p.name}{flag}")
+                st.write(
+                    f"• {ts} · {ident.get('district_id','?')} · {policy.get('label_raw','?')} · "
+                    f"k2/k3={int(k2)}/{int(k3)} · {p.name}{flag}"
+                )
                 shown += 1
             if shown == 0:
                 st.caption("No certs to show with current filter.")
