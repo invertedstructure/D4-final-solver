@@ -6468,123 +6468,123 @@ with safe_expander("Cert & provenance", expanded=True):
             parts.append("Δ projector_hash")
         return "; ".join(parts) or "Δ —"
 
-        # ---------- freeze snapshot (single read) ----------
-ss  = st.session_state
-rc  = dict(ss.get("run_ctx") or {})
-out = dict(ss.get("overlap_out") or {})
-H_obj = ss.get("overlap_H") or io.parse_cmap({"blocks": {}})
-C_obj = ss.get("overlap_C") or io.parse_cmap({"blocks": {}})
-ib    = dict(ss.get("_inputs_block") or {})
-
-# Canonical SSOT readers (5-tuple + dict)
-def current_inputs_sig() -> tuple[str, str, str, str, str]:
-    h  = (ib.get("hashes") or {})
-    return (
-        str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
-        str(h.get("C_hash",          ib.get("C_hash",""))),
-        str(h.get("H_hash",          ib.get("H_hash",""))),
-        str(h.get("U_hash",          ib.get("U_hash",""))),
-        str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
-    )
-
-def current_inputs_dict() -> dict:
-    h  = (ib.get("hashes") or {})
-    d  = (ib.get("dims") or {})
-    fn = (ib.get("filenames") or {})
-    return {
-        "hashes": {
-            "boundaries_hash": h.get("boundaries_hash", ib.get("boundaries_hash","")),
-            "C_hash":          h.get("C_hash",          ib.get("C_hash","")),
-            "H_hash":          h.get("H_hash",          ib.get("H_hash","")),
-            "U_hash":          h.get("U_hash",          ib.get("U_hash","")),
-            "shapes_hash":     h.get("shapes_hash",     ib.get("shapes_hash","")),
-        },
-        "dims":      {"n2": int((d or {}).get("n2") or 0), "n3": int((d or {}).get("n3") or 0)},
-        "filenames": dict(fn),
-    }
-
-# If _inputs_block is still empty, try to publish from the staged “pending” vars
-def _publish_inputs_block_from_pending() -> bool:
-    ph = ss.get("_inputs_hashes_pending") or {}
-    pd = ss.get("_dims_pending") or {}
-    pf = ss.get("_filenames_pending") or {}
-    if not ph or not pd:
-        return False
-    ss["_inputs_block"] = {
-        "hashes": dict(ph),
-        "dims":   dict(pd),
-        "filenames": dict(pf),
-        # legacy flattening for older readers:
-        "boundaries_hash": ph.get("boundaries_hash",""),
-        "C_hash":          ph.get("C_hash",""),
-        "H_hash":          ph.get("H_hash",""),
-        "U_hash":          ph.get("U_hash",""),
-        "shapes_hash":     ph.get("shapes_hash",""),
-    }
-    return True
-
-if (not ib) or (not ib.get("hashes") and not ib.get("boundaries_hash")):
-    if _publish_inputs_block_from_pending():
-        ib = dict(ss.get("_inputs_block") or {})
-
-# LAST-RESORT: synthesize SSOT from live objects so Reports & write never see blanks
-if (not ib) or (not (ib.get("hashes") or ib.get("boundaries_hash"))):
-    def _deep_intify(o):
-        if isinstance(o, bool): return 1 if o else 0
-        if isinstance(o, list): return [_deep_intify(x) for x in o]
-        if isinstance(o, dict): return {k: _deep_intify(v) for k, v in o.items()}
-        return o
-    def _stable_blocks_sha(obj) -> str:
-        try:
-            data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (obj if isinstance(obj, dict) else {"blocks": {}})
-            s = json.dumps(_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-            return hashlib.sha256(s).hexdigest()
-        except Exception:
-            return ""
-    try:
-        b_obj = boundaries
-        c_obj = cmap
-        h_obj = H_obj or io.parse_cmap({"blocks": {}})
-        u_obj = shapes
-        ph_live = {
-            "boundaries_hash": _stable_blocks_sha(b_obj),
-            "C_hash":          _stable_blocks_sha(c_obj),
-            "H_hash":          _stable_blocks_sha(h_obj),
-            "U_hash":          _stable_blocks_sha(u_obj),
-            "shapes_hash":     _stable_blocks_sha(u_obj),
-        }
-        pd_live = {
-            "n2": int(len((h_obj.blocks.__root__.get("2") or [])) if h_obj else 0),
-            "n3": int((len((rc.get("d3") or [])[0]) if (rc.get("d3") and rc.get("d3")[0]) else 0)),
-        }
-        pf_live = {
-            "boundaries": ss.get("fname_boundaries","boundaries.json"),
-            "C":          ss.get("fname_cmap","cmap.json"),
-            "H":          ss.get("fname_h","H.json"),
-            "U":          ss.get("fname_shapes","shapes.json"),
-        }
-        ss["_inputs_block"] = {
-            "hashes": dict(ph_live),
-            "dims":   dict(pd_live),
-            "filenames": dict(pf_live),
-            # legacy flattening:
-            "boundaries_hash": ph_live["boundaries_hash"],
-            "C_hash":          ph_live["C_hash"],
-            "H_hash":          ph_live["H_hash"],
-            "U_hash":          ph_live["U_hash"],
-            "shapes_hash":     ph_live["shapes_hash"],
-        }
-        ib = dict(ss.get("_inputs_block") or {})
-        st.caption("SSOT inputs synthesized from live objects.")
-    except Exception as _e_live:
-        st.warning(f"SSOT inputs not staged (live synthesis failed: {_e_live}).")
-
-# Quick SSOT toggle (debug)
-if st.checkbox("Show raw SSOT (_inputs_block)", value=False, key="show_raw_ssot_final"):
-    st.json(ss.get("_inputs_block") or {})
-
-# Canonical, frozen sig that the rest of the cert block will use:
-inputs_sig = current_inputs_sig()
+                # ---------- freeze snapshot (single read) ----------
+        ss  = st.session_state
+        rc  = dict(ss.get("run_ctx") or {})
+        out = dict(ss.get("overlap_out") or {})
+        H_obj = ss.get("overlap_H") or io.parse_cmap({"blocks": {}})
+        C_obj = ss.get("overlap_C") or io.parse_cmap({"blocks": {}})
+        ib    = dict(ss.get("_inputs_block") or {})
+        
+        # Canonical SSOT readers (5-tuple + dict)
+        def current_inputs_sig() -> tuple[str, str, str, str, str]:
+            h  = (ib.get("hashes") or {})
+            return (
+                str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
+                str(h.get("C_hash",          ib.get("C_hash",""))),
+                str(h.get("H_hash",          ib.get("H_hash",""))),
+                str(h.get("U_hash",          ib.get("U_hash",""))),
+                str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
+            )
+        
+        def current_inputs_dict() -> dict:
+            h  = (ib.get("hashes") or {})
+            d  = (ib.get("dims") or {})
+            fn = (ib.get("filenames") or {})
+            return {
+                "hashes": {
+                    "boundaries_hash": h.get("boundaries_hash", ib.get("boundaries_hash","")),
+                    "C_hash":          h.get("C_hash",          ib.get("C_hash","")),
+                    "H_hash":          h.get("H_hash",          ib.get("H_hash","")),
+                    "U_hash":          h.get("U_hash",          ib.get("U_hash","")),
+                    "shapes_hash":     h.get("shapes_hash",     ib.get("shapes_hash","")),
+                },
+                "dims":      {"n2": int((d or {}).get("n2") or 0), "n3": int((d or {}).get("n3") or 0)},
+                "filenames": dict(fn),
+            }
+        
+        # If _inputs_block is still empty, try to publish from the staged “pending” vars
+        def _publish_inputs_block_from_pending() -> bool:
+            ph = ss.get("_inputs_hashes_pending") or {}
+            pd = ss.get("_dims_pending") or {}
+            pf = ss.get("_filenames_pending") or {}
+            if not ph or not pd:
+                return False
+            ss["_inputs_block"] = {
+                "hashes": dict(ph),
+                "dims":   dict(pd),
+                "filenames": dict(pf),
+                # legacy flattening for older readers:
+                "boundaries_hash": ph.get("boundaries_hash",""),
+                "C_hash":          ph.get("C_hash",""),
+                "H_hash":          ph.get("H_hash",""),
+                "U_hash":          ph.get("U_hash",""),
+                "shapes_hash":     ph.get("shapes_hash",""),
+            }
+            return True
+        
+        if (not ib) or (not ib.get("hashes") and not ib.get("boundaries_hash")):
+            if _publish_inputs_block_from_pending():
+                ib = dict(ss.get("_inputs_block") or {})
+        
+        # LAST-RESORT: synthesize SSOT from live objects so Reports & write never see blanks
+        if (not ib) or (not (ib.get("hashes") or ib.get("boundaries_hash"))):
+            def _deep_intify(o):
+                if isinstance(o, bool): return 1 if o else 0
+                if isinstance(o, list): return [_deep_intify(x) for x in o]
+                if isinstance(o, dict): return {k: _deep_intify(v) for k, v in o.items()}
+                return o
+            def _stable_blocks_sha(obj) -> str:
+                try:
+                    data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (obj if isinstance(obj, dict) else {"blocks": {}})
+                    s = json.dumps(_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+                    return hashlib.sha256(s).hexdigest()
+                except Exception:
+                    return ""
+            try:
+                b_obj = boundaries
+                c_obj = cmap
+                h_obj = H_obj or io.parse_cmap({"blocks": {}})
+                u_obj = shapes
+                ph_live = {
+                    "boundaries_hash": _stable_blocks_sha(b_obj),
+                    "C_hash":          _stable_blocks_sha(c_obj),
+                    "H_hash":          _stable_blocks_sha(h_obj),
+                    "U_hash":          _stable_blocks_sha(u_obj),
+                    "shapes_hash":     _stable_blocks_sha(u_obj),
+                }
+                pd_live = {
+                    "n2": int(len((h_obj.blocks.__root__.get("2") or [])) if h_obj else 0),
+                    "n3": int((len((rc.get("d3") or [])[0]) if (rc.get("d3") and rc.get("d3")[0]) else 0)),
+                }
+                pf_live = {
+                    "boundaries": ss.get("fname_boundaries","boundaries.json"),
+                    "C":          ss.get("fname_cmap","cmap.json"),
+                    "H":          ss.get("fname_h","H.json"),
+                    "U":          ss.get("fname_shapes","shapes.json"),
+                }
+                ss["_inputs_block"] = {
+                    "hashes": dict(ph_live),
+                    "dims":   dict(pd_live),
+                    "filenames": dict(pf_live),
+                    # legacy flattening:
+                    "boundaries_hash": ph_live["boundaries_hash"],
+                    "C_hash":          ph_live["C_hash"],
+                    "H_hash":          ph_live["H_hash"],
+                    "U_hash":          ph_live["U_hash"],
+                    "shapes_hash":     ph_live["shapes_hash"],
+                }
+                ib = dict(ss.get("_inputs_block") or {})
+                st.caption("SSOT inputs synthesized from live objects.")
+            except Exception as _e_live:
+                st.warning(f"SSOT inputs not staged (live synthesis failed: {_e_live}).")
+        
+        # Quick SSOT toggle (debug)
+        if st.checkbox("Show raw SSOT (_inputs_block)", value=False, key="show_raw_ssot_final"):
+            st.json(ss.get("_inputs_block") or {})
+        
+        # Canonical, frozen sig that the rest of the cert block will use:
+        inputs_sig = current_inputs_sig()
 
 
 
