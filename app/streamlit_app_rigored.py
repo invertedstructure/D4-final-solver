@@ -5870,14 +5870,18 @@ with safe_expander("Cert & provenance", expanded=True):
     # ---------- inputs completeness (U optional) ----------
     inputs_complete = all(isinstance(x, str) and x for x in (inputs_sig[0], inputs_sig[1], inputs_sig[2], inputs_sig[4]))
 
-    # ---------- policy & pass vec ----------
-    policy_raw   = rc.get("policy_tag") or rc.get("mode") or "strict"
+        # --- derive policy + pass_vec safely (self-contained) ---
+    ss = st.session_state
+    rc = dict(ss.get("run_ctx") or {})
+    out = dict(ss.get("overlap_out") or {})
+    
+    policy_raw   = rc.get("policy_tag") or ss.get("overlap_policy_label") or ""
     policy_canon = _canon_policy(policy_raw)
-    proj_hash    = rc.get("projector_hash","") if policy_canon == "projected:file" else ""
-    pass_vec     = (
-        bool((out.get("2",{}) or {}).get("eq", False)),
-        bool((out.get("3",{}) or {}).get("eq", False)),
-    )
+    proj_hash    = rc.get("projector_hash", "") if policy_canon == "projected:file" else ""
+    
+    eq2 = bool(((out.get("2") or {}).get("eq", False)))
+    eq3 = bool(((out.get("3") or {}).get("eq", False)))
+    pass_vec = (eq2, eq3)
 
     # ---------- dedupe key (single write gate) ----------
     write_key = (inputs_sig, policy_canon, pass_vec, proj_hash)
