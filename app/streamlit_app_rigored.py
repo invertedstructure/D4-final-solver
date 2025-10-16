@@ -1274,46 +1274,61 @@ def run_overlap():
     try:
         # If you didn't add the helper, swap the next line back to: P_active, meta = projector_choose_active(cfg_active, boundaries)
         P_active, meta = _resolve_projector(cfg_active, boundaries)
-    except ValueError as e:
-        # ---- FILE mode error path: persist minimal SSOT so cert can witness SKIP_FILE_PI_INVALID
+        except ValueError as e:
+        # Determine intended mode from policy source
+        source3 = (cfg_active.get("source") or {}).get("3", "auto")
+        mode_str = "projected(file)" if source3 == "file" else "projected(auto)"
+    
         pjfn    = (cfg_active.get("projector_files", {}) or {}).get("3", "")
         d3_now  = (boundaries.blocks.__root__.get("3") or [])
         n3_now  = (len(d3_now[0]) if (d3_now and d3_now[0]) else 0)
         lm_now  = _truth_mask_from_d3(d3_now)
         pol_lbl = policy_label_from_cfg(cfg_active)
-
+    
         st.session_state["run_ctx"] = {
-            "policy_tag": pol_lbl, "mode": "projected(file)",
+            "policy_tag": pol_lbl, "mode": mode_str,
             "d3": d3_now, "n3": n3_now, "lane_mask_k3": lm_now,
             "P_active": [],
             "projector_filename": pjfn, "projector_hash": "",
-            "projector_consistent_with_d": False,
+            "projector_consistent_with_d": (False if mode_str == "projected(file)" else None),
             "source": (cfg_active.get("source") or {}),
             "errors": [str(e)],
         }
         st.session_state["overlap_out"]          = {"3": {"eq": False, "n_k": n3_now}, "2": {"eq": True}}
         st.session_state["overlap_cfg"]          = cfg_active
         st.session_state["overlap_policy_label"] = pol_lbl
-
-        # Freeze SSOT even on FILE error (no projector field)
+    
+        # Freeze SSOT even on resolver error
         H_local = _load_h_local()
         st.session_state["overlap_H"] = H_local
         st.session_state["overlap_C"] = cmap
-
         pub = ssot_publish_block(
             boundaries_obj=boundaries,
             cmap_obj=cmap,
             H_obj=H_local,
             shapes_obj=shapes,
             n3=n3_now,
-            projector_filename="",   # none on FILE error
+            projector_filename=(""
+                if mode_str != "projected(file)" else pjfn),
         )
         st.caption(f"SSOT sig (before → after): {list(pub['before'])} → {list(pub['after'])}")
+    
+        try: _reconcile_di_vs_ssot()
+        except Exception: pass
+    
+        # Only mark FILE invalid if we’re actually in FILE mode
+        st.session_state["file_pi_valid"]   = (mode_str != "projected(file)")
+        st.session_state["file_pi_reasons"] = ([str(e)] if mode_str == "projected(file)" else [])
+        st.session_state["write_armed"]     = True
+        st.session_state["armed_by"]        = ("file_invalid" if mode_str == "projected(file)" else "overlap_run")
+    
+        if mode_str == "projected(file)":
+            st.error(f"Projected(FILE) validation failed: {e}")
+        else:
+            st.info("AUTO mode selected; projector FILE not required. Continuing without Π.")
+        return
 
-        try:
-            _reconcile_di_vs_ssot()
-        except Exception:
-            pass
+            
 
         st.session_state["file_pi_valid"]   = False
         st.session_state["file_pi_reasons"] = [str(e)]
