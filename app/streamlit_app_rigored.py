@@ -147,6 +147,40 @@ def load_fixtures_registry() -> dict | None:
             return None
     return ss.get("_fixtures_cache")
 
+# --- Compatibility shim: allow both names & both signatures ---
+def fixtures_load_cached(path: str = "configs/fixtures.json") -> dict:
+    ss = st.session_state
+    b, h, p = _fixtures_bytes_and_hash(path)
+    cache = ss.get("_fixtures_cache")
+    if not cache or ss.get("_fixtures_bytes_hash") != h:
+        try:
+            data = json.loads(b.decode("utf-8"))
+            data = {
+                "version": str(data.get("version","")),
+                "ordering": list(data.get("ordering") or []),
+                "fixtures": list(data.get("fixtures") or []),
+                "__path": p,
+            }
+        except Exception:
+            data = {"version":"", "ordering":[], "fixtures":[], "__path": p}
+        ss["_fixtures_cache"] = data
+        ss["_fixtures_bytes_hash"] = h
+    return ss["_fixtures_cache"]
+
+# If something elsewhere imports/calls load_fixtures_registry(...), make it a tolerant alias.
+def load_fixtures_registry(*args, **kwargs) -> dict:
+    """
+    Backwards-compatible wrapper.
+    Accepts either no args, or a single path, or 'path=' kwarg.
+    """
+    path = "configs/fixtures.json"
+    if args:
+        path = args[0]
+    if "path" in kwargs and kwargs["path"]:
+        path = kwargs["path"]
+    return fixtures_load_cached(path)
+
+
 # ─── Matching utilities ───────────────────────────────────────────────────────
 def _norm_vec(v): 
     return [int(x) for x in (v or [])]
@@ -1381,6 +1415,12 @@ def _stable_hash(obj) -> str:
             return _hash.sha256(str(obj).encode("utf-8", "ignore")).hexdigest()
         except Exception:
             return ""
+
+
+def fixtures_match_current(...):
+    reg = load_fixtures_registry()  # <-- use the tolerant alias
+    ordering = reg.get("ordering") or []
+    ...
 
 
 
