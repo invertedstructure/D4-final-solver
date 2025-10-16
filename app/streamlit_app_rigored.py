@@ -2334,9 +2334,7 @@ def run_self_tests():
         if not ib.get(k):
             warnings.append(f"SSOT: missing {k}")
 
-    # Check SSOT freshness (v2)
-    if ssot_is_stale_v2():
-        warnings.append("SSOT_STALE: live inputs changed; run Overlap to refresh SSOT")
+    
     
     # Check SSOT freshness (current)
     if ssot_is_stale():
