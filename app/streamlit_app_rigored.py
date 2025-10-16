@@ -113,6 +113,58 @@ DISTRICT_MAP: dict[str, str] = {
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
 
+# --- baseline imports (defensive) ---
+import os, json, time, uuid, shutil, tempfile, hashlib
+from datetime import datetime, timezone
+from pathlib import Path
+
+# --- legacy aliases to avoid NameError from older code paths ---
+_json = json                               # some helpers still used _json.*
+_sha256_hex_bytes = lambda b: hashlib.sha256(b).hexdigest()
+_sha256_hex = _sha256_hex_bytes            # older helpers referenced this name
+_mul_gf2 = globals().get("mul")            # older helpers referenced _mul_gf2
+_add_gf2 = globals().get("add")            # older helpers referenced _add_gf2
+if _mul_gf2 is None:
+    def _mul_gf2(A,B):
+        if not A or not B or not A[0] or not B[0]: return []
+        m, kA = len(A), len(A[0])
+        kB, n = len(B), len(B[0])
+        if kA != kB: return []
+        C = [[0]*n for _ in range(m)]
+        for i in range(m):
+            Ai = A[i]
+            for k in range(kA):
+                if Ai[k] & 1:
+                    Bk = B[k]
+                    for j in range(n):
+                        C[i][j] ^= (Bk[j] & 1)
+        return C
+if _add_gf2 is None:
+    def _add_gf2(A,B):
+        if not A: return B or []
+        if not B: return A or []
+        r,c = len(A), len(A[0])
+        if len(B)!=r or len(B[0])!=c: return A
+        return [[(A[i][j]^B[i][j]) for j in range(c)] for i in range(r)]
+
+# --- reports/paths (canonical + compat) ---
+if "REPORTS_DIR" not in globals():
+    REPORTS_DIR = Path("reports")
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+if "PARITY_REPORT_PATH" not in globals():
+    PARITY_REPORT_PATH = REPORTS_DIR / "parity_report.json"
+if "PARITY_SUMMARY_CSV" not in globals():
+    PARITY_SUMMARY_CSV = REPORTS_DIR / "parity_summary.csv"
+
+# back-compat aliases some code might still reference
+PARITY_JSON_PATH = globals().get("PARITY_JSON_PATH", PARITY_REPORT_PATH)
+PARITY_CSV_PATH  = globals().get("PARITY_CSV_PATH",  PARITY_SUMMARY_CSV)
+
+LOGS_DIR = Path(globals().get("LOGS_DIR", "logs"))
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+
 
 # =============================== TOP HELPERS — CANONICAL ===============================
 # This block replaces the previous duplicate helpers. Single Source of Truth (SSOT).
@@ -548,6 +600,12 @@ def build_inputs_block(boundaries, cmap, H_used, shapes, filenames: dict) -> dic
 
 
 
+try:
+    tab1, tab2, tab3 = st.tabs(["Overlap", "A/B compare", "Certs & Reports"])
+except Exception as e:
+    st.error("Tab construction failed — see details below.")
+    st.exception(e)
+    st.stop()
 
 
 # ───────────────────────────────── SIDEBAR ───────────────────────────────────
