@@ -1467,47 +1467,7 @@ inputs_complete = bool(
 )
 
 # -----------------------------------------------------------------------------------------------------------
-with st.expander("SSOT debug", expanded=False):
-    rc_ = st.session_state.get("run_ctx") or {}
-    ib_ = st.session_state.get("_inputs_block") or {}
-    st.write({
-        "rc.inputs_sig":      tuple(rc_.get("inputs_sig") or ()),
-        "now.inputs_sig":     _current_inputs_sig_compat(_ib=ib_),
-        "stale?":             ssot_is_stale(),
-        "policy_tag_now":     rc_.get("policy_tag") or "",
-        "mode":               rc_.get("mode") or "",
-        "auto_projector_hash": (_auto_pj_hash_from_rc(rc_) if (rc_.get("mode") == "projected(auto)") else ""),
-        "file_projector_hash": (rc_.get("projector_hash") or ""),
-        "inputs_complete":     bool(inputs_complete),
-    })
 
-
-
-
-
-
-
-# (optional) minimal debug expander; safe to remove
-with st.expander("Debug · d3 & lane mask"):
-    try:
-        d3_now = (boundaries.blocks.__root__.get("3") or [])
-        n3_now = len(d3_now[0]) if (d3_now and d3_now[0]) else 0
-        lm_now = _truth_mask_from_d3(d3_now)
-        st.write(f"n3={n3_now} · lane_mask(d3)={lm_now}")
-        cfg_now = st.session_state.get("overlap_cfg") or {}
-        if (cfg_now.get("source", {}) or {}).get("3") == "file":
-            try:
-                P_file, _meta = projector_choose_active(cfg_now, boundaries)
-                diagP = [int(P_file[i][i] & 1) for i in range(len(P_file))] if P_file else []
-                st.write(f"diag(P_file)={diagP}")
-                if diagP != lm_now and lm_now:
-                    st.warning("diag(P) ≠ lane_mask(d3) → FILE projector will fail validation.")
-            except Exception as e:
-                st.error(f"Could not load FILE projector: {e}")
-        else:
-            st.caption("No FILE projector active (strict/AUTO).")
-    except Exception as e:
-        st.error(f"Debug probe failed: {e}")
 
     
 
@@ -1891,6 +1851,114 @@ with safe_expander("A/B compare (strict vs active projected)", expanded=False):
             st.success("Cleared A/B snapshot. Re-run A/B to refresh.")
 # ============================ end A/B block ===================================
 
+# ===================== A/B Diagnostics (compact strip) =====================
+with st.expander("A/B diagnostics", expanded=False):
+    ss = st.session_state
+    rc = ss.get("run_ctx") or {}
+    ib = ss.get("_inputs_block") or {}
+    out = ss.get("overlap_out") or {}
+    ab_pin = ss.get("ab_pin") or {}
+    mode_now = str(rc.get("mode",""))
+    k3_eq_proj = bool(((out.get("3") or {}).get("eq", False)))
+    k3_eq_strict = False  # recompute quick strict for clarity
+
+    # Use the exact H from Overlap for strict recompute
+    try:
+        H_used = ss.get("overlap_H") or io.parse_cmap({"blocks": {}})
+    except Exception:
+        H_used = io.parse_cmap({"blocks": {}})
+    d3   = rc.get("d3") or []
+    lanes = list(rc.get("lane_mask_k3") or [])
+
+    # tiny recompute (matches A/B helper)
+    def _shape_ok(A,B): return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
+    def _xor(A,B):
+        if not A: return [r[:] for r in (B or [])]
+        if not B: return [r[:] for r in (A or [])]
+        r,c = len(A), len(A[0])
+        return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
+    def _is_zero(M): return (not M) or all(all((x & 1) == 0 for x in row) for row in M)
+    try:
+        H2 = (H_used.blocks.__root__.get("2") or [])
+        C3 = (cmap.blocks.__root__.get("3") or [])
+        I3 = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
+        if _shape_ok(H2, d3) and C3 and C3[0] and (len(C3)==len(C3[0])):
+            R3s = _xor(mul(H2,d3), _xor(C3,I3))
+            k3_eq_strict = _is_zero(R3s)
+    except Exception:
+        k3_eq_strict = False
+
+    # lane-bottom vectors (helpful for expected-outcomes)
+    def _bottom_row(M): return M[-1] if (M and len(M)) else []
+    def _mask(vec, mask):
+        idx = [j for j,m in enumerate(mask or []) if m]
+        return [vec[j] for j in idx] if (vec and idx) else []
+    try:
+        H2d3 = mul(H2, d3) if _shape_ok(H2,d3) else []
+        C3pI3 = _xor(C3, I3) if (C3 and C3[0]) else []
+        lane_vec_H2d3  = _mask(_bottom_row(H2d3), lanes)
+        lane_vec_C3I3  = _mask(_bottom_row(C3pI3), lanes)
+    except Exception:
+        lane_vec_H2d3, lane_vec_C3I3 = [], []
+
+    # freshness reason (same logic your A/B uses)
+    def _inputs_sig_frozen():
+        try:
+            if "ssot_frozen_sig_from_ib" in globals() and callable(globals()["ssot_frozen_sig_from_ib"]):
+                s = ssot_frozen_sig_from_ib()
+                if s: return list(s)
+        except Exception:
+            pass
+        return [
+            str((ib.get("hashes") or {}).get("boundaries_hash", ib.get("boundaries_hash",""))),
+            str((ib.get("hashes") or {}).get("C_hash",          ib.get("C_hash",""))),
+            str((ib.get("hashes") or {}).get("H_hash",          ib.get("H_hash",""))),
+            str((ib.get("hashes") or {}).get("U_hash",          ib.get("U_hash",""))),
+            str((ib.get("hashes") or {}).get("shapes_hash",     ib.get("shapes_hash",""))),
+        ]
+    def _policy_tag_now(rc):
+        lbl = (rc or {}).get("policy_tag")
+        if lbl: return str(lbl)
+        try: return str(policy_label_from_cfg(cfg_active))
+        except Exception: pass
+        m = str((rc or {}).get("mode",""))
+        if m=="strict": return "strict"
+        if m=="projected(file)": return "projected(columns@k=3,file)"
+        if m=="projected(auto)": return "projected(columns@k=3,auto)"
+        return "projected(columns@k=3,auto)"
+    def _fresh_reason(ab_payload, rc):
+        if not ab_payload: return False, "NO_PIN"
+        if list(ab_payload.get("inputs_sig") or []) != _inputs_sig_frozen():
+            return False, "AB_STALE_INPUTS_SIG"
+        pol_now = _policy_tag_now(rc)
+        ab_pol  = str(ab_payload.get("policy_tag") or (ab_payload.get("projected") or {}).get("policy_tag",""))
+        if ab_pol != pol_now:
+            return False, "AB_STALE_POLICY"
+        if str((rc or {}).get("mode",""))=="projected(file)":
+            pj_now = str((rc or {}).get("projector_hash","") or "")
+            pj_ab  = str((ab_payload.get("projected") or {}).get("projector_hash","") or "")
+            if pj_ab != pj_now:
+                return False, "AB_STALE_PROJECTOR_HASH"
+        return True, ""
+    fresh, reason = _fresh_reason((ab_pin.get("payload") or {}), rc)
+
+    c1,c2,c3,c4 = st.columns(4)
+    with c1:
+        st.write(f"Mode: `{mode_now}`")
+        st.write(f"n3={int(rc.get('n3') or 0)} lanes={lanes}")
+    with c2:
+        st.write(f"k3 strict: {'✅' if k3_eq_strict else '❌'}")
+        st.write(f"k3 proj:   {'✅' if k3_eq_proj else '❌'}")
+    with c3:
+        st.write(f"lane_vec_H2@d3: {lane_vec_H2d3}")
+        st.write(f"lane_vec_C3+I3: {lane_vec_C3I3}")
+    with c4:
+        if ab_pin.get("state")=="pinned":
+            st.write("A/B pin: **present**")
+            st.write("fresh: " + ("🟢 yes" if fresh else f"🟠 no ({reason})"))
+        else:
+            st.write("A/B pin: —")
+# ========================================================================
 
 
 
