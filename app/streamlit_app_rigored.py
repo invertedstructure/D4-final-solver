@@ -102,6 +102,42 @@ DISTRICT_MAP: dict[str, str] = {
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
 
+# ======================= SSOT v2 COMPAT SHIMS =======================
+# Map old v2 helper names to the new canonical SSOT core.
+
+def frozen_sig_from_ib_v2():
+    return ssot_frozen_sig_from_ib()
+
+def stable_blocks_sha_v2(obj):
+    return ssot_stable_blocks_sha(obj) if 'ssot_stable_blocks_sha' in globals() else stable_blocks_sha(obj)
+
+def live_sig_now_v2():
+    # prefer the H used by Overlap so “live” matches the pipeline
+    H_live = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
+    return ssot_live_sig(
+        globals().get("boundaries"),
+        globals().get("cmap"),
+        H_live,
+        globals().get("shapes"),
+    )
+
+def publish_inputs_block_v2(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int):
+    # projector filename optional; read from run_ctx if present
+    rc = st.session_state.get("run_ctx") or {}
+    proj_fn = rc.get("projector_filename", "")
+    return ssot_publish_block(
+        boundaries_obj=boundaries_obj,
+        cmap_obj=cmap_obj,
+        H_obj=H_obj,
+        shapes_obj=shapes_obj,
+        n3=n3,
+        projector_filename=proj_fn,
+    )
+
+def ssot_is_stale_v2():
+    return ssot_is_stale()
+# ===================== end SSOT v2 COMPAT SHIMS =====================
+
 # ======================= SSOT COMPAT SHIMS (bridge old call sites) =======================
 # Some older code (debuggers/health banners) may still call these names.
 
@@ -2192,8 +2228,8 @@ def run_self_tests():
     
     # A/B snapshot freshness
     ab = st.session_state.get("ab_compare") or {}
-    if ab and (tuple(ab.get("inputs_sig") or ()) != frozen_sig_from_ib_v2()):
-        warnings.append("AB_FRESH: A/B snapshot is stale (won’t embed)")
+    if ab and (tuple(ab.get("inputs_sig") or ()) != ssot_frozen_sig_from_ib()):
+       warnings.append("AB_FRESH: A/B snapshot is stale (won’t embed)")
     
     return failures, warnings
 
