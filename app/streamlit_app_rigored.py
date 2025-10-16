@@ -2123,6 +2123,8 @@ def run_overlap():
         st.session_state["_inputs_hashes_pending"] = hashes_now
         st.session_state["_dims_pending"] = dims_now
         st.session_state.setdefault("_filenames_pending", files_now)
+        st.session_state["_has_overlap"] = True
+
 
         # publish canonical block (what Cert & Reports read)
         st.session_state["_inputs_block"] = {
@@ -2187,6 +2189,7 @@ with st.expander("Debug · d3 & lane mask"):
         st.error(f"Debug probe failed: {e}")
 
     
+
 # -------------------- Health checks + compact, non-duplicated UI --------------------
 def _stable_blocks_sha(obj) -> str:
     try:
@@ -2203,7 +2206,7 @@ def _ab_is_fresh_now() -> bool:
         return False
     ib = ss.get("_inputs_block") or {}
     rc = ss.get("run_ctx") or {}
-    # inputs_sig equality
+
     cur_sig = [
         str((ib or {}).get("boundaries_hash","")),
         str((ib or {}).get("C_hash","")),
@@ -2213,11 +2216,11 @@ def _ab_is_fresh_now() -> bool:
     ]
     if list(ab.get("inputs_sig") or []) != cur_sig:
         return False
-    # policy tag equality
+
     pol_now = str((rc or {}).get("policy_tag") or "strict")
     if ab.get("policy_tag","") != pol_now:
         return False
-    # projector hash equality in FILE mode
+
     if str((rc or {}).get("mode","")).startswith("projected(file)"):
         if (ab.get("projected") or {}).get("projector_hash","") != (rc.get("projector_hash","") or ""):
             return False
@@ -2229,18 +2232,30 @@ def run_self_tests():
     ib = ss.get("_inputs_block") or {}
     rc = ss.get("run_ctx") or {}
     out = ss.get("overlap_out") or {}
+    di = ss.get("_district_info") or {}
 
-    # HASH_COHERENT: compare IB hash with LIVE boundaries hash (authoritative)
+    # --- initialization guard (no red before anything runs) ---
+    has_ssot   = bool(ib.get("hashes") or ib.get("boundaries_hash"))
+    has_bounds = 'boundaries' in globals()
+    if not (has_ssot and has_bounds):
+        # surface gentle hints but never fail pre-init
+        if not has_ssot:
+            warnings.append("INIT: SSOT not published yet (run Overlap once).")
+        if not has_bounds:
+            warnings.append("INIT: live boundaries object not loaded.")
+        return [], warnings  # no failures pre-init
+
+    # HASH_COHERENT: SSOT vs LIVE (authoritative)
     bh_ib   = ib.get("boundaries_hash","")
-    bh_live = _stable_blocks_sha(boundaries) if 'boundaries' in globals() else ""
+    bh_live = _stable_blocks_sha(boundaries) if has_bounds else ""
     if bh_ib and bh_live and (bh_ib != bh_live):
         failures.append("HASH_COHERENT: _inputs_block.boundaries_hash ≠ live(boundaries)")
 
-    # If _district_info carries a hash and it's different, warn (not fail)
-    di = ss.get("_district_info") or {}
-    bh_di = di.get("boundaries_hash","")
-    if bh_di and bh_ib and (bh_di != bh_ib):
-        warnings.append("HASH_SIDECHANNEL: _district_info.boundaries_hash differs from SSOT (will ignore _district_info).")
+    # Only warn about side-channel after this session has run Overlap at least once
+    if ss.get("_has_overlap"):
+        bh_di = di.get("boundaries_hash","")
+        if bh_di and bh_ib and (bh_di != bh_ib):
+            warnings.append("HASH_SIDECHANNEL: _district_info.boundaries_hash differs from SSOT (ignored).")
 
     # AUTO_OK / FILE_OK
     mode = str(rc.get("mode",""))
@@ -2252,9 +2267,8 @@ def run_self_tests():
             warnings.append("AUTO_OK: no overlap_out present yet")
 
     # AB_FRESH
-    if ss.get("ab_compare"):
-        if not _ab_is_fresh_now():
-            warnings.append("AB_FRESH: A/B snapshot is stale (won’t embed)")
+    if ss.get("ab_compare") and not _ab_is_fresh_now():
+        warnings.append("AB_FRESH: A/B snapshot is stale (won’t embed)")
 
     # Core hashes present in SSOT
     for k in ("boundaries_hash","C_hash","H_hash","U_hash"):
@@ -2276,11 +2290,11 @@ pH = _short8(_rc.get("projector_hash","")) if str(_rc.get("mode","")).startswith
 st.markdown(f"**Policy:** `{policy_tag}`")
 st.caption(f"{policy_tag} | n3={n3} | b={bH} C={cH} H={hH} U={uH} P={pH}")
 
-# If any short hash is blank, hint to (re)publish SSOT
+# Gentle hint only if any core hash is blank
 if any(x in ("", None) for x in (_ib.get("boundaries_hash"), _ib.get("C_hash"), _ib.get("H_hash"), _ib.get("U_hash"))):
-    st.warning("Some provenance hashes are blank. Run Overlap (or the Cert 'publish SSOT' path) once to populate.")
+    st.info("SSOT isn’t fully populated yet. Run Overlap once to publish provenance hashes.")
 
-# Self-tests banner
+# Self-tests banner (with startup-friendly behavior)
 _fail, _warn = run_self_tests()
 if _fail:
     st.error("🚨 Plumbing not healthy — fix before exploration.")
@@ -2292,10 +2306,14 @@ if _fail:
             st.markdown("**Warnings:**")
             for w in _warn: st.write(f"- {w}")
 else:
-    st.success("🟢 Self-tests passed.")
-    if _warn:
-        st.info("Notes:")
-        for w in _warn: st.write(f"- {w}")
+    # If not fully initialized, stay neutral; else show green
+    if not (_ib.get("hashes") or _ib.get("boundaries_hash")):
+        st.info("Awaiting first Overlap run…")
+    else:
+        st.success("🟢 Self-tests passed.")
+        if _warn:
+            st.info("Notes:")
+            for w in _warn: st.write(f"- {w}")
 
 
 
