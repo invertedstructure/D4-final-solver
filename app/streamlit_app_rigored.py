@@ -681,7 +681,14 @@ def _stamp_filename(state_key: str, upload):
         name = name2 or "uploaded.json"
     st.session_state[state_key] = name
 
-
+def safe_expander(label: str, expanded: bool = False):
+    try:
+        return st.expander(label, expanded=expanded)
+    except Exception:
+        @contextlib.contextmanager
+        def _noop():
+            yield
+        return _noop()
 
 
 
