@@ -6803,7 +6803,8 @@ with safe_expander("Cert & provenance", expanded=True):
     if write_armed:
         st.caption(_delta_line(last_key, write_key))
 
-    # ---------- decisions & witnesses ----------
+       # ---------- decisions & witnesses ----------
+    # 1) completeness (U optional)
     if not inputs_complete:
         _append_witness({
             "ts": _utc_now_z(),
@@ -6819,11 +6820,28 @@ with safe_expander("Cert & provenance", expanded=True):
         })
         st.caption("Inputs incomplete — skipping write.")
         st.stop()
-
+    
+    # 2) stale SSOT — allow A/B ticket to override
     if stale and not allow_stale:
-        st.caption("SSOT stale — skipping write.")
-        st.stop()
-
+        # re-evaluate ticket freshness here (in case user toggled after header)
+        is_ab_pinned           = (ab_pin.get("state") == "pinned")
+        ab_ticket_pending      = ss.get("_ab_ticket_pending")
+        last_ab_ticket_written = ss.get("_last_ab_ticket_written")
+        ticket_required        = bool(is_ab_pinned and (ab_ticket_pending is not None) and (ab_ticket_pending != last_ab_ticket_written))
+    
+        if not ticket_required:
+            st.warning("Inputs changed since last Overlap — run Overlap to refresh SSOT before writing or reporting.")
+            st.caption("SSOT stale — skipping write.")
+            st.stop()
+        else:
+            st.info("SSOT is stale, but proceeding due to A/B one-shot ticket override.")
+            # safety: ensure we’re armed if a valid pinned ticket exists
+            if not write_armed:
+                ss["write_armed"] = True
+                ss["armed_by"] = ss.get("armed_by","") or "ab_pinned_catchup"
+                write_armed = True  # reflect in local var
+    
+    # 3) file Π validity (FILE mode only)
     if policy_canon == "projected:file" and not file_pi_valid:
         _append_witness({
             "ts": _utc_now_z(),
@@ -6839,9 +6857,12 @@ with safe_expander("Cert & provenance", expanded=True):
         })
         st.caption("FILE Π invalid — fix Π or re-freeze from AUTO.")
         st.stop()
-
-    # allow ticket to force a write once (even if 4-tuple key didn't change)
+    
+    # 4) final “should write?” decision
+    #    allow ticket to force a write once even if the 4-tuple didn’t change
+    #    (ticket_required was computed above; write_armed may have been set by A/B catch-up)
     should_write = write_armed and ( (write_key != last_key) or ticket_required )
+    
 
     if not should_write:
         skip_reason = REASON.SKIP_NO_MATERIAL_CHANGE
