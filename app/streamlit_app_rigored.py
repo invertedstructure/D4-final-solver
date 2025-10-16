@@ -2002,44 +2002,7 @@ def run_overlap():
             str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
         )
 
-    # helper: publish_inputs_block(...) if not already defined elsewhere
-    if "publish_inputs_block" not in globals():
-        def publish_inputs_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int):
-            H2_now = (H_obj.blocks.__root__.get("2") or [])
-            hashes_now = {
-                "boundaries_hash": _stable_blocks_sha(boundaries_obj),
-                "C_hash":          _stable_blocks_sha(cmap_obj),
-                "H_hash":          _stable_blocks_sha(H_obj),
-                "U_hash":          _stable_blocks_sha(shapes_obj),
-                "shapes_hash":     _stable_blocks_sha(shapes_obj),
-            }
-            dims_now = {"n2": int(len(H2_now) if H2_now else 0), "n3": int(n3)}
-            files_now = {
-                "boundaries": st.session_state.get("fname_boundaries","boundaries.json"),
-                "C":          st.session_state.get("fname_cmap","cmap.json"),
-                "H":          st.session_state.get("fname_h","H.json"),
-                "U":          st.session_state.get("fname_shapes","shapes.json"),
-            }
-            st.session_state["_inputs_hashes_pending"] = hashes_now
-            st.session_state["_dims_pending"]          = dims_now
-            st.session_state.setdefault("_filenames_pending", files_now)
-            st.session_state["_inputs_block"] = {
-                "hashes": dict(hashes_now),
-                "dims":   dict(dims_now),
-                "filenames": dict(files_now),
-                # legacy flattening:
-                "boundaries_hash": hashes_now["boundaries_hash"],
-                "C_hash":          hashes_now["C_hash"],
-                "H_hash":          hashes_now["H_hash"],
-                "U_hash":          hashes_now["U_hash"],
-                "shapes_hash":     hashes_now["shapes_hash"],
-            }
-            # keep _district_info in sync if reconciler exists
-            if "_reconcile_di_vs_ssot" in globals():
-                try: _reconcile_di_vs_ssot()
-                except Exception: pass
-            st.session_state["_has_overlap"] = True
-
+   
     # ── clear per-run artifacts (keep A/B pin, fixtures cache, frozen IB) ─────
     keep = {"ab_pin", "_fixtures_cache", "_fixtures_bytes_hash", "_inputs_block", "_last_ib_sig"}
     for k in ("proj_meta","run_ctx","residual_tags","overlap_out",
