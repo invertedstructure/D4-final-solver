@@ -1710,6 +1710,67 @@ def run_overlap():
         "projector_consistent_with_d": meta.get("projector_consistent_with_d", None),
         "source": (cfg_active.get("source") or {}),
     }
+    # --- Fixture matching (after you set overlap_out / run_ctx) ---
+    try:
+        fx = load_fixtures_registry(Path("configs/fixtures.json"))  # caches + invalidates by file hash
+    
+        # derive snapshot from the same SSOT the cert block uses
+        rc   = st.session_state.get("run_ctx") or {}
+        di   = st.session_state.get("_district_info") or {}
+        out  = st.session_state.get("overlap_out") or {}
+        H2   = ( (st.session_state.get("overlap_H") or io.parse_cmap({"blocks":{}})).blocks.__root__.get("2") or [] )
+        d3   = rc.get("d3", [])
+        C3   = ( (cmap.blocks.__root__.get("3")) if 'cmap' in globals() and hasattr(cmap, 'blocks') else [] )
+        I3   = eye(len(C3)) if C3 else []
+        def _bottom_row(M): return M[-1] if (M and len(M)) else []
+        def _xor(A,B):
+            if not A: return [r[:] for r in (B or [])]
+            if not B: return [r[:] for r in (A or [])]
+            r,c = len(A), len(A[0])
+            return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
+    
+        # guarded products for bottoms
+        if H2 and d3 and len(H2[0]) == len(d3):
+            H2d3 = mul(H2, d3)
+        else:
+            H2d3 = []
+        C3pI3 = _xor(C3, I3) if C3 else []
+    
+        snap = {
+            "district_id": di.get("district_id", st.session_state.get("district_id","UNKNOWN")),
+            "policy_canon": (_canon_policy(rc.get("policy_tag") or rc.get("mode") or "strict")
+                             if "_canon_policy" in globals() else (rc.get("mode") or "strict")),
+            "lane_mask_k3": list(rc.get("lane_mask_k3") or []),
+            "H_bottom": _bottom_row(H2d3),
+            "C3_plus_I3_bottom": _bottom_row(C3pI3),
+            "strict_eq3": bool(((out.get("3") or {}).get("eq", False))),
+        }
+    
+        m = match_fixture_from_snapshot(fx, snap)  # first-match-wins or None
+        if m:
+            # session echoes (used by cert writer)
+            st.session_state["fixture_label"]     = m["fixture_label"]
+            st.session_state["gallery_tag"]       = m["tag"]
+            st.session_state["gallery_strictify"] = m["strictify"]
+            st.session_state["growth_bumps"]      = int(m["growth_bumps"])
+            # mirror into run_ctx for snap-freeze
+            rc["fixture_label"] = m["fixture_label"]
+            rc["fixture_code"]  = m.get("fixture_code","")
+            st.session_state["run_ctx"] = rc
+        else:
+            # fallback: synthesize a deterministic label (warn-only)
+            lab = synthesize_fixture_label(snap)
+            st.session_state["fixture_label"]     = lab
+            st.session_state["gallery_tag"]       = "novelty"
+            st.session_state["gallery_strictify"] = "tbd"
+            # growth_bumps unchanged (or 0 if you prefer)
+            rc["fixture_label"] = lab
+            rc["fixture_code"]  = ""
+            st.session_state["run_ctx"] = rc
+    
+    except Exception as e:
+        st.info(f"(fixture match skipped: {e})")
+
 
     # FILE validity flags (single SSOT for cert guard)
     st.session_state["file_pi_valid"] = bool(
