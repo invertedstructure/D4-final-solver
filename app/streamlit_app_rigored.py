@@ -1770,6 +1770,197 @@ def run_overlap():
     
     except Exception as e:
         st.info(f"(fixture match skipped: {e})")
+        # ---- Fixtures registry: cached load + matcher (drop once, top-level safe to repeat) ----
+import json, hashlib
+from pathlib import Path
+
+def _fixtures_bytes_and_hash(path: str = "configs/fixtures.json"):
+    p = Path(path)
+    if not p.exists():
+        return b"{}", hashlib.sha256(b"{}").hexdigest(), path
+    b = p.read_bytes()
+    return b, hashlib.sha256(b).hexdigest(), path
+
+def fixtures_load_cached(path: str = "configs/fixtures.json") -> dict:
+    ss = st.session_state
+    b, h, p = _fixtures_bytes_and_hash(path)
+    cache = ss.get("_fixtures_cache")
+    if not cache or ss.get("_fixtures_bytes_hash") != h:
+        try:
+            data = json.loads(b.decode("utf-8"))
+            # Normalize minimal shape
+            data = {
+                "version": str(data.get("version","")),
+                "ordering": list(data.get("ordering") or []),
+                "fixtures": list(data.get("fixtures") or []),
+                "__path": p,
+            }
+        except Exception:
+            data = {"version":"", "ordering":[], "fixtures":[], "__path": p}
+        ss["_fixtures_cache"] = data
+        ss["_fixtures_bytes_hash"] = h
+    return ss["_fixtures_cache"]
+
+def _norm_vec(v):
+    return [int(x) for x in (v or [])]
+
+def _eq_vec(a, b):
+    a, b = _norm_vec(a), _norm_vec(b)
+    return (len(a) == len(b)) and all(x == y for x, y in zip(a, b))
+
+def _vec_to_bits(v):
+    # converts list[int] like [1,0,1] to "101" (for optional C3_any_of rules if you surface it)
+    v = _norm_vec(v)
+    return "".join("1" if int(x) else "0" for x in v)
+
+def fixtures_match_current(*, district_id: str, policy_canon: str,
+                           lane_mask_k3: list[int],
+                           H_bottom: list[int],
+                           C3_plus_I3_bottom: list[int],
+                           strict_eq3: bool):
+    """
+    Returns dict or None:
+    {"code": <"G#"... or "">, "label": "...", "tag": "...",
+     "strictify": "tbd|no|yes", "growth_bumps": int}
+    First match wins, following registry["ordering"].
+    """
+    reg = fixtures_load_cached()
+    ordering = reg.get("ordering") or []
+    fx = {f["code"]: f for f in reg.get("fixtures") or [] if isinstance(f, dict) and f.get("code")}
+    def _matches(entry: dict) -> bool:
+        m  = entry.get("match") or {}
+        # District
+        d_ok = (not entry.get("district")) or (str(entry.get("district")) == str(district_id))
+        if not d_ok: return False
+        # Policy canon
+        pol_ok = (not m.get("policy_canon_any")) or (policy_canon in [str(x) for x in (m.get("policy_canon_any") or [])])
+        if not pol_ok: return False
+        # Lanes
+        if m.get("lanes") is not None and not _eq_vec(m.get("lanes"), lane_mask_k3):
+            return False
+        # H bottom row
+        if m.get("H_bottom") is not None and not _eq_vec(m.get("H_bottom"), H_bottom):
+            return False
+        # (C3+I3) bottom row
+        if m.get("C3_plus_I3_bottom") is not None and not _eq_vec(m.get("C3_plus_I3_bottom"), C3_plus_I3_bottom):
+            return False
+        # strict_eq3
+        if m.get("strict_eq3") is not None and bool(m.get("strict_eq3")) != bool(strict_eq3):
+            return False
+        # Optional: C3_any_of by bitstring (only if you compute it upstream)
+        if m.get("C3_any_of") is not None:
+            # If you don't have a raw C3-bottom, you can skip this; here we map from (C3+I3) if desired.
+            # Safer: skip this rule if you don't compute an exact C3 pattern upstream.
+            pass
+        return True
+
+    # Ordered scan
+    for code in ordering:
+        e = fx.get(code)
+        if not e: 
+            continue
+        if _matches(e):
+            return {
+                "code":        str(e.get("code","")),
+                "label":       str(e.get("label","")) or str(e.get("code","")),
+                "tag":         str(e.get("tag","")) or "",
+                "strictify":   str(e.get("strictify","tbd")).lower(),
+                "growth_bumps": int(e.get("growth_bumps", 0)),
+                "registry":    reg,  # pass-through for provenance
+            }
+
+    # Fallback: synthesize a deterministic label (warn-only)
+    fb_label = (f"{district_id} • lanes={_norm_vec(lane_mask_k3)}"
+                f" • H={_norm_vec(H_bottom)} • C+I={_norm_vec(C3_plus_I3_bottom)}")
+    return {
+        "code": "",
+        "label": fb_label,
+        "tag": "novelty",
+        "strictify": "tbd",
+        "growth_bumps": 0,
+        "registry": reg,
+    }
+
+    # ---- Call this at the end of run_overlap() (after you built rc/out/H2/C3 etc.) ----
+    try:
+        # Pull the bits we just computed in run_overlap
+        rc_now   = st.session_state.get("run_ctx") or {}
+        out_now  = st.session_state.get("overlap_out") or {}
+        policy_canon_now = "strict"
+        try:
+            raw = rc_now.get("policy_tag") or rc_now.get("mode") or "strict"
+            policy_canon_now = ("strict" if "strict" in str(raw).lower() else
+                                "projected:file" if ("projected" in str(raw).lower() and "file" in str(raw).lower())
+                                else "projected:auto")
+        except Exception:
+            pass
+    
+        # District & lanes from rc
+        district_now = (st.session_state.get("_district_info") or {}).get("district_id",
+                         st.session_state.get("district_id","UNKNOWN"))
+        lane_mask_now = list(rc_now.get("lane_mask_k3") or [])
+    
+        # We already have H2, d3, C3 in run_overlap; rebuild the two bottom vectors (same guards you used)
+        H2 = (st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})).blocks.__root__.get("2") or []
+        d3 = rc_now.get("d3", [])
+        C3 = (st.session_state.get("overlap_C") or io.parse_cmap({"blocks": {}})).blocks.__root__.get("3") or []
+        I3 = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
+    
+        def _mul(A, B):  # fast GF(2) multiply with your shim if present
+            return mul(A, B) if "mul" in globals() else []
+    
+        def _xor(A, B):
+            if not A: return [r[:] for r in (B or [])]
+            if not B: return [r[:] for r in (A or [])]
+            r, c = len(A), len(A[0])
+            return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
+    
+        def _bottom_row(M): return M[-1] if (M and len(M)) else []
+    
+        H2d3 = _mul(H2, d3) if (H2 and d3 and H2 and d3 and len(H2[0]) == len(d3)) else []
+        C3pI3 = _xor(C3, I3) if C3 else []
+    
+        H_bottom = _bottom_row(H2d3)
+        CI_bottom = _bottom_row(C3pI3)
+        strict_eq3 = bool(((out_now.get("3") or {}).get("eq", False))
+                          if policy_canon_now == "strict" else
+                          ((out_now.get("3") or {}).get("eq", False)))  # same field either way
+    
+        match = fixtures_match_current(
+            district_id=district_now,
+            policy_canon=policy_canon_now,
+            lane_mask_k3=lane_mask_now,
+            H_bottom=H_bottom,
+            C3_plus_I3_bottom=CI_bottom,
+            strict_eq3=strict_eq3,
+        )
+    
+        # Write into session + run_ctx (NO arming here)
+        ss = st.session_state
+        ss["fixture_label"]      = match.get("label","")
+        ss["gallery_tag"]        = match.get("tag","")
+        ss["gallery_strictify"]  = match.get("strictify","tbd")
+        ss["growth_bumps"]       = int(match.get("growth_bumps", 0))
+    
+        rc_now["fixture_label"]  = match.get("label","")
+        rc_now["fixture_code"]   = match.get("code","")
+        st.session_state["run_ctx"] = rc_now
+    
+    except Exception as _e:
+        # Non-fatal; cert writer will fallback; optional tiny match log
+        try:
+            p = Path("logs") / "fixtures.matchlog.jsonl"
+            p.parent.mkdir(parents=True, exist_ok=True)
+            j = {
+                "ts": datetime.utcnow().replace(microsecond=0).isoformat()+"Z",
+                "error": str(_e),
+                "district": st.session_state.get("district_id","UNKNOWN"),
+            }
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(json.dumps(j, separators=(",", ":"))+"\n")
+        except Exception:
+            pass
+    
 
 
     # FILE validity flags (single SSOT for cert guard)
