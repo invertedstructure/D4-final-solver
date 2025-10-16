@@ -2054,30 +2054,27 @@ def run_overlap():
         st.session_state["overlap_cfg"]            = cfg_active
         st.session_state["overlap_policy_label"]   = pol_lbl
 
-                # Freeze SSOT even on FILE error (no projector field)
+               # Freeze SSOT even on FILE error (no projector field)
         H_local = _load_h_local()
         st.session_state["overlap_H"] = H_local
         st.session_state["overlap_C"] = cmap
         
-        # Canonical v2 freezer (idempotent; also sets _has_overlap + guards stale-on-same-render)
-        sig_info = publish_inputs_block_v2(
+        pub = publish_inputs_block(
             boundaries_obj=boundaries,
             cmap_obj=cmap,
             H_obj=H_local,
             shapes_obj=shapes,
             n3=n3_now,
         )
-        st.caption(f"SSOT sig (before → after): {list(sig_info['before'])} → {list(sig_info['after'])}")
+        st.caption(f"SSOT sig (before → after): {list(pub['before'])} → {list(pub['after'])}")
+        _reconcile_di_vs_ssot()
         
-        # FILE Π invalid flags + single-flight witness arm
         st.session_state["file_pi_valid"]   = False
         st.session_state["file_pi_reasons"] = [str(e)]
         st.session_state["write_armed"]     = True
         st.session_state["armed_by"]        = "file_invalid"
-        
         st.error(f"Projected(FILE) validation failed: {e}")
         return
-
 
     # ── success path (d3/mode) ────────────────────────────────────────────────
     d3   = meta.get("d3") if "d3" in meta else (boundaries.blocks.__root__.get("3") or [])
@@ -2134,16 +2131,17 @@ def run_overlap():
     st.session_state["overlap_H"] = H_local
     st.session_state["overlap_C"] = cmap
     
-    # --- single canonical SSOT publisher (idempotent; sets _has_overlap/_last_ib_sig) ---
-    pub = ssot_publish_block(
+    # publish canonical SSOT (idempotent single source of truth)
+    pub = publish_inputs_block(
         boundaries_obj=boundaries,
         cmap_obj=cmap,
         H_obj=H_local,
         shapes_obj=shapes,
         n3=n3,
-        projector_filename=st.session_state.get("run_ctx", {}).get("projector_filename",""),
     )
     st.caption(f"SSOT sig (before → after): {list(pub['before'])} → {list(pub['after'])}")
+    _reconcile_di_vs_ssot()
+
     
     # --- fixture auto-match (no arming) ------------------------------------------
     try:
@@ -2222,42 +2220,21 @@ if st.button("Run Overlap", key="btn_run_overlap_main"):
 # -----------------------------------------------------------------------------------------------------------
 with st.expander("🔧 SSOT & Overlap debugger", expanded=False):
     try:
-        # What Overlap believes it used
-        H_dbg = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
-        C_dbg = st.session_state.get("overlap_C") or cmap  # fallback to live cmap
-        rc    = st.session_state.get("run_ctx") or {}
-        out   = st.session_state.get("overlap_out") or {}
-        d3    = rc.get("d3", [])
-        n3    = rc.get("n3", (len(d3[0]) if (d3 and d3[0]) else 0))
-        pj    = rc.get("projector_filename","")
+        frozen = current_inputs_sig()               # from _inputs_block (frozen)
+        live   = live_inputs_fingerprint()          # from in-memory (boundaries/cmap/H/shapes)
+        stale  = ssot_is_stale()                    # startup-safe
 
-        live = ssot_live_sig(boundaries, cmap, H_dbg, shapes)
-        frozen = ssot_frozen_sig_from_ib()
-        st.write("live sig:   ", list(live))
-        st.write("frozen sig: ", list(frozen) if frozen else "—")
+        st.write("frozen sig:", list(frozen))
+        st.write("live sig:",   list(live))
+        st.write("stale?:", stale)
 
-        # Overlap_out visibility (k2/k3)
-        k2 = bool(((out.get("2") or {}).get("eq", False)))
-        k3 = bool(((out.get("3") or {}).get("eq", False)))
-        st.write("overlap_out k2/k3:", k2, k3)
-
-        # Stale reason
-        stale_now = ssot_is_stale(boundaries_obj=boundaries, cmap_obj=cmap, H_obj=H_dbg, shapes_obj=shapes)
-        st.write("ssot_is_stale:", stale_now)
-
-        # One-click canonical re-publish (debug only)
-        if st.button("Force refresh SSOT (debug-only)", key="btn_force_refresh_ssot"):
-            info = ssot_publish_block(
-                boundaries_obj=boundaries,
-                cmap_obj=cmap,
-                H_obj=H_dbg,
-                shapes_obj=shapes,
-                n3=n3,
-                projector_filename=pj,
-            )
-            st.success(f"Re-published SSOT. before→after: {list(info['before'])} → {list(info['after'])}")
+        out = st.session_state.get("overlap_out") or {}
+        k2 = bool((out.get("2") or {}).get("eq", False))
+        k3 = bool((out.get("3") or {}).get("eq", False))
+        st.write(f"overlap_out k2/k3: {k2} {k3}")
     except Exception as e:
         st.error(f"Debugger failed: {e}")
+
 
 
 
