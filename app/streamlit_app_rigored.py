@@ -102,6 +102,36 @@ DISTRICT_MAP: dict[str, str] = {
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
 
+# ======================= SSOT COMPAT SHIMS (bridge old call sites) =======================
+# Some older code (debuggers/health banners) may still call these names.
+
+def live_inputs_fingerprint():
+    """
+    Compatibility shim: old code expected a 'live fingerprint' of the current inputs.
+    We now return the SSOT live 5-tuple (b, C, H, U, shapes) using the same sources
+    the publisher uses (overlap_H preferred for H).
+    """
+    # Prefer the H used by Overlap so 'live' matches the pipeline
+    H_live = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
+    return ssot_live_sig(
+        globals().get("boundaries"),
+        globals().get("cmap"),
+        H_live,
+        globals().get("shapes"),
+    )
+
+# If anything old still calls publish_inputs_block(...), map it to the new canonical publisher.
+def publish_inputs_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int, projector_filename: str = ""):
+    return ssot_publish_block(
+        boundaries_obj=boundaries_obj,
+        cmap_obj=cmap_obj,
+        H_obj=H_obj,
+        shapes_obj=shapes_obj,
+        n3=n3,
+        projector_filename=projector_filename,
+    )
+# ======================= end SSOT COMPAT SHIMS =========================================
+
 # ======================= SSOT CORE (single source of truth) =======================
 import json, hashlib, streamlit as st
 
@@ -2059,20 +2089,17 @@ if st.button("Run Overlap", key="btn_run_overlap_main"):
 # -----------------------------------------------------------------------------------------------------------
 with st.expander("🔧 SSOT & Overlap debugger", expanded=False):
     try:
-        frozen = current_inputs_sig()               # from _inputs_block (frozen)
-        live   = live_inputs_fingerprint()          # from in-memory (boundaries/cmap/H/shapes)
-        stale  = ssot_is_stale()                    # startup-safe
-
-        st.write("frozen sig:", list(frozen))
+        frozen = ssot_frozen_sig_from_ib()
+        live   = ssot_live_sig()  # uses overlap_H if present
+        st.write("frozen sig:", list(frozen) if frozen else "∅")
         st.write("live sig:",   list(live))
-        st.write("stale?:", stale)
-
-        out = st.session_state.get("overlap_out") or {}
-        k2 = bool((out.get("2") or {}).get("eq", False))
-        k3 = bool((out.get("3") or {}).get("eq", False))
-        st.write(f"overlap_out k2/k3: {k2} {k3}")
+        st.write("stale?:", ssot_is_stale())
+        oo = st.session_state.get("overlap_out") or {}
+        st.write("overlap_out k2/k3:", bool(((oo.get("2") or {}).get("eq", False))),
+                                    bool(((oo.get("3") or {}).get("eq", False))))
     except Exception as e:
         st.error(f"Debugger failed: {e}")
+
 
 
 
