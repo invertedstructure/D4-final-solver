@@ -4010,19 +4010,43 @@ with safe_expander("Gallery (canonical)", expanded=False):
     # Assemble canonical row from cert
     row = _gallery_row_from_cert(cert) if has_cert else {}
 
-    # UI: lightweight overrides (optional)
-    c1, c2, c3 = st.columns([1,1,2])
+        # UI: lightweight overrides (optional, safe defaults)
+    c1, c2, c3 = st.columns([1, 1, 2])
+    
+    opts_strictify = ["tbd", "no", "yes"]
+    
     with c1:
         if has_cert:
-            row["growth"] = st.number_input("growth_bumps", min_value=0, value=int(row.get("growth",0)), step=1, key="gal_growth_bumps_v2")
+            # coerce to int with safe default
+            row["growth"] = int(st.number_input(
+                "growth_bumps",
+                min_value=0,
+                value=int(row.get("growth", 0) or 0),
+                step=1,
+                key="gal_growth_bumps_v2"
+            ))
+    
     with c2:
         if has_cert:
-            row["strictify"] = st.selectbox("strictify", options=["tbd","no","yes"],
-                                            index=["tbd","no","yes"].index(row.get("strictify","tbd")),
-                                            key="gal_strictify_v2")
+            # normalize strictify to one of the allowed options
+            _sv = str(row.get("strictify") or "tbd").strip().lower()
+            if _sv not in opts_strictify:
+                _sv = "tbd"
+            row["strictify"] = st.selectbox(
+                "strictify",
+                options=opts_strictify,
+                index=opts_strictify.index(_sv),
+                key="gal_strictify_v2"
+            )
+    
     with c3:
         if has_cert:
-            row["tag"] = st.text_input("tag (optional)", value=row.get("tag",""), key="gal_tag_v2")
+            row["tag"] = st.text_input(
+                "tag (optional)",
+                value=str(row.get("tag", "") or ""),
+                key="gal_tag_v2"
+            )
+
 
     # Bootstrap dedupe cache from tail once
     if not ss["_gallery_bootstrapped"]:
