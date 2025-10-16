@@ -1800,8 +1800,20 @@ with safe_expander("A/B compare (strict vs active projected)", expanded=False):
     ib   = ss.get("_inputs_block") or {}
     snap = ss.get("ab_compare") or {}
 
-    fresh = _ab_is_fresh(snap, rc=rc, ib=ib)
-    st.caption("A/B snapshot: " + ("🟢 fresh (will embed in cert)" if fresh else ("🟡 stale (won’t embed)" if snap else "—")))
+        # A/B header snippet (inside your columns block)
+    ab_pin = st.session_state.get("ab_pin") or {}
+    rc     = st.session_state.get("run_ctx") or {}
+    ib     = st.session_state.get("_inputs_block") or {}
+    if ab_pin.get("state") == "pinned":
+        ab_payload = ab_pin.get("payload") or {}
+        fresh, reason = _ab_is_fresh_now(rc=rc, ib=ib, ab_payload=ab_payload)
+        if fresh:
+            st.success("A/B: Pinned · Fresh (will embed)")
+        else:
+            st.warning(f"A/B: Pinned · Stale ({reason})")
+    else:
+        st.caption("A/B: —")
+
 
     if st.button("Run A/B compare", key="btn_ab_compare_main"):
         try:
