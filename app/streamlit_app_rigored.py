@@ -6803,17 +6803,58 @@ import os, json, csv, zipfile, secrets, shutil, hashlib, tempfile, platform
 from pathlib import Path
 from datetime import datetime, timezone
 
-# Respect existing globals if already defined elsewhere
-CERTS_DIR      = Path(globals().get("CERTS_DIR", "logs/certs"))
+# ---------- Paths (safe defaults) ----------
 LOGS_DIR       = Path(globals().get("LOGS_DIR", "logs"))
+CERTS_DIR      = Path(globals().get("CERTS_DIR", LOGS_DIR / "certs"))
 REPORTS_DIR    = Path(globals().get("REPORTS_DIR", "reports"))
 BUNDLES_DIR    = Path(globals().get("BUNDLES_DIR", "bundles"))
 PROJECTORS_DIR = Path(globals().get("PROJECTORS_DIR", "projectors"))
+
 
 SCHEMA_VERSION = globals().get("SCHEMA_VERSION", "1.0.0")
 APP_VERSION    = globals().get("APP_VERSION", "v0.1-core")
 
 # ─────────────── tiny utils (no widgets; used by both features) ───────────────
+def flush_workspace(*, delete_projectors: bool=False) -> dict:
+    summary = {"when": datetime.now(timezone.utc).isoformat(), "deleted_dirs": [], "recreated_dirs": [], "files_removed": 0, "token": "", "composite_cache_key_short": ""}
+
+    # Session clears
+    for k in (
+        "_inputs_block","_district_info","run_ctx","overlap_out","overlap_H",
+        "residual_tags","ab_compare","last_cert_path","cert_payload",
+        "last_run_id","_gallery_keys","_last_boundaries_hash",
+        "_projector_cache","_projector_cache_ab","parity_pairs",
+        "parity_last_report_pairs","selftests_snapshot","_last_cert_write_key",
+    ):
+        st.session_state.pop(k, None)
+
+    # Disk clears
+    dirs = [CERTS_DIR, LOGS_DIR, REPORTS_DIR, BUNDLES_DIR]
+    if delete_projectors: dirs.append(PROJECTORS_DIR)
+
+    removed = 0
+    for d in dirs:
+        if d.exists():
+            for _root, _dirs, files in os.walk(d):
+                removed += len(files)
+            shutil.rmtree(d)
+        d.mkdir(parents=True, exist_ok=True)
+        summary["deleted_dirs"].append(str(d))
+        summary["recreated_dirs"].append(str(d))
+    summary["files_removed"] = removed
+
+    # Bump a token/key
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    salt = secrets.token_hex(2).upper()
+    token = f"FLUSH-{ts}-{salt}"
+    ckey  = hashlib.sha256((ts+salt).encode()).hexdigest()
+    st.session_state["_composite_cache_key"] = ckey
+    st.session_state["_last_flush_token"] = token
+    summary["token"] = token
+    summary["composite_cache_key_short"] = ckey[:12]
+    return summary
+
+
 def _utc_iso_z() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -6896,6 +6937,25 @@ def _discover_certs() -> list[Path]:
     out.sort(key=lambda p: p.stat().st_mtime if p.exists() else 0.0, reverse=True)
     return out
 
+# ---- helper: recursively discover certs under CERTS_DIR ----
+from pathlib import Path
+import os
+
+# Respect existing global if present; otherwise default to logs/certs
+CERTS_DIR = Path(globals().get("CERTS_DIR", "logs/certs"))
+
+def _discover_certs() -> list[Path]:
+    """
+    Recursively find all *.json cert files under CERTS_DIR, sorted.
+    """
+    out: list[Path] = []
+    if CERTS_DIR.exists():
+        for dirpath, _, filenames in os.walk(CERTS_DIR):
+            for fn in filenames:
+                if fn.lower().endswith(".json"):
+                    out.append(Path(dirpath) / fn)
+    out.sort()
+    return out
 # ─────────────────────────── SNAPSHOT BUILDER ───────────────────────────
 def build_everything_snapshot() -> str:
     """
@@ -6914,7 +6974,9 @@ def build_everything_snapshot() -> str:
     except Exception:
         st = None  # Optional; used only for user-facing info
 
+    # --- Collect certs (recursive under CERTS_DIR) ---
     cert_files = _discover_certs()
+
     parsed, skipped = [], []
     for p in cert_files:
         data, err = _read_json_safely(p)
@@ -6927,6 +6989,10 @@ def build_everything_snapshot() -> str:
         if st:
             st.info("Nothing to snapshot yet (no parsed certs).")
         return ""
+
+    # ... keep the rest of your function unchanged ...
+    # (proj_refs, districts, index_rows, manifest_files; projectors/logs/reports; manifest; zip; return)
+
 
     proj_refs, districts, index_rows, manifest_files = set(), set(), [], []
 
@@ -7113,6 +7179,9 @@ def _session_flush_run_cache():
     st.session_state["_last_flush_token"] = token
     return {"token": token, "ckey_short": ckey[:12]}
 
+
+
+
 # ─────────────────────────── FULL WORKSPACE FLUSH ───────────────────────────
 def _full_flush_workspace(delete_projectors: bool = False):
     """
@@ -7175,60 +7244,46 @@ EXPORTS_NS = "exports_v2"  # keep consistent with the rest of your app
 with safe_expander("Exports", expanded=False):
     c1, c2 = st.columns(2)
 
-    # ── Snapshot ZIP ───────────────────────────────────────────────────────────
-    with c1:
-        if st.button("Build Snapshot ZIP", key=_mkkey(EXPORTS_NS, "btn_build_snapshot")):
-            try:
-                zp = build_everything_snapshot()
-                if zp:
-                    st.success(f"Snapshot ready → {zp}")
-                    with open(zp, "rb") as fz:
-                        st.download_button(
-                            "Download snapshot.zip",
-                            fz,
-                            file_name=os.path.basename(zp),
-                            key=_mkkey(EXPORTS_NS, "dl_snapshot_zip"),
-                        )
-                else:
-                    st.info("Nothing to snapshot (no parsed certs found).")
-            except Exception as e:
-                st.error(f"Snapshot failed: {e}")
+   # ── Snapshot button
+with c1:
+    if st.button("Build Snapshot ZIP", key=_mkkey(EXPORTS_NS, "btn_build_snapshot")):
+        try:
+            zp = build_everything_snapshot()
+            if zp:
+                st.success(f"Snapshot ready → {zp}")
+                with open(zp, "rb") as fz:
+                    st.download_button("Download snapshot.zip", fz,
+                                       file_name=os.path.basename(zp),
+                                       key=_mkkey(EXPORTS_NS, "dl_snapshot_zip"))
+        except Exception as e:
+            st.error(f"Snapshot failed: {e}")
 
-    # ── Flush / Reset ─────────────────────────────────────────────────────────
-    with c2:
-        st.caption("Flush / Reset")
-        if st.button(
-            "Quick Reset (session only)",
-            key=_mkkey(EXPORTS_NS, "btn_quick_reset_session"),
-            help="Clears computed session data, bumps nonce; does not touch files.",
-        ):
-            out = _session_flush_run_cache()
-            st.success(f"Run cache flushed · token={out['token']} · key={out['ckey_short']}")
+# ── Flush/Reset buttons
+with c3:
+    st.caption("Flush / Reset")
+    if st.button("Quick Reset (session only)",
+                 key=_mkkey(EXPORTS_NS, "btn_quick_reset_session"),
+                 help="Clears computed session data, bumps nonce; does not touch files."):
+        out = _session_flush_run_cache()
+        st.success(f"Run cache flushed · token={out['token']} · key={out['ckey_short']}")
 
-        inc_pj = st.checkbox(
-            "Also remove projectors (full flush)",
-            value=False,
-            key=_mkkey(EXPORTS_NS, "flush_inc_pj"),
-        )
-        confirm = st.checkbox(
-            "I understand this deletes files on disk",
-            value=False,
-            key=_mkkey(EXPORTS_NS, "ff_confirm"),
-        )
-        if st.button(
-            "Full Flush (certs/logs/reports/bundles)",
-            key=_mkkey(EXPORTS_NS, "btn_full_flush"),
-            disabled=not confirm,
-            help="Deletes persisted outputs; keeps inputs. Bumps nonce & resets session.",
-        ):
-            try:
-                info = _full_flush_workspace(delete_projectors=inc_pj)
-                st.success(f"Workspace flushed · {info['token']}")
-                st.caption(f"New cache key: `{info['composite_cache_key_short']}`")
-                with st.expander("Flush details"):
-                    st.json(info)
-            except Exception as e:
-                st.error(f"Flush failed: {e}")
+    inc_pj  = st.checkbox("Also remove projectors (full flush)",
+                          value=False, key=_mkkey(EXPORTS_NS, "flush_inc_pj"))
+    confirm = st.checkbox("I understand this deletes files on disk",
+                          value=False, key=_mkkey(EXPORTS_NS, "ff_confirm"))
+    if st.button("Full Flush (certs/logs/reports/bundles)",
+                 key=_mkkey(EXPORTS_NS, "btn_full_flush"),
+                 disabled=not confirm,
+                 help="Deletes persisted outputs; keeps inputs. Bumps nonce & resets session."):
+        try:
+            info = flush_workspace(delete_projectors=inc_pj)
+            st.success(f"Workspace flushed · {info['token']}")
+            st.caption(f"New cache key: `{info['composite_cache_key_short']}`")
+            with st.expander("Flush details"):
+                st.json(info)
+        except Exception as e:
+            st.error(f"Flush failed: {e}")
+
                         
 
  
