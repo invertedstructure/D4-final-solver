@@ -4072,81 +4072,7 @@ if "eye" not in globals():
     def eye(n: int):
         return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
 
-# ==== Parity import/export shims (place above the expander) ====
-import io as _io, json as _json
-from pathlib import Path
 
-# Safe defaults for paths/dirs
-if "LOGS_DIR" not in globals():
-    LOGS_DIR = Path("logs"); LOGS_DIR.mkdir(parents=True, exist_ok=True)
-if "DEFAULT_PARITY_PATH" not in globals():
-    DEFAULT_PARITY_PATH = LOGS_DIR / "parity_pairs.json"
-
-def _file_mode_invalid_now() -> bool:
-    """
-    Disable export/import only when FILE Π is selected AND current Π is invalid.
-    Otherwise allow (strict/auto always allowed).
-    """
-    rc = st.session_state.get("run_ctx") or {}
-    mode_now = str(rc.get("mode",""))
-    if mode_now == "projected(file)":
-        return not bool(st.session_state.get("file_pi_valid", False))
-    return False
-
-def __pp_pairs_payload_from_queue(queue: list[dict] | None) -> dict:
-    """
-    Build a portable payload:
-      { schema_version, policy_hint, pairs: [...] }
-    Prefers 'parity_pairs_table' (editor), falls back to provided queue.
-    """
-    policy_hint = st.session_state.get("parity_policy_hint") or "strict"
-    pairs_src = st.session_state.get("parity_pairs_table")
-    if not pairs_src:
-        pairs_src = queue or st.session_state.get("parity_pairs") or []
-    # assume items already normalized by validate_pairs_payload or your editor
-    pairs = []
-    for p in pairs_src:
-        # keep only label/left/right; pass through embedded or path forms
-        pairs.append({
-            "label": p.get("label",""),
-            "left":  {**(p.get("left")  or {})},
-            "right": {**(p.get("right") or {})},
-        })
-    return {"schema_version":"1.0.0","policy_hint":policy_hint,"pairs":pairs}
-
-def _ensure_json_path_str(s: str | None) -> str:
-    s = (s or "").strip()
-    if not s:
-        return str(DEFAULT_PARITY_PATH)
-    p = Path(s)
-    if p.suffix.lower() != ".json":
-        p = p.with_suffix(".json")
-    p.parent.mkdir(parents=True, exist_ok=True)
-    return str(p)
-
-def _export_pairs_to_path(path_str: str) -> str:
-    """
-    Write current pairs to JSON at path_str and return the path string.
-    """
-    out = Path(_ensure_json_path_str(path_str))
-    payload = __pp_pairs_payload_from_queue(st.session_state.get("parity_pairs"))
-    with out.open("w", encoding="utf-8") as f:
-        _json.dump(payload, f, ensure_ascii=False, indent=2)
-    return str(out)
-
-def _import_pairs_from_payload(payload: dict, *, merge: bool) -> int:
-    """
-    Validate payload and stash into session (table-driven).
-    """
-    pairs_sanitized, policy_hint = validate_pairs_payload(payload)
-    if merge and "parity_pairs_table" in st.session_state:
-        st.session_state["parity_pairs_table"].extend(pairs_sanitized)
-    else:
-        st.session_state["parity_pairs_table"] = pairs_sanitized
-    st.session_state["parity_policy_hint"] = policy_hint
-    # clear legacy queue to avoid confusion
-    st.session_state["parity_pairs"] = []
-    return len(st.session_state["parity_pairs_table"])
 
 
 # --- Hashing helpers (reuse canonical) -----------------------------------
@@ -4639,20 +4565,54 @@ def load_fixture_from_paths(*, boundaries_path, cmap_path, H_path, shapes_path):
         "shapes": io.parse_shapes(_read_json(u_path)),
     }
 
+
+# ========================== Parity import/export helpers (canonical) ==========================
+# Place this block ABOVE the "Parity pairs: import/export" expander. Keep only one copy.
+
+import os
+import io as _io
+import json as _json
+from pathlib import Path
+
+# --- tiny clock shim if not already present
+if "__pp_now_z" not in globals():
+    from datetime import datetime, timezone
+    def __pp_now_z():
+        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+# --- safe defaults for paths/dirs
+if "LOGS_DIR" not in globals():
+    LOGS_DIR = Path("logs")
+    LOGS_DIR.mkdir(parents=True, exist_ok=True)
+if "DEFAULT_PARITY_PATH" not in globals():
+    DEFAULT_PARITY_PATH = LOGS_DIR / "parity_pairs.json"
+
+def _file_mode_invalid_now() -> bool:
+    """
+    Disable export/import only when FILE Π is selected AND current Π is invalid.
+    Otherwise allow (strict/auto always allowed).
+    """
+    rc = st.session_state.get("run_ctx") or {}
+    mode_now = str(rc.get("mode",""))
+    if mode_now == "projected(file)":
+        return not bool(st.session_state.get("file_pi_valid", False))
+    return False
+
 # ---- queue → portable JSON payload
 def __pp_pairs_payload_from_queue(pairs: list[dict]) -> dict:
     def _paths_anyshape(fx: dict) -> dict:
-        # prefer your universal adapter; fallback to SSOT file names
+        # Prefer your universal adapter if present; else fall back to SSOT filenames
         try:
-            return _paths_from_fixture_or_current(fx)
+            return _paths_from_fixture_or_current(fx)  # optional: provided elsewhere
         except Exception:
             ib = st.session_state.get("_inputs_block") or {}
-            fns = ib.get("filenames") or {}
+            fns = (ib.get("filenames") or {})
+            # accept both canonical and legacy keys
             return {
                 "boundaries": fx.get("boundaries", fns.get("boundaries", "inputs/boundaries.json")),
-                "cmap":       fx.get("cmap",       fns.get("C",          "inputs/cmap.json")),
+                "cmap":       fx.get("cmap",       fns.get("cmap",       fns.get("C", "inputs/cmap.json"))),
                 "H":          fx.get("H",          fns.get("H",          "inputs/H.json")),
-                "shapes":     fx.get("shapes",     fns.get("U",          "inputs/shapes.json")),
+                "shapes":     fx.get("shapes",     fns.get("shapes",     fns.get("U", "inputs/shapes.json"))),
             }
     rows = []
     for row in (pairs or []):
@@ -4675,9 +4635,10 @@ def _ensure_json_path_str(p_str: str, default_name="parity_pairs.json") -> str:
         p = p / default_name
     if p.suffix.lower() != ".json":
         p = p.with_suffix(".json")
+    p.parent.mkdir(parents=True, exist_ok=True)
     return p.as_posix()
 
-# --- Parity queue shims (safe to re-define if missing)
+# --- Parity queue shims (safe if re-defined)
 if "clear_parity_pairs" not in globals():
     def clear_parity_pairs():
         st.session_state["parity_pairs"] = []
@@ -4692,11 +4653,9 @@ if "add_parity_pair" not in globals():
         })
         return len(st.session_state["parity_pairs"])
 
-
 # ---- export helper used by the button
 def _export_pairs_to_path(path_str: str) -> str:
     p = Path(_ensure_json_path_str(path_str))
-    p.parent.mkdir(parents=True, exist_ok=True)
     payload = __pp_pairs_payload_from_queue(st.session_state.get("parity_pairs", []) or [])
     tmp = p.with_suffix(p.suffix + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
@@ -4707,14 +4666,33 @@ def _export_pairs_to_path(path_str: str) -> str:
 
 # ---- import helper for the uploader (payload-based)
 def _import_pairs_from_payload(payload: dict, *, merge: bool) -> int:
+    """
+    If you have validate_pairs_payload(...), call it here before ingesting.
+    Otherwise we accept the payload shape produced by __pp_pairs_payload_from_queue.
+    """
+    # Optional hard validation (uncomment if available):
+    # pairs_sanitized, policy_hint = validate_pairs_payload(payload)
+    # pairs_in = pairs_sanitized
+    pairs_in = payload.get("pairs") or []
+
     if not merge:
         clear_parity_pairs()
-    for r in (payload.get("pairs") or []):
-        L, R = r.get("left") or {}, r.get("right") or {}
-        fxL = load_fixture_from_paths(boundaries_path=L["boundaries"], cmap_path=L["cmap"], H_path=L["H"], shapes_path=L["shapes"])
-        fxR = load_fixture_from_paths(boundaries_path=R["boundaries"], cmap_path=R["cmap"], H_path=R["H"], shapes_path=R["shapes"])
+
+    for r in pairs_in:
+        L = r.get("left")  or {}
+        R = r.get("right") or {}
+        # load_fixture_from_paths is expected to exist elsewhere; if not, replace with your loader.
+        fxL = load_fixture_from_paths(
+            boundaries_path=L["boundaries"], cmap_path=L["cmap"], H_path=L["H"], shapes_path=L["shapes"]
+        )
+        fxR = load_fixture_from_paths(
+            boundaries_path=R["boundaries"], cmap_path=R["cmap"], H_path=R["H"], shapes_path=R["shapes"]
+        )
         add_parity_pair(label=r.get("label","PAIR"), left_fixture=fxL, right_fixture=fxR)
+
     return len(st.session_state.get("parity_pairs", []))
+# ======================== /Parity import/export helpers ========================
+
 
 
 # -------------- Loader shim for parity import -----------------
