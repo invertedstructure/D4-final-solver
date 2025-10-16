@@ -3980,7 +3980,7 @@ if "PARITY_SUMMARY_CSV" not in globals():
 PARITY_JSON_PATH = globals().get("PARITY_JSON_PATH", PARITY_REPORT_PATH)
 PARITY_CSV_PATH  = globals().get("PARITY_CSV_PATH",  PARITY_SUMMARY_CSV)
 
-LOGS_DIR = Path(globals()_
+LOGS_DIR = Path(globals().get("LOGS_DIR", "logs"))
 
 
 # --------- Universal adapter: capture old _paths_from_fixture_or_current ----------
