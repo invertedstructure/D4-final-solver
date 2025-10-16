@@ -1685,52 +1685,98 @@ else:
             for w in _warn: st.write(f"- {w}")
 
 
-
-
 # ====================== A/B Compare (strict vs ACTIVE projected) ======================
 
-def _inputs_sig_now_from_ib(ib: dict | None) -> list[str]:
-    ib = ib or {}
+# --- tiny key helper (no collisions) ----------------------------------------------
+try:
+    _mkkey
+except NameError:
+    def _mkkey(ns: str, name: str) -> str:
+        return f"{ns}__{name}"
+AB_NS = "ab_v3"
+
+# --- canonical policy tag (single source) -----------------------------------------
+def _policy_tag_now_from_rc(rc: dict | None) -> str:
+    rc = rc or {}
+    pol = rc.get("policy_tag")
+    if pol:
+        return str(pol)
+    mode = str(rc.get("mode",""))
+    if mode == "strict":            return "strict"
+    if mode == "projected(file)":   return "projected(columns@k=3,file)"
+    if mode == "projected(auto)":   return "projected(columns@k=3,auto)"
+    # fallback to your cfg when available
+    try:
+        return policy_label_from_cfg(cfg_active)
+    except Exception:
+        return "strict"
+
+# --- frozen inputs sig (prefer SSOT) ----------------------------------------------
+def _inputs_sig_frozen() -> list[str]:
+    try:
+        if "ssot_frozen_sig_from_ib" in globals():
+            tup = ssot_frozen_sig_from_ib() or ()
+            return [str(x) for x in tup]
+    except Exception:
+        pass
+    ib = st.session_state.get("_inputs_block") or {}
+    h  = (ib.get("hashes") or {})
     return [
-        str(ib.get("boundaries_hash","")),
-        str(ib.get("C_hash","")),
-        str(ib.get("H_hash","")),
-        str(ib.get("U_hash","")),
-        str(ib.get("shapes_hash","")),
+        str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
+        str(h.get("C_hash",          ib.get("C_hash",""))),
+        str(h.get("H_hash",          ib.get("H_hash",""))),
+        str(h.get("U_hash",          ib.get("U_hash",""))),
+        str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
     ]
 
-def _canonical_policy_tag(rc: dict | None) -> str:
+# --- projector hash (AUTO uses rc-lane-mask hash if available) ---------------------
+def _projector_hash_now(rc: dict) -> str:
+    mode = str(rc.get("mode",""))
+    if mode == "projected(file)":
+        return rc.get("projector_hash","") or ""
+    if mode == "projected(auto)":
+        if " _auto_pj_hash_from_rc" in globals():  # unlikely typo-guard
+            return _auto_pj_hash_from_rc(rc) or ""
+        if "_auto_pj_hash_from_rc" in globals():
+            try:
+                return _auto_pj_hash_from_rc(rc) or ""
+            except Exception:
+                return ""
+    return ""
+
+# --- freshness check with reason ---------------------------------------------------
+def _ab_fresh_and_reason(*, ab_payload: dict | None, rc: dict | None, ib: dict | None) -> tuple[bool,str]:
+    ab = ab_payload or {}
+    if not ab:
+        return False, "NO_PIN"
+    frozen = tuple(_inputs_sig_frozen())
+    if tuple(ab.get("inputs_sig") or ()) != frozen:
+        return False, "INPUTS_SIG"
+    pol_now = _policy_tag_now_from_rc(rc or {})
+    ab_pol  = str(ab.get("policy_tag","") or (ab.get("projected") or {}).get("policy_tag",""))
+    if ab_pol != pol_now:
+        return False, "POLICY"
     rc = rc or {}
-    try:
-        return str(rc.get("policy_tag") or policy_label_from_cfg(cfg_active))
-    except Exception:
-        return str(rc.get("policy_tag") or "strict")
+    if str(rc.get("mode","")) == "projected(file)":
+        pj_now = rc.get("projector_hash","") or ""
+        pj_ab  = (ab.get("projected") or {}).get("projector_hash","") or ""
+        if pj_ab != pj_now:
+            return False, "PROJECTOR_HASH"
+    return True, "OK"
 
-def _ab_is_fresh(ab: dict | None, *, rc: dict | None, ib: dict | None) -> bool:
-    if not ab: return False
-    if ab.get("inputs_sig") != _inputs_sig_now_from_ib(ib): return False
-    ab_pol = ab.get("policy_tag") or (ab.get("projected") or {}).get("policy_tag")
-    if ab_pol != _canonical_policy_tag(rc): return False
-    if str((rc or {}).get("mode","")).startswith("projected(file)"):
-        if (ab.get("projected") or {}).get("projector_hash","") != ((rc or {}).get("projector_hash","") or ""):
-            return False
-    return True
-
+# --- strict recompute (shape-safe, no side effects) --------------------------------
 def _recompute_strict_out(*, boundaries_obj, cmap_obj, H_obj, d3) -> dict:
-    """Tiny strict check mirroring your overlap math, shape-safe & tolerant."""
-    # helpers
     def _shape_ok(A,B): return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
     def _xor(A,B):
         if not A: return [r[:] for r in (B or [])]
         if not B: return [r[:] for r in (A or [])]
-        r, c = len(A), len(A[0])
+        r,c = len(A), len(A[0])
         return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
-    def _is_zero(M): return (not M) or all(all((x & 1) == 0 for x in row) for row in M)
+    def _is_zero(M): return (not M) or all((x & 1) == 0 for x in row for row in M)
 
-    H2 = (H_obj.blocks.__root__.get("2") or []) if H_obj else []
-    C3 = (cmap_obj.blocks.__root__.get("3") or [])
+    H2 = (getattr(getattr(H_obj, "blocks", None), "__root__", {}) or {}).get("2", []) if H_obj else []
+    C3 = (getattr(getattr(cmap_obj, "blocks", None), "__root__", {}) or {}).get("3", []) if cmap_obj else []
     I3 = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
-
     eq3 = False
     try:
         if _shape_ok(H2, d3) and C3 and C3[0] and (len(C3) == len(C3[0])):
@@ -1738,79 +1784,67 @@ def _recompute_strict_out(*, boundaries_obj, cmap_obj, H_obj, d3) -> dict:
             eq3 = _is_zero(R3)
     except Exception:
         eq3 = False
-
-    # By construction your k=2 equality is a gate on d2, which isn’t touched here → True
     return {"2": {"eq": True}, "3": {"eq": bool(eq3), "n_k": (len(d3[0]) if (d3 and d3[0]) else 0)}}
 
+# --- diag lane bottoms (for gallery/fixture) --------------------------------------
 def _lane_bottoms_for_diag(*, H_obj, cmap_obj, d3, lane_mask):
-    """Diagnostics rows used by fixtures/galleries (shape-safe)."""
     def _shape_ok(A,B): return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
     def _xor(A,B):
         if not A: return [r[:] for r in (B or [])]
         if not B: return [r[:] for r in (A or [])]
-        r, c = len(A), len(A[0])
+        r,c = len(A), len(A[0])
         return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
     def _bottom_row(M): return M[-1] if (M and len(M)) else []
     def _mask(vec, mask):
         idx = [j for j,m in enumerate(mask or []) if m]
         return [vec[j] for j in idx] if (vec and idx) else []
 
-    H2 = (H_obj.blocks.__root__.get("2") or []) if H_obj else []
-    C3 = (cmap_obj.blocks.__root__.get("3") or [])
+    H2 = (getattr(getattr(H_obj, "blocks", None), "__root__", {}) or {}).get("2", []) if H_obj else []
+    C3 = (getattr(getattr(cmap_obj, "blocks", None), "__root__", {}) or {}).get("3", []) if cmap_obj else []
     I3 = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
-
     try:
         H2d3  = mul(H2, d3) if _shape_ok(H2, d3) else []
         C3pI3 = _xor(C3, I3) if (C3 and C3[0]) else []
     except Exception:
         H2d3, C3pI3 = [], []
-
     return _mask(_bottom_row(H2d3), lane_mask), _mask(_bottom_row(C3pI3), lane_mask)
 
+# --- pin for cert (canon fields + one-shot ticket) --------------------------------
 def _pin_ab_for_cert(strict_out: dict, projected_out: dict):
-    """Pin + ticket so the cert block embeds this snapshot next render."""
     ss = st.session_state
-    ib = ss.get("_inputs_block") or {}
     rc = ss.get("run_ctx") or {}
-
-    # Prefer canonical frozen sig so it matches cert deduper
-    inputs_sig = []
-    if "ssot_frozen_sig_from_ib" in globals():
-        try:
-            inputs_sig = list(ssot_frozen_sig_from_ib() or [])
-        except Exception:
-            pass
-    if not inputs_sig:
-        inputs_sig = _inputs_sig_now_from_ib(ib)
-
-    pol_tag = _canonical_policy_tag(rc)
-    pj_hash = (rc.get("projector_hash","") if str(rc.get("mode","")) == "projected(file)" else "")
+    inputs_sig = _inputs_sig_frozen()
+    pol_tag    = _policy_tag_now_from_rc(rc)
+    pj_hash    = _projector_hash_now(rc)
 
     payload = {
         "inputs_sig": inputs_sig,
         "policy_tag": pol_tag,
         "strict":    {"out": dict(strict_out or {})},
-        "projected": {"out": dict(projected_out or {}), "policy_tag": pol_tag, "projector_hash": pj_hash},
+        "projected": {
+            "out": dict(projected_out or {}),
+            "policy_tag": pol_tag,
+            "projector_hash": pj_hash,
+            "projector_filename": rc.get("projector_filename",""),
+            "projector_consistent_with_d": rc.get("projector_consistent_with_d", True),
+        },
     }
-
     ss["ab_pin"] = {"state": "pinned", "payload": payload, "consumed": False}
     ss["_ab_ticket_pending"] = int(ss.get("_ab_ticket_pending", 0)) + 1
     ss["write_armed"] = True
     ss["armed_by"]    = "ab_compare"
 
+# --- UI ---------------------------------------------------------------------------
 with safe_expander("A/B compare (strict vs active projected)", expanded=False):
     ss   = st.session_state
     rc   = ss.get("run_ctx") or {}
     ib   = ss.get("_inputs_block") or {}
-    snap = ss.get("ab_compare") or {}
 
-        # A/B header snippet (inside your columns block)
-    ab_pin = st.session_state.get("ab_pin") or {}
-    rc     = st.session_state.get("run_ctx") or {}
-    ib     = st.session_state.get("_inputs_block") or {}
+    # Header: fresh/stale pill (uses the pin payload)
+    ab_pin     = ss.get("ab_pin") or {}
+    ab_payload = ab_pin.get("payload") or {}
+    fresh, reason = _ab_fresh_and_reason(ab_payload=ab_payload, rc=rc, ib=ib)
     if ab_pin.get("state") == "pinned":
-        ab_payload = ab_pin.get("payload") or {}
-        fresh, reason = _ab_is_fresh_now(rc=rc, ib=ib, ab_payload=ab_payload)
         if fresh:
             st.success("A/B: Pinned · Fresh (will embed)")
         else:
@@ -1818,86 +1852,94 @@ with safe_expander("A/B compare (strict vs active projected)", expanded=False):
     else:
         st.caption("A/B: —")
 
-
-    if st.button("Run A/B compare", key="btn_ab_compare_main"):
+    # Compare button
+    if st.button("Run A/B compare", key=_mkkey(AB_NS, "btn_run_compare")):
         try:
             mode_now = str(rc.get("mode","strict"))
             if mode_now == "strict":
                 st.warning("Active policy is strict — run Overlap in projected(auto/file) first to compare.")
-                st.stop()
+            else:
+                # Use the H from overlap if available
+                H_used   = ss.get("overlap_H")
+                cmap_obj = ss.get("overlap_C") or globals().get("cmap")
+                d3       = rc.get("d3") or []
+                lane_mask = list(rc.get("lane_mask_k3") or [])
 
-            # Use exactly the H that Overlap used; fallback to local loader if needed
-            H_used = ss.get("overlap_H") or (io.parse_cmap({"blocks": {}}))
-            d3     = rc.get("d3") or []
-            lane_mask = list(rc.get("lane_mask_k3") or [])
+                # Fallbacks
+                if cmap_obj is None: cmap_obj = globals().get("cmap")
+                if H_used is None and "_load_h_local" in globals():
+                    try: H_used = _load_h_local()
+                    except Exception: H_used = None
 
-            # recompute strict; take projected from the active run
-            out_active  = ss.get("overlap_out") or {}
-            out_strict  = _recompute_strict_out(boundaries_obj=boundaries, cmap_obj=cmap, H_obj=H_used, d3=d3)
-            out_project = out_active
+                # recompute strict; projected from active run
+                out_active  = ss.get("overlap_out") or {}
+                out_strict  = _recompute_strict_out(boundaries_obj=globals().get("boundaries"),
+                                                    cmap_obj=cmap_obj, H_obj=H_used, d3=d3)
+                out_project = out_active
 
-            # diagnostics (bottom vectors on lanes)
-            lane_vec_H2d3, lane_vec_C3I = _lane_bottoms_for_diag(
-                H_obj=H_used, cmap_obj=cmap, d3=d3, lane_mask=lane_mask
-            )
+                # diagnostics (bottom vectors on lanes)
+                lane_vec_H2d3, lane_vec_C3I = _lane_bottoms_for_diag(
+                    H_obj=H_used, cmap_obj=cmap_obj, d3=d3, lane_mask=lane_mask
+                )
 
-            label_proj = _canonical_policy_tag(rc)
-            pair_tag   = f"strict__VS__{label_proj}"
+                label_proj = _policy_tag_now_from_rc(rc)
+                pair_tag   = f"strict__VS__{label_proj}"
 
-            # full snapshot for UI/debug panes
-            ab_payload = {
-                "pair_tag": pair_tag,
-                "inputs_sig": _inputs_sig_now_from_ib(ib),
-                "lane_mask_k3": lane_mask,
-                "policy_tag": label_proj,
-                "strict": {
-                    "label": "strict",
-                    "out":   out_strict,
-                    "lane_vec_H2d3": lane_vec_H2d3,
-                    "lane_vec_C3plusI3": lane_vec_C3I,
-                    "pass_vec": [
-                        int(out_strict.get("2",{}).get("eq", False)),
-                        int(out_strict.get("3",{}).get("eq", False)),
-                    ],
-                    "projector_hash": "",
-                },
-                "projected": {
-                    "label": label_proj,
+                # rich snapshot (UI convenience)
+                ab_snapshot = {
+                    "pair_tag": pair_tag,
+                    "inputs_sig": _inputs_sig_frozen(),
+                    "lane_mask_k3": lane_mask,
                     "policy_tag": label_proj,
-                    "out":   out_project,
-                    "lane_vec_H2d3": lane_vec_H2d3[:],
-                    "lane_vec_C3plusI3": lane_vec_C3I[:],
-                    "pass_vec": [
-                        int(out_project.get("2",{}).get("eq", False)),
-                        int(out_project.get("3",{}).get("eq", False)),
-                    ],
-                    "projector_filename": rc.get("projector_filename",""),
-                    "projector_hash": rc.get("projector_hash","") if mode_now == "projected(file)" else "",
-                    "projector_consistent_with_d": rc.get("projector_consistent_with_d", None),
-                },
-            }
+                    "strict": {
+                        "label": "strict",
+                        "out":   out_strict,
+                        "lane_vec_H2d3": lane_vec_H2d3,
+                        "lane_vec_C3plusI3": lane_vec_C3I,
+                        "pass_vec": [
+                            int(out_strict.get("2",{}).get("eq", False)),
+                            int(out_strict.get("3",{}).get("eq", False)),
+                        ],
+                        "projector_hash": "",
+                    },
+                    "projected": {
+                        "label": label_proj,
+                        "policy_tag": label_proj,
+                        "out":   out_project,
+                        "lane_vec_H2d3": lane_vec_H2d3[:],
+                        "lane_vec_C3plusI3": lane_vec_C3I[:],
+                        "pass_vec": [
+                            int(out_project.get("2",{}).get("eq", False)),
+                            int(out_project.get("3",{}).get("eq", False)),
+                        ],
+                        "projector_filename": rc.get("projector_filename",""),
+                        "projector_hash": _projector_hash_now(rc),
+                        "projector_consistent_with_d": rc.get("projector_consistent_with_d", True),
+                    },
+                }
+                ss["ab_compare"] = ab_snapshot
+                _pin_ab_for_cert(out_strict, out_project)
 
-            # cache for UI and pin for cert
-            ss["ab_compare"] = ab_payload
-            _pin_ab_for_cert(out_strict, out_project)
+                s_ok = bool(out_strict.get("3",{}).get("eq", False))
+                p_ok = bool(out_project.get("3",{}).get("eq", False))
+                st.success(f"A/B updated → strict={'✅' if s_ok else '❌'} · projected={'✅' if p_ok else '❌'} · {pair_tag}")
 
-            # receipt
-            s_ok = bool(out_strict.get("3",{}).get("eq", False))
-            p_ok = bool(out_project.get("3",{}).get("eq", False))
-            st.success(f"A/B updated → strict={'✅' if s_ok else '❌'} · projected={'✅' if p_ok else '❌'} · {pair_tag}")
-
-            if st.checkbox("Show A/B snapshot payload", value=False, key="ab_show_payload_main"):
-                st.json(ab_payload)
-
+                if st.checkbox("Show A/B snapshot payload", value=False, key=_mkkey(AB_NS,"show_payload")):
+                    st.json(ab_snapshot)
         except Exception as e:
             st.error(f"A/B compare failed: {e}")
 
     # convenience clearer if snapshot is stale
-    if snap and (not _ab_is_fresh(snap, rc=rc, ib=ib)):
-        if st.button("Clear stale A/B", key="btn_ab_clear_main"):
+    ab_snap = ss.get("ab_compare") or {}
+    fresh2, _reason2 = _ab_fresh_and_reason(ab_payload=ab_snap, rc=rc, ib=ib)
+    if ab_snap and (not fresh2):
+        if st.button("Clear stale A/B", key=_mkkey(AB_NS, "btn_clear")):
             ss.pop("ab_compare", None)
             st.success("Cleared A/B snapshot. Re-run A/B to refresh.")
 # ======================================================================================
+
+
+
 
 
 
@@ -3996,6 +4038,101 @@ def freeze_auto_projector_to_file(*, filename: str, overwrite: bool = False) -> 
     return {"path": pj_path.as_posix(), "projector_hash": pj_hash, "bytes": pj_bytes}
 
 # ---------------------------- UI: Freezer Expander ----------------------------
+from pathlib import Path
+import json, os, tempfile, hashlib, shutil
+from datetime import datetime, timezone
+
+# --- tiny fallbacks so this block is self-contained ---
+def _safe_key(base: str):
+    try:
+        return ensure_unique_widget_key(base)  # type: ignore[name-defined]
+    except Exception:
+        return base
+
+def _utc_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+def _sha256_bytes(b: bytes) -> str:
+    import hashlib as _hh
+    return _hh.sha256(b).hexdigest()
+
+def _atomic_write_json(path: Path, payload: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    blob = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    with tempfile.NamedTemporaryFile("wb", delete=False, dir=path.parent) as tmp:
+        tmp.write(blob); tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
+    os.replace(tmp_name, path)
+    return _sha256_bytes(blob), len(blob)
+
+# minimal validator fallback (uses your existing strict validator when present)
+def _validate_projector_diag(P_freeze, *, n3: int, lane_mask: list[int]):
+    if "validate_projector_file_strict" in globals():
+        validate_projector_file_strict(P_freeze, n3=n3, lane_mask=lane_mask)  # type: ignore[name-defined]
+    else:
+        # quick sanity only
+        if not isinstance(P_freeze, list) or len(P_freeze) != n3:
+            raise ValueError("P shape mismatch")
+        for row in P_freeze:
+            if not isinstance(row, list) or len(row) != n3:
+                raise ValueError("P row mismatch")
+        for j, m in enumerate(lane_mask):
+            if m not in (0,1): raise ValueError("lane mask must be 0/1")
+            if P_freeze[j][j] != m:
+                raise ValueError("P diag must equal lane_mask")
+
+# build diagonal Π from lane mask
+def _diag_from_mask(lm: list[int]) -> list[list[int]]:
+    n = len(lm or [])
+    return [[1 if (i==j and int(lm[j])==1) else 0 for j in range(n)] for i in range(n)]
+
+# wrapper: freeze AUTO → FILE and switch policy, re-run overlap
+def freeze_auto_projector_to_file(*, filename: str, overwrite: bool=False) -> dict:
+    ss = st.session_state
+    rc = dict(ss.get("run_ctx") or {})
+    mode_now = str(rc.get("mode",""))
+    if mode_now != "projected(auto)":
+        raise RuntimeError("Current run is not projected(auto). Run Overlap in AUTO first.")
+
+    n3 = int(rc.get("n3") or 0)
+    lm = list(rc.get("lane_mask_k3") or [])
+    if n3 <= 0 or len(lm) != n3:
+        raise RuntimeError("Context invalid (n3/mask mismatch). Run Overlap and try again.")
+
+    P_freeze = _diag_from_mask(lm)
+    _validate_projector_diag(P_freeze, n3=n3, lane_mask=lm)
+
+    pj_dir = Path(ss.get("PROJECTORS_DIR","projectors"))
+    pj_dir.mkdir(parents=True, exist_ok=True)
+    pj_path = pj_dir / (filename or f"projector_{(ss.get('_district_info') or {}).get('district_id','UNKNOWN')}.json")
+    if pj_path.exists() and not overwrite:
+        raise FileExistsError("Projector file already exists (enable overwrite).")
+
+    payload = {"schema_version": "1.0.0", "written_at_utc": _utc_iso(), "blocks": {"3": P_freeze}}
+    pj_hash, _ = _atomic_write_json(pj_path, payload)
+
+    # flip UI/config to FILE for k=3
+    ss["ov_policy_choice"] = "projected(file)"
+    cfg_active.setdefault("source", {})["3"] = "file"                # type: ignore[name-defined]
+    cfg_active.setdefault("projector_files", {})["3"] = pj_path.as_posix()  # type: ignore[name-defined]
+    ss["ov_last_pj_path"] = pj_path.as_posix()
+
+    # soft reset overlap caches
+    if "_soft_reset_before_overlap" in globals():
+        try: _soft_reset_before_overlap()  # type: ignore[name-defined]
+        except Exception: pass
+    for k in ("overlap_out","residual_tags","overlap_cfg","overlap_policy_label"):
+        ss.pop(k, None)
+
+    # re-run overlap immediately in FILE mode
+    run_overlap()  # type: ignore[name-defined]
+
+    # arm cert write (single flight)
+    ss["should_write_cert"] = True
+    ss.pop("_last_cert_write_key", None)
+
+    return {"path": pj_path.as_posix(), "projector_hash": pj_hash, "lane_mask_k3": lm[:], "n3": n3}
+
+# ---------------------------- Freezer Expander ----------------------------
 with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
     ss = st.session_state
     rc = dict(ss.get("run_ctx") or {})
@@ -4009,12 +4146,11 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
             is_stale = ssot_is_stale()  # type: ignore[name-defined]
     except Exception:
         pass
-    _k_toggle = ensure_unique_widget_key("freezer_allow_stale") if "ensure_unique_widget_key" in globals() else "freezer_allow_stale"
-    allow_stale = st.toggle("Allow writing with stale SSOT", value=False, key=_k_toggle)
+    allow_stale = st.toggle("Allow writing with stale SSOT", value=False, key=_safe_key("freezer_allow_stale"))
     if is_stale and not allow_stale:
         st.warning("STALE_RUN_CTX: Inputs changed; click Run Overlap to refresh before freezing.")
 
-    # Eligibility
+    # Eligibility (AUTO + sane + k3 green)
     k3_green = bool((((ss.get("overlap_out") or {}).get("3") or {}).get("eq", False)))
     mode_now = str(rc.get("mode",""))
     n3       = int(rc.get("n3") or 0)
@@ -4023,10 +4159,8 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
 
     st.caption("Freeze current AUTO Π → file, switch to projected(file), re-run Overlap, and arm cert write.")
 
-    _k_name = ensure_unique_widget_key("pj_freeze_name") if "ensure_unique_widget_key" in globals() else "pj_freeze_name"
-    _k_ow   = ensure_unique_widget_key("pj_freeze_overwrite") if "ensure_unique_widget_key" in globals() else "pj_freeze_overwrite"
-    name    = st.text_input("Filename", value=f"projector_{district_id or 'UNKNOWN'}.json", key=_k_name)
-    overwrite_ok = st.checkbox("Overwrite if exists", value=False, key=_k_ow)
+    name         = st.text_input("Filename", value=f"projector_{district_id or 'UNKNOWN'}.json", key=_safe_key("pj_freeze_name"))
+    overwrite_ok = st.checkbox("Overwrite if exists", value=False, key=_safe_key("pj_freeze_overwrite"))
 
     # If current FILE Π is invalid, we still allow freezing from AUTO (that’s the fix).
     fm_bad = False
@@ -4035,16 +4169,22 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
     except Exception:
         pass
 
-    disabled = (not elig)
-    tip = None if elig else "Enabled when current run is projected(auto) and k=3 is green."
+    disabled = not elig
+    tip = ("Disabled: need projected(auto), valid n3/mask, and k=3 green."
+           if not elig else None)
+    if fm_bad and mode_now == "projected(file)":
+        st.info("Current FILE Π is invalid — switch/run AUTO first, then freeze from AUTO.")
 
-    _k_btn = ensure_unique_widget_key("btn_freeze_auto_to_file") if "ensure_unique_widget_key" in globals() else "btn_freeze_auto_to_file"
-    if st.button("Freeze Π → FILE & re-run", key=_k_btn, disabled=disabled, help=(tip or "Freeze AUTO to FILE and re-run")):
+    if st.button("Freeze Π → FILE & re-run",
+                 key=_safe_key("btn_freeze_auto_to_file"),
+                 disabled=disabled,
+                 help=(tip or "Freeze AUTO to FILE and re-run")):
         try:
             info = freeze_auto_projector_to_file(filename=name, overwrite=overwrite_ok)
             st.success(f"Π saved → {Path(info['path']).name} · {info['projector_hash'][:12]}… and switched to FILE.")
         except Exception as e:
             st.error(f"Freeze failed: {e}")
+
 
 
 
@@ -7181,7 +7321,77 @@ def _session_flush_run_cache():
 
 
 
+# ───────────────────────── Flush/Reset buttons (C) ─────────────────────────
+# fallbacks so the UI keys don't collide
+try:
+    EXPORTS_NS
+except NameError:
+    EXPORTS_NS = "exports_v2"
+try:
+    _mkkey
+except NameError:
+    def _mkkey(ns: str, name: str) -> str:
+        return f"{ns}__{name}"
 
+# local safe wrappers (use your existing funcs when present)
+def _session_flush_run_cache_safe():
+    if "_session_flush_run_cache" in globals():
+        return _session_flush_run_cache()  # type: ignore[name-defined]
+    # minimal in-session reset
+    ss = st.session_state
+    for k in (
+        "run_ctx","overlap_out","overlap_cfg","overlap_policy_label",
+        "overlap_H","residual_tags","ab_compare","cert_payload",
+        "last_cert_path","_last_cert_write_key","_projector_cache","_projector_cache_ab"
+    ):
+        ss.pop(k, None)
+    from datetime import datetime, timezone
+    import secrets, hashlib
+    ts = datetime.now(timezone.utc).isoformat()
+    salt = secrets.token_hex(2).upper()
+    token = f"RUN-FLUSH-{ts}-{salt}"
+    ckey  = hashlib.sha256((ts + salt).encode("utf-8")).hexdigest()
+    ss["_composite_cache_key"] = ckey
+    ss["_last_flush_token"]    = token
+    ss["_fixture_nonce"]       = int(ss.get("_fixture_nonce", 0)) + 1
+    return {"token": token, "ckey_short": ckey[:12]}
+
+def _flush_workspace_safe(delete_projectors: bool=False):
+    if "flush_workspace" in globals():
+        return flush_workspace(delete_projectors=delete_projectors)  # type: ignore[name-defined]
+    # minimal on-disk flush fallback
+    from pathlib import Path
+    import shutil, hashlib, secrets
+    CERTS_DIR      = Path(globals().get("CERTS_DIR","certs"))
+    LOGS_DIR       = Path(globals().get("LOGS_DIR","logs"))
+    REPORTS_DIR    = Path(globals().get("REPORTS_DIR","reports"))
+    BUNDLES_DIR    = Path(globals().get("BUNDLES_DIR","bundles"))
+    PROJECTORS_DIR = Path(globals().get("PROJECTORS_DIR","projectors"))
+    dirs = [CERTS_DIR, LOGS_DIR, REPORTS_DIR, BUNDLES_DIR]
+    if delete_projectors:
+        dirs.append(PROJECTORS_DIR)
+    deleted = []
+    recreated = []
+    files_removed = 0
+    for d in dirs:
+        if d.exists():
+            # count files
+            for root, _, files in os.walk(d):
+                files_removed += len(files)
+            shutil.rmtree(d, ignore_errors=True)
+        d.mkdir(parents=True, exist_ok=True)
+        deleted.append(str(d)); recreated.append(str(d))
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    salt = secrets.token_hex(2).upper()
+    token = f"FLUSH-{ts}-{salt}"
+    ckey  = hashlib.sha256((ts + salt).encode("utf-8")).hexdigest()
+    st.session_state["_composite_cache_key"] = ckey
+    st.session_state["_last_flush_token"]    = token
+    return {
+        "when": ts, "deleted_dirs": deleted, "recreated_dirs": recreated,
+        "files_removed": files_removed, "token": token,
+        "composite_cache_key_short": ckey[:12],
+    }
 # ─────────────────────────── FULL WORKSPACE FLUSH ───────────────────────────
 def _full_flush_workspace(delete_projectors: bool = False):
     """
@@ -7257,14 +7467,13 @@ with c1:
                                        key=_mkkey(EXPORTS_NS, "dl_snapshot_zip"))
         except Exception as e:
             st.error(f"Snapshot failed: {e}")
-
-# ── Flush/Reset buttons
-with c3:
+# place this in your “Exports” section, column c2
+with c2:
     st.caption("Flush / Reset")
     if st.button("Quick Reset (session only)",
                  key=_mkkey(EXPORTS_NS, "btn_quick_reset_session"),
                  help="Clears computed session data, bumps nonce; does not touch files."):
-        out = _session_flush_run_cache()
+        out = _session_flush_run_cache_safe()
         st.success(f"Run cache flushed · token={out['token']} · key={out['ckey_short']}")
 
     inc_pj  = st.checkbox("Also remove projectors (full flush)",
@@ -7276,13 +7485,19 @@ with c3:
                  disabled=not confirm,
                  help="Deletes persisted outputs; keeps inputs. Bumps nonce & resets session."):
         try:
-            info = flush_workspace(delete_projectors=inc_pj)
+            info = _flush_workspace_safe(delete_projectors=inc_pj)
             st.success(f"Workspace flushed · {info['token']}")
             st.caption(f"New cache key: `{info['composite_cache_key_short']}`")
             with st.expander("Flush details"):
                 st.json(info)
         except Exception as e:
             st.error(f"Flush failed: {e}")
+
+
+
+
+
+
 
                         
 
