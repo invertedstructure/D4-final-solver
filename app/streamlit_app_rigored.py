@@ -101,6 +101,110 @@ DISTRICT_MAP: dict[str, str] = {
     "28f8db2a822cb765e841a35c2850a745c667f4228e782d0cfdbcb710fd4fecb9": "D3",
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
+# ========== SSOT canon helpers (single source of truth) ==========
+
+def _deep_intify(o):
+    if isinstance(o, bool): return 1 if o else 0
+    if isinstance(o, list): return [_deep_intify(x) for x in o]
+    if isinstance(o, dict): return {k: _deep_intify(v) for k,v in o.items()}
+    return o
+
+def ssot_stable_blocks_sha(obj) -> str:
+    """Stable sha256 of {"blocks": ...} for cmap-like objects or dicts."""
+    import hashlib, json
+    try:
+        data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (
+            obj if isinstance(obj, dict) else {"blocks": {}}
+        )
+        s = json.dumps(_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        return hashlib.sha256(s).hexdigest()
+    except Exception:
+        return ""
+
+def ssot_live_sig(boundaries_obj, cmap_obj, H_obj, shapes_obj) -> tuple[str,str,str,str,str]:
+    """Compute live 5-tuple hashes from in-memory objects."""
+    return (
+        ssot_stable_blocks_sha(boundaries_obj),  # boundaries_hash
+        ssot_stable_blocks_sha(cmap_obj),        # C_hash
+        ssot_stable_blocks_sha(H_obj),           # H_hash
+        ssot_stable_blocks_sha(shapes_obj),      # U_hash
+        ssot_stable_blocks_sha(shapes_obj),      # shapes_hash
+    )
+
+def ssot_frozen_sig_from_ib() -> tuple:
+    """Read frozen 5-tuple from _inputs_block (tolerates legacy flattening)."""
+    ib = st.session_state.get("_inputs_block") or {}
+    if not ib: return ()
+    h = ib.get("hashes") or {}
+    return (
+        str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
+        str(h.get("C_hash",          ib.get("C_hash",""))),
+        str(h.get("H_hash",          ib.get("H_hash",""))),
+        str(h.get("U_hash",          ib.get("U_hash",""))),
+        str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
+    )
+
+def ssot_publish_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int, projector_filename: str = "") -> dict:
+    """
+    Canonical publisher: writes _inputs_block with hashes/dims/filenames +
+    legacy flattening. Returns {"before": tuple, "after": tuple, "changed": bool}.
+    Also sets _last_ib_sig and _has_overlap=True.
+    """
+    before = ssot_frozen_sig_from_ib()
+
+    hB, hC, hH, hU, hS = ssot_live_sig(boundaries_obj, cmap_obj, H_obj, shapes_obj)
+    H2 = (H_obj.blocks.__root__.get("2") or []) if H_obj else []
+    dims = {"n2": int(len(H2) if H2 else 0), "n3": int(n3)}
+
+    files = {
+        "boundaries": st.session_state.get("fname_boundaries","boundaries.json"),
+        "shapes":     st.session_state.get("fname_shapes","shapes.json"),
+        "cmap":       st.session_state.get("fname_cmap","cmap.json"),
+        "H":          st.session_state.get("fname_h","H.json"),
+        "U":          st.session_state.get("fname_shapes","shapes.json"),
+    }
+    if projector_filename:
+        files["projector"] = projector_filename
+
+    ib = {
+        "hashes": {
+            "boundaries_hash": hB,
+            "C_hash":          hC,
+            "H_hash":          hH,
+            "U_hash":          hU,
+            "shapes_hash":     hS,
+        },
+        "dims":      dims,
+        "filenames": files,
+        # legacy flattening:
+        "boundaries_hash": hB,
+        "C_hash":          hC,
+        "H_hash":          hH,
+        "U_hash":          hU,
+        "shapes_hash":     hS,
+    }
+    st.session_state["_inputs_block"] = ib
+
+    after = ssot_frozen_sig_from_ib()
+    changed = (before != after)
+
+    # persist for cheap stale detection
+    st.session_state["_last_ib_sig"] = after
+    st.session_state["_has_overlap"] = True
+
+    return {"before": before, "after": after, "changed": changed}
+
+def ssot_is_stale(*, boundaries_obj, cmap_obj, H_obj, shapes_obj) -> bool:
+    """
+    Return True if live objects' sig != frozen SSOT sig.
+    If we never published (no _inputs_block), return False (startup-neutral).
+    """
+    frozen = ssot_frozen_sig_from_ib()
+    if not frozen:
+        return False
+    live = ssot_live_sig(boundaries_obj, cmap_obj, H_obj, shapes_obj)
+    return tuple(live) != tuple(frozen)
+
 # ===== SSOT canon (v2) — single source of truth for hashes/dims/filenames =====
 from typing import Tuple
 
@@ -2519,24 +2623,29 @@ def run_overlap():
         "projector_consistent_with_d": meta.get("projector_consistent_with_d", None),
         "source": (cfg_active.get("source") or {}),
     }
-    # make these available to Cert/Reports:
+       # --- make objects available to Cert/Reports (already computed above) ---
     st.session_state["overlap_H"] = H_local
     st.session_state["overlap_C"] = cmap
-
-    # publish canonical SSOT (idempotent single source of truth)
-    publish_inputs_block(
+    
+    # --- single canonical SSOT publisher (idempotent; sets _has_overlap/_last_ib_sig) ---
+    pub = ssot_publish_block(
         boundaries_obj=boundaries,
         cmap_obj=cmap,
         H_obj=H_local,
         shapes_obj=shapes,
         n3=n3,
+        projector_filename=st.session_state.get("run_ctx", {}).get("projector_filename",""),
     )
-
-    # --- fixture auto-match (no arming) --------------------------------------
+    st.caption(f"SSOT sig (before → after): {list(pub['before'])} → {list(pub['after'])}")
+    
+    # --- fixture auto-match (no arming) ------------------------------------------
     try:
+        def _shape_ok_for_mul(A, B):
+            return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
+    
         H2d3  = mul(H2, d3) if _shape_ok_for_mul(H2, d3) else []
         C3pI3 = _xor_mat(C3, I3) if (C3 and C3[0]) else []
-
+    
         snapshot = {
             "identity": {"district_id": (st.session_state.get("_district_info") or {}).get(
                 "district_id", st.session_state.get("district_id","UNKNOWN")
@@ -2553,29 +2662,21 @@ def run_overlap():
         apply_fixture_to_session(m)
     except Exception as e:
         st.info(f"(fixture match skipped: {e})")
-
-    # FILE Π validity for cert guard
-    st.session_state["file_pi_valid"]   = bool(
+    
+    # --- FILE Π validity for cert guard ------------------------------------------
+    st.session_state["file_pi_valid"] = bool(
         (mode == "projected(file)") and meta.get("projector_consistent_with_d", False)
         or (mode != "projected(file)")
     )
     st.session_state["file_pi_reasons"] = []
-
-    # ── pre-arm cert writer only if material key changed (using frozen IB) ────
-    ib = st.session_state.get("_inputs_block") or {}
-    h  = (ib.get("hashes") or {})
-    ib_sig = (
-        str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
-        str(h.get("C_hash",          ib.get("C_hash",""))),
-        str(h.get("H_hash",          ib.get("H_hash",""))),
-        str(h.get("U_hash",          ib.get("U_hash",""))),
-        str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
-    )
+    
+    # --- pre-arm cert writer (material key over frozen SSOT) ----------------------
+    ib_sig       = ssot_frozen_sig_from_ib()  # 5-tuple from the frozen _inputs_block
     policy_canon = _canon_policy(pol_lbl)
     pass_vec     = (bool(out.get("2",{}).get("eq", False)), bool(out.get("3",{}).get("eq", False)))
     proj_hash    = st.session_state["run_ctx"].get("projector_hash","") if policy_canon == "projected:file" else ""
     overlap_key  = (ib_sig, policy_canon, pass_vec, proj_hash)
-
+    
     if st.session_state.get("_last_overlap_key") != overlap_key:
         st.session_state["_last_overlap_key"] = overlap_key
         st.session_state["write_armed"] = True
@@ -2612,6 +2713,44 @@ if st.button("Run Overlap", key="btn_run_overlap_main"):
         st.exception(e)
 
 # -----------------------------------------------------------------------------------------------------------
+with st.expander("🔧 SSOT & Overlap debugger", expanded=False):
+    try:
+        # What Overlap believes it used
+        H_dbg = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
+        C_dbg = st.session_state.get("overlap_C") or cmap  # fallback to live cmap
+        rc    = st.session_state.get("run_ctx") or {}
+        out   = st.session_state.get("overlap_out") or {}
+        d3    = rc.get("d3", [])
+        n3    = rc.get("n3", (len(d3[0]) if (d3 and d3[0]) else 0))
+        pj    = rc.get("projector_filename","")
+
+        live = ssot_live_sig(boundaries, cmap, H_dbg, shapes)
+        frozen = ssot_frozen_sig_from_ib()
+        st.write("live sig:   ", list(live))
+        st.write("frozen sig: ", list(frozen) if frozen else "—")
+
+        # Overlap_out visibility (k2/k3)
+        k2 = bool(((out.get("2") or {}).get("eq", False)))
+        k3 = bool(((out.get("3") or {}).get("eq", False)))
+        st.write("overlap_out k2/k3:", k2, k3)
+
+        # Stale reason
+        stale_now = ssot_is_stale(boundaries_obj=boundaries, cmap_obj=cmap, H_obj=H_dbg, shapes_obj=shapes)
+        st.write("ssot_is_stale:", stale_now)
+
+        # One-click canonical re-publish (debug only)
+        if st.button("Force refresh SSOT (debug-only)", key="btn_force_refresh_ssot"):
+            info = ssot_publish_block(
+                boundaries_obj=boundaries,
+                cmap_obj=cmap,
+                H_obj=H_dbg,
+                shapes_obj=shapes,
+                n3=n3,
+                projector_filename=pj,
+            )
+            st.success(f"Re-published SSOT. before→after: {list(info['before'])} → {list(info['after'])}")
+    except Exception as e:
+        st.error(f"Debugger failed: {e}")
 
 
 
