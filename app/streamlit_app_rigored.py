@@ -1281,7 +1281,7 @@ def build_inputs_block(boundaries, cmap, H_used, shapes, filenames: dict) -> dic
         **hashes_dict,
         "shapes_hash": hashes_dict["U_hash"],
     }
-]
+
 
 
 
