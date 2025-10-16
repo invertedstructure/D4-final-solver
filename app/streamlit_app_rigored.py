@@ -2676,7 +2676,7 @@ def _ab_is_fresh_now() -> bool:
             return False
     return True
 
-_fail, _warn = run_self_tests()
+
 
 def run_self_tests():
     failures, warnings = [], []
