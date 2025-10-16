@@ -1226,6 +1226,7 @@ def _resolve_projector(cfg_active: dict, boundaries) -> tuple[list[list[int]], d
     return P_active, meta
 
         
+
 # ------------------------------ Run Overlap (SSOT-staging; cert-aligned, final) ------------------------------
 def run_overlap():
     # ── tiny locals ────────────────────────────────────────────────────────────
@@ -1275,7 +1276,7 @@ def run_overlap():
         if k not in _keep:
             st.session_state.pop(k, None)
 
-       # ── STEP 2: projector resolve (handles projected:file fail path) ──────────────────
+    # ── STEP 2: projector resolve (handles projected:file fail path) ──────────────────
     try:
         # If you didn't add the helper, swap the next line back to: P_active, meta = projector_choose_active(cfg_active, boundaries)
         P_active, meta = _resolve_projector(cfg_active, boundaries)
@@ -1363,7 +1364,7 @@ def run_overlap():
     tag_strict = _residual_tag(R3_strict, lm_truth)
     eq3_strict = _is_zero(R3_strict)
 
-        # projected leg (if enabled)
+    # projected leg (if enabled)
     if cfg_active.get("enabled_layers"):
         # Strong fallback: if AUTO didn’t supply a projector, synthesize diag(lane_mask)
         P_eff = (meta.get("P_active") or P_active or _diag_from_mask(lm_truth)) if lm_truth else (meta.get("P_active") or P_active or [])
@@ -1394,15 +1395,14 @@ def run_overlap():
     _apply_fixture_after_overlap(
         rc=st.session_state.get("run_ctx") or rc,
         diag={"lane_vec_H2@d3": lane_vec_H2d3, "lane_vec_C3+I3": lane_vec_C3pI3},
+        lane_mask_k3=lm_truth,
     )
-    
-
 
     # persist run_ctx (SSOT for cert)
     pol_lbl = policy_label_from_cfg(cfg_active)
     st.session_state["overlap_out"]          = out
     st.session_state["overlap_cfg"]          = cfg_active
-    st.session_state["overlap_policy_label"] = pol_lbl
+    st.session_state["overlap_policy_tag"] = pol_lbl
     st.session_state["run_ctx"] = {
         "policy_tag": pol_lbl, "mode": mode,
         "d3": d3, "n3": n3, "lane_mask_k3": lm_truth,
@@ -1449,8 +1449,6 @@ def run_overlap():
     # stamp inputs_sig from frozen SSOT
     rc["inputs_sig"] = current_inputs_sig(_ib=st.session_state.get("_inputs_block") or {})
     st.session_state["run_ctx"] = rc
-
-
     
     
        
