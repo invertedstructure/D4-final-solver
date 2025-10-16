@@ -7067,25 +7067,7 @@ def build_everything_snapshot() -> str:
     return str(zpath)
 
  
-               
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-    
                 with tab3:
                     st.subheader("Triangle gate (Echo)")
                 
@@ -7141,6 +7123,24 @@ def build_everything_snapshot() -> str:
                             st.success(f"Saved: {csv_path}")
                             with open(csv_path, "r", encoding="utf-8") as f:
                                 st.download_button("Download CSV", f.read(), file_name=os.path.basename(csv_path), mime="text/csv")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+    
                 
             
                            
