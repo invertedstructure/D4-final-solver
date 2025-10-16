@@ -1230,189 +1230,182 @@ def run_overlap():
         if ker_resid and not lanes_resid:     return "ker"
         return "mixed"
 
-    # ── clear per-run artifacts (keep A/B pin, fixtures cache, frozen IB) ─────
-    keep = {"ab_pin", "_fixtures_cache", "_fixtures_bytes_hash", "_inputs_block", "_last_ib_sig"}
-    for k in ("proj_meta","run_ctx","residual_tags","overlap_out",
-              "overlap_H","overlap_C","overlap_cfg","overlap_policy_label","_file_mode_error"):
-        if k not in keep:
-            st.session_state.pop(k, None)
+    # ── STEP 1: clear per-run artifacts (keep A/B pin, fixtures cache, frozen IB) ─────
+_keep = {"ab_pin", "_fixtures_cache", "_fixtures_bytes_hash", "_inputs_block", "_last_ib_sig"}
+for k in (
+    "proj_meta", "run_ctx", "residual_tags", "overlap_out",
+    "overlap_H", "overlap_C", "overlap_cfg", "overlap_policy_label",
+    "_file_mode_error"
+):
+    if k not in _keep:
+        st.session_state.pop(k, None)
 
-    # ── projector resolve (handles projected:file fail path) ──────────────────
-    try:
-        P_active, meta = projector_choose_active(cfg_active, boundaries)
-    except ValueError as e:
-        # Build minimal SSOT so the cert block can witness SKIP_FILE_PI_INVALID
-        pjfn    = (cfg_active.get("projector_files", {}) or {}).get("3", "")
-        d3_now  = (boundaries.blocks.__root__.get("3") or [])
-        n3_now  = len(d3_now[0]) if (d3_now and d3_now[0]) else 0
-        pol_lbl = policy_label_from_cfg(cfg_active)
+# ── STEP 2: projector resolve (handles projected:file fail path) ──────────────────
+try:
+    P_active, meta = projector_choose_active(cfg_active, boundaries)
+except ValueError as e:
+    # ---- FILE mode error path: persist minimal SSOT so cert can witness SKIP_FILE_PI_INVALID
+    pjfn    = (cfg_active.get("projector_files", {}) or {}).get("3", "")
+    d3_now  = (boundaries.blocks.__root__.get("3") or [])
+    n3_now  = (len(d3_now[0]) if (d3_now and d3_now[0]) else 0)
+    lm_now  = _truth_mask_from_d3(d3_now)
+    pol_lbl = policy_label_from_cfg(cfg_active)
 
-        st.session_state["run_ctx"] = {
-            "policy_tag": pol_lbl, "mode": "projected(file)",
-            "d3": d3_now, "n3": n3_now, "lane_mask_k3": _truth_mask_from_d3(d3_now),
-            "P_active": [],
-            "projector_filename": pjfn, "projector_hash": "",
-            "projector_consistent_with_d": False,
-            "source": (cfg_active.get("source") or {}), "errors": [str(e)],
-        }
-        st.session_state["overlap_out"]            = {"3": {"eq": False, "n_k": n3_now}, "2": {"eq": True}}
-        st.session_state["overlap_cfg"]            = cfg_active
-        st.session_state["overlap_policy_label"]   = pol_lbl
+    st.session_state["run_ctx"] = {
+        "policy_tag": pol_lbl, "mode": "projected(file)",
+        "d3": d3_now, "n3": n3_now, "lane_mask_k3": lm_now,
+        "P_active": [],
+        "projector_filename": pjfn, "projector_hash": "",
+        "projector_consistent_with_d": False,
+        "source": (cfg_active.get("source") or {}),
+        "errors": [str(e)],
+    }
+    st.session_state["overlap_out"]          = {"3": {"eq": False, "n_k": n3_now}, "2": {"eq": True}}
+    st.session_state["overlap_cfg"]          = cfg_active
+    st.session_state["overlap_policy_label"] = pol_lbl
 
-              # Freeze SSOT even on FILE error (no projector field)
-        H_local = _load_h_local()
-        st.session_state["overlap_H"] = H_local
-        st.session_state["overlap_C"] = cmap
-        
-        pub = ssot_publish_block(
-            boundaries_obj=boundaries,
-            cmap_obj=cmap,
-            H_obj=H_local,
-            shapes_obj=shapes,
-            n3=n3_now,
-            projector_filename="",   # none on FILE error
-        )
-        st.caption(f"SSOT sig (before → after): {list(pub['before'])} → {list(pub['after'])}")
-        _reconcile_di_vs_ssot()
-        
-        st.session_state["file_pi_valid"]   = False
-        st.session_state["file_pi_reasons"] = [str(e)]
-        st.session_state["write_armed"]     = True
-        st.session_state["armed_by"]        = "file_invalid"
-        st.error(f"Projected(FILE) validation failed: {e}")
-        return
+    # Freeze SSOT even on FILE error (no projector field)
+    H_local = _load_h_local()
+    st.session_state["overlap_H"] = H_local
+    st.session_state["overlap_C"] = cmap
 
-
-        # ── success path (d3/mode) ────────────────────────────────────────────────
-        d3   = meta.get("d3") if "d3" in meta else (boundaries.blocks.__root__.get("3") or [])
-        n3   = meta.get("n3") if "n3" in meta else (len(d3[0]) if (d3 and d3[0]) else 0)
-        mode = meta.get("mode", "strict")
-    
-        # lane mask
-        lm_truth = _truth_mask_from_d3(d3)
-        assert len(lm_truth) == n3, f"lane_mask_k3 length {len(lm_truth)} != n3 {n3}"
-    
-        # strict residuals (shape-safe)
-        H_local = _load_h_local()
-        H2 = (H_local.blocks.__root__.get("2") or [])
-        C3 = (cmap.blocks.__root__.get("3") or [])
-        I3 = eye(len(C3)) if C3 else []
-    
-        R3_strict = []
-        if _shape_ok_for_mul(H2, d3) and (C3 and C3[0] and len(C3) == len(C3[0])):  # C3 square
-            try:
-                R3_strict = _xor_mat(mul(H2, d3), _xor_mat(C3, I3))
-            except Exception:
-                R3_strict = []
-        # else leave as []
-    
-        tag_strict = _residual_tag(R3_strict, lm_truth)
-        eq3_strict = _is_zero(R3_strict)
-    
-        # projected leg (if enabled)
-        if cfg_active.get("enabled_layers"):
-            R3_proj  = mul(R3_strict, P_active) if (R3_strict and P_active) else []
-            eq3_proj = _is_zero(R3_proj)
-            tag_proj = _residual_tag(R3_proj, lm_truth)
-            out = {"3": {"eq": bool(eq3_proj), "n_k": n3}, "2": {"eq": True}}
-            st.session_state["residual_tags"] = {"strict": tag_strict, "projected": tag_proj}
-        else:
-            out = {"3": {"eq": bool(eq3_strict), "n_k": n3}, "2": {"eq": True}}
-            st.session_state["residual_tags"] = {"strict": tag_strict}
-    
-        # persist run_ctx (SSOT for cert)
-        pol_lbl = policy_label_from_cfg(cfg_active)
-        st.session_state["overlap_out"]          = out
-        st.session_state["overlap_cfg"]          = cfg_active
-        st.session_state["overlap_policy_label"] = pol_lbl
-        st.session_state["run_ctx"] = {
-            "policy_tag": pol_lbl, "mode": mode,
-            "d3": d3, "n3": n3, "lane_mask_k3": lm_truth,
-            "P_active": P_active,
-            "projector_filename": meta.get("projector_filename", ""),
-            "projector_hash": meta.get("projector_hash", ""),
-            "projector_consistent_with_d": meta.get("projector_consistent_with_d", None),
-            "source": (cfg_active.get("source") or {}),
-        }
-               # --- make objects available to Cert/Reports (already computed above) ---
-        st.session_state["overlap_H"] = H_local
-        st.session_state["overlap_C"] = cmap
-        pub = ssot_publish_block(
-            boundaries_obj=boundaries,
-            cmap_obj=cmap,
-            H_obj=H_local,
-            shapes_obj=shapes,
-            n3=n3,
-            projector_filename=st.session_state["run_ctx"].get("projector_filename",""),
-        )
-        st.caption(f"SSOT sig (before → after): {list(pub['before'])} → {list(pub['after'])}")
-        _reconcile_di_vs_ssot()
-       
-            rc = st.session_state.get("run_ctx") or {}
-            rc.update({
-                "mode":            policy_label_from_cfg(cfg_active).replace("projected(columns@k=3,", "projected("),  # "strict" | "projected(auto)" | "projected(file)"
-                "policy_tag":      policy_label_from_cfg(cfg_active),  # keep your canonical tag
-                "n3":              int((st.session_state.get("_inputs_block") or {}).get("dims", {}).get("n3") or 0),
-                "lane_mask_k3":    list(st.session_state.get("_district_info", {}).get("lane_mask_k3") or []),
-                # projector hash: file uses rc["projector_hash"]; auto derives from lane mask
-                "projector_filename": (st.session_state.get("ov_last_pj_path") or ""),
-            })
-            # projector hash
-            if rc["mode"] == "projected(file)":
-                rc["projector_hash"] = rc.get("projector_hash") or ""  # set elsewhere when you validate/load Π
-            elif rc["mode"] == "projected(auto)":
-                rc["projector_hash"] = _auto_pj_hash_from_rc(rc)
-            
-            # stamp inputs_sig from frozen SSOT
-            rc["inputs_sig"] = _current_inputs_sig_compat(_ib=st.session_state.get("_inputs_block") or {})
-            st.session_state["run_ctx"] = rc
-
-         
-
-    
-    # --- fixture auto-match (no arming) ------------------------------------------
-    try:
-        def _shape_ok_for_mul(A, B):
-            return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
-    
-        H2d3  = mul(H2, d3) if _shape_ok_for_mul(H2, d3) else []
-        C3pI3 = _xor_mat(C3, I3) if (C3 and C3[0]) else []
-    
-        snapshot = {
-            "identity": {"district_id": (st.session_state.get("_district_info") or {}).get(
-                "district_id", st.session_state.get("district_id","UNKNOWN")
-            )},
-            "policy": {"canon": _canon_policy(pol_lbl)},
-            "inputs": {"lane_mask_k3": list(lm_truth)},
-            "diagnostics": {
-                "lane_vec_H2@d3": list(_bottom_row(H2d3)),
-                "lane_vec_C3+I3": list(_bottom_row(C3pI3)),
-            },
-            "checks": {"k": {"3": {"eq": bool(out.get("3",{}).get("eq", False))}}},
-        }
-        m = match_fixture_from_snapshot(snapshot)
-        apply_fixture_to_session(m)
-    except Exception as e:
-        st.info(f"(fixture match skipped: {e})")
-    
-    # --- FILE Π validity for cert guard ------------------------------------------
-    st.session_state["file_pi_valid"] = bool(
-        (mode == "projected(file)") and meta.get("projector_consistent_with_d", False)
-        or (mode != "projected(file)")
+    pub = ssot_publish_block(
+        boundaries_obj=boundaries,
+        cmap_obj=cmap,
+        H_obj=H_local,
+        shapes_obj=shapes,
+        n3=n3_now,
+        projector_filename="",   # none on FILE error
     )
-    st.session_state["file_pi_reasons"] = []
+    st.caption(f"SSOT sig (before → after): {list(pub['before'])} → {list(pub['after'])}")
+
+    # optional reconciler
+    try:
+        _reconcile_di_vs_ssot()
+    except Exception:
+        pass
+
+    st.session_state["file_pi_valid"]   = False
+    st.session_state["file_pi_reasons"] = [str(e)]
+    st.session_state["write_armed"]     = True
+    st.session_state["armed_by"]        = "file_invalid"
+    st.error(f"Projected(FILE) validation failed: {e}")
+    return  # stop run_overlap here
+
+    # ---- success path (strict + projected residuals; persist SSOT) --------------------
+    # meta may carry d3/n3/mode; fall back to boundaries
+    d3   = meta.get("d3") if ("d3" in meta) else (boundaries.blocks.__root__.get("3") or [])
+    n3   = meta.get("n3") if ("n3" in meta) else (len(d3[0]) if (d3 and d3[0]) else 0)
+    mode = str(meta.get("mode", "strict"))
     
-    # --- pre-arm cert writer (material key over frozen SSOT) ----------------------
-    ib_sig       = ssot_frozen_sig_from_ib()  # 5-tuple from the frozen _inputs_block
-    policy_canon = _canon_policy(pol_lbl)
-    pass_vec     = (bool(out.get("2",{}).get("eq", False)), bool(out.get("3",{}).get("eq", False)))
-    proj_hash    = st.session_state["run_ctx"].get("projector_hash","") if policy_canon == "projected:file" else ""
-    overlap_key  = (ib_sig, policy_canon, pass_vec, proj_hash)
+    # lane mask (truth)
+    lm_truth = _truth_mask_from_d3(d3)
+    if n3 and len(lm_truth) != n3:
+        raise RuntimeError(f"lane_mask_k3 length {len(lm_truth)} != n3 {n3}")
     
-    if st.session_state.get("_last_overlap_key") != overlap_key:
-        st.session_state["_last_overlap_key"] = overlap_key
-        st.session_state["write_armed"] = True
-        st.session_state["armed_by"]    = "overlap_run"
+    # strict residuals (shape-safe)
+    H_local = _load_h_local()
+    H2 = (H_local.blocks.__root__.get("2") or [])
+    C3 = (cmap.blocks.__root__.get("3") or [])
+    I3 = eye(len(C3)) if C3 else []
+    
+    def _shape_ok_for_mul(A, B):
+        return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
+    
+    R3_strict = []
+    if _shape_ok_for_mul(H2, d3) and C3 and C3[0] and (len(C3) == len(C3[0])):  # C3 square
+        try:
+            R3_strict = _xor_mat(mul(H2, d3), _xor_mat(C3, I3))
+        except Exception:
+            R3_strict = []
+    
+    # tag/eq for strict
+    def _is_zero(M):
+        return (not M) or all((x & 1) == 0 for row in M for x in row)
+    
+    def _residual_tag(R3, mask):
+        # lanes / ker / mixed / none
+        if _is_zero(R3): return "none"
+        n3loc = len(R3[0]) if R3 else 0
+        def _col_support(j): return any(R3[i][j] & 1 for i in range(len(R3)))
+        lanes_support = any(_col_support(j) for j in range(n3loc) if j < len(mask) and mask[j])
+        ker_support   = any(_col_support(j) for j in range(n3loc) if j >= len(mask) or not mask[j])
+        if lanes_support and ker_support: return "mixed"
+        if lanes_support: return "lanes"
+        if ker_support:   return "ker"
+        return "none"
+    
+    tag_strict = _residual_tag(R3_strict, lm_truth)
+    eq3_strict = _is_zero(R3_strict)
+    
+    # projected leg (if enabled)
+    if cfg_active.get("enabled_layers"):
+        P_active = meta.get("P_active", P_active)  # prefer meta when provided
+        R3_proj  = mul(R3_strict, P_active) if (R3_strict and P_active) else []
+        eq3_proj = _is_zero(R3_proj)
+        tag_proj = _residual_tag(R3_proj, lm_truth)
+        out = {"3": {"eq": bool(eq3_proj), "n_k": n3}, "2": {"eq": True}}
+        st.session_state["residual_tags"] = {"strict": tag_strict, "projected": tag_proj}
+    else:
+        out = {"3": {"eq": bool(eq3_strict), "n_k": n3}, "2": {"eq": True}}
+        st.session_state["residual_tags"] = {"strict": tag_strict}
+    
+    # persist run_ctx (SSOT for cert)
+    pol_lbl = policy_label_from_cfg(cfg_active)
+    st.session_state["overlap_out"]          = out
+    st.session_state["overlap_cfg"]          = cfg_active
+    st.session_state["overlap_policy_label"] = pol_lbl
+    st.session_state["run_ctx"] = {
+        "policy_tag": pol_lbl, "mode": mode,
+        "d3": d3, "n3": n3, "lane_mask_k3": lm_truth,
+        "P_active": meta.get("P_active", P_active),
+        "projector_filename": meta.get("projector_filename", ""),
+        "projector_hash": meta.get("projector_hash", ""),
+        "projector_consistent_with_d": meta.get("projector_consistent_with_d", None),
+        "source": (cfg_active.get("source") or {}),
+    }
+    
+    # make objects available to Cert/Reports
+    st.session_state["overlap_H"] = H_local
+    st.session_state["overlap_C"] = cmap
+    
+    # publish SSOT
+    pub = ssot_publish_block(
+        boundaries_obj=boundaries,
+        cmap_obj=cmap,
+        H_obj=H_local,
+        shapes_obj=shapes,
+        n3=n3,
+        projector_filename=st.session_state["run_ctx"].get("projector_filename",""),
+    )
+    st.caption(f"SSOT sig (before → after): {list(pub['before'])} → {list(pub['after'])}")
+    
+    # optional reconciler
+    try:
+        _reconcile_di_vs_ssot()
+    except Exception:
+        pass
+    
+    # normalize/stamp rc for downstream freshness logic
+    rc = st.session_state.get("run_ctx") or {}
+    rc.update({
+        # normalize label “projected(columns@k=3,*)” → mode string expected elsewhere
+        "mode":       policy_label_from_cfg(cfg_active).replace("projected(columns@k=3,", "projected(").rstrip(")")+")",
+        "policy_tag": policy_label_from_cfg(cfg_active),
+        "n3":         int((st.session_state.get("_inputs_block") or {}).get("dims", {}).get("n3") or 0),
+        "lane_mask_k3": list(st.session_state.get("_district_info", {}).get("lane_mask_k3") or lm_truth),
+        "projector_filename": (st.session_state.get("ov_last_pj_path") or rc.get("projector_filename","")),
+    })
+    # projector hash
+    if rc["mode"] == "projected(file)":
+        rc["projector_hash"] = rc.get("projector_hash") or meta.get("projector_hash","") or ""
+    elif rc["mode"] == "projected(auto)":
+        rc["projector_hash"] = _auto_pj_hash_from_rc(rc)
+    
+    # stamp inputs_sig from frozen SSOT
+    rc["inputs_sig"] = _current_inputs_sig_compat(_ib=st.session_state.get("_inputs_block") or {})
+    st.session_state["run_ctx"] = rc
+
 
 # ---- Single canonical button (instrumented) ----
 if st.button("Run Overlap", key="btn_run_overlap_main"):
