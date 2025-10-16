@@ -6048,13 +6048,14 @@ with safe_expander("Cert & provenance", expanded=True):
         })
         st.caption("FILE Π invalid — write disabled (fix Π or re-freeze from AUTO).")
 
-    # 4) final “should write?” decision
+        # 4) final “should write?” decision
     should_write = write_enabled and write_armed and ((write_key != last_key) or ticket_required)
+    
     if not should_write:
         skip_reason = REASON.SKIP_NO_MATERIAL_CHANGE
         if write_enabled and is_ab_pinned and (ab_ticket_pending == last_ab_ticket_written):
             skip_reason = REASON.SKIP_AB_TICKET_ALREADY_WRITTEN
-
+    
         _append_witness({
             "ts": _utc_now_z(),
             "outcome": skip_reason,
@@ -6065,21 +6066,27 @@ with safe_expander("Cert & provenance", expanded=True):
                 "pol": policy_canon, "pv": f"{int(pass_vec[0])}{int(pass_vec[1])}", "pj": _short(proj_hash)
             },
             "ab": ("PINNED" if is_ab_pinned else "NONE"),
-            "file_pi": {"mode": ("file" if policy_canon=="projected:file" else policy_canon), "valid": file_pi_valid, "reasons": ([] if write_enabled else file_pi_reasons[:3])}
+            "file_pi": {"mode": ("file" if policy_canon=="projected:file" else policy_canon),
+                        "valid": file_pi_valid,
+                        "reasons": ([] if write_enabled else file_pi_reasons[:3])}
         })
-
+    
         if write_enabled:
             st.caption("Cert unchanged — skipping rewrite.")
-        # don’t stop; let UI continue
-        return
+        wrote_cert = False  # mark path and fall through (do not write)
+    else:
+        wrote_cert = True
+    
+        # ----- stable run_id per inputs_sig -----
+        if ss.get("_last_inputs_sig") != inputs_sig:
+            seed = _sha256_hex((":".join(inputs_sig) + f"|{int(time.time())}").encode())[:8]
+            ss["_last_inputs_sig"] = inputs_sig
+            ss["last_run_id"] = seed
+            ss["run_idx"] = 0
+        ss["run_idx"] = int(ss.get("run_idx", 0)) + 1
 
-    # ----- stable run_id per inputs_sig -----
-    if ss.get("_last_inputs_sig") != inputs_sig:
-        seed = _sha256_hex((":".join(inputs_sig) + f"|{int(time.time())}").encode())[:8]
-        ss["_last_inputs_sig"] = inputs_sig
-        ss["last_run_id"] = seed
-        ss["run_idx"] = 0
-    ss["run_idx"] = int(ss.get("run_idx", 0)) + 1
+
+
 
     # ----- assemble cert payload (strict schema) -----
     district_id = (ss.get("_district_info") or {}).get("district_id", ss.get("district_id","UNKNOWN"))
