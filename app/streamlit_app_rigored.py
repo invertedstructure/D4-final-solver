@@ -600,13 +600,16 @@ def build_inputs_block(boundaries, cmap, H_used, shapes, filenames: dict) -> dic
 
 
 
-try:
-    tab1, tab2, tab3 = st.tabs(["Overlap", "A/B compare", "Certs & Reports"])
-except Exception as e:
-    st.error("Tab construction failed — see details below.")
-    st.exception(e)
-    st.stop()
 
+
+# ───────────────────────── Tabs — create once, early ─────────────────────────
+if not all(n in globals() for n in ("tab1","tab2","tab3","tab4","tab5")):
+    try:
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(["Unit", "Overlap", "Triangle", "Towers", "Export"])
+    except Exception as _e:
+        st.error("Tab construction failed.")
+        st.exception(_e)
+        st.stop()
 
 # ───────────────────────────────── SIDEBAR ───────────────────────────────────
 with st.sidebar:
@@ -901,7 +904,11 @@ def publish_inputs_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int
         n3=n3,
         projector_filename=projector_filename,
     )
-
+with tab2:
+    st.subheader("Overlap")
+    if not inputs_ready:
+        st.info("Upload + validate inputs in the sidebar first.")
+    else:
 # ------------------------------ OVERLAP TAB (polished, SSOT-staging) -----------------------------------
 
 # Utility functions (shared)
@@ -1033,6 +1040,8 @@ cfg_active = _cfg_from_policy(
 # Display active policy label
 st.caption(f"Active policy: `{policy_label_from_cfg(cfg_active)}`")
 
+
+        
 
 # ------------------------------ Run Overlap (SSOT-staging; cert-aligned, final) ------------------------------
 def run_overlap():
@@ -7140,8 +7149,8 @@ with safe_expander("Exports", expanded=False):
                         with open(csv_path, "r", encoding="utf-8") as f:
                             st.download_button("Download CSV", f.read(), file_name=os.path.basename(csv_path), mime="text/csv")
             
-            with tab5:
-                st.subheader("Export")
+             with tab4:
+                st.subheader("Towers")
                 st.caption("Bundle all artifacts in ./reports into a single ZIP for sharing/archival.")
                 if st.button("Export ./reports → report.zip"):
                     reports_dir = pathlib.Path("reports")
