@@ -310,6 +310,30 @@ def _reconcile_di_vs_ssot():
         di["boundaries_hash"] = bh_ib
         ss["_district_info"] = di
 # ===================== end SSOT CORE =============================================
+def _ab_autoclear_if_stale_now():
+    ss = st.session_state
+    ab = ss.get("ab_compare") or {}
+    if not ab:
+        return
+
+    frozen = tuple(ssot_frozen_sig_from_ib() or ())
+    rc     = ss.get("run_ctx") or {}
+    pol    = policy_label_from_state(rc, cfg_active)
+    pj_now = rc.get("projector_hash","") if rc.get("mode") == "projected(file)" else ""
+
+    pj_ab  = ((ab.get("projected") or {}).get("projector_hash","") if rc.get("mode") == "projected(file)" else "")
+
+    stale = (
+        tuple(ab.get("inputs_sig") or ()) != frozen or
+        str(ab.get("policy_tag",""))      != str(pol) or
+        str(pj_ab)                        != str(pj_now)
+    )
+    if stale:
+        ss.pop("ab_compare", None)  # silently drop old snapshot
+
+# run it early every script execution
+_ab_autoclear_if_stale_now()
+
 
 # ─── Fixtures registry: load + cache + invalidate ─────────────────────────────
 from pathlib import Path
