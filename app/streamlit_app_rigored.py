@@ -310,6 +310,24 @@ def _reconcile_di_vs_ssot():
         di["boundaries_hash"] = bh_ib
         ss["_district_info"] = di
 # ===================== end SSOT CORE =============================================
+def _policy_tag_now_from_rc(rc: dict) -> str:
+    """
+    Produce the canonical policy tag using only run_ctx.
+    Avoids any dependency on cfg_active/policy_label_from_state.
+    """
+    mode = str((rc or {}).get("mode", "")).strip()
+    if mode == "strict":
+        return "strict"
+    if mode == "projected(file)":
+        return "projected(columns@k=3,file)"
+    if mode == "projected(auto)":
+        return "projected(columns@k=3,auto)"
+    # fallback: honor explicit tag if present; else strict
+    tag = (rc or {}).get("policy_tag")
+    if tag:
+        return str(tag)
+    return "strict"
+
 def _ab_autoclear_if_stale_now():
     ss = st.session_state
     ab = ss.get("ab_compare") or {}
@@ -318,10 +336,11 @@ def _ab_autoclear_if_stale_now():
 
     frozen = tuple(ssot_frozen_sig_from_ib() or ())
     rc     = ss.get("run_ctx") or {}
-    pol    = policy_label_from_state(rc, cfg_active)
+    pol    = _policy_tag_now_from_rc(rc)
     pj_now = rc.get("projector_hash","") if rc.get("mode") == "projected(file)" else ""
 
-    pj_ab  = ((ab.get("projected") or {}).get("projector_hash","") if rc.get("mode") == "projected(file)" else "")
+    pj_ab  = ((ab.get("projected") or {}).get("projector_hash","")
+              if rc.get("mode") == "projected(file)" else "")
 
     stale = (
         tuple(ab.get("inputs_sig") or ()) != frozen or
@@ -331,8 +350,9 @@ def _ab_autoclear_if_stale_now():
     if stale:
         ss.pop("ab_compare", None)  # silently drop old snapshot
 
-# run it early every script execution
+# run it early every script execution (keep this call where it is)
 _ab_autoclear_if_stale_now()
+
 
 
 # ─── Fixtures registry: load + cache + invalidate ─────────────────────────────
@@ -2250,12 +2270,20 @@ def run_self_tests():
     elif mode.startswith("projected(auto)") and "3" not in out:
         warnings.append("AUTO_OK: no overlap_out present yet")
     
-    # A/B snapshot freshness
-    ab = st.session_state.get("ab_compare") or {}
-    if ab and (tuple(ab.get("inputs_sig") or ()) != ssot_frozen_sig_from_ib()):
-       warnings.append("AB_FRESH: A/B snapshot is stale (won’t embed)")
-    
-    return failures, warnings
+        # A/B snapshot freshness (only warn if a snapshot exists)
+    ab = ss.get("ab_compare") or {}
+    if ab:
+        frozen = tuple(ssot_frozen_sig_from_ib() or ())
+        pol_now = _policy_tag_now_from_rc(rc)
+        pj_now  = rc.get("projector_hash","") if rc.get("mode") == "projected(file)" else ""
+        pj_ab   = ((ab.get("projected") or {}).get("projector_hash","")
+                   if rc.get("mode") == "projected(file)" else "")
+
+        if (tuple(ab.get("inputs_sig") or ()) != frozen or
+            str(ab.get("policy_tag",""))     != str(pol_now) or
+            str(pj_ab)                       != str(pj_now)):
+            warnings.append("AB_FRESH: A/B snapshot is stale (won’t embed)")
+
 
 
 
