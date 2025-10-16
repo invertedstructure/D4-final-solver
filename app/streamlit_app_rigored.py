@@ -5870,7 +5870,7 @@ with safe_expander("Cert & provenance", expanded=True):
 
     # Freshness gate (SSOT-only)
     stale = ssot_is_stale()
-    _toggle_key = ensure_unique_widget_key("cert_allow_stale_ssot")
+    _toggle_key = ensure_unique_widget_key("allow_stale_ssot__cert")
     allow_stale = st.toggle("Allow writing with stale SSOT", value=False, key=_toggle_key)
     if stale and not allow_stale:
         st.warning("Inputs changed since last Overlap — run Overlap to refresh SSOT before writing or reporting.")
