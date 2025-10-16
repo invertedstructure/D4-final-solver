@@ -1428,19 +1428,6 @@ if st.button("Run Overlap", key="btn_run_overlap_main"):
         st.exception(e)
 
 # -----------------------------------------------------------------------------------------------------------
-with st.expander("🔧 SSOT & Overlap debugger", expanded=False):
-    try:
-        frozen = ssot_frozen_sig_from_ib()
-        live   = ssot_live_sig()  # uses overlap_H if present
-        st.write("frozen sig:", list(frozen) if frozen else "∅")
-        st.write("live sig:",   list(live))
-        st.write("stale?:", ssot_is_stale())
-        oo = st.session_state.get("overlap_out") or {}
-        st.write("overlap_out k2/k3:", bool(((oo.get("2") or {}).get("eq", False))),
-                                    bool(((oo.get("3") or {}).get("eq", False))))
-    except Exception as e:
-        st.error(f"Debugger failed: {e}")
-
 with st.expander("SSOT debug", expanded=False):
     rc_ = st.session_state.get("run_ctx") or {}
     ib_ = st.session_state.get("_inputs_block") or {}
