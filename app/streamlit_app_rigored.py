@@ -6083,26 +6083,55 @@ with safe_expander("Cert & provenance", expanded=True):
         n3 = int((ib.get("dims") or {}).get("n3") or rc.get("n3") or 0)
         lane_mask = list(rc.get("lane_mask_k3") or [])
 
-        # GF(2) diagnostics (guarded shapes)
-        def _bottom_row(M): return M[-1] if (M and len(M)) else []
-        def _xor(A,B):
+        # ---------- GF(2) diagnostics (guarded shapes; self-contained) ----------
+        # Local helpers (safe, idempotent if already defined above)
+        def _bottom_row(M): 
+            return M[-1] if (M and len(M)) else []
+        
+        def _xor(A, B):
             if not A: return [r[:] for r in (B or [])]
             if not B: return [r[:] for r in (A or [])]
-            r,c = len(A), len(A[0])
-            return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
+            r, c = len(A), len(A[0])
+            return [[(A[i][j] ^ B[i][j]) & 1 for j in range(c)] for i in range(r)]
+        
         def _mask_row(row, lm):
             L = min(len(row or []), len(lm or []))
             return [int(row[j]) if int(lm[j]) else 0 for j in range(L)]
-
-        H2 = (H_obj.blocks.__root__.get("2") or [])
-        d3 = rc.get("d3", [])
-        C3 = (C_obj.blocks.__root__.get("3") or [])
-        I3 = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
-        if H2 and d3 and len(H2[0]) == len(d3):
-            H2d3 = [[sum(H2[i][k] & d3[k][j] for k in range(len(d3))) & 1 for j in range(len(d3[0]))] for i in range(len(H2))]
+        
+        # Pull needed objects from session, with robust fallbacks
+        _ss = st.session_state
+        rc  = dict(_ss.get("run_ctx") or {})
+        try:
+            H_obj = _ss.get("overlap_H") or io.parse_cmap({"blocks": {}})
+        except Exception:
+            H_obj = io.parse_cmap({"blocks": {}})
+        try:
+            C_obj = _ss.get("overlap_C") or io.parse_cmap({"blocks": {}})
+        except Exception:
+            C_obj = io.parse_cmap({"blocks": {}})
+        
+        # Read blocks safely
+        H2 = (getattr(H_obj, "blocks", None).__root__.get("2") if getattr(H_obj, "blocks", None) else []) or []
+        d3 = rc.get("d3") or []
+        C3 = (getattr(C_obj, "blocks", None).__root__.get("3") if getattr(C_obj, "blocks", None) else []) or []
+        I3 = [[1 if i == j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
+        
+        # Compute H2@d3 only when shapes are compatible
+        if H2 and d3 and H2[0] and d3[0] and (len(H2[0]) == len(d3)):
+            H2d3 = [
+                [sum((H2[i][k] & d3[k][j]) & 1 for k in range(len(d3))) & 1 for j in range(len(d3[0]))]
+                for i in range(len(H2))
+            ]
         else:
             H2d3 = []
+        
         C3pI3 = _xor(C3, I3) if C3 else []
+        
+        # Optional: masked bottom-row diagnostics (used in fixture/snapshot)
+        lane_mask = list(rc.get("lane_mask_k3") or [])
+        lane_vec_H2d3 = _mask_row(_bottom_row(H2d3), lane_mask)
+        lane_vec_C3pI3 = _mask_row(_bottom_row(C3pI3), lane_mask)
+
 
         # A/B freshness
         ab_status = REASON.AB_NONE
