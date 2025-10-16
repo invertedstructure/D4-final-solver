@@ -906,86 +906,83 @@ def publish_inputs_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int
     )
 with tab2:
     st.subheader("Overlap")
-    if not inputs_ready:
-        st.info("Upload + validate inputs in the sidebar first.")
-    else:
-# ------------------------------ OVERLAP TAB (polished, SSOT-staging) -----------------------------------
+    # Your provided code starts here
+    def _xor_mat(A, B):
+        # prefer library add() if available (keeps one implementation)
+        if "add" in globals() and callable(globals()["add"]):
+            return globals()["add"](A, B)
+        if not A: return [r[:] for r in (B or [])]
+        if not B: return [r[:] for r in (A or [])]
+        r, c = len(A), len(A[0])
+        return [[(A[i][j] ^ B[i][j]) & 1 for j in range(c)] for i in range(r)]
 
-# Utility functions (shared)
-def _xor_mat(A, B):
-    # prefer library add() if available (keeps one implementation)
-    if "add" in globals() and callable(globals()["add"]):
-        return globals()["add"](A, B)
-    if not A: return [r[:] for r in (B or [])]
-    if not B: return [r[:] for r in (A or [])]
-    r, c = len(A), len(A[0])
-    return [[(A[i][j] ^ B[i][j]) & 1 for j in range(c)] for i in range(r)]
+    def _bottom_row(M):
+        return M[-1] if (M and len(M)) else []
 
-def _bottom_row(M):
-    return M[-1] if (M and len(M)) else []
+    def _load_h_local():
+        """Best-effort H loader used in Tab 2; resilient to missing file/var."""
+        try:
+            # prefer a session-uploaded H if your UI stashes it in st.session_state
+            up = st.session_state.get("f_H")
+            if up is not None:
+                return io.parse_cmap(read_json_file(up))
+        except Exception:
+            pass
+        try:
+            # fall back to a module-level f_H if present
+            if 'f_H' in globals() and globals()['f_H'] is not None:
+                return io.parse_cmap(read_json_file(globals()['f_H']))
+        except Exception:
+            pass
+        try:
+            # finally, fall back to whatever was produced by Overlap
+            H_obj = st.session_state.get("overlap_H")
+            if H_obj is not None:
+                return H_obj
+        except Exception:
+            pass
+        # last resort: empty cmap
+        return io.parse_cmap({"blocks": {}})
 
-def _load_h_local():
-    """Best-effort H loader used in Tab 2; resilient to missing file/var."""
-    try:
-        # prefer a session-uploaded H if your UI stashes it in st.session_state
-        up = st.session_state.get("f_H")
-        if up is not None:
-            return io.parse_cmap(read_json_file(up))
-    except Exception:
-        pass
-    try:
-        # fall back to a module-level f_H if present
-        if 'f_H' in globals() and globals()['f_H'] is not None:
-            return io.parse_cmap(read_json_file(globals()['f_H']))
-    except Exception:
-        pass
-    try:
-        # finally, fall back to whatever was produced by Overlap
-        H_obj = st.session_state.get("overlap_H")
-        if H_obj is not None:
-            return H_obj
-    except Exception:
-        pass
-    # last resort: empty cmap
-    return io.parse_cmap({"blocks": {}})
+    def _lane_mask_from_d3_strict(boundaries_obj):
+        """Derive lane mask directly from d3 by column support (strict truth)."""
+        try:
+            d3 = boundaries_obj.blocks.__root__.get("3") or []
+        except Exception:
+            d3 = []
+        return _truth_mask_from_d3(d3)
 
-def _lane_mask_from_d3_strict(boundaries_obj):
-    """Derive lane mask directly from d3 by column support (strict truth)."""
-    try:
-        d3 = boundaries_obj.blocks.__root__.get("3") or []
-    except Exception:
-        d3 = []
-    return _truth_mask_from_d3(d3)
+    def _lane_mask_from_d3_local(boundaries_obj):
+        # alias maintained for existing call-sites
+        return _lane_mask_from_d3_strict(boundaries_obj)
 
-def _lane_mask_from_d3_local(boundaries_obj):
-    # alias maintained for existing call-sites
-    return _lane_mask_from_d3_strict(boundaries_obj)
+    def _derive_mode_from_cfg(cfg: dict) -> str:
+        if not cfg or not cfg.get("enabled_layers"):
+            return "strict"
+        src = (cfg.get("source", {}) or {}).get("3", "auto")
+        return "projected(file)" if src == "file" else "projected(auto)"
 
-def _derive_mode_from_cfg(cfg: dict) -> str:
-    if not cfg or not cfg.get("enabled_layers"):
-        return "strict"
-    src = (cfg.get("source", {}) or {}).get("3", "auto")
-    return "projected(file)" if src == "file" else "projected(auto)"
+    # Projected(FILE) validation banner (single source)
+    def file_validation_failed() -> bool:
+        """Return True if last attempt to use FILE Π failed validation."""
+        return bool(st.session_state.get("_file_mode_error"))
 
-# Projected(FILE) validation banner (single source)
-def file_validation_failed() -> bool:
-    """Return True if last attempt to use FILE Π failed validation."""
-    return bool(st.session_state.get("_file_mode_error"))
+    def _shape(M):
+        return (len(M), len(M[0]) if (M and M[0]) else 0)
 
-def _shape(M):
-    return (len(M), len(M[0]) if (M and M[0]) else 0)
+    def _guard_r3_shapes(H2, d3, C3):
+        """Ensure H2·d3 and (C3⊕I3) shapes are consistent; tolerate empty during exploration."""
+        rH, cH = _shape(H2); rD, cD = _shape(d3); rC, cC = _shape(C3)
+        if not (rH and cH and rD and cD and rC and cC):
+            return  # allow empty while exploring
+        n3, n2 = rH, cH
+        if not (rD == n2 and cD == n3 and rC == n3 and cC == n3):
+            raise RuntimeError(
+                f"R3_SHAPE: expected H2({n3}×{n2})·d3({n2}×{n3}) and (C3⊕I3)({n3}×{n3}); "
+                f"got H2({rH}×{cH}), d3({rD}×{cD}), C3({rC}×{cC})"
+            )
 
-def _guard_r3_shapes(H2, d3, C3):
-    """Ensure H2·d3 and (C3⊕I3) shapes are consistent; tolerate empty during exploration."""
-    rH, cH = _shape(H2); rD, cD = _shape(d3); rC, cC = _shape(C3)
-    if not (rH and cH and rD and cD and rC and cC):
-        return  # allow empty while exploring
-    n3, n2 = rH, cH
-    if not (rD == n2 and cD == n3 and rC == n3 and cC == n3):
-        raise RuntimeError(
-            f"R3_SHAPE: expected H2({n3}×{n2})·d3({n2}×{n3}) and (C3⊕I3)({n3}×{n3}); "
-            f"got H2({rH}×{cH}), d3({rD}×{cD}), C3({rC}×{cC})"
-        )
+    # You can add additional UI controls or logic here as needed for your app.
 
 
 # ------------------------------ UI: policy + H + projector ------------------------------
