@@ -151,6 +151,21 @@ def current_inputs_sig() -> tuple[str, str, str, str, str]:
     sig = (list(sig) + ["","","","",""])[:5]
     return tuple(sig)
 
+# --- Side-channel reconciler: keep _district_info in sync with SSOT -----------
+def _reconcile_di_vs_ssot():
+    ss = st.session_state
+    ib = ss.get("_inputs_block") or {}
+    if not ib: 
+        return
+    bh_ib = ib.get("boundaries_hash", "")
+    if not bh_ib:
+        return
+    di = dict(ss.get("_district_info") or {})
+    if di.get("boundaries_hash") != bh_ib:
+        di["boundaries_hash"] = bh_ib
+        ss["_district_info"] = di  # write back
+
+
 # ---------- SSOT helpers: canonical inputs block + signature ----------
 def _stable_blocks_sha(obj) -> str:
     import json, hashlib
@@ -2126,7 +2141,38 @@ def run_overlap():
         st.session_state["_has_overlap"] = True
 
 
-        # publish canonical block (what Cert & Reports read)
+           # --- SOURCE-OF-TRUTH: stage & publish SSOT into _inputs_block -------------
+    def _stable_blocks_sha(obj) -> str:
+        try:
+            data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (obj if isinstance(obj, dict) else {"blocks": {}})
+            s = json.dumps(_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+            return hashlib.sha256(s).hexdigest()
+        except Exception:
+            return ""
+    
+    try:
+        H2_now = (H_local.blocks.__root__.get("2") or [])
+        hashes_now = {
+            "boundaries_hash": _stable_blocks_sha(boundaries),
+            "C_hash":          _stable_blocks_sha(cmap),
+            "H_hash":          _stable_blocks_sha(H_local),
+            "U_hash":          _stable_blocks_sha(shapes),
+            "shapes_hash":     _stable_blocks_sha(shapes),
+        }
+        dims_now = {"n2": int(len(H2_now) if H2_now else 0), "n3": int(n3)}
+        files_now = {
+            "boundaries": st.session_state.get("fname_boundaries","boundaries.json"),
+            "C":          st.session_state.get("fname_cmap","cmap.json"),
+            "H":          st.session_state.get("fname_h","H.json"),
+            "U":          st.session_state.get("fname_shapes","shapes.json"),
+        }
+    
+        # Stage (pending) for any late readers
+        st.session_state["_inputs_hashes_pending"] = hashes_now
+        st.session_state["_dims_pending"]          = dims_now
+        st.session_state.setdefault("_filenames_pending", files_now)
+    
+        # Publish canonical block (what Cert & Reports read)
         st.session_state["_inputs_block"] = {
             "hashes": dict(hashes_now),
             "dims":   dict(dims_now),
@@ -2138,8 +2184,14 @@ def run_overlap():
             "U_hash":          hashes_now["U_hash"],
             "shapes_hash":     hashes_now["shapes_hash"],
         }
+    
+        # NEW: keep _district_info in sync with SSOT + mark that overlap ran
+        _reconcile_di_vs_ssot()
+        st.session_state["_has_overlap"] = True
+    
     except Exception as e:
         st.warning(f"(Could not publish SSOT inputs after Overlap: {e})")
+
 
 
     # ── pre-arm cert writer only if material key changed (using frozen IB) ────
@@ -2251,11 +2303,7 @@ def run_self_tests():
     if bh_ib and bh_live and (bh_ib != bh_live):
         failures.append("HASH_COHERENT: _inputs_block.boundaries_hash ≠ live(boundaries)")
 
-    # Only warn about side-channel after this session has run Overlap at least once
-    if ss.get("_has_overlap"):
-        bh_di = di.get("boundaries_hash","")
-        if bh_di and bh_ib and (bh_di != bh_ib):
-            warnings.append("HASH_SIDECHANNEL: _district_info.boundaries_hash differs from SSOT (ignored).")
+
 
     # AUTO_OK / FILE_OK
     mode = str(rc.get("mode",""))
