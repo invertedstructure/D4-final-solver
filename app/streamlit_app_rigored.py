@@ -1270,11 +1270,11 @@ def run_overlap():
         if k not in _keep:
             st.session_state.pop(k, None)
 
-    # ── STEP 2: projector resolve (handles projected:file fail path) ──────────────────
+       # ── STEP 2: projector resolve (handles projected:file fail path) ──────────────────
     try:
         # If you didn't add the helper, swap the next line back to: P_active, meta = projector_choose_active(cfg_active, boundaries)
         P_active, meta = _resolve_projector(cfg_active, boundaries)
-         except ValueError as e:
+    except ValueError as e:
         # Determine intended mode from policy source
         source3 = (cfg_active.get("source") or {}).get("3", "auto")
         mode_str = "projected(file)" if source3 == "file" else "projected(auto)"
@@ -1313,20 +1313,22 @@ def run_overlap():
         )
         st.caption(f"SSOT sig (before → after): {list(pub['before'])} → {list(pub['after'])}")
     
-        try: _reconcile_di_vs_ssot()
-        except Exception: pass
-    
-        # Only mark FILE invalid if we’re actually in FILE mode
-        st.session_state["file_pi_valid"]   = (mode_str != "projected(file)")
-        st.session_state["file_pi_reasons"] = ([str(e)] if mode_str == "projected(file)" else [])
-        st.session_state["write_armed"]     = True
-        st.session_state["armed_by"]        = ("file_invalid" if mode_str == "projected(file)" else "overlap_run")
-    
-        if mode_str == "projected(file)":
-            st.error(f"Projected(FILE) validation failed: {e}")
-        else:
-            st.info("AUTO mode selected; projector FILE not required. Continuing without Π.")
-        return
+        try: 
+            _reconcile_di_vs_ssot()
+        except Exception: 
+            pass
+
+    # Only mark FILE invalid if we’re actually in FILE mode
+    st.session_state["file_pi_valid"]   = (mode_str != "projected(file)")
+    st.session_state["file_pi_reasons"] = ([str(e)] if mode_str == "projected(file)" else [])
+    st.session_state["write_armed"]     = True
+    st.session_state["armed_by"]        = ("file_invalid" if mode_str == "projected(file)" else "overlap_run")
+
+    if mode_str == "projected(file)":
+        st.error(f"Projected(FILE) validation failed: {e}")
+    else:
+        st.info("AUTO mode selected; projector FILE not required. Continuing without Π.")
+    return
 
 
     # ---- success path (strict + projected residuals; persist SSOT) --------------------
