@@ -102,6 +102,55 @@ DISTRICT_MAP: dict[str, str] = {
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
 
+# ---------- Inputs Block freezer (single source of truth) ----------
+def _ib_from_components(*, dims: dict, filenames: dict, hashes: dict) -> dict:
+    ib = {
+        "dims": {
+            "n2": int(dims.get("n2", 0)),
+            "n3": int(dims.get("n3", 0)),
+        },
+        "filenames": {
+            "boundaries": filenames.get("boundaries",""),
+            "shapes":     filenames.get("shapes",""),
+            "cmap":       filenames.get("cmap","") or filenames.get("C",""),
+            "H":          filenames.get("H",""),
+            "U":          filenames.get("U",""),
+            **({"projector": filenames.get("projector","")} if filenames.get("projector") else {}),
+        },
+        "hashes": {
+            "boundaries_hash": hashes.get("boundaries_hash",""),
+            "C_hash":          hashes.get("C_hash",""),
+            "H_hash":          hashes.get("H_hash",""),
+            "U_hash":          hashes.get("U_hash",""),
+            "shapes_hash":     hashes.get("shapes_hash",""),
+        },
+    }
+    # canonical inputs_sig (U optional, but keep position stable)
+    ib["inputs_sig"] = [
+        ib["hashes"]["boundaries_hash"],
+        ib["hashes"]["C_hash"],
+        ib["hashes"]["H_hash"],
+        ib["hashes"]["U_hash"],
+        ib["hashes"]["shapes_hash"],
+    ]
+    return ib
+
+def freeze_inputs_block(*, dims: dict, filenames: dict, hashes: dict):
+    """Writes a single canonical _inputs_block into session. All consumers must read this."""
+    ib = _ib_from_components(dims=dims, filenames=filenames, hashes=hashes)
+    st.session_state["_inputs_block"] = ib
+    # a tiny guard to detect accidental drifts
+    st.session_state["_last_ib_sig"] = tuple(ib["inputs_sig"])
+    return ib
+
+def current_inputs_sig() -> tuple[str, str, str, str, str]:
+    """Always read the signature from the frozen _inputs_block."""
+    ib = st.session_state.get("_inputs_block") or {}
+    sig = ib.get("inputs_sig") or []
+    # always return a 5-tuple for stable compares
+    sig = (list(sig) + ["","","","",""])[:5]
+    return tuple(sig)
+
 # ─── Fixtures registry: load + cache + invalidate ─────────────────────────────
 from pathlib import Path
 import json, hashlib, os
