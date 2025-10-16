@@ -2246,34 +2246,49 @@ def _ab_is_fresh_now() -> bool:
     return True
 
 
-def run_self_tests():
-    failures, warnings = [], []
-    ib = st.session_state.get("_inputs_block") or {}
-    rc = st.session_state.get("run_ctx") or {}
-    out = st.session_state.get("overlap_out") or {}
 
-    # Check SSOT completeness
+# --- Self-tests (startup-friendly, no globals other than Streamlit + helpers) ---
+def run_self_tests():
+    import streamlit as st
+
+    failures, warnings = [], []
+
+    ss   = st.session_state
+    ib   = ss.get("_inputs_block") or {}
+    rc   = ss.get("run_ctx") or {}
+    out  = ss.get("overlap_out") or {}
+
+    # 1) SSOT completeness (read-only; just warn if blanks)
     for k in ("boundaries_hash","C_hash","H_hash","U_hash"):
-        if not ib.get(k):
+        if not ib.get(k) and not ((ib.get("hashes") or {}).get(k)):
             warnings.append(f"SSOT: missing {k}")
 
-    
-    
-    # Check SSOT freshness (current)
-    if ssot_is_stale():
-        warnings.append("SSOT_STALE: live inputs changed; run Overlap to refresh SSOT")
-    
-    # Projector validation
-    mode = rc.get("mode","")
-    if mode.startswith("projected(file)") and not bool(rc.get("projector_consistent_with_d", False)):
-        failures.append("FILE_OK: projected(file) not consistent with d3")
-    elif mode.startswith("projected(auto)") and "3" not in out:
-        warnings.append("AUTO_OK: no overlap_out present yet")
-    
-        # A/B snapshot freshness (only warn if a snapshot exists)
+    # 2) Freshness (don’t require side-channels; use your ssot_is_stale/guard)
+    try:
+        if ss.get("_has_overlap"):  # only after first publish
+            # Prefer your v2 guard if present; else fallback
+            if "ssot_is_stale_v2" in globals() and callable(globals()["ssot_is_stale_v2"]):
+                if ssot_is_stale_v2():
+                    warnings.append("SSOT_STALE: live inputs changed; run Overlap to refresh SSOT")
+            elif "ssot_is_stale" in globals() and callable(globals()["ssot_is_stale"]):
+                if ssot_is_stale():
+                    warnings.append("SSOT_STALE: live inputs changed; run Overlap to refresh SSOT")
+    except Exception as e:
+        warnings.append(f"SSOT_STALE_CHECK: {e}")
+
+    # 3) Mode sanity
+    mode = str(rc.get("mode",""))
+    if mode.startswith("projected(file)"):
+        if not bool(rc.get("projector_consistent_with_d", False)):
+            failures.append("FILE_OK: projected(file) not consistent with d3")
+    elif mode.startswith("projected(auto)"):
+        if "3" not in out:
+            warnings.append("AUTO_OK: no overlap_out present yet")
+
+    # 4) A/B snapshot freshness (only warn if a snapshot exists)
     ab = ss.get("ab_compare") or {}
     if ab:
-        frozen = tuple(ssot_frozen_sig_from_ib() or ())
+        frozen  = tuple(ssot_frozen_sig_from_ib() or ())
         pol_now = _policy_tag_now_from_rc(rc)
         pj_now  = rc.get("projector_hash","") if rc.get("mode") == "projected(file)" else ""
         pj_ab   = ((ab.get("projected") or {}).get("projector_hash","")
@@ -2283,6 +2298,8 @@ def run_self_tests():
             str(ab.get("policy_tag",""))     != str(pol_now) or
             str(pj_ab)                       != str(pj_now)):
             warnings.append("AB_FRESH: A/B snapshot is stale (won’t embed)")
+
+    return failures, warnings
 
 
 
