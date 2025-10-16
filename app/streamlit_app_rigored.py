@@ -102,6 +102,18 @@ DISTRICT_MAP: dict[str, str] = {
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
 
+def current_inputs_sig(_ib: dict | None = None) -> tuple[str, str, str, str, str]:
+    """Canonical 5-tuple: D, C, H, U, SHAPES ('' if absent)."""
+    ib = dict(_ib or (st.session_state.get("_inputs_block") or {}))
+    h  = dict(ib.get("hashes") or {})
+    return (
+        str(h.get("boundaries_hash") or ""),
+        str(h.get("C_hash")         or ""),
+        str(h.get("H_hash")         or ""),
+        str(h.get("U_hash")         or ""),       # ok if missing → ""
+        str(h.get("shapes_hash")    or ""),       # must be present for “complete”
+    )
+
 # ======================= SSOT v2 COMPAT SHIMS =======================
 # Map old v2 helper names to the new canonical SSOT core.
 
@@ -4712,14 +4724,14 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
     _di = _ss.get("_district_info") or {}
     district_id = _di.get("district_id", "UNKNOWN")
 
-    # Freshness + rectifier (stops if stale)
-    _rectify_run_ctx_mask_from_d3_or_stop()
-    rc = _ss.get("run_ctx") or {}  # fetch AFTER rectifier
-    n3 = int(rc.get("n3") or 0)
-    lm = list(rc.get("lane_mask_k3") or [])
-    if n3 <= 0 or len(lm) != n3:
-        st.warning("Context invalid (n3/mask mismatch). Click Run Overlap and try again.")
-        st.stop()
+    # Freshness gate (SSOT-only): warn, do NOT stop the app render
+    stale = ssot_is_stale()
+    allow_stale = st.toggle("Allow writing with stale SSOT", value=False, key="cert_allow_stale_ssot")
+    
+    if stale:
+        st.warning("STALE_RUN_CTX: Inputs changed; please click Run Overlap to refresh.")
+    # DO NOT call st.stop() here — let the rest of the UI render
+
 
     # Eligibility: AUTO mode + k=3 green + SSOT present
     k3_green = bool(((_ss.get("overlap_out") or {}).get("3", {}) or {}).get("eq", False))
