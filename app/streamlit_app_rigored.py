@@ -101,6 +101,70 @@ DISTRICT_MAP: dict[str, str] = {
     "28f8db2a822cb765e841a35c2850a745c667f4228e782d0cfdbcb710fd4fecb9": "D3",
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
+# --- canonical: deep-int → stable SHA (reuse if you already have it) ---
+def _deep_intify(o):
+    if isinstance(o, bool): return 1 if o else 0
+    if isinstance(o, list): return [_deep_intify(x) for x in o]
+    if isinstance(o, dict): return {k: _deep_intify(v) for k, v in o.items()}
+    return o
+
+def _stable_blocks_sha(obj) -> str:
+    try:
+        data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (obj if isinstance(obj, dict) else {"blocks": {}})
+        s = json.dumps(_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        return hashlib.sha256(s).hexdigest()
+    except Exception:
+        return ""
+
+# --- live sig (optionally accepts overrides but ALL args are optional) ---
+def ssot_live_sig(b=None, c=None, h=None, u=None) -> tuple[str, str, str, str, str]:
+    # Prefer passed-in objects; fall back to session/globals
+    b = b or globals().get("boundaries")
+    c = c or globals().get("cmap")
+    # Prefer overlap_H if present so "live" matches what Overlap actually used
+    h = h or (st.session_state.get("overlap_H") or globals().get("H_obj") or io.parse_cmap({"blocks": {}}))
+    u = u or globals().get("shapes")
+    return (
+        _stable_blocks_sha(b) if b is not None else "",
+        _stable_blocks_sha(c) if c is not None else "",
+        _stable_blocks_sha(h) if h is not None else "",
+        _stable_blocks_sha(u) if u is not None else "",
+        _stable_blocks_sha(u) if u is not None else "",  # shapes_hash == U_hash by design here
+    )
+
+# --- frozen sig: read-only from canonical _inputs_block ---
+def ssot_frozen_sig_from_ib() -> tuple[str, str, str, str, str] | tuple():
+    ib = st.session_state.get("_inputs_block") or {}
+    if not ib:
+        return ()
+    h = ib.get("hashes") or {}
+    return (
+        str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
+        str(h.get("C_hash",          ib.get("C_hash",""))),
+        str(h.get("H_hash",          ib.get("H_hash",""))),
+        str(h.get("U_hash",          ib.get("U_hash",""))),
+        str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
+    )
+
+# --- tolerant stale check: accepts/ignores any args from older callers ---
+def ssot_is_stale(*_args, **_kwargs) -> bool:
+    try:
+        frozen = ssot_frozen_sig_from_ib()
+        if not frozen:
+            # No frozen SSOT yet → treat as stale so first Overlap will publish
+            return True
+        live = ssot_live_sig(
+            _kwargs.get("boundaries_obj") or _kwargs.get("boundaries"),
+            _kwargs.get("cmap_obj")       or _kwargs.get("cmap"),
+            _kwargs.get("H_obj")          or _kwargs.get("H"),
+            _kwargs.get("shapes_obj")     or _kwargs.get("shapes"),
+        )
+        return tuple(live) != tuple(frozen)
+    except Exception as e:
+        st.warning(f"ssot_is_stale() guard tripped: {e}")
+        # Fail-safe to 'stale' if something goes wrong
+        return True
+
 # ========== SSOT canon helpers (single source of truth) ==========
 
 def _deep_intify(o):
@@ -2823,27 +2887,32 @@ def run_self_tests():
     rc = st.session_state.get("run_ctx") or {}
     out = st.session_state.get("overlap_out") or {}
 
-    # SSOT completeness (read-only)
+    # Check SSOT completeness
     for k in ("boundaries_hash","C_hash","H_hash","U_hash"):
         if not ib.get(k):
             warnings.append(f"SSOT: missing {k}")
 
-    # freshness (v2)
+    # Check SSOT freshness
     if ssot_is_stale_v2():
         warnings.append("SSOT_STALE: live inputs changed; run Overlap to refresh SSOT")
-
-    # projector validations etc...
+    
+    # Add the new stale check
+    stale = ssot_is_stale()  # ← do NOT pass boundaries_obj=...
+    if stale:
+        warnings.append("SSOT_STALE: live inputs changed; run Overlap to refresh SSOT")
+    
+    # Projector validation
     mode = rc.get("mode","")
     if mode.startswith("projected(file)") and not bool(rc.get("projector_consistent_with_d", False)):
         failures.append("FILE_OK: projected(file) not consistent with d3")
     elif mode.startswith("projected(auto)") and "3" not in out:
         warnings.append("AUTO_OK: no overlap_out present yet")
-
-    # A/B freshness vs frozen sig (use v2 canonical reader)
+    
+    # A/B snapshot freshness
     ab = st.session_state.get("ab_compare") or {}
     if ab and (tuple(ab.get("inputs_sig") or ()) != frozen_sig_from_ib_v2()):
         warnings.append("AB_FRESH: A/B snapshot is stale (won’t embed)")
-
+    
     return failures, warnings
 
 
