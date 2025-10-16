@@ -5785,47 +5785,43 @@ with safe_expander("Cert & provenance", expanded=True):
             parts.append("Δ projector_hash")
         return "; ".join(parts) or "Δ —"
 
-    # ---------- freeze snapshot (single read; SSOT-only) ----------
-    ss  = st.session_state
-    rc  = dict(ss.get("run_ctx") or {})
-    out = dict(ss.get("overlap_out") or {})
-    H_obj = ss.get("overlap_H") or io.parse_cmap({"blocks": {}})
-    C_obj = ss.get("overlap_C") or io.parse_cmap({"blocks": {}})
-    ib    = dict(ss.get("_inputs_block") or {})
+           # ---------- freeze snapshot (single read; SSOT-only) ----------
+        ss  = st.session_state
+        rc  = dict(ss.get("run_ctx") or {})
+        out = dict(ss.get("overlap_out") or {})
+        H_obj = ss.get("overlap_H") or io.parse_cmap({"blocks": {}})
+        C_obj = ss.get("overlap_C") or io.parse_cmap({"blocks": {}})
+        ib    = dict(ss.get("_inputs_block") or {})
+        
+        # Freshness gate (SSOT-only): warn or block when stale
+        stale = ssot_is_stale()
+        _toggle_key = ensure_unique_widget_key("cert_allow_stale_ssot")
+        allow_stale = st.toggle("Allow writing with stale SSOT", value=False, key=_toggle_key)
+        if stale and not allow_stale:
+            st.warning("Inputs changed since last Overlap — run Overlap to refresh SSOT before writing or reporting.")
+            # We still render the header strip but will block actual write below.
+        
+        # Canonical SSOT readers (use global helpers; don't shadow names)
+        now_sig = current_inputs_sig(_ib=ib)
+        
+        def _current_inputs_dict_view(_ib: dict) -> dict:
+            h  = (_ib.get("hashes") or {})
+            d  = (_ib.get("dims") or {})
+            fn = (_ib.get("filenames") or {})
+            return {
+                "hashes": {
+                    "boundaries_hash": h.get("boundaries_hash", _ib.get("boundaries_hash","")),
+                    "C_hash":          h.get("C_hash",          _ib.get("C_hash","")),
+                    "H_hash":          h.get("H_hash",          _ib.get("H_hash","")),
+                    "U_hash":          h.get("U_hash",          _ib.get("U_hash","")),
+                    "shapes_hash":     h.get("shapes_hash",     _ib.get("shapes_hash","")),
+                },
+                "dims":      {"n2": int((d or {}).get("n2") or 0), "n3": int((d or {}).get("n3") or 0)},
+                "filenames": dict(fn),
+            }
+        
+        # (use now_sig / _current_inputs_dict_view(ib) wherever you previously used the local defs)
 
-    # Freshness gate (SSOT-only): warn or block when stale
-    stale = ssot_is_stale()
-    allow_stale = st.toggle("Allow writing with stale SSOT", value=False, key="cert_allow_stale_ssot")
-    if stale and not allow_stale:
-        st.warning("Inputs changed since last Overlap — run Overlap to refresh SSOT before writing or reporting.")
-        # We still render the header strip but will block actual write below.
-
-    # Canonical SSOT readers
-    def current_inputs_sig() -> tuple[str, str, str, str, str]:
-        h = (ib.get("hashes") or {})
-        return (
-            str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
-            str(h.get("C_hash",          ib.get("C_hash",""))),
-            str(h.get("H_hash",          ib.get("H_hash",""))),
-            str(h.get("U_hash",          ib.get("U_hash",""))),
-            str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
-        )
-
-    def current_inputs_dict() -> dict:
-        h  = (ib.get("hashes") or {})
-        d  = (ib.get("dims") or {})
-        fn = (ib.get("filenames") or {})
-        return {
-            "hashes": {
-                "boundaries_hash": h.get("boundaries_hash", ib.get("boundaries_hash","")),
-                "C_hash":          h.get("C_hash",          ib.get("C_hash","")),
-                "H_hash":          h.get("H_hash",          ib.get("H_hash","")),
-                "U_hash":          h.get("U_hash",          ib.get("U_hash","")),
-                "shapes_hash":     h.get("shapes_hash",     ib.get("shapes_hash","")),
-            },
-            "dims":      {"n2": int((d or {}).get("n2") or 0), "n3": int((d or {}).get("n3") or 0)},
-            "filenames": dict(fn),
-        }
 
     # If IB is blank, try staged pending once (no live synthesis here)
     def _publish_inputs_block_from_pending() -> bool:
