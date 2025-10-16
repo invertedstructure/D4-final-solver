@@ -6337,22 +6337,22 @@ with safe_expander("Cert & provenance", expanded=True):
         ss["run_idx"] = int(ss.get("run_idx", 0)) + 1
         run_id = ss.get("last_run_id","00000000")
 
-        # ----- assemble cert payload -----
+                # ----- assemble cert payload (strict schema) -----
         district_id = (ss.get("_district_info") or {}).get("district_id", ss.get("district_id","UNKNOWN"))
         n2 = int((ib.get("dims") or {}).get("n2") or rc.get("n2") or 0)
         n3 = int((ib.get("dims") or {}).get("n3") or rc.get("n3") or 0)
         lane_mask = list(rc.get("lane_mask_k3") or [])
-
+        
         # GF(2) diagnostics (guarded shapes)
         def _bottom_row(M): return M[-1] if (M and len(M)) else []
         def _xor(A,B):
             if not A: return [r[:] for r in (B or [])]
             if not B: return [r[:] for r in (A or [])]
-            return [[(A[i][j]^B[i][j])&1 for j in range(len(A[0]))] for i in range(len(A))]
+            return [[(A[i][j]^B[i][j]) & 1 for j in range(len(A[0]))] for i in range(len(A))]
         def _mask_row(row, lm):
             L = min(len(row or []), len(lm or []))
             return [int(row[j]) if int(lm[j]) else 0 for j in range(L)]
-
+        
         H2 = (H_obj.blocks.__root__.get("2") or [])
         d3 = rc.get("d3", [])
         C3 = (C_obj.blocks.__root__.get("3") or [])
@@ -6362,7 +6362,7 @@ with safe_expander("Cert & provenance", expanded=True):
         else:
             H2d3 = []
         C3pI3 = _xor(C3, I3) if C3 else []
-
+        
         # A/B freshness
         ab_status = REASON.AB_NONE
         ab_fresh = False
@@ -6377,14 +6377,19 @@ with safe_expander("Cert & provenance", expanded=True):
             else:
                 ab_fresh = True
                 ab_status = REASON.AB_EMBEDDED
-
+        
+        # ---------------- Identity (now includes fixture_code) ----------------
         identity = {
             "district_id":   district_id,
             "run_id":        ss.get("last_run_id","00000000"),
             "run_idx":       int(ss.get("run_idx", 0)),
             "field":         ss.get("field_label", "B2"),
             "fixture_label": ss.get("fixture_label",""),
+            "fixture_code":  (ss.get("run_ctx") or {}).get("fixture_code",""),
+            "fixture_nonce": ss.get("_fixture_nonce", 0),
         }
+        
+        # ---------------- Policy ----------------
         policy = {
             "label_raw":      policy_raw,
             "canon":          policy_canon,
@@ -6392,7 +6397,8 @@ with safe_expander("Cert & provenance", expanded=True):
         }
         if policy_canon == "projected:file":
             policy["projector_hash"] = proj_hash
-
+        
+        # ---------------- Inputs + filenames ----------------
         filenames = dict(ib.get("filenames") or {})
         filenames.setdefault("boundaries", ss.get("fname_boundaries","boundaries.json"))
         filenames.setdefault("shapes",     ss.get("fname_shapes","shapes.json"))
@@ -6401,7 +6407,7 @@ with safe_expander("Cert & provenance", expanded=True):
         filenames.setdefault("U",          ss.get("fname_U","U.json"))
         if policy_canon == "projected:file" and rc.get("projector_filename"):
             filenames["projector"] = rc.get("projector_filename")
-
+        
         inputs = {
             "dims": {"n2": n2, "n3": n3},
             "lane_mask_k3": lane_mask[:],
@@ -6415,32 +6421,48 @@ with safe_expander("Cert & provenance", expanded=True):
             },
             "inputs_sig": list(inputs_sig),
         }
-
+        
+        # ---- Registry provenance (fixtures.json) ----
+        fx_cache = st.session_state.get("_fixtures_cache") or {}
+        inputs["registry"] = {
+            "fixtures_version": fx_cache.get("version",""),
+            "fixtures_path":    fx_cache.get("__path","configs/fixtures.json"),
+            "fixtures_hash":    st.session_state.get("_fixtures_bytes_hash",""),
+            "ordering":         list(fx_cache.get("ordering") or []),
+        }
+        
+        # ---------------- Checks / Diagnostics ----------------
         checks = {
             "k": {"2": {"eq": pass_vec[0]}, "3": {"eq": pass_vec[1]}},
             "grid":  bool(out.get("grid", True)),
             "fence": bool(out.get("fence", True)),
             "guards": {"ker_guard": (policy_canon=="strict"), "policy_guard": True},
         }
-
+        
         diagnostics = {
             "lane_mask_k3": lane_mask[:],
             "lane_vec_H2@d3": _mask_row(_bottom_row(H2d3), lane_mask),
             "lane_vec_C3+I3": _mask_row(_bottom_row(C3pI3), lane_mask),
             "residual_tag": (ss.get("residual_tags", {}) or {}).get(policy_canon.split(":")[0], "none"),
         }
-
+        
+        # ---------------- A/B embed snapshot ----------------
         ab_embed = {"fresh": bool(ab_fresh)}
         if ab_fresh:
             ab_embed["strict_snapshot"]    = (ab.get("strict") or {}).get("out", {})
             ab_embed["projected_snapshot"] = (ab.get("projected") or {}).get("out", {})
         elif is_ab_pinned:
             ab_embed["stale_reason"] = ab_status
-
+        
+        # ---------------- Growth / Gallery ----------------
         growth  = {"growth_bumps": int(ss.get("growth_bumps", 0)), "H_diff": ss.get("H_diff","")}
-        gallery = {"projected_green": bool(ss.get("projected_green", pass_vec[1])),
-                   "tag": ss.get("gallery_tag",""), "strictify": ss.get("gallery_strictify","tbd")}
-
+        gallery = {
+            "projected_green": bool(ss.get("projected_green", pass_vec[1])),
+            "tag": ss.get("gallery_tag",""),
+            "strictify": ss.get("gallery_strictify","tbd"),
+        }
+        
+        # ---------------- Assemble cert ----------------
         cert = {
             "schema_version": SCHEMA_VERSION,
             "app_version":    APP_VERSION,
@@ -6455,31 +6477,18 @@ with safe_expander("Cert & provenance", expanded=True):
             "gallery":    gallery,
             "hashes":     {},
         }
-                # --- Identity additions -------------------------------------------------------
-        identity["fixture_code"] = (st.session_state.get("run_ctx") or {}).get("fixture_code", "")
         
-        # --- Registry provenance (under inputs) --------------------------------------
-        fx_cache = st.session_state.get("_fixtures_cache") or {}
-        cert.setdefault("inputs", {}).setdefault("registry", {})
-        cert["inputs"]["registry"] = {
-            "fixtures_version": fx_cache.get("version",""),
-            "fixtures_path": (st.session_state.get("_fixtures_cache") or {}).get("__path","configs/fixtures.json"),
-            "fixtures_hash": st.session_state.get("_fixtures_bytes_hash",""),
-            "ordering": list(fx_cache.get("ordering") or []),
-        }
-
-
         # non-blocking warnings
         warns = []
         if len(lane_mask) != max(n3,0): warns.append("CERT_INVAR_WARN: lane_mask_k3 length != n3")
         if policy_canon == "projected:file" and not proj_hash: warns.append("CERT_INVAR_WARN: projector_hash missing for projected:file")
         if warns: cert["_warnings"] = warns
-
-        # UTC stamp & strict JSON hash
+        
+        # UTC stamp & strict JSON hash (timestamp NOT in dedupe key)
         cert["written_at_utc"] = _utc_now_z()
         cert_blob = json.dumps(cert, sort_keys=True, separators=(",", ":")).encode("utf-8")
         cert["hashes"]["content_hash"] = _sha256_hex(cert_blob)
-
+        
         # deterministic filename / single-writer path
         policy_sanitized = _sanitize(policy_raw)
         content12        = cert["hashes"]["content_hash"][:12]
@@ -6487,23 +6496,23 @@ with safe_expander("Cert & provenance", expanded=True):
         base_dir         = Path("logs") / "certs" / district_id / ss.get("last_run_id","00000000")
         fname            = f"overlap__{district_id}__{policy_sanitized}__{ss.get('last_run_id','00000000')}__{content12}{ab_tail}.json"
         fpath            = base_dir / fname
-
+        
         _write_json_atomic(fpath, cert)
-
+        
         # session updates
         ss["_last_cert_write_key"] = write_key
         ss["last_cert_path"] = str(fpath)
         ss["cert_payload"]   = cert
         ss["write_armed"]    = False  # single-flight consumed
-
+        
         # mark A/B ticket as used to prevent duplicate embedded writes on reruns
         if is_ab_pinned and (ab_ticket_pending is not None):
             ss["_last_ab_ticket_written"] = ab_ticket_pending
-
+        
         # clear pin only if we actually embedded this write
         if ab_fresh and is_ab_pinned:
             ss["ab_pin"] = {"state":"idle","payload":None,"consumed":True}
-
+        
         # witness (write)
         _append_witness({
             "ts": cert["written_at_utc"],
@@ -6518,25 +6527,28 @@ with safe_expander("Cert & provenance", expanded=True):
             "file_pi": {"mode": ("file" if policy_canon=="projected:file" else policy_canon), "valid": True, "reasons": []},
             "path": fpath.as_posix()
         })
-                # --- Clear fixture echoes to avoid carry-over ---------------------------------
-        st.session_state["fixture_label"] = ""
-        rc_tmp = st.session_state.get("run_ctx") or {}
-        if rc_tmp.get("fixture_label"):
-            rc_tmp.pop("fixture_label", None)
-        st.session_state["run_ctx"] = rc_tmp
-
-
+        
+        # prevent fixture carry-over into the next unrelated cert
+        for _k in ("fixture_label","gallery_tag","gallery_strictify"):
+            st.session_state[_k] = ""
+        _rc_tmp = st.session_state.get("run_ctx") or {}
+        if "fixture_label" in _rc_tmp or "fixture_code" in _rc_tmp:
+            _rc_tmp.pop("fixture_label", None)
+            _rc_tmp.pop("fixture_code", None)
+            st.session_state["run_ctx"] = _rc_tmp
+        
         # UI receipt
         st.success(f"Cert written → `{fpath.as_posix()}` · {content12}")
         if st.checkbox("Show copyable path", value=False, key="copy_path_toggle"):
             _copybox(fpath.as_posix(), key="copy_cert_path")
-
+        
         # optional: auto-build B2 gallery (debounced inside)
         try:
             if "build_b2_gallery" in globals():
                 build_b2_gallery(debounce=True)
         except Exception as e:
             st.info(f"(B2 gallery build skipped: {e})")
+
 
     # ---------- tail (read-only, compact) ----------
     with st.container():
