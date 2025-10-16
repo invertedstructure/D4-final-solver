@@ -7428,6 +7428,100 @@ def _flush_workspace_safe(*, delete_projectors: bool = False):
         "token": "FLUSH-NOOP",
         "composite_cache_key_short": (st.session_state.get("_composite_cache_key","") or "")[:12],
     }
+# ---------------------- DEFINITIVE FULL FLUSH (works even if globals differ) ----------------------
+from pathlib import Path
+import os, shutil, hashlib, secrets
+from datetime import datetime, timezone
+
+def _utc_iso_z() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+def _count_files(root: Path) -> int:
+    if not root.exists(): return 0
+    n = 0
+    for _, _, files in os.walk(root): n += len(files)
+    return n
+
+def _resolve_dir(name: str, default: str) -> Path:
+    # honor globals if present; else default
+    p = globals().get(name)
+    if isinstance(p, (str, Path)): 
+        return Path(p)
+    return Path(default)
+
+def hard_full_flush(*, delete_projectors: bool = False) -> dict:
+    """
+    Removes persisted outputs on disk and resets session caches.
+    Targets BOTH top-level and logs/* variants to avoid dir mismatch issues.
+    """
+    # Resolve dirs robustly
+    TOP_CERTS     = _resolve_dir("CERTS_DIR",      "certs")
+    LOGS_DIR      = _resolve_dir("LOGS_DIR",       "logs")
+    REPORTS_DIR   = _resolve_dir("REPORTS_DIR",    "reports")
+    BUNDLES_DIR   = _resolve_dir("BUNDLES_DIR",    "bundles")
+    PROJECTORS_DIR= _resolve_dir("PROJECTORS_DIR", "projectors")
+
+    # Extra paths some UIs use
+    LOGS_CERTS    = LOGS_DIR / "certs"
+
+    # Build the list of dirs to wipe
+    targets = [
+        TOP_CERTS, LOGS_DIR, REPORTS_DIR, BUNDLES_DIR,
+        LOGS_CERTS,                       # wipe nested certs as well
+    ]
+    if delete_projectors:
+        targets.append(PROJECTORS_DIR)
+
+    # Deduplicate while preserving order
+    seen = set()
+    dirs = []
+    for d in targets:
+        rp = d.resolve()
+        if rp not in seen:
+            seen.add(rp); dirs.append(d)
+
+    # Clear session state keys that cache discovery/render
+    for k in (
+        "_inputs_block","_district_info","run_ctx","overlap_out","overlap_H",
+        "residual_tags","ab_compare","last_cert_path","cert_payload",
+        "last_run_id","_gallery_keys","_last_boundaries_hash",
+        "_projector_cache","_projector_cache_ab",
+        "parity_pairs","parity_last_report_pairs","selftests_snapshot",
+        "_last_cert_write_key","_has_overlap","_gallery_seen_keys",
+        "_gallery_bootstrapped","_composite_cache_key","_last_flush_token"
+    ):
+        st.session_state.pop(k, None)
+
+    removed_files = 0
+    for d in dirs:
+        try:
+            if d.exists():
+                removed_files += _count_files(d)
+                shutil.rmtree(d, ignore_errors=True)
+        except Exception:
+            pass
+        # recreate
+        try:
+            d.mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+
+    # New cache key + token
+    ts    = _utc_iso_z()
+    salt  = secrets.token_hex(2).upper()
+    token = f"FLUSH-{ts}-{salt}"
+    ckey  = hashlib.sha256((ts + salt).encode("utf-8")).hexdigest()
+    st.session_state["_composite_cache_key"] = ckey
+    st.session_state["_last_flush_token"]    = token
+
+    return {
+        "when": ts,
+        "deleted_dirs": [str(d) for d in dirs],
+        "recreated_dirs": [str(d) for d in dirs],
+        "files_removed": removed_files,
+        "token": token,
+        "composite_cache_key_short": ckey[:12],
+    }
 
 # ─────────────────────────── EXPORTS (Snapshot + Flush) ───────────────────────────
 EXPORTS_NS = "exports_v2"  # keep consistent across app
@@ -7454,10 +7548,10 @@ with safe_expander("Exports", expanded=False):
             except Exception as e:
                 st.error(f"Snapshot failed: {e}")
 
-    # ── Flush / Reset (right column)
+   
     with c2:
         st.caption("Flush / Reset")
-
+    
         if st.button(
             "Quick Reset (session only)",
             key=_mkkey(EXPORTS_NS, "btn_quick_reset_session"),
@@ -7465,18 +7559,11 @@ with safe_expander("Exports", expanded=False):
         ):
             out = _session_flush_run_cache_safe()
             st.success(f"Run cache flushed · token={out['token']} · key={out['ckey_short']}")
-
-        inc_pj = st.checkbox(
-            "Also remove projectors (full flush)",
-            value=False,
-            key=_mkkey(EXPORTS_NS, "flush_inc_pj"),
-        )
-        confirm = st.checkbox(
-            "I understand this deletes files on disk",
-            value=False,
-            key=_mkkey(EXPORTS_NS, "ff_confirm"),
-        )
-
+    
+        inc_pj  = st.checkbox("Also remove projectors (full flush)",
+                              value=False, key=_mkkey(EXPORTS_NS, "flush_inc_pj"))
+        confirm = st.checkbox("I understand this deletes files on disk",
+                              value=False, key=_mkkey(EXPORTS_NS, "ff_confirm"))
         if st.button(
             "Full Flush (certs/logs/reports/bundles)",
             key=_mkkey(EXPORTS_NS, "btn_full_flush"),
@@ -7484,10 +7571,9 @@ with safe_expander("Exports", expanded=False):
             help="Deletes persisted outputs; keeps inputs. Bumps nonce & resets session.",
         ):
             try:
-                info = _flush_workspace_safe(delete_projectors=inc_pj)
+                info = hard_full_flush(delete_projectors=inc_pj)
                 st.success(f"Workspace flushed · {info['token']}")
                 st.caption(f"New cache key: `{info['composite_cache_key_short']}`")
-                # NO NESTED EXPANDER: use a checkbox+container for details
                 if st.checkbox("Show flush details", key=_mkkey(EXPORTS_NS, "show_flush_details")):
                     st.json(info)
             except Exception as e:
