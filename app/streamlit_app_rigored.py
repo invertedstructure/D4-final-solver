@@ -5970,9 +5970,10 @@ with safe_expander("Cert & provenance", expanded=True):
                 stale_ab = REASON.AB_STALE_POLICY
             elif policy_canon == "projected:file" and (ab.get("projected",{}) or {}).get("projector_hash","") != proj_hash:
                 stale_ab = REASON.AB_STALE_PROJECTOR_HASH
-            st.success("A/B: Pinned · Fresh") if not stale_ab else st.warning(f"A/B: Pinned · Stale ({stale_ab})")
-        else:
-            st.caption("A/B: —")
+            if not stale_ab:
+                st.success("A/B: Pinned · Fresh")
+            else:
+                st.warning(f"A/B: Pinned · Stale ({stale_ab})")
     with c4:
         if not write_armed:
             st.caption("Write: Idle")
