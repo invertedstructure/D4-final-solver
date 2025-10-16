@@ -2417,19 +2417,24 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
     REPORTS_DIR = Path(st.session_state.get("REPORTS_DIR", "reports"))
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Freshness (non-blocking in render)
+        # Freshness (non-blocking in render)
     try:
-        rc = require_fresh_run_ctx()
-        rc = rectify_run_ctx_mask_from_d3()
+        rc_try = require_fresh_run_ctx()  # may return None
+        rc_fix = rectify_run_ctx_mask_from_d3()  # may return None
+        # prefer rectified rc if present, else the first, else session, else {}
+        rc = rc_fix or rc_try or (st.session_state.get("run_ctx") or {})
     except Exception as e:
         rc = st.session_state.get("run_ctx") or {}
         st.warning(str(e))
-
+    
     # Inputs / policy context (safe defaults)
-    H_used   = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
-    P_active = rc.get("P_active") if str(rc.get("mode","")).startswith("projected") else None
+    H_used = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
+    mode_now = str(rc.get("mode", ""))
+    P_active = rc.get("P_active") if mode_now.startswith("projected") else None
+    
     B0, C0, H0 = boundaries, cmap, H_used
     U0 = shapes  # carrier (for Fence)
+
 
     d3_base = (B0.blocks.__root__.get("3") or [])
     n2 = len(d3_base)
