@@ -3999,7 +3999,9 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
 
     # Freshness gate (warn only)
     stale = ssot_is_stale()
-    st.toggle("Allow writing with stale SSOT", value=False, key="cert_allow_stale_ssot")
+    _toggle_key_freezer = ensure_unique_widget_key("allow_stale_ssot__freezer")
+    allow_stale_freezer = st.toggle("Allow writing with stale SSOT", value=False, key=_toggle_key_freezer)
+
     if stale:
         st.warning("STALE_RUN_CTX: Inputs changed; please click Run Overlap to refresh.")
     # (do not st.stop() here)
