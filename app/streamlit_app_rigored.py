@@ -4679,6 +4679,15 @@ if "load_fixture_from_paths" not in globals():
                 return (h[:n] + "…") if h else ""
 
 
+# ---- Parity defaults (define once, above import_parity_pairs) ----
+from pathlib import Path
+
+if "LOGS_DIR" not in globals():
+    LOGS_DIR = Path("logs")
+LOGS_DIR.mkdir(parents=True, exist_ok=True)
+
+if "DEFAULT_PARITY_PATH" not in globals():
+    DEFAULT_PARITY_PATH = LOGS_DIR / "parity_pairs.json"
 
 # ----------------- import_parity_pairs (validate & stash only) -----------------
 def import_parity_pairs(
