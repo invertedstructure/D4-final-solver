@@ -101,467 +101,11 @@ DISTRICT_MAP: dict[str, str] = {
     "28f8db2a822cb765e841a35c2850a745c667f4228e782d0cfdbcb710fd4fecb9": "D3",
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
-# ---------- SSOT helpers (typing-safe) ----------
 
-# If you like explicit types:
-# from typing import Tuple
-# Sig5 = Tuple[str, str, str, str, str]
-
-def _deep_intify(o):
-    if isinstance(o, bool): return 1 if o else 0
-    if isinstance(o, list): return [_deep_intify(x) for x in o]
-    if isinstance(o, dict): return {k: _deep_intify(v) for k, v in o.items()}
-    return o
-
-def _stable_blocks_sha(obj) -> str:
-    try:
-        data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (obj if isinstance(obj, dict) else {"blocks": {}})
-        s = json.dumps(_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-        return hashlib.sha256(s).hexdigest()
-    except Exception:
-        return ""
-
-def ssot_live_sig(b=None, c=None, h=None, u=None) -> tuple:
-    """Compute the live 5-tuple (b, C, H, U, shapes) from in-memory objects."""
-    b = b or globals().get("boundaries")
-    c = c or globals().get("cmap")
-    h = h or (st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}}))
-    u = u or globals().get("shapes")
-    return (
-        _stable_blocks_sha(b) if b is not None else "",
-        _stable_blocks_sha(c) if c is not None else "",
-        _stable_blocks_sha(h) if h is not None else "",
-        _stable_blocks_sha(u) if u is not None else "",
-        _stable_blocks_sha(u) if u is not None else "",  # shapes_hash mirrors U_hash here
-    )
-
-def ssot_frozen_sig_from_ib() -> tuple:
-    """Read the frozen 5-tuple from _inputs_block. Returns () if not present."""
-    ib = st.session_state.get("_inputs_block") or {}
-    if not ib:
-        return ()
-    h = ib.get("hashes") or {}
-    return (
-        str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
-        str(h.get("C_hash",          ib.get("C_hash",""))),
-        str(h.get("H_hash",          ib.get("H_hash",""))),
-        str(h.get("U_hash",          ib.get("U_hash",""))),
-        str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
-    )
-
-def ssot_is_stale(*_args, **_kwargs) -> bool:
-    """
-    Tolerant stale check. Ignores unexpected args so older call sites won't break.
-    Compares live (in-memory) vs frozen (_inputs_block) 5-tuples.
-    """
-    try:
-        frozen = ssot_frozen_sig_from_ib()
-        if not frozen:
-            return True  # no frozen SSOT yet → treat as stale to trigger first publish
-        live = ssot_live_sig(
-            _kwargs.get("boundaries_obj") or _kwargs.get("boundaries"),
-            _kwargs.get("cmap_obj")       or _kwargs.get("cmap"),
-            _kwargs.get("H_obj")          or _kwargs.get("H"),
-            _kwargs.get("shapes_obj")     or _kwargs.get("shapes"),
-        )
-        return tuple(live) != tuple(frozen)
-    except Exception as e:
-        st.warning(f"ssot_is_stale() guard tripped: {e}")
-        return True
-
-# --- canonical: deep-int → stable SHA (reuse if you already have it) ---
-def _deep_intify(o):
-    if isinstance(o, bool): return 1 if o else 0
-    if isinstance(o, list): return [_deep_intify(x) for x in o]
-    if isinstance(o, dict): return {k: _deep_intify(v) for k, v in o.items()}
-    return o
-
-def _stable_blocks_sha(obj) -> str:
-    try:
-        data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (obj if isinstance(obj, dict) else {"blocks": {}})
-        s = json.dumps(_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-        return hashlib.sha256(s).hexdigest()
-    except Exception:
-        return ""
-
-# --- live sig (optionally accepts overrides but ALL args are optional) ---
-def ssot_live_sig(b=None, c=None, h=None, u=None) -> tuple[str, str, str, str, str]:
-    # Prefer passed-in objects; fall back to session/globals
-    b = b or globals().get("boundaries")
-    c = c or globals().get("cmap")
-    # Prefer overlap_H if present so "live" matches what Overlap actually used
-    h = h or (st.session_state.get("overlap_H") or globals().get("H_obj") or io.parse_cmap({"blocks": {}}))
-    u = u or globals().get("shapes")
-    return (
-        _stable_blocks_sha(b) if b is not None else "",
-        _stable_blocks_sha(c) if c is not None else "",
-        _stable_blocks_sha(h) if h is not None else "",
-        _stable_blocks_sha(u) if u is not None else "",
-        _stable_blocks_sha(u) if u is not None else "",  # shapes_hash == U_hash by design here
-    )
-
-# --- frozen sig: read-only from canonical _inputs_block ---
-def ssot_frozen_sig_from_ib() -> tuple[str, str, str, str, str] | tuple():
-    ib = st.session_state.get("_inputs_block") or {}
-    if not ib:
-        return ()
-    h = ib.get("hashes") or {}
-    return (
-        str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
-        str(h.get("C_hash",          ib.get("C_hash",""))),
-        str(h.get("H_hash",          ib.get("H_hash",""))),
-        str(h.get("U_hash",          ib.get("U_hash",""))),
-        str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
-    )
-
-# --- tolerant stale check: accepts/ignores any args from older callers ---
-def ssot_is_stale(*_args, **_kwargs) -> bool:
-    try:
-        frozen = ssot_frozen_sig_from_ib()
-        if not frozen:
-            # No frozen SSOT yet → treat as stale so first Overlap will publish
-            return True
-        live = ssot_live_sig(
-            _kwargs.get("boundaries_obj") or _kwargs.get("boundaries"),
-            _kwargs.get("cmap_obj")       or _kwargs.get("cmap"),
-            _kwargs.get("H_obj")          or _kwargs.get("H"),
-            _kwargs.get("shapes_obj")     or _kwargs.get("shapes"),
-        )
-        return tuple(live) != tuple(frozen)
-    except Exception as e:
-        st.warning(f"ssot_is_stale() guard tripped: {e}")
-        # Fail-safe to 'stale' if something goes wrong
-        return True
-
-# ========== SSOT canon helpers (single source of truth) ==========
-
-def _deep_intify(o):
-    if isinstance(o, bool): return 1 if o else 0
-    if isinstance(o, list): return [_deep_intify(x) for x in o]
-    if isinstance(o, dict): return {k: _deep_intify(v) for k,v in o.items()}
-    return o
-
-def ssot_stable_blocks_sha(obj) -> str:
-    """Stable sha256 of {"blocks": ...} for cmap-like objects or dicts."""
-    import hashlib, json
-    try:
-        data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (
-            obj if isinstance(obj, dict) else {"blocks": {}}
-        )
-        s = json.dumps(_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-        return hashlib.sha256(s).hexdigest()
-    except Exception:
-        return ""
-
-def ssot_live_sig(boundaries_obj, cmap_obj, H_obj, shapes_obj) -> tuple[str,str,str,str,str]:
-    """Compute live 5-tuple hashes from in-memory objects."""
-    return (
-        ssot_stable_blocks_sha(boundaries_obj),  # boundaries_hash
-        ssot_stable_blocks_sha(cmap_obj),        # C_hash
-        ssot_stable_blocks_sha(H_obj),           # H_hash
-        ssot_stable_blocks_sha(shapes_obj),      # U_hash
-        ssot_stable_blocks_sha(shapes_obj),      # shapes_hash
-    )
-
-def ssot_frozen_sig_from_ib() -> tuple:
-    """Read frozen 5-tuple from _inputs_block (tolerates legacy flattening)."""
-    ib = st.session_state.get("_inputs_block") or {}
-    if not ib: return ()
-    h = ib.get("hashes") or {}
-    return (
-        str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
-        str(h.get("C_hash",          ib.get("C_hash",""))),
-        str(h.get("H_hash",          ib.get("H_hash",""))),
-        str(h.get("U_hash",          ib.get("U_hash",""))),
-        str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
-    )
-
-def ssot_publish_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int, projector_filename: str = "") -> dict:
-    """
-    Canonical publisher: writes _inputs_block with hashes/dims/filenames +
-    legacy flattening. Returns {"before": tuple, "after": tuple, "changed": bool}.
-    Also sets _last_ib_sig and _has_overlap=True.
-    """
-    before = ssot_frozen_sig_from_ib()
-
-    hB, hC, hH, hU, hS = ssot_live_sig(boundaries_obj, cmap_obj, H_obj, shapes_obj)
-    H2 = (H_obj.blocks.__root__.get("2") or []) if H_obj else []
-    dims = {"n2": int(len(H2) if H2 else 0), "n3": int(n3)}
-
-    files = {
-        "boundaries": st.session_state.get("fname_boundaries","boundaries.json"),
-        "shapes":     st.session_state.get("fname_shapes","shapes.json"),
-        "cmap":       st.session_state.get("fname_cmap","cmap.json"),
-        "H":          st.session_state.get("fname_h","H.json"),
-        "U":          st.session_state.get("fname_shapes","shapes.json"),
-    }
-    if projector_filename:
-        files["projector"] = projector_filename
-
-    ib = {
-        "hashes": {
-            "boundaries_hash": hB,
-            "C_hash":          hC,
-            "H_hash":          hH,
-            "U_hash":          hU,
-            "shapes_hash":     hS,
-        },
-        "dims":      dims,
-        "filenames": files,
-        # legacy flattening:
-        "boundaries_hash": hB,
-        "C_hash":          hC,
-        "H_hash":          hH,
-        "U_hash":          hU,
-        "shapes_hash":     hS,
-    }
-    st.session_state["_inputs_block"] = ib
-
-    after = ssot_frozen_sig_from_ib()
-    changed = (before != after)
-
-    # persist for cheap stale detection
-    st.session_state["_last_ib_sig"] = after
-    st.session_state["_has_overlap"] = True
-
-    return {"before": before, "after": after, "changed": changed}
-
-def ssot_is_stale(*, boundaries_obj, cmap_obj, H_obj, shapes_obj) -> bool:
-    """
-    Return True if live objects' sig != frozen SSOT sig.
-    If we never published (no _inputs_block), return False (startup-neutral).
-    """
-    frozen = ssot_frozen_sig_from_ib()
-    if not frozen:
-        return False
-    live = ssot_live_sig(boundaries_obj, cmap_obj, H_obj, shapes_obj)
-    return tuple(live) != tuple(frozen)
-
-# ===== SSOT canon (v2) — single source of truth for hashes/dims/filenames =====
+# ================== SSOT — single canonical helper suite ==================
 from typing import Tuple
 
-def _deep_intify_v2(o):
-    if isinstance(o, bool): return 1 if o else 0
-    if isinstance(o, list): return [_deep_intify_v2(x) for x in o]
-    if isinstance(o, dict): return {k: _deep_intify_v2(v) for k, v in o.items()}
-    return o
-
-def stable_blocks_sha_v2(obj) -> str:
-    import json, hashlib
-    try:
-        data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (obj if isinstance(obj, dict) else {"blocks": {}})
-        s = json.dumps(_deep_intify_v2(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-        return hashlib.sha256(s).hexdigest()
-    except Exception:
-        return ""
-
-def frozen_sig_from_ib_v2() -> Tuple[str,str,str,str,str] or tuple:
-    ib = st.session_state.get("_inputs_block") or {}
-    if not ib: return ()
-    h = ib.get("hashes") or {}
-    b = str(h.get("boundaries_hash", ib.get("boundaries_hash","")))
-    C = str(h.get("C_hash",          ib.get("C_hash","")))
-    H = str(h.get("H_hash",          ib.get("H_hash","")))
-    U = str(h.get("U_hash",          ib.get("U_hash","")))
-    S = str(h.get("shapes_hash",     ib.get("shapes_hash","")))
-    if not any((b, C, H, U, S)): return ()
-    return (b, C, H, U, S)
-
-def live_sig_now_v2() -> Tuple[str,str,str,str,str]:
-    H_obj = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
-    return (
-        stable_blocks_sha_v2(boundaries),
-        stable_blocks_sha_v2(cmap),
-        stable_blocks_sha_v2(H_obj),
-        stable_blocks_sha_v2(shapes),
-        stable_blocks_sha_v2(shapes),
-    )
-
-def publish_inputs_block_v2(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int):
-    """Freeze canonical _inputs_block and memoize live/frozen sigs atomically."""
-    ss = st.session_state
-    H2 = (H_obj.blocks.__root__.get("2") or []) if H_obj else []
-    hashes = {
-        "boundaries_hash": stable_blocks_sha_v2(boundaries_obj),
-        "C_hash":          stable_blocks_sha_v2(cmap_obj),
-        "H_hash":          stable_blocks_sha_v2(H_obj),
-        "U_hash":          stable_blocks_sha_v2(shapes_obj),
-        "shapes_hash":     stable_blocks_sha_v2(shapes_obj),
-    }
-    dims = {"n2": int(len(H2) if H2 else 0), "n3": int(n3 or 0)}
-    files = {
-        "boundaries": ss.get("fname_boundaries","boundaries.json"),
-        "cmap":       ss.get("fname_cmap","cmap.json"),
-        "H":          ss.get("fname_h","H.json"),
-        "U":          ss.get("fname_shapes","shapes.json"),
-        "shapes":     ss.get("fname_shapes","shapes.json"),
-    }
-    rc = ss.get("run_ctx") or {}
-    if rc.get("projector_filename"):
-        files["projector"] = rc["projector_filename"]
-
-    before = frozen_sig_from_ib_v2()
-    ss["_inputs_block"] = {
-        "hashes": dict(hashes),
-        "dims":   dict(dims),
-        "filenames": dict(files),
-        # legacy top level
-        "boundaries_hash": hashes["boundaries_hash"],
-        "C_hash":          hashes["C_hash"],
-        "H_hash":          hashes["H_hash"],
-        "U_hash":          hashes["U_hash"],
-        "shapes_hash":     hashes["shapes_hash"],
-    }
-    after = (hashes["boundaries_hash"], hashes["C_hash"], hashes["H_hash"], hashes["U_hash"], hashes["shapes_hash"])
-
-    # freshness flags (and a one-frame guard to silence stale right after publish)
-    ss["_has_overlap"] = True
-    ss["_last_ib_sig"] = after
-    ss["_ssot_live_sig_at_publish"] = live_sig_now_v2()
-    ss["_ssot_just_published_v2"] = True
-    return {"before": before, "after": after}
-
-def ssot_is_stale_v2() -> bool:
-    ss = st.session_state
-    # if we literally just published this render, don't mark stale
-    if ss.pop("_ssot_just_published_v2", False): 
-        return False
-    if not ss.get("_has_overlap"):   # never stale before first publish
-        return False
-    frozen = frozen_sig_from_ib_v2()
-    if not frozen:
-        return False
-    # compare against last-live-at-publish first (handles same-render comparisons)
-    live_at_pub = ss.get("_ssot_live_sig_at_publish")
-    if live_at_pub and tuple(frozen) == tuple(live_at_pub):
-        return False
-    # fallback: recompute live now
-    return tuple(frozen) != tuple(live_sig_now_v2())
-# ===== end SSOT canon (v2) ====================================================
-
-
-# ─── SSOT freshness check (startup/one-frame safe) ───────────────────────────
-from typing import Tuple
-
-def _frozen_sig_from_ib() -> Tuple[str,str,str,str,str] or tuple:
-    ib = st.session_state.get("_inputs_block") or {}
-    if not ib: return ()
-    h = ib.get("hashes") or {}
-    b = str(h.get("boundaries_hash", ib.get("boundaries_hash","")))
-    C = str(h.get("C_hash",          ib.get("C_hash","")))
-    H = str(h.get("H_hash",          ib.get("H_hash","")))
-    U = str(h.get("U_hash",          ib.get("U_hash","")))
-    S = str(h.get("shapes_hash",     ib.get("shapes_hash","")))
-    if not any((b, C, H, U, S)): return ()
-    return (b, C, H, U, S)
-
-def _live_sig_now() -> Tuple[str,str,str,str,str]:
-    H_obj = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
-    return (
-        _stable_blocks_sha(boundaries),
-        _stable_blocks_sha(cmap),
-        _stable_blocks_sha(H_obj),
-        _stable_blocks_sha(shapes),
-        _stable_blocks_sha(shapes),
-    )
-
-def ssot_is_stale() -> bool:
-    ss = st.session_state
-    # If we literally just published this render, don't flag stale
-    if ss.pop("_ssot_just_published", False):
-        return False
-    if not ss.get("_has_overlap"):    # never stale before first publish
-        return False
-    frozen = _frozen_sig_from_ib()
-    if not frozen:
-        return False
-    live = _live_sig_now()
-    return tuple(frozen) != tuple(live)
-
-
-# ─── Canonical SSOT publisher (freeze Inputs Block) ───────────────────────────
-def publish_inputs_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int):
-    import json, hashlib
-    ss = st.session_state
-
-    def _deep_intify(o):
-        if isinstance(o, bool): return 1 if o else 0
-        if isinstance(o, list): return [_deep_intify(x) for x in o]
-        if isinstance(o, dict): return {k: _deep_intify(v) for k, v in o.items()}
-        return o
-
-    def _stable_blocks_sha(obj) -> str:
-        try:
-            data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (obj if isinstance(obj, dict) else {"blocks": {}})
-            s = json.dumps(_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-            return hashlib.sha256(s).hexdigest()
-        except Exception:
-            return ""
-
-    # BEFORE sig (if already frozen)
-    ib_before = ss.get("_inputs_block") or {}
-    h_before  = ib_before.get("hashes") or {}
-    before_sig = (
-        str(h_before.get("boundaries_hash", ib_before.get("boundaries_hash",""))),
-        str(h_before.get("C_hash",          ib_before.get("C_hash",""))),
-        str(h_before.get("H_hash",          ib_before.get("H_hash",""))),
-        str(h_before.get("U_hash",          ib_before.get("U_hash",""))),
-        str(h_before.get("shapes_hash",     ib_before.get("shapes_hash",""))),
-    )
-
-    # Compute current hashes/dims/files
-    H2 = (H_obj.blocks.__root__.get("2") or []) if H_obj else []
-    hashes = {
-        "boundaries_hash": _stable_blocks_sha(boundaries_obj),
-        "C_hash":          _stable_blocks_sha(cmap_obj),
-        "H_hash":          _stable_blocks_sha(H_obj),
-        "U_hash":          _stable_blocks_sha(shapes_obj),
-        "shapes_hash":     _stable_blocks_sha(shapes_obj),
-    }
-    dims = {"n2": int(len(H2) if H2 else 0), "n3": int(n3 or 0)}
-    files = {
-        "boundaries": ss.get("fname_boundaries","boundaries.json"),
-        "cmap":       ss.get("fname_cmap","cmap.json"),
-        "H":          ss.get("fname_h","H.json"),
-        "U":          ss.get("fname_shapes","shapes.json"),
-        "shapes":     ss.get("fname_shapes","shapes.json"),
-    }
-    # include projector filename when present
-    rc = ss.get("run_ctx") or {}
-    if rc.get("projector_filename"):
-        files["projector"] = rc["projector_filename"]
-
-    # Write canonical block (+ legacy flattening)
-    ss["_inputs_block"] = {
-        "hashes": dict(hashes),
-        "dims":   dict(dims),
-        "filenames": dict(files),
-        # legacy top level:
-        "boundaries_hash": hashes["boundaries_hash"],
-        "C_hash":          hashes["C_hash"],
-        "H_hash":          hashes["H_hash"],
-        "U_hash":          hashes["U_hash"],
-        "shapes_hash":     hashes["shapes_hash"],
-    }
-
-    after_sig = (
-        hashes["boundaries_hash"],
-        hashes["C_hash"],
-        hashes["H_hash"],
-        hashes["U_hash"],
-        hashes["shapes_hash"],
-    )
-
-    # Bookkeeping: mark that we have a frozen SSOT and memoize the sig
-    ss["_has_overlap"]   = True
-    ss["_last_ib_sig"]   = after_sig
-    ss["_ssot_just_published"] = True  # one-frame guard to silence stale UI
-
-    return {"before": before_sig, "after": after_sig}
-
-# ─── SSOT freshness (canonical, annotation-safe) ─────────────────────────────
-from typing import Tuple
-
+# ---- stable hashing for {"blocks": ...} objects/dicts ----
 def _deep_intify(o):
     if isinstance(o, bool): return 1 if o else 0
     if isinstance(o, list): return [_deep_intify(x) for x in o]
@@ -571,229 +115,39 @@ def _deep_intify(o):
 def _stable_blocks_sha(obj) -> str:
     import json, hashlib
     try:
-        data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (obj if isinstance(obj, dict) else {"blocks": {}})
+        data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") \
+               else (obj if isinstance(obj, dict) else {"blocks": {}})
         s = json.dumps(_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
         return hashlib.sha256(s).hexdigest()
     except Exception:
         return ""
 
-def _frozen_sig_from_ib() -> Tuple[str, str, str, str, str] or tuple:
-    """Return frozen 5-tuple from _inputs_block, or () if not frozen yet."""
-    ib = st.session_state.get("_inputs_block") or {}
-    if not ib:
-        return ()
-    h = ib.get("hashes") or {}
-    b = str(h.get("boundaries_hash", ib.get("boundaries_hash","")))
-    C = str(h.get("C_hash",          ib.get("C_hash","")))
-    H = str(h.get("H_hash",          ib.get("H_hash","")))
-    U = str(h.get("U_hash",          ib.get("U_hash","")))
-    S = str(h.get("shapes_hash",     ib.get("shapes_hash","")))
-    if not any((b, C, H, U, S)):
-        return ()
-    return (b, C, H, U, S)
+# ---- read the canonical inputs block in a normalized way ----
+def current_inputs_block() -> dict:
+    ib = dict(st.session_state.get("_inputs_block") or {})
+    h  = dict(ib.get("hashes") or {})
+    # backfill legacy flat keys
+    for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"):
+        if k not in h and k in ib:
+            h[k] = ib[k]
+    ib["hashes"] = h
+    return ib
 
-def _live_sig_now() -> Tuple[str, str, str, str, str]:
-    """Compute live 5-tuple using the same objects the publisher uses."""
-    H_obj = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
+def current_inputs_sig() -> Tuple[str, str, str, str, str]:
+    ib = current_inputs_block()
+    h  = ib.get("hashes") or {}
     return (
-        _stable_blocks_sha(boundaries),
-        _stable_blocks_sha(cmap),
-        _stable_blocks_sha(H_obj),
-        _stable_blocks_sha(shapes),
-        _stable_blocks_sha(shapes),
+        str(h.get("boundaries_hash","")),
+        str(h.get("C_hash","")),
+        str(h.get("H_hash","")),
+        str(h.get("U_hash","")),
+        str(h.get("shapes_hash","")),
     )
 
-def ssot_is_stale() -> bool:
-    """
-    True only if we've published at least once (_has_overlap)
-    and frozen != live. Never flags before first Overlap publish.
-    """
-    if not st.session_state.get("_has_overlap"):
-        return False
-    frozen = _frozen_sig_from_ib()
-    if not frozen:
-        return False
-    live = _live_sig_now()
-    st.session_state["_last_live_sig"] = live  # optional: handy elsewhere
-    return tuple(frozen) != tuple(live)
-
-
-
-
-def publish_inputs_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int):
-    """
-    Canonical SSOT publisher. Writes a frozen _inputs_block with:
-      - hashes (b, C, H, U/shapes)
-      - dims (n2, n3)
-      - filenames (best-effort)
-    Also updates:
-      - _inputs_hashes_pending / _dims_pending / _filenames_pending
-      - _has_overlap = True
-      - _last_ib_sig (for stale checks)
-    """
-    import json, hashlib
-
-    def _deep_intify(o):
-        if isinstance(o, bool): return 1 if o else 0
-        if isinstance(o, list): return [_deep_intify(x) for x in o]
-        if isinstance(o, dict): return {k: _deep_intify(v) for k, v in o.items()}
-        return o
-
-    def _stable_blocks_sha(obj) -> str:
-        try:
-            data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (obj if isinstance(obj, dict) else {"blocks": {}})
-            s = json.dumps(_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-            return hashlib.sha256(s).hexdigest()
-        except Exception:
-            return ""
-
-    # compute pieces
-    H2_now = (H_obj.blocks.__root__.get("2") or []) if H_obj else []
-    hashes_now = {
-        "boundaries_hash": _stable_blocks_sha(boundaries_obj),
-        "C_hash":          _stable_blocks_sha(cmap_obj),
-        "H_hash":          _stable_blocks_sha(H_obj),
-        "U_hash":          _stable_blocks_sha(shapes_obj),
-        "shapes_hash":     _stable_blocks_sha(shapes_obj),
-    }
-    dims_now = {
-        "n2": int(len(H2_now) if H2_now else 0),
-        "n3": int(n3 or 0),
-    }
-    files_now = {
-        "boundaries": st.session_state.get("fname_boundaries","boundaries.json"),
-        "C":          st.session_state.get("fname_cmap","cmap.json"),
-        "H":          st.session_state.get("fname_h","H.json"),
-        "U":          st.session_state.get("fname_shapes","shapes.json"),
-    }
-    # publish (pending)
-    st.session_state["_inputs_hashes_pending"] = hashes_now
-    st.session_state["_dims_pending"]          = dims_now
-    st.session_state.setdefault("_filenames_pending", files_now)
-
-    # publish canonical (what everyone reads)
-    st.session_state["_inputs_block"] = {
-        "hashes": dict(hashes_now),
-        "dims":   dict(dims_now),
-        "filenames": dict(files_now),
-        # legacy flattening for older readers:
-        "boundaries_hash": hashes_now["boundaries_hash"],
-        "C_hash":          hashes_now["C_hash"],
-        "H_hash":          hashes_now["H_hash"],
-        "U_hash":          hashes_now["U_hash"],
-        "shapes_hash":     hashes_now["shapes_hash"],
-    }
-
-    # mark health + memoize a sig that stale-checkers can rely on
-    st.session_state["_has_overlap"] = True
-    st.session_state["_last_ib_sig"] = (
-        hashes_now["boundaries_hash"],
-        hashes_now["C_hash"],
-        hashes_now["H_hash"],
-        hashes_now["U_hash"],
-        hashes_now["shapes_hash"],
-    )
-
-
-# ---- SSOT core: one publisher, one staleness check --------------------------
-def _stable_blocks_sha(obj) -> str:
-    try:
-        data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (obj if isinstance(obj, dict) else {"blocks": {}})
-        s = json.dumps(_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-        return hashlib.sha256(s).hexdigest()
-    except Exception:
-        return ""
-
-def live_inputs_fingerprint():
-    """Fingerprint of *current live* objects. Used ONLY to tell if Overlap needs a rerun."""
-    H_live = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
-    return (
-        _stable_blocks_sha(boundaries),
-        _stable_blocks_sha(cmap),
-        _stable_blocks_sha(H_live),   # H used by pipeline
-        _stable_blocks_sha(shapes),
-    )
-
-def publish_inputs_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int):
-    """Single SSOT publisher. Everyone else reads st.session_state['_inputs_block']."""
-    H2_now = (H_obj.blocks.__root__.get("2") or [])
-    hashes_now = {
-        "boundaries_hash": _stable_blocks_sha(boundaries_obj),
-        "C_hash":          _stable_blocks_sha(cmap_obj),
-        "H_hash":          _stable_blocks_sha(H_obj),
-        "U_hash":          _stable_blocks_sha(shapes_obj),
-        "shapes_hash":     _stable_blocks_sha(shapes_obj),
-    }
-    dims_now = {"n2": int(len(H2_now) if H2_now else 0), "n3": int(n3)}
-    files_now = {
-        "boundaries": st.session_state.get("fname_boundaries","boundaries.json"),
-        "C":          st.session_state.get("fname_cmap","cmap.json"),
-        "H":          st.session_state.get("fname_h","H.json"),
-        "U":          st.session_state.get("fname_shapes","shapes.json"),
-    }
-
-    # Stage (optional) and publish canonical IB
-    ss = st.session_state
-    ss["_inputs_hashes_pending"] = hashes_now
-    ss["_dims_pending"]          = dims_now
-    ss.setdefault("_filenames_pending", files_now)
-
-    ss["_inputs_block"] = {
-        "hashes": dict(hashes_now),
-        "dims":   dict(dims_now),
-        "filenames": dict(files_now),
-        # legacy flatten:
-        "boundaries_hash": hashes_now["boundaries_hash"],
-        "C_hash":          hashes_now["C_hash"],
-        "H_hash":          hashes_now["H_hash"],
-        "U_hash":          hashes_now["U_hash"],
-        "shapes_hash":     hashes_now["shapes_hash"],
-    }
-
-    # Record the live fingerprint at the moment we published SSOT
-    ss["_live_fp_at_overlap"] = live_inputs_fingerprint()
-    ss["_ssot_epoch"] = int(ss.get("_ssot_epoch", 0)) + 1  # monotonic, useful for logs
-    ss["_has_overlap"] = True
-
-def ssot_is_stale() -> bool:
-    """True if live objects differ from the ones used when SSOT was last published."""
-    ss = st.session_state
-    if not ss.get("_inputs_block"):
-        return True
-    fp_now  = live_inputs_fingerprint()
-    fp_last = tuple(ss.get("_live_fp_at_overlap") or ())
-    return (fp_last != tuple(fp_now))
-
-def current_inputs_sig() -> tuple[str, str, str, str, str]:
-    """Read-only signature from the frozen SSOT (never from live objects)."""
-    ib = st.session_state.get("_inputs_block") or {}
-    if "hashes" in ib:
-        h = ib["hashes"] or {}
-        return (
-            h.get("boundaries_hash",""),
-            h.get("C_hash",""),
-            h.get("H_hash",""),
-            h.get("U_hash",""),
-            h.get("shapes_hash",""),
-        )
-    # legacy flattening
-    return (
-        ib.get("boundaries_hash",""),
-        ib.get("C_hash",""),
-        ib.get("H_hash",""),
-        ib.get("U_hash",""),
-        ib.get("shapes_hash",""),
-    )
-
-
-
-# ---------- Inputs Block freezer (single source of truth) ----------
+# ---- freeze helper used by file-error path or others that pass parts ----
 def _ib_from_components(*, dims: dict, filenames: dict, hashes: dict) -> dict:
     ib = {
-        "dims": {
-            "n2": int(dims.get("n2", 0)),
-            "n3": int(dims.get("n3", 0)),
-        },
+        "dims": {"n2": int(dims.get("n2", 0)), "n3": int(dims.get("n3", 0))},
         "filenames": {
             "boundaries": filenames.get("boundaries",""),
             "shapes":     filenames.get("shapes",""),
@@ -810,7 +164,7 @@ def _ib_from_components(*, dims: dict, filenames: dict, hashes: dict) -> dict:
             "shapes_hash":     hashes.get("shapes_hash",""),
         },
     }
-    # canonical inputs_sig (U optional, but keep position stable)
+    # canonical 5-tuple (U optional but keep slot)
     ib["inputs_sig"] = [
         ib["hashes"]["boundaries_hash"],
         ib["hashes"]["C_hash"],
@@ -821,52 +175,46 @@ def _ib_from_components(*, dims: dict, filenames: dict, hashes: dict) -> dict:
     return ib
 
 def freeze_inputs_block(*, dims: dict, filenames: dict, hashes: dict):
-    """Writes a single canonical _inputs_block into session. All consumers must read this."""
     ib = _ib_from_components(dims=dims, filenames=filenames, hashes=hashes)
     st.session_state["_inputs_block"] = ib
-    # a tiny guard to detect accidental drifts
-    st.session_state["_last_ib_sig"] = tuple(ib["inputs_sig"])
+    st.session_state["_last_ib_sig"]  = tuple(ib["inputs_sig"])
+    st.session_state["_has_overlap"]  = True
     return ib
 
-def current_inputs_sig() -> tuple[str, str, str, str, str]:
-    """Always read the signature from the frozen _inputs_block."""
-    ib = st.session_state.get("_inputs_block") or {}
-    sig = ib.get("inputs_sig") or []
-    # always return a 5-tuple for stable compares
-    sig = (list(sig) + ["","","","",""])[:5]
-    return tuple(sig)
+# ---- live fingerprint (what Overlap actually used) ----
+def _live_H():
+    return st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
 
-# --- Side-channel reconciler: keep _district_info in sync with SSOT -----------
-def _reconcile_di_vs_ssot():
-    ss = st.session_state
-    ib = ss.get("_inputs_block") or {}
-    if not ib: 
-        return
-    bh_ib = ib.get("boundaries_hash", "")
-    if not bh_ib:
-        return
-    di = dict(ss.get("_district_info") or {})
-    if di.get("boundaries_hash") != bh_ib:
-        di["boundaries_hash"] = bh_ib
-        ss["_district_info"] = di  # write back
+def live_inputs_fingerprint() -> Tuple[str, str, str, str, str]:
+    return (
+        _stable_blocks_sha(boundaries),
+        _stable_blocks_sha(cmap),
+        _stable_blocks_sha(_live_H()),
+        _stable_blocks_sha(shapes),
+        _stable_blocks_sha(shapes),  # shapes_hash mirrors U_hash
+    )
 
-
-# ---------- SSOT helpers: canonical inputs block + signature ----------
-def _stable_blocks_sha(obj) -> str:
-    import json, hashlib
-    try:
-        data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (obj if isinstance(obj, dict) else {"blocks": {}})
-        s = json.dumps(_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-        return hashlib.sha256(s).hexdigest()
-    except Exception:
-        return ""
-
+# ---- single canonical publisher used by Overlap success & FILE error paths ----
 def publish_inputs_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int) -> dict:
-    """Publish the canonical _inputs_block (idempotent) and return it."""
-    import streamlit as st
+    """
+    Writes canonical _inputs_block (hashes/dims/filenames + legacy flattening),
+    and records live fingerprint for stable stale-check behavior.
+    Returns {"before": tuple, "after": tuple}.
+    """
     ss = st.session_state
 
-    H2 = (H_obj.blocks.__root__.get("2") or []) if H_obj else []
+    # BEFORE (frozen, if any)
+    ib_before = ss.get("_inputs_block") or {}
+    h_before  = ib_before.get("hashes") or {}
+    before_sig = (
+        str(h_before.get("boundaries_hash", ib_before.get("boundaries_hash",""))),
+        str(h_before.get("C_hash",          ib_before.get("C_hash",""))),
+        str(h_before.get("H_hash",          ib_before.get("H_hash",""))),
+        str(h_before.get("U_hash",          ib_before.get("U_hash",""))),
+        str(h_before.get("shapes_hash",     ib_before.get("shapes_hash",""))),
+    )
+
+    H2_now = (H_obj.blocks.__root__.get("2") or []) if H_obj else []
     hashes_now = {
         "boundaries_hash": _stable_blocks_sha(boundaries_obj),
         "C_hash":          _stable_blocks_sha(cmap_obj),
@@ -874,54 +222,81 @@ def publish_inputs_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int
         "U_hash":          _stable_blocks_sha(shapes_obj),
         "shapes_hash":     _stable_blocks_sha(shapes_obj),
     }
-    dims_now = {"n2": int(len(H2) if H2 else 0), "n3": int(n3)}
+    dims_now = {"n2": int(len(H2_now) if H2_now else 0), "n3": int(n3 or 0)}
     files_now = {
         "boundaries": ss.get("fname_boundaries","boundaries.json"),
-        "C":          ss.get("fname_cmap","cmap.json"),
+        "cmap":       ss.get("fname_cmap","cmap.json"),
         "H":          ss.get("fname_h","H.json"),
         "U":          ss.get("fname_shapes","shapes.json"),
+        "shapes":     ss.get("fname_shapes","shapes.json"),
     }
+    rc = ss.get("run_ctx") or {}
+    if rc.get("projector_filename"):
+        files_now["projector"] = rc["projector_filename"]
 
-    blk = {
+    ss["_inputs_hashes_pending"] = hashes_now
+    ss["_dims_pending"]          = dims_now
+    ss.setdefault("_filenames_pending", files_now)
+
+    # publish canonical (what Cert/Reports read)
+    ss["_inputs_block"] = {
         "hashes": dict(hashes_now),
         "dims":   dict(dims_now),
         "filenames": dict(files_now),
-        # legacy flattened keys for older readers:
+        # legacy flattening
         "boundaries_hash": hashes_now["boundaries_hash"],
         "C_hash":          hashes_now["C_hash"],
         "H_hash":          hashes_now["H_hash"],
         "U_hash":          hashes_now["U_hash"],
         "shapes_hash":     hashes_now["shapes_hash"],
     }
-    ss["_inputs_hashes_pending"] = hashes_now
-    ss["_dims_pending"] = dims_now
-    ss["_filenames_pending"] = files_now
-    ss["_inputs_block"] = blk
-    ss["_inputs_block_ready"] = True
-    return blk
 
-def current_inputs_block() -> dict:
-    """Return a normalized view of the canonical inputs block (never None)."""
-    import streamlit as st
-    ib = dict(st.session_state.get("_inputs_block") or {})
-    h  = dict(ib.get("hashes") or {})
-    # backfill from flat keys if needed
-    for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"):
-        if k not in h and k in ib:
-            h[k] = ib[k]
-    ib["hashes"] = h
-    return ib
-
-def current_inputs_sig() -> tuple[str,str,str,str,str]:
-    ib = current_inputs_block()
-    h  = ib.get("hashes") or {}
-    return (
-        str(h.get("boundaries_hash","")),
-        str(h.get("C_hash","")),
-        str(h.get("H_hash","")),
-        str(h.get("U_hash","")),
-        str(h.get("shapes_hash","")),
+    after_sig = (
+        hashes_now["boundaries_hash"],
+        hashes_now["C_hash"],
+        hashes_now["H_hash"],
+        hashes_now["U_hash"],
+        hashes_now["shapes_hash"],
     )
+
+    # record live fingerprint & guards
+    ss["_live_fp_at_overlap"]   = live_inputs_fingerprint()
+    ss["_ssot_just_published"]  = True   # suppress stale on the same render
+    ss["_has_overlap"]          = True
+    ss["_last_ib_sig"]          = after_sig
+
+    return {"before": before_sig, "after": after_sig}
+
+# ---- single, startup-safe stale check used by health UI ----
+def ssot_is_stale() -> bool:
+    """
+    True if live objects differ from the ones used when _inputs_block was last published.
+    Never flags before first publish. One-frame guard prevents stale right after publish.
+    """
+    ss = st.session_state
+    if ss.pop("_ssot_just_published", False):
+        return False
+    if not ss.get("_has_overlap"):
+        return False
+    ib = ss.get("_inputs_block")
+    if not ib:
+        return False
+    fp_last = tuple(ss.get("_live_fp_at_overlap") or ())
+    fp_now  = live_inputs_fingerprint()
+    return (fp_last != tuple(fp_now))
+
+# ---- keep _district_info.boundaries_hash in sync with SSOT (no noise) ----
+def _reconcile_di_vs_ssot():
+    ss = st.session_state
+    ib = ss.get("_inputs_block") or {}
+    bh = ib.get("boundaries_hash", "")
+    if not bh:
+        return
+    di = dict(ss.get("_district_info") or {})
+    if di.get("boundaries_hash") != bh:
+        di["boundaries_hash"] = bh
+        ss["_district_info"] = di
+# ================== /SSOT helpers ============================================
 
 
 # ─── Fixtures registry: load + cache + invalidate ─────────────────────────────
