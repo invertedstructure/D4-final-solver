@@ -1436,6 +1436,14 @@ if st.button("Run Overlap", key="btn_run_overlap_main"):
         st.caption(f"SSOT sig (before → after): {list(_sig_before)} → {list(_sig_after)}")
     except Exception as e:
         st.exception(e)
+# ---- inputs completeness (define before using in debugger) ----
+_h = (st.session_state.get("_inputs_block") or {}).get("hashes") or {}
+inputs_complete = bool(
+    _h.get("boundaries_hash") and
+    _h.get("C_hash") and
+    _h.get("H_hash") and
+    _h.get("shapes_hash")   # shapes_hash mirrors U_hash
+)
 
 # -----------------------------------------------------------------------------------------------------------
 with st.expander("SSOT debug", expanded=False):
