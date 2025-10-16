@@ -7146,17 +7146,5 @@ with safe_expander("Exports", expanded=False):
                         with open(csv_path, "r", encoding="utf-8") as f:
                             st.download_button("Download CSV", f.read(), file_name=os.path.basename(csv_path), mime="text/csv")
             
-             with tab4:
-                st.subheader("Towers")
-                st.caption("Bundle all artifacts in ./reports into a single ZIP for sharing/archival.")
-                if st.button("Export ./reports → report.zip"):
-                    reports_dir = pathlib.Path("reports")
-                    if not reports_dir.exists():
-                        st.warning("No ./reports directory yet. Run a Tower or Manifest first.")
-                    else:
-                        zpath = reports_dir / "report.zip"
-                        export_mod.zip_report(str(reports_dir), str(zpath))
-                        st.success(f"Exported: {zpath}")
-                        with open(zpath, "rb") as fz:
-                            st.download_button("Download report.zip", fz, file_name="report.zip")
+            
                            
