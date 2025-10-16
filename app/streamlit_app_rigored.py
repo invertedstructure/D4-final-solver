@@ -3708,61 +3708,67 @@ with st.expander("Coverage Sampling", expanded=st.session_state.get("_cov_sampli
 # ===================== /Coverage Sampling =====================
 
 
-# =========================[ · Gallery Append & Dedupe (cert-required, canonical schema) ]=========================
-
+# ========================= Gallery · Append & Dedupe (cert-required, canonical schema) =========================
 from pathlib import Path
 import os, json
 
-LOGS_DIR = Path("logs")
+LOGS_DIR = Path(globals().get("LOGS_DIR", "logs"))
 GALLERY_JSONL = LOGS_DIR / "gallery.jsonl"
 GALLERY_JSONL.parent.mkdir(parents=True, exist_ok=True)
 
-# --- Canonical schema (same as build_b2_gallery) ---
-# district,fixture,projected,hash_d,hash_U,hash_suppC,hash_suppH,
-# growth,tag,strictify,lane_vec_H2,lane_vec_C3pI3,ab_embedded,content_hash
+# Canonical row schema (columns used by build_b2_gallery):
+# district, fixture, projected, hash_d, hash_U, hash_suppC, hash_suppH,
+# growth, tag, strictify, lane_vec_H2, lane_vec_C3pI3, ab_embedded, content_hash
+
+def _as_json_vec(v) -> str:
+    try:
+        return json.dumps(v, separators=(",", ":"), ensure_ascii=True)
+    except Exception:
+        return "[]"
 
 def _gallery_row_from_cert(cert: dict) -> dict:
-    """Project a cert payload to the canonical B2 row schema."""
+    """Project a cert payload to the canonical B2 row schema (robust to missing keys)."""
     if not cert:
         return {}
 
-    identity   = cert.get("identity", {}) or {}
-    policy     = cert.get("policy",   {}) or {}
-    inputs     = cert.get("inputs",   {}) or {}
-    hashes     = (inputs.get("hashes") or {})
-    diags      = cert.get("diagnostics", {}) or {}
-    gallery    = cert.get("gallery", {}) or {}
-    ab_embed   = cert.get("ab_embed", {}) or {}
-    h          = cert.get("hashes", {}) or {}
+    identity   = cert.get("identity") or {}
+    policy     = cert.get("policy") or {}
+    inputs     = cert.get("inputs") or {}
+    inputs_h   = (inputs.get("hashes") or {})
+    diags      = cert.get("diagnostics") or {}
+    gallery    = cert.get("gallery") or {}
+    ab_embed   = cert.get("ab_embed") or {}
+    hashes     = cert.get("hashes") or {}  # contains content_hash in your writer
 
-    district   = identity.get("district_id", "UNKNOWN")
-    fixture    = identity.get("fixture_label", "") or ""   # required for row, may be blank
-    projected  = str(policy.get("canon", "strict"))
+    district   = str(identity.get("district_id", "UNKNOWN"))
+    fixture    = str(identity.get("fixture_label", "") or "")
+    projected  = str(policy.get("canon", policy.get("projector_mode", "strict")))  # e.g., "strict" | "projected:auto" | "projected:file"
+    content_h  = str(hashes.get("content_hash", ""))
 
+    # Hashes
+    hash_U     = str(inputs_h.get("U_hash", ""))
+    hash_C     = str(inputs_h.get("C_hash", ""))
+    hash_H     = str(inputs_h.get("H_hash", ""))
     hash_d     = str(policy.get("projector_hash", "")) if projected == "projected:file" else ""
-    hash_U     = str(hashes.get("U_hash", "")) or ""
-    hash_C     = str(hashes.get("C_hash", "")) or ""
-    hash_H     = str(hashes.get("H_hash", "")) or ""
 
-    growth     = gallery.get("growth_bumps", cert.get("growth", {}).get("growth_bumps", 0))
+    # Gallery-ish fields
+    growth     = gallery.get("growth_bumps", (cert.get("growth") or {}).get("growth_bumps", 0))
+    try:
+        growth = int(growth)
+    except Exception:
+        growth = 0
     tag        = str(gallery.get("tag", ""))
-    strictify  = str(gallery.get("strictify", "tbd"))
+    strictify  = str(gallery.get("strictify", "tbd")).lower()
+    if strictify not in ("tbd", "no", "yes"):
+        strictify = "tbd"
 
-    # diagnostics vectors; store JSON-strings per spec
-    lv_H2      = diags.get("lane_vec_H2@d3", [])
-    lv_C3pI3   = diags.get("lane_vec_C3+I3", [])
+    # Diagnostics vectors → JSON strings
+    lv_H2      = _as_json_vec(diags.get("lane_vec_H2@d3", []))
+    lv_C3pI3   = _as_json_vec(diags.get("lane_vec_C3+I3", []))
 
     ab_emb     = bool(ab_embed.get("fresh", False))
-    content_h  = str(h.get("content_hash", ""))
 
-    # ensure stable JSON text for vector columns
-    def _as_json(v): 
-        try:
-            return json.dumps(v, separators=(",", ":"), ensure_ascii=True)
-        except Exception:
-            return "[]"
-
-    return {
+    row = {
         "district":        district,
         "fixture":         fixture,
         "projected":       projected,
@@ -3770,23 +3776,25 @@ def _gallery_row_from_cert(cert: dict) -> dict:
         "hash_U":          hash_U,
         "hash_suppC":      hash_C,
         "hash_suppH":      hash_H,
-        "growth":          int(growth) if isinstance(growth, (int, float)) else 0,
+        "growth":          growth,
         "tag":             tag,
         "strictify":       strictify,
-        "lane_vec_H2":     _as_json(lv_H2),
-        "lane_vec_C3pI3":  _as_json(lv_C3pI3),
-        "ab_embedded":     bool(ab_emb),
+        "lane_vec_H2":     lv_H2,
+        "lane_vec_C3pI3":  lv_C3pI3,
+        "ab_embedded":     ab_emb,
         "content_hash":    content_h,
     }
 
+    # not part of canonical columns, but useful to display in the tail view:
+    row["written_at_utc"] = str(cert.get("written_at_utc", ""))
+
+    return row
+
 def _atomic_append_jsonl(path: Path, row: dict) -> None:
     blob = (json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
-    tmp  = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "ab") as f:
-        f.write(blob); f.flush(); os.fsync(f.fileno())
-    # append to real file
+    # Write once to the final file (simple & reliable; your gallery isn’t a hot path)
     with open(path, "ab") as f:
-        f.write(blob)
+        f.write(blob); f.flush(); os.fsync(f.fileno())
 
 def _read_jsonl_tail(path: Path, N: int = 100) -> list[dict]:
     out = []
@@ -3794,13 +3802,15 @@ def _read_jsonl_tail(path: Path, N: int = 100) -> list[dict]:
         if not path.exists():
             return out
         with open(path, "r", encoding="utf-8") as f:
-            for ln in f.readlines()[-N:]:
-                ln = ln.strip()
-                if ln:
-                    try:
-                        out.append(json.loads(ln))
-                    except Exception:
-                        pass
+            lines = f.readlines()[-N:]
+        for ln in lines:
+            ln = ln.strip()
+            if not ln:
+                continue
+            try:
+                out.append(json.loads(ln))
+            except Exception:
+                pass
     except Exception:
         pass
     return out
@@ -3811,7 +3821,7 @@ ss.setdefault("_gallery_seen_keys", set())
 ss.setdefault("_gallery_bootstrapped", False)
 
 def _gallery_key(row: dict) -> tuple:
-    # minimal, deterministic dedupe: same cert for same fixture once
+    # Deterministic dedupe: same cert for same fixture once per district
     return (row.get("district",""), row.get("fixture",""), row.get("content_hash",""))
 
 with safe_expander("Gallery (canonical)", expanded=False):
@@ -3820,17 +3830,15 @@ with safe_expander("Gallery (canonical)", expanded=False):
     if not has_cert:
         st.info("No cert in memory yet. Run Overlap until a cert is written, then append here.")
 
-    # Assemble canonical row from cert
+    # Build canonical row (from cert in memory)
     row = _gallery_row_from_cert(cert) if has_cert else {}
 
-        # UI: lightweight overrides (optional, safe defaults)
+    # UI overrides (optional)
     c1, c2, c3 = st.columns([1, 1, 2])
-    
     opts_strictify = ["tbd", "no", "yes"]
-    
+
     with c1:
         if has_cert:
-            # coerce to int with safe default
             row["growth"] = int(st.number_input(
                 "growth_bumps",
                 min_value=0,
@@ -3838,10 +3846,9 @@ with safe_expander("Gallery (canonical)", expanded=False):
                 step=1,
                 key="gal_growth_bumps_v2"
             ))
-    
+
     with c2:
         if has_cert:
-            # normalize strictify to one of the allowed options
             _sv = str(row.get("strictify") or "tbd").strip().lower()
             if _sv not in opts_strictify:
                 _sv = "tbd"
@@ -3851,7 +3858,7 @@ with safe_expander("Gallery (canonical)", expanded=False):
                 index=opts_strictify.index(_sv),
                 key="gal_strictify_v2"
             )
-    
+
     with c3:
         if has_cert:
             row["tag"] = st.text_input(
@@ -3860,8 +3867,7 @@ with safe_expander("Gallery (canonical)", expanded=False):
                 key="gal_tag_v2"
             )
 
-
-    # Bootstrap dedupe cache from tail once
+    # Bootstrap dedupe cache once from tail
     if not ss["_gallery_bootstrapped"]:
         for tail_row in _read_jsonl_tail(GALLERY_JSONL, N=200):
             try:
@@ -3870,11 +3876,11 @@ with safe_expander("Gallery (canonical)", expanded=False):
                 continue
         ss["_gallery_bootstrapped"] = True
 
-    # Append button (disabled w/o cert or missing fixture)
+    # Append button (disabled w/o cert or missing fixture label)
     disabled = (not has_cert) or (not row.get("fixture"))
     tip = None if has_cert else "Disabled until a cert is available."
-    if not row.get("fixture"):
-        st.warning("This cert has no fixture_label. Set identity.fixture_label in your cert flow to log gallery rows.")
+    if has_cert and not row.get("fixture"):
+        st.warning("This cert has no fixture_label. Your overlap/cert flow should set identity.fixture_label (auto-label via registry).")
 
     if st.button("Add to Gallery", key="btn_gallery_append_v2", disabled=disabled, help=tip or "Append row to gallery.jsonl"):
         try:
@@ -3887,7 +3893,7 @@ with safe_expander("Gallery (canonical)", expanded=False):
                 st.success("Gallery row appended.")
                 # keep CSV in sync, if builder is present
                 try:
-                    build_b2_gallery(debounce=True)
+                    build_b2_gallery(debounce=True)  # type: ignore[name-defined]
                 except Exception as e:
                     st.info(f"(B2 gallery build skipped: {e})")
         except Exception as e:
@@ -3920,6 +3926,7 @@ with safe_expander("Gallery (canonical)", expanded=False):
     except Exception as e:
         st.warning(f"Could not render gallery tail: {e}")
 # ======================= end Gallery (canonical) =======================
+
 
 
 
