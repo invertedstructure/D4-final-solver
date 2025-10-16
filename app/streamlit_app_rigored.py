@@ -102,202 +102,148 @@ DISTRICT_MAP: dict[str, str] = {
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
 
-# ================== SSOT — single canonical helper suite ==================
-from typing import Tuple
+# ======================= SSOT CORE (single source of truth) =======================
+import json, hashlib, streamlit as st
 
-# ---- stable hashing for {"blocks": ...} objects/dicts ----
+# ---- hashing helpers ------------------------------------------------------------
 def _deep_intify(o):
     if isinstance(o, bool): return 1 if o else 0
     if isinstance(o, list): return [_deep_intify(x) for x in o]
     if isinstance(o, dict): return {k: _deep_intify(v) for k, v in o.items()}
     return o
 
-def _stable_blocks_sha(obj) -> str:
-    import json, hashlib
+def ssot_stable_blocks_sha(obj) -> str:
+    """Stable sha256 of {'blocks': ...} for cmap-like objects or plain dicts."""
     try:
-        data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") \
-               else (obj if isinstance(obj, dict) else {"blocks": {}})
+        data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (
+            obj if isinstance(obj, dict) else {"blocks": {}}
+        )
         s = json.dumps(_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
         return hashlib.sha256(s).hexdigest()
     except Exception:
         return ""
 
-# ---- read the canonical inputs block in a normalized way ----
-def current_inputs_block() -> dict:
-    ib = dict(st.session_state.get("_inputs_block") or {})
-    h  = dict(ib.get("hashes") or {})
-    # backfill legacy flat keys
-    for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"):
-        if k not in h and k in ib:
-            h[k] = ib[k]
-    ib["hashes"] = h
-    return ib
-
-def current_inputs_sig() -> Tuple[str, str, str, str, str]:
-    ib = current_inputs_block()
-    h  = ib.get("hashes") or {}
-    return (
-        str(h.get("boundaries_hash","")),
-        str(h.get("C_hash","")),
-        str(h.get("H_hash","")),
-        str(h.get("U_hash","")),
-        str(h.get("shapes_hash","")),
-    )
-
-# ---- freeze helper used by file-error path or others that pass parts ----
-def _ib_from_components(*, dims: dict, filenames: dict, hashes: dict) -> dict:
-    ib = {
-        "dims": {"n2": int(dims.get("n2", 0)), "n3": int(dims.get("n3", 0))},
-        "filenames": {
-            "boundaries": filenames.get("boundaries",""),
-            "shapes":     filenames.get("shapes",""),
-            "cmap":       filenames.get("cmap","") or filenames.get("C",""),
-            "H":          filenames.get("H",""),
-            "U":          filenames.get("U",""),
-            **({"projector": filenames.get("projector","")} if filenames.get("projector") else {}),
-        },
-        "hashes": {
-            "boundaries_hash": hashes.get("boundaries_hash",""),
-            "C_hash":          hashes.get("C_hash",""),
-            "H_hash":          hashes.get("H_hash",""),
-            "U_hash":          hashes.get("U_hash",""),
-            "shapes_hash":     hashes.get("shapes_hash",""),
-        },
-    }
-    # canonical 5-tuple (U optional but keep slot)
-    ib["inputs_sig"] = [
-        ib["hashes"]["boundaries_hash"],
-        ib["hashes"]["C_hash"],
-        ib["hashes"]["H_hash"],
-        ib["hashes"]["U_hash"],
-        ib["hashes"]["shapes_hash"],
-    ]
-    return ib
-
-def freeze_inputs_block(*, dims: dict, filenames: dict, hashes: dict):
-    ib = _ib_from_components(dims=dims, filenames=filenames, hashes=hashes)
-    st.session_state["_inputs_block"] = ib
-    st.session_state["_last_ib_sig"]  = tuple(ib["inputs_sig"])
-    st.session_state["_has_overlap"]  = True
-    return ib
-
-# ---- live fingerprint (what Overlap actually used) ----
-def _live_H():
-    return st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
-
-def live_inputs_fingerprint() -> Tuple[str, str, str, str, str]:
-    return (
-        _stable_blocks_sha(boundaries),
-        _stable_blocks_sha(cmap),
-        _stable_blocks_sha(_live_H()),
-        _stable_blocks_sha(shapes),
-        _stable_blocks_sha(shapes),  # shapes_hash mirrors U_hash
-    )
-
-# ---- single canonical publisher used by Overlap success & FILE error paths ----
-def publish_inputs_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int) -> dict:
+# ---- signatures (live vs frozen) ------------------------------------------------
+def ssot_live_sig(boundaries_obj=None, cmap_obj=None, H_obj=None, shapes_obj=None) -> tuple:
     """
-    Writes canonical _inputs_block (hashes/dims/filenames + legacy flattening),
-    and records live fingerprint for stable stale-check behavior.
-    Returns {"before": tuple, "after": tuple}.
+    Live 5-tuple (b, C, H, U, shapes). If args aren’t passed, fall back to globals/session.
+    H prefers overlap_H so 'live' matches what Overlap used.
+    """
+    if boundaries_obj is None: boundaries_obj = globals().get("boundaries")
+    if cmap_obj       is None: cmap_obj       = globals().get("cmap")
+    if H_obj          is None: H_obj          = (st.session_state.get("overlap_H") or
+                                                 globals().get("H_obj") or
+                                                 type("X",(object,),{"blocks":type("Y",(object,),{"__root__":{}})()})())
+    if shapes_obj     is None: shapes_obj     = globals().get("shapes")
+
+    return (
+        ssot_stable_blocks_sha(boundaries_obj) if boundaries_obj is not None else "",
+        ssot_stable_blocks_sha(cmap_obj)       if cmap_obj       is not None else "",
+        ssot_stable_blocks_sha(H_obj)          if H_obj          is not None else "",
+        ssot_stable_blocks_sha(shapes_obj)     if shapes_obj     is not None else "",
+        ssot_stable_blocks_sha(shapes_obj)     if shapes_obj     is not None else "",  # shapes_hash mirrors U_hash
+    )
+
+def ssot_frozen_sig_from_ib() -> tuple:
+    """
+    Read frozen 5-tuple from st.session_state['_inputs_block'].
+    Tolerates legacy flattening. Returns () if not present.
+    """
+    ib = st.session_state.get("_inputs_block") or {}
+    if not ib: return ()
+    h = ib.get("hashes") or {}
+    b = str(h.get("boundaries_hash", ib.get("boundaries_hash","")))
+    C = str(h.get("C_hash",          ib.get("C_hash","")))
+    H = str(h.get("H_hash",          ib.get("H_hash","")))
+    U = str(h.get("U_hash",          ib.get("U_hash","")))
+    S = str(h.get("shapes_hash",     ib.get("shapes_hash","")))
+    if not any((b, C, H, U, S)): return ()
+    return (b, C, H, U, S)
+
+def current_inputs_sig() -> tuple:
+    """Always read the signature from the frozen _inputs_block (never from live)."""
+    frozen = ssot_frozen_sig_from_ib()
+    if frozen: return frozen
+    return ("","","","","")
+
+# ---- publisher (only writer) ----------------------------------------------------
+def ssot_publish_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int, projector_filename: str = "") -> dict:
+    """
+    Canonical publisher: writes _inputs_block with hashes/dims/filenames (+ legacy flattening).
+    Returns {'before': tuple, 'after': tuple, 'changed': bool}.
+    Also sets: _inputs_hashes_pending/_dims_pending/_filenames_pending, _has_overlap, _live_fp_at_overlap.
     """
     ss = st.session_state
+    before = ssot_frozen_sig_from_ib()
 
-    # BEFORE (frozen, if any)
-    ib_before = ss.get("_inputs_block") or {}
-    h_before  = ib_before.get("hashes") or {}
-    before_sig = (
-        str(h_before.get("boundaries_hash", ib_before.get("boundaries_hash",""))),
-        str(h_before.get("C_hash",          ib_before.get("C_hash",""))),
-        str(h_before.get("H_hash",          ib_before.get("H_hash",""))),
-        str(h_before.get("U_hash",          ib_before.get("U_hash",""))),
-        str(h_before.get("shapes_hash",     ib_before.get("shapes_hash",""))),
-    )
-
-    H2_now = (H_obj.blocks.__root__.get("2") or []) if H_obj else []
-    hashes_now = {
-        "boundaries_hash": _stable_blocks_sha(boundaries_obj),
-        "C_hash":          _stable_blocks_sha(cmap_obj),
-        "H_hash":          _stable_blocks_sha(H_obj),
-        "U_hash":          _stable_blocks_sha(shapes_obj),
-        "shapes_hash":     _stable_blocks_sha(shapes_obj),
-    }
-    dims_now = {"n2": int(len(H2_now) if H2_now else 0), "n3": int(n3 or 0)}
-    files_now = {
+    # compute live hashes/dims/files
+    hB, hC, hH, hU, hS = ssot_live_sig(boundaries_obj, cmap_obj, H_obj, shapes_obj)
+    H2 = (H_obj.blocks.__root__.get("2") or []) if H_obj else []
+    dims = {"n2": int(len(H2) if H2 else 0), "n3": int(n3 or 0)}
+    files = {
         "boundaries": ss.get("fname_boundaries","boundaries.json"),
         "cmap":       ss.get("fname_cmap","cmap.json"),
         "H":          ss.get("fname_h","H.json"),
         "U":          ss.get("fname_shapes","shapes.json"),
         "shapes":     ss.get("fname_shapes","shapes.json"),
     }
-    rc = ss.get("run_ctx") or {}
-    if rc.get("projector_filename"):
-        files_now["projector"] = rc["projector_filename"]
+    if projector_filename:
+        files["projector"] = projector_filename
 
-    ss["_inputs_hashes_pending"] = hashes_now
-    ss["_dims_pending"]          = dims_now
-    ss.setdefault("_filenames_pending", files_now)
-
-    # publish canonical (what Cert/Reports read)
-    ss["_inputs_block"] = {
-        "hashes": dict(hashes_now),
-        "dims":   dict(dims_now),
-        "filenames": dict(files_now),
-        # legacy flattening
-        "boundaries_hash": hashes_now["boundaries_hash"],
-        "C_hash":          hashes_now["C_hash"],
-        "H_hash":          hashes_now["H_hash"],
-        "U_hash":          hashes_now["U_hash"],
-        "shapes_hash":     hashes_now["shapes_hash"],
+    hashes = {
+        "boundaries_hash": hB, "C_hash": hC, "H_hash": hH, "U_hash": hU, "shapes_hash": hS,
     }
 
-    after_sig = (
-        hashes_now["boundaries_hash"],
-        hashes_now["C_hash"],
-        hashes_now["H_hash"],
-        hashes_now["U_hash"],
-        hashes_now["shapes_hash"],
-    )
+    # stage “pending” for older readers that still look there
+    ss["_inputs_hashes_pending"] = dict(hashes)
+    ss["_dims_pending"]          = dict(dims)
+    ss.setdefault("_filenames_pending", dict(files))
 
-    # record live fingerprint & guards
-    ss["_live_fp_at_overlap"]   = live_inputs_fingerprint()
-    ss["_ssot_just_published"]  = True   # suppress stale on the same render
-    ss["_has_overlap"]          = True
-    ss["_last_ib_sig"]          = after_sig
+    # publish canonical block
+    ss["_inputs_block"] = {
+        "hashes": dict(hashes),
+        "dims":   dict(dims),
+        "filenames": dict(files),
+        # legacy flatten:
+        "boundaries_hash": hB, "C_hash": hC, "H_hash": hH, "U_hash": hU, "shapes_hash": hS,
+    }
 
-    return {"before": before_sig, "after": after_sig}
+    after   = ssot_frozen_sig_from_ib()
+    changed = (before != after)
 
-# ---- single, startup-safe stale check used by health UI ----
+    # freshness anchors (used by stale banner & cert)
+    ss["_has_overlap"] = True
+    ss["_live_fp_at_overlap"] = ssot_live_sig(boundaries_obj, cmap_obj, H_obj, shapes_obj)
+
+    return {"before": before, "after": after, "changed": changed}
+
+# ---- staleness ------------------------------------------------------------------
 def ssot_is_stale() -> bool:
     """
-    True if live objects differ from the ones used when _inputs_block was last published.
-    Never flags before first publish. One-frame guard prevents stale right after publish.
+    True iff we have published at least once AND the live fingerprint != frozen.
+    Startup-neutral (no false warnings before first Overlap).
     """
     ss = st.session_state
-    if ss.pop("_ssot_just_published", False):
-        return False
     if not ss.get("_has_overlap"):
         return False
-    ib = ss.get("_inputs_block")
-    if not ib:
+    frozen = ssot_frozen_sig_from_ib()
+    if not frozen:
         return False
-    fp_last = tuple(ss.get("_live_fp_at_overlap") or ())
-    fp_now  = live_inputs_fingerprint()
-    return (fp_last != tuple(fp_now))
+    live_now = ssot_live_sig()
+    return tuple(frozen) != tuple(live_now)
 
-# ---- keep _district_info.boundaries_hash in sync with SSOT (no noise) ----
+# ---- side-channel reconciliation -------------------------------------------------
 def _reconcile_di_vs_ssot():
     ss = st.session_state
     ib = ss.get("_inputs_block") or {}
-    bh = ib.get("boundaries_hash", "")
-    if not bh:
-        return
+    if not ib: return
+    bh_ib = ib.get("boundaries_hash","")
+    if not bh_ib: return
     di = dict(ss.get("_district_info") or {})
-    if di.get("boundaries_hash") != bh:
-        di["boundaries_hash"] = bh
+    if di.get("boundaries_hash") != bh_ib:
+        di["boundaries_hash"] = bh_ib
         ss["_district_info"] = di
-# ================== /SSOT helpers ============================================
-
+# ===================== end SSOT CORE =============================================
 
 # ─── Fixtures registry: load + cache + invalidate ─────────────────────────────
 from pathlib import Path
@@ -376,7 +322,6 @@ def load_fixtures_registry(*args, **kwargs) -> dict:
     if "path" in kwargs and kwargs["path"]:
         path = kwargs["path"]
     return fixtures_load_cached(path)
-
 
 # ─── Matching utilities ───────────────────────────────────────────────────────
 def _norm_vec(v): 
@@ -675,7 +620,6 @@ def _ab_is_fresh(ab: dict, *, rc: dict) -> bool:
     return True
 
 
-
 # ───────── auto-clear A/B when context changes (call once per run) ─────────
 def _ab_autoclear_if_stale():
     ss = st.session_state
@@ -690,10 +634,6 @@ def _ab_autoclear_if_stale():
         ss["_ab_ctx_sig_prev"] = sig_now
 
 _ab_autoclear_if_stale()
-
-
-
-
 
 # ======================= App constants & helpers =======================
 SCHEMA_VERSION = "1.0.0"
@@ -720,100 +660,10 @@ def _std_meta(*, include_python: bool = False, run_id: str | None = None) -> dic
         meta["run_id"] = run_id
     return meta
 
-def _inputs_sig_now() -> list[str]:
-    """Deterministic ‘freshness’ signature for A/B embedding (SSOT)."""
-    ib = st.session_state.get("_inputs_block") or {}
-    # Always include shapes_hash; fall back to U_hash for older runs.
-    return [
-        str(ib.get("boundaries_hash", "")),
-        str(ib.get("C_hash", "")),
-        str(ib.get("H_hash", "")),
-        str(ib.get("U_hash", "")),
-        str(ib.get("shapes_hash", ib.get("U_hash", ""))),
-    ]
-
-
-
-# ====================== Policy label symmetry (full tag) ======================
-def policy_label_from_cfg_full(cfg: dict) -> str:
-    """
-    Returns a canonical, full policy tag:
-      - "strict"
-      - "projected(columns@k=3,auto)"
-      - "projected(columns@k=3,file)"
-    """
-    if not cfg or not cfg.get("enabled_layers"):
-        return "strict"
-    src3 = (cfg.get("source") or {}).get("3", "auto")
-    if src3 == "file":
-        return "projected(columns@k=3,file)"
-    return "projected(columns@k=3,auto)"
-
-def policy_label_from_state(rc: dict, cfg_active: dict) -> str:
-    """
-    Mirrors the active policy tag using run_ctx when available; falls back to cfg.
-    """
-    mode = (rc or {}).get("mode", "")
-    if mode == "strict":
-        return "strict"
-    if mode == "projected(file)":
-        return "projected(columns@k=3,file)"
-    if mode == "projected(auto)":
-        return "projected(columns@k=3,auto)"
-    # fallback
-    return policy_label_from_cfg_full(cfg_active or {})
-
-# --- compat shim for legacy call sites ---------------------------------
-if "_rectify_run_ctx_mask_from_d3_or_stop" not in globals():
-    def _rectify_run_ctx_mask_from_d3_or_stop():
-        """Require fresh run_ctx and rectify mask; hard-stop if stale."""
-        try:
-            rc = require_fresh_run_ctx()        # raises via st.stop() on stale
-            rc = rectify_run_ctx_mask_from_d3() # may also st.stop() on mismatch
-            return rc
-        except Exception as e:
-            # If your rectifiers switched to soft warnings elsewhere,
-            # keep this call site hard-guarded for Freezer correctness.
-            st.warning(str(e))
-            st.stop()
-
-# UTC ISO helper (if not already present)
-if "_utc_iso" not in globals():
-    from datetime import datetime, timezone
-    def _utc_iso() -> str:
-        return datetime.now(timezone.utc).isoformat()
-
-
-def _file_mode_invalid_now() -> bool:
-    """True only when we're in projected(FILE) mode *and* the FILE Π fails validation."""
-    rc = st.session_state.get("run_ctx") or {}
-    return (str(rc.get("mode")) == "projected(file)") and bool(file_validation_failed())
-
-
-
-
-# =========================[ STEP 1 · Core helpers + guards ]=========================
-from pathlib import Path
-from contextlib import contextmanager
-
-# ---- Directories (be tolerant if not pre-defined)
-LOGS_DIR = Path(globals().get("LOGS_DIR", "logs"))
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
-
-# --- Inputs signature (canonical, de-duplicated) ---
-def current_inputs_sig() -> list[str]:
-    ib = st.session_state.get("_inputs_block") or {}
-    return [
-        str(ib.get("boundaries_hash", "")),
-        str(ib.get("C_hash", "")),
-        str(ib.get("H_hash", "")),
-        str(ib.get("U_hash", "")),
-        str(ib.get("shapes_hash", "")),
-    ]
+# Removed: def _inputs_sig_now() -> list[str]:  # duplicate of core's current_inputs_sig()
 
 # Back-compat alias for older call sites
 _current_inputs_sig = current_inputs_sig
-
 
 # ========================= Widget key utilities (NEW) =========================
 def _mkkey(ns: str, name: str) -> str:
@@ -979,7 +829,6 @@ def is_strict_red_lanes(run_ctx: dict | None, overlap_out: dict | None, residual
     tag = ((residual_tags or {}).get("strict") or "")
     return tag == "lanes"
 
-
 # ---- Hash key builders for deduplication
 def gallery_key(row: dict) -> tuple:
     pol = row.get("policy") or {}
@@ -1028,11 +877,9 @@ def run_stamp_line() -> str:
     rid = (rc.get("run_id", "") or "")[:8]
     return f"{pol} | n3={n3} | B {hB} · C {hC} · H {hH} · U {hU} | P {pH} | run {rid}"
 
-
 # ───────────────────────── SSOT + Freshness helpers (aliases) ─────────────────────────
 _mark_fixtures_changed = _bump_fixture_nonce  # legacy
 _soft_reset_before_overlap = soft_reset_before_overlap  # legacy
-
 
 # ---------- stable hashing ----------
 def _sha256_hex_bytes(b: bytes) -> str:
@@ -1050,24 +897,7 @@ def _iso_utc_now() -> str:
 
 
 # ====================== FILE Validator (strict) ======================
-def _mul_gf2(A, B):
-    # Use app's mul if present; otherwise a safe GF(2) fallback
-    if "mul" in globals() and callable(globals()["mul"]):
-        return mul(A, B)
-    if not A or not B:
-        return []
-    m, k = len(A), len(A[0])
-    k2, c = len(B), len(B[0])
-    if k != k2:
-        raise ValueError(f"dim mismatch: {m}x{k} @ {k2}x{c}")
-    out = [[0] * c for _ in range(m)]
-    for i in range(m):
-        for t in range(k):
-            if A[i][t] & 1:
-                bt = B[t]
-                for j in range(c):
-                    out[i][j] ^= (bt[j] & 1)
-    return out
+# Removed: def _mul_gf2(A, B):  # duplicate of core's GF2 multiplication
 
 def validate_projector_file_strict(P, *, n3: int, lane_mask: list[int]) -> None:
     # shape validation
@@ -1451,6 +1281,10 @@ def build_inputs_block(boundaries, cmap, H_used, shapes, filenames: dict) -> dic
         **hashes_dict,
         "shapes_hash": hashes_dict["U_hash"],
     }
+]
+
+
+
 
 
 
@@ -2054,17 +1888,18 @@ def run_overlap():
         st.session_state["overlap_cfg"]            = cfg_active
         st.session_state["overlap_policy_label"]   = pol_lbl
 
-               # Freeze SSOT even on FILE error (no projector field)
+              # Freeze SSOT even on FILE error (no projector field)
         H_local = _load_h_local()
         st.session_state["overlap_H"] = H_local
         st.session_state["overlap_C"] = cmap
         
-        pub = publish_inputs_block(
+        pub = ssot_publish_block(
             boundaries_obj=boundaries,
             cmap_obj=cmap,
             H_obj=H_local,
             shapes_obj=shapes,
             n3=n3_now,
+            projector_filename="",   # none on FILE error
         )
         st.caption(f"SSOT sig (before → after): {list(pub['before'])} → {list(pub['after'])}")
         _reconcile_di_vs_ssot()
@@ -2075,6 +1910,7 @@ def run_overlap():
         st.session_state["armed_by"]        = "file_invalid"
         st.error(f"Projected(FILE) validation failed: {e}")
         return
+
 
     # ── success path (d3/mode) ────────────────────────────────────────────────
     d3   = meta.get("d3") if "d3" in meta else (boundaries.blocks.__root__.get("3") or [])
@@ -2131,16 +1967,17 @@ def run_overlap():
     st.session_state["overlap_H"] = H_local
     st.session_state["overlap_C"] = cmap
     
-    # publish canonical SSOT (idempotent single source of truth)
-    pub = publish_inputs_block(
-        boundaries_obj=boundaries,
-        cmap_obj=cmap,
-        H_obj=H_local,
-        shapes_obj=shapes,
-        n3=n3,
-    )
-    st.caption(f"SSOT sig (before → after): {list(pub['before'])} → {list(pub['after'])}")
-    _reconcile_di_vs_ssot()
+    pub = ssot_publish_block(
+    boundaries_obj=boundaries,
+    cmap_obj=cmap,
+    H_obj=H_local,
+    shapes_obj=shapes,
+    n3=n3,
+    projector_filename=st.session_state["run_ctx"].get("projector_filename",""),
+)
+st.caption(f"SSOT sig (before → after): {list(pub['before'])} → {list(pub['after'])}")
+_reconcile_di_vs_ssot()
+
 
     
     # --- fixture auto-match (no arming) ------------------------------------------
