@@ -7000,13 +7000,28 @@ with safe_expander("Cert & provenance", expanded=True):
             "residual_tag": (ss.get("residual_tags", {}) or {}).get(policy_canon.split(":")[0], "none"),
         }
 
-        # ---------------- A/B embed snapshot ----------------
+               # ---------------- A/B embed snapshot ----------------
         ab_embed = {"fresh": bool(ab_fresh)}
+        
         if ab_fresh:
-            ab_embed["strict_snapshot"]    = (ab.get("strict") or {}).get("out", {})
-            ab_embed["projected_snapshot"] = (ab.get("projected") or {}).get("out", {})
+            # Prefer the rich UI snapshot if it's still fresh; else fall back to the pin
+            ab_rich = st.session_state.get("ab_compare") or {}
+            if _ab_is_fresh(ab_rich, rc=rc, ib=ib):
+                # carry full, properly populated structure
+                ab_embed.update({
+                    "pair_tag":        ab_rich.get("pair_tag",""),
+                    "inputs_sig":      list(ab_rich.get("inputs_sig") or []),
+                    "lane_mask_k3":    list(ab_rich.get("lane_mask_k3") or []),
+                    "strict":          ab_rich.get("strict") or {},     # includes out, lane_vecs, pass_vec
+                    "projected":       ab_rich.get("projected") or {},  # includes policy_tag, projector_* etc.
+                })
+            else:
+                # fallback: preserve current minimal snapshots from the pin
+                ab_embed["strict_snapshot"]    = (ab.get("strict") or {}).get("out", {})
+                ab_embed["projected_snapshot"] = (ab.get("projected") or {}).get("out", {})
         elif is_ab_pinned:
             ab_embed["stale_reason"] = ab_status
+
 
         # ---------------- Growth / Gallery ----------------
         growth  = {"growth_bumps": int(ss.get("growth_bumps", 0)), "H_diff": ss.get("H_diff","")}
