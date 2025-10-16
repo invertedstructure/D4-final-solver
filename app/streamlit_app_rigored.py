@@ -101,8 +101,9 @@ DISTRICT_MAP: dict[str, str] = {
     "28f8db2a822cb765e841a35c2850a745c667f4228e782d0cfdbcb710fd4fecb9": "D3",
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
+# ─── SSOT freshness (canonical, annotation-safe) ─────────────────────────────
+from typing import Tuple
 
-# ─── SSOT freshness (canonical) ──────────────────────────────────────────────
 def _deep_intify(o):
     if isinstance(o, bool): return 1 if o else 0
     if isinstance(o, list): return [_deep_intify(x) for x in o]
@@ -118,21 +119,23 @@ def _stable_blocks_sha(obj) -> str:
     except Exception:
         return ""
 
-def _frozen_sig_from_ib() -> tuple[str,str,str,str,str] | tuple():
+def _frozen_sig_from_ib() -> Tuple[str, str, str, str, str] or tuple:
+    """Return frozen 5-tuple from _inputs_block, or () if not frozen yet."""
     ib = st.session_state.get("_inputs_block") or {}
-    if not ib: return ()
+    if not ib:
+        return ()
     h = ib.get("hashes") or {}
     b = str(h.get("boundaries_hash", ib.get("boundaries_hash","")))
     C = str(h.get("C_hash",          ib.get("C_hash","")))
     H = str(h.get("H_hash",          ib.get("H_hash","")))
     U = str(h.get("U_hash",          ib.get("U_hash","")))
     S = str(h.get("shapes_hash",     ib.get("shapes_hash","")))
-    if not any((b, C, H, U, S)):  # not frozen yet
+    if not any((b, C, H, U, S)):
         return ()
     return (b, C, H, U, S)
 
-def _live_sig_now() -> tuple[str,str,str,str,str]:
-    # Use the SAME objects publish_inputs_block() uses
+def _live_sig_now() -> Tuple[str, str, str, str, str]:
+    """Compute live 5-tuple using the same objects the publisher uses."""
     H_obj = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
     return (
         _stable_blocks_sha(boundaries),
@@ -143,17 +146,20 @@ def _live_sig_now() -> tuple[str,str,str,str,str]:
     )
 
 def ssot_is_stale() -> bool:
-    """True only if we have both a frozen SSOT and live objects, and they differ."""
-    # Don’t flag anything before the first Overlap publish
+    """
+    True only if we've published at least once (_has_overlap)
+    and frozen != live. Never flags before first Overlap publish.
+    """
     if not st.session_state.get("_has_overlap"):
         return False
     frozen = _frozen_sig_from_ib()
     if not frozen:
         return False
     live = _live_sig_now()
-    # Optional: memo the last seen live sig for easy diffs elsewhere
-    st.session_state["_last_live_sig"] = live
+    st.session_state["_last_live_sig"] = live  # optional: handy elsewhere
     return tuple(frozen) != tuple(live)
+
+
 
 
 def publish_inputs_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int):
