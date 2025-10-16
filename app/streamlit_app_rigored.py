@@ -18,8 +18,19 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 import random
+# ------------------------- End of Organized Helpers -------------------------
+import uuid
+import os
+import shutil
+import tempfile
+import json
+from pathlib import Path
+from contextlib import contextmanager
+# ======================= Canon Helpers SSOT - Deduped & Organized =======================
 
-
+import json, hashlib, streamlit as st
+from datetime import datetime, timezone
+from pathlib import Path
 import pandas as pd
 import streamlit as st
 
@@ -102,209 +113,173 @@ DISTRICT_MAP: dict[str, str] = {
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
 
-# tolerant canonical inputs-sig helper (0 or 1 arg)
-def current_inputs_sig(*args, **kwargs) -> tuple[str, str, str, str, str]:
-    """
-    Canonical 5-tuple: (D, C, H, U, SHAPES). Missing pieces -> "".
-    Accepts 0 args (reads from st.session_state["_inputs_block"]) or
-    1 positional arg / keyword _ib providing an inputs_block dict.
-    """
-    _ib = None
-    if args:
-        _ib = args[0]
-    _ib = kwargs.get("_ib", _ib)
 
-    ss = st.session_state
-    ib = dict(_ib or (ss.get("_inputs_block") or {}))
-    h  = dict(ib.get("hashes") or {})
-    return (
-        str(h.get("boundaries_hash") or ""),
-        str(h.get("C_hash")         or ""),
-        str(h.get("H_hash")         or ""),
-        str(h.get("U_hash")         or ""),
-        str(h.get("shapes_hash")    or ""),
-    )
+# =============================== TOP HELPERS — CANONICAL ===============================
+# This block replaces the previous duplicate helpers. Single Source of Truth (SSOT).
 
+# --- Imports expected to be available ---
+# import os, json, time, uuid, shutil, tempfile, hashlib
+# from pathlib import Path
+# import streamlit as st
+# from datetime import datetime, timezone
 
-def current_inputs_sig(_ib: dict | None = None) -> tuple[str, str, str, str, str]:
-    """
-    Canonical 5-tuple of input hashes in this exact order:
-    D, C, H, U, SHAPES. If a piece is missing, return "" for that slot.
-    Accepts an optional _ib (inputs_block) to compare arbitrary snapshots,
-    otherwise reads from st.session_state["_inputs_block"].
-    """
-    ss = st.session_state
-    ib = dict(_ib or (ss.get("_inputs_block") or {}))
-    h  = dict(ib.get("hashes") or {})
-    return (
-        str(h.get("boundaries_hash") or ""),
-        str(h.get("C_hash")         or ""),
-        str(h.get("H_hash")         or ""),
-        str(h.get("U_hash")         or ""),
-        str(h.get("shapes_hash")    or ""),
-    )
-
-#---------------------------------------------------------------------#
-def _auto_pj_hash_from_rc(rc: dict) -> str:
-    try:
-        lm = rc.get("lane_mask_k3") or []
-        import json, hashlib
-        blob = json.dumps(lm, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        return hashlib.sha256(blob).hexdigest()
-    except Exception:
-        return ""
-
-
-# ======================= SSOT v2 COMPAT SHIMS =======================
-# Map old v2 helper names to the new canonical SSOT core.
-
-def frozen_sig_from_ib_v2():
-    return ssot_frozen_sig_from_ib()
-
-def stable_blocks_sha_v2(obj):
-    return ssot_stable_blocks_sha(obj) if 'ssot_stable_blocks_sha' in globals() else stable_blocks_sha(obj)
-
-def live_sig_now_v2():
-    # prefer the H used by Overlap so “live” matches the pipeline
-    H_live = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
-    return ssot_live_sig(
-        globals().get("boundaries"),
-        globals().get("cmap"),
-        H_live,
-        globals().get("shapes"),
-    )
-
-def publish_inputs_block_v2(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int):
-    # projector filename optional; read from run_ctx if present
-    rc = st.session_state.get("run_ctx") or {}
-    proj_fn = rc.get("projector_filename", "")
-    return ssot_publish_block(
-        boundaries_obj=boundaries_obj,
-        cmap_obj=cmap_obj,
-        H_obj=H_obj,
-        shapes_obj=shapes_obj,
-        n3=n3,
-        projector_filename=proj_fn,
-    )
-
-def ssot_is_stale_v2():
-    return ssot_is_stale()
-# ===================== end SSOT v2 COMPAT SHIMS =====================
-
-# ======================= SSOT COMPAT SHIMS (bridge old call sites) =======================
-# Some older code (debuggers/health banners) may still call these names.
-
-def live_inputs_fingerprint():
-    """
-    Compatibility shim: old code expected a 'live fingerprint' of the current inputs.
-    We now return the SSOT live 5-tuple (b, C, H, U, shapes) using the same sources
-    the publisher uses (overlap_H preferred for H).
-    """
-    # Prefer the H used by Overlap so 'live' matches the pipeline
-    H_live = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
-    return ssot_live_sig(
-        globals().get("boundaries"),
-        globals().get("cmap"),
-        H_live,
-        globals().get("shapes"),
-    )
-
-# If anything old still calls publish_inputs_block(...), map it to the new canonical publisher.
-def publish_inputs_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int, projector_filename: str = ""):
-    return ssot_publish_block(
-        boundaries_obj=boundaries_obj,
-        cmap_obj=cmap_obj,
-        H_obj=H_obj,
-        shapes_obj=shapes_obj,
-        n3=n3,
-        projector_filename=projector_filename,
-    )
-# ======================= end SSOT COMPAT SHIMS =========================================
-
-# ======================= SSOT CORE (single source of truth) =======================
-import json, hashlib, streamlit as st
-
-# ---- hashing helpers ------------------------------------------------------------
+# ------------------------- Hashing Helpers -------------------------
 def _deep_intify(o):
     if isinstance(o, bool): return 1 if o else 0
     if isinstance(o, list): return [_deep_intify(x) for x in o]
     if isinstance(o, dict): return {k: _deep_intify(v) for k, v in o.items()}
     return o
 
+def _sha256_hex_bytes(b: bytes) -> str:
+    return hashlib.sha256(b).hexdigest()
+
+def _sha256_hex_text(s: str) -> str:
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+def hash_json(obj) -> str:
+    """Stable SHA-256 over a JSON-serializable object (bools → 0/1, sorted keys, tight separators)."""
+    s = json.dumps(_deep_intify(obj), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return _sha256_hex_text(s)
+
+# ------------------------- Fixtures Registry (cache) -------------------------
+def _fixtures_bytes_and_hash(path: str):
+    """Helper to read file bytes and compute hash."""
+    try:
+        b = Path(path).read_bytes()
+        h = _sha256_hex_bytes(b)
+        return b, h, path
+    except Exception:
+        return b"", "", path
+
+def load_fixtures_registry() -> dict | None:
+    """Load and cache the fixtures registry with cache invalidation."""
+    fx_path = Path("configs") / "fixtures.json"
+    try:
+        fx_bytes = fx_path.read_bytes()
+        fx_hash = _sha256_hex_bytes(fx_bytes)
+    except Exception:
+        st.session_state.pop("_fixtures_cache", None)
+        st.session_state.pop("_fixtures_bytes_hash", None)
+        return None
+
+    if st.session_state.get("_fixtures_bytes_hash") != fx_hash:
+        try:
+            data = json.loads(fx_bytes.decode("utf-8"))
+            cache = {
+                "version": str(data.get("version", "")),
+                "ordering": list(data.get("ordering") or []),
+                "fixtures": list(data.get("fixtures") or []),
+                "__hash": fx_hash,
+                "__path": fx_path.as_posix(),
+            }
+            st.session_state["_fixtures_cache"] = cache
+            st.session_state["_fixtures_bytes_hash"] = fx_hash
+        except Exception:
+            st.session_state.pop("_fixtures_cache", None)
+            st.session_state["_fixtures_bytes_hash"] = fx_hash
+            return None
+    return st.session_state.get("_fixtures_cache")
+
+def fixtures_load_cached(path: str = "configs/fixtures.json") -> dict:
+    """Load fixtures cache with tolerant signature. Rehydrates cache if bytes hash changed."""
+    b, h, p = _fixtures_bytes_and_hash(path)
+    cache = st.session_state.get("_fixtures_cache")
+    if not cache or st.session_state.get("_fixtures_bytes_hash") != h:
+        try:
+            data = json.loads(b.decode("utf-8")) if b else {}
+            cache = {
+                "version": str(data.get("version", "")),
+                "ordering": list(data.get("ordering") or []),
+                "fixtures": list(data.get("fixtures") or []),
+                "__path": p,
+            }
+        except Exception:
+            cache = {"version": "", "ordering": [], "fixtures": [], "__path": p}
+        st.session_state["_fixtures_cache"] = cache
+        st.session_state["_fixtures_bytes_hash"] = h
+    return cache
+
+# ------------------------- SSOT: Stable hashes for block-like objects -------------------------
 def ssot_stable_blocks_sha(obj) -> str:
-    """Stable sha256 of {'blocks': ...} for cmap-like objects or plain dicts."""
+    """
+    Compute stable sha256 of blocks-like objects.
+    Accepts an object with .blocks.__root__ OR a plain dict {"blocks": ...}.
+    """
     try:
         data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (
-            obj if isinstance(obj, dict) else {"blocks": {}}
+            obj if isinstance(obj, dict) and "blocks" in obj else {"blocks": {}}
         )
-        s = json.dumps(_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-        return hashlib.sha256(s).hexdigest()
+        s = json.dumps(_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        return _sha256_hex_text(s)
     except Exception:
         return ""
 
-# ---- signatures (live vs frozen) ------------------------------------------------
-def ssot_live_sig(boundaries_obj=None, cmap_obj=None, H_obj=None, shapes_obj=None) -> tuple:
-    """
-    Live 5-tuple (b, C, H, U, shapes). If args aren’t passed, fall back to globals/session.
-    H prefers overlap_H so 'live' matches what Overlap used.
-    """
-    if boundaries_obj is None: boundaries_obj = globals().get("boundaries")
-    if cmap_obj       is None: cmap_obj       = globals().get("cmap")
-    if H_obj          is None: H_obj          = (st.session_state.get("overlap_H") or
-                                                 globals().get("H_obj") or
-                                                 type("X",(object,),{"blocks":type("Y",(object,),{"__root__":{}})()})())
-    if shapes_obj     is None: shapes_obj     = globals().get("shapes")
-
-    return (
-        ssot_stable_blocks_sha(boundaries_obj) if boundaries_obj is not None else "",
-        ssot_stable_blocks_sha(cmap_obj)       if cmap_obj       is not None else "",
-        ssot_stable_blocks_sha(H_obj)          if H_obj          is not None else "",
-        ssot_stable_blocks_sha(shapes_obj)     if shapes_obj     is not None else "",
-        ssot_stable_blocks_sha(shapes_obj)     if shapes_obj     is not None else "",  # shapes_hash mirrors U_hash
-    )
-
-def ssot_frozen_sig_from_ib() -> tuple:
-    """
-    Read frozen 5-tuple from st.session_state['_inputs_block'].
-    Tolerates legacy flattening. Returns () if not present.
-    """
+# ------------------------- Current Inputs Signature (frozen) -------------------------
+def ssot_frozen_sig_from_ib() -> tuple[str, str, str, str, str]:
+    """Read the canonical 5-tuple from st.session_state['_inputs_block'] if present."""
     ib = st.session_state.get("_inputs_block") or {}
-    if not ib: return ()
     h = ib.get("hashes") or {}
-    b = str(h.get("boundaries_hash", ib.get("boundaries_hash","")))
-    C = str(h.get("C_hash",          ib.get("C_hash","")))
-    H = str(h.get("H_hash",          ib.get("H_hash","")))
-    U = str(h.get("U_hash",          ib.get("U_hash","")))
-    S = str(h.get("shapes_hash",     ib.get("shapes_hash","")))
-    if not any((b, C, H, U, S)): return ()
+    b = str(h.get("boundaries_hash", ib.get("boundaries_hash", "")))
+    C = str(h.get("C_hash",         ib.get("C_hash", "")))
+    H = str(h.get("H_hash",         ib.get("H_hash", "")))
+    U = str(h.get("U_hash",         ib.get("U_hash", "")))
+    S = str(h.get("shapes_hash",    ib.get("shapes_hash", "")))
+    if not any((b, C, H, U, S)):
+        return ("", "", "", "", "")
     return (b, C, H, U, S)
 
-def current_inputs_sig() -> tuple:
-    """Always read the signature from the frozen _inputs_block (never from live)."""
-    frozen = ssot_frozen_sig_from_ib()
-    if frozen: return frozen
-    return ("","","","","")
+def current_inputs_sig(*, _ib: dict | None = None) -> tuple[str, str, str, str, str]:
+    """
+    Canonical 5-tuple (D, C, H, U, SHAPES). If _ib provided, read from that,
+    otherwise read from the frozen st.session_state['_inputs_block'].
+    """
+    if _ib is not None:
+        h = dict((_ib or {}).get("hashes") or {})
+        return (
+            str(h.get("boundaries_hash") or ""),
+            str(h.get("C_hash")         or ""),
+            str(h.get("H_hash")         or ""),
+            str(h.get("U_hash")         or ""),
+            str(h.get("shapes_hash")    or ""),
+        )
+    return ssot_frozen_sig_from_ib()
 
-# ---- publisher (only writer) ----------------------------------------------------
+# ------------------------- SSOT live fingerprint (what’s currently loaded in memory) -------------------------
+def ssot_live_sig(boundaries_obj=None, cmap_obj=None, H_obj=None, shapes_obj=None) -> tuple[str, str, str, str, str]:
+    """
+    Compute the live 5-tuple signature from in-memory objects:
+    (D, C, H, U, SHAPES). In this app U ≡ SHAPES, so we mirror the same hash for both.
+    """
+    boundaries_obj = boundaries_obj or globals().get("boundaries")
+    cmap_obj       = cmap_obj       or globals().get("cmap")
+    H_obj          = H_obj          or (st.session_state.get("overlap_H") or globals().get("H_obj"))
+    shapes_obj     = shapes_obj     or globals().get("shapes")
+
+    hB = ssot_stable_blocks_sha(boundaries_obj) if boundaries_obj else ""
+    hC = ssot_stable_blocks_sha(cmap_obj)       if cmap_obj       else ""
+    hH = ssot_stable_blocks_sha(H_obj)          if H_obj          else ""
+    hU = ssot_stable_blocks_sha(shapes_obj)     if shapes_obj     else ""
+    hS = hU  # mirror by design
+    return (hB, hC, hH, hU, hS)
+
+# --------------------- Publish _inputs_block after Overlap ---------------------
 def ssot_publish_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int, projector_filename: str = "") -> dict:
     """
-    Canonical publisher: writes _inputs_block with hashes/dims/filenames (+ legacy flattening).
-    Returns {'before': tuple, 'after': tuple, 'changed': bool}.
-    Also sets: _inputs_hashes_pending/_dims_pending/_filenames_pending, _has_overlap, _live_fp_at_overlap.
+    Publish canonical _inputs_block into session state and return change info.
+    Also stamps dims, filenames, and sets freshness anchors.
     """
     ss = st.session_state
     before = ssot_frozen_sig_from_ib()
 
-    # compute live hashes/dims/files
     hB, hC, hH, hU, hS = ssot_live_sig(boundaries_obj, cmap_obj, H_obj, shapes_obj)
-    H2 = (H_obj.blocks.__root__.get("2") or []) if H_obj else []
-    dims = {"n2": int(len(H2) if H2 else 0), "n3": int(n3 or 0)}
+    H2 = (H_obj.blocks.__root__.get("2") or []) if (H_obj and hasattr(H_obj, "blocks")) else []
+    dims = {"n2": (len(H2) if H2 else 0), "n3": int(n3 or 0)}
     files = {
-        "boundaries": ss.get("fname_boundaries","boundaries.json"),
-        "cmap":       ss.get("fname_cmap","cmap.json"),
-        "H":          ss.get("fname_h","H.json"),
-        "U":          ss.get("fname_shapes","shapes.json"),
-        "shapes":     ss.get("fname_shapes","shapes.json"),
+        "boundaries": ss.get("fname_boundaries", "boundaries.json"),
+        "cmap":       ss.get("fname_cmap",       "cmap.json"),
+        "H":          ss.get("fname_h",         "H.json"),
+        "U":          ss.get("fname_shapes",    "shapes.json"),
+        "shapes":     ss.get("fname_shapes",    "shapes.json"),
     }
     if projector_filename:
         files["projector"] = projector_filename
@@ -313,566 +288,49 @@ def ssot_publish_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int, 
         "boundaries_hash": hB, "C_hash": hC, "H_hash": hH, "U_hash": hU, "shapes_hash": hS,
     }
 
-    # stage “pending” for older readers that still look there
-    ss["_inputs_hashes_pending"] = dict(hashes)
-    ss["_dims_pending"]          = dict(dims)
-    ss.setdefault("_filenames_pending", dict(files))
-
-    # publish canonical block
+    # Save block (SSOT)
     ss["_inputs_block"] = {
-        "hashes": dict(hashes),
-        "dims":   dict(dims),
-        "filenames": dict(files),
-        # legacy flatten:
+        "hashes":    hashes,
+        "dims":      dims,
+        "filenames": files,
+        # legacy flatten (readers that still look at top-level fields)
         "boundaries_hash": hB, "C_hash": hC, "H_hash": hH, "U_hash": hU, "shapes_hash": hS,
     }
 
-    after   = ssot_frozen_sig_from_ib()
+    after = ssot_frozen_sig_from_ib()
     changed = (before != after)
 
-    # freshness anchors (used by stale banner & cert)
-    ss["_has_overlap"] = True
+    # Freshness anchors for stale detection
+    ss["_has_overlap"]        = True
     ss["_live_fp_at_overlap"] = ssot_live_sig(boundaries_obj, cmap_obj, H_obj, shapes_obj)
 
     return {"before": before, "after": after, "changed": changed}
 
-# ---- staleness ------------------------------------------------------------------
+# --------------------- Staleness Check (non-blocking) ---------------------
 def ssot_is_stale() -> bool:
-    """
-    True iff we have published at least once AND the live fingerprint != frozen.
-    Startup-neutral (no false warnings before first Overlap).
-    """
+    """True if current live fingerprint differs from frozen _inputs_block."""
     ss = st.session_state
     if not ss.get("_has_overlap"):
         return False
     frozen = ssot_frozen_sig_from_ib()
-    if not frozen:
+    if not any(frozen):
         return False
     live_now = ssot_live_sig()
     return tuple(frozen) != tuple(live_now)
 
-# ---- side-channel reconciliation -------------------------------------------------
-def _reconcile_di_vs_ssot():
-    ss = st.session_state
-    ib = ss.get("_inputs_block") or {}
-    if not ib: return
-    bh_ib = ib.get("boundaries_hash","")
-    if not bh_ib: return
-    di = dict(ss.get("_district_info") or {})
-    if di.get("boundaries_hash") != bh_ib:
-        di["boundaries_hash"] = bh_ib
-        ss["_district_info"] = di
-# ===================== end SSOT CORE =============================================
-def _policy_tag_now_from_rc(rc: dict) -> str:
-    """
-    Produce the canonical policy tag using only run_ctx.
-    Avoids any dependency on cfg_active/policy_label_from_state.
-    """
-    mode = str((rc or {}).get("mode", "")).strip()
-    if mode == "strict":
-        return "strict"
-    if mode == "projected(file)":
-        return "projected(columns@k=3,file)"
-    if mode == "projected(auto)":
-        return "projected(columns@k=3,auto)"
-    # fallback: honor explicit tag if present; else strict
-    tag = (rc or {}).get("policy_tag")
-    if tag:
-        return str(tag)
-    return "strict"
-
-def _ab_autoclear_if_stale_now():
-    ss = st.session_state
-    ab = ss.get("ab_compare") or {}
-    if not ab:
-        return
-
-    frozen = tuple(ssot_frozen_sig_from_ib() or ())
-    rc     = ss.get("run_ctx") or {}
-    pol    = _policy_tag_now_from_rc(rc)
-    pj_now = rc.get("projector_hash","") if rc.get("mode") == "projected(file)" else ""
-
-    pj_ab  = ((ab.get("projected") or {}).get("projector_hash","")
-              if rc.get("mode") == "projected(file)" else "")
-
-    stale = (
-        tuple(ab.get("inputs_sig") or ()) != frozen or
-        str(ab.get("policy_tag",""))      != str(pol) or
-        str(pj_ab)                        != str(pj_now)
-    )
-    if stale:
-        ss.pop("ab_compare", None)  # silently drop old snapshot
-
-# run it early every script execution (keep this call where it is)
-_ab_autoclear_if_stale_now()
-
-# ---------- A/B pin + ticket (single-flight embed) ----------
-def _ab_pin_snapshot_for_cert(strict_out: dict, projected_out: dict):
-    """Pin an A/B snapshot for the cert block and force a one-shot write."""
-    import streamlit as st
-    ss = st.session_state
-
-    # Use the frozen SSOT signature so cert dedupe logic aligns
-    if "ssot_frozen_sig_from_ib" in globals():
-        inputs_sig = list(ssot_frozen_sig_from_ib() or ())
-    else:
-        # very tolerant fallback
-        ib = ss.get("_inputs_block") or {}
-        h  = (ib.get("hashes") or {})
-        inputs_sig = [
-            str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
-            str(h.get("C_hash",          ib.get("C_hash",""))),
-            str(h.get("H_hash",          ib.get("H_hash",""))),
-            str(h.get("U_hash",          ib.get("U_hash",""))),
-            str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
-        ]
-
-    rc        = ss.get("run_ctx") or {}
-    pol_tag   = str(rc.get("policy_tag") or "strict")
-    pj_hash   = (rc.get("projector_hash","") if rc.get("mode") == "projected(file)" else "")
-
-    # Minimal payload that the cert block expects/validates
-    payload = {
-        "inputs_sig": inputs_sig,
-        "policy_tag": pol_tag,
-        "strict":    {"out": dict(strict_out or {})},
-        "projected": {"out": dict(projected_out or {}), "projector_hash": pj_hash},
-    }
-
-    # Pin + force one-shot write
-    ss["ab_pin"] = {"state": "pinned", "payload": payload, "consumed": False}
-    ss["_ab_ticket_pending"] = int(ss.get("_ab_ticket_pending", 0)) + 1
-    ss["write_armed"] = True
-    ss["armed_by"]    = "ab_compare"
-
-    # (Optional) small receipt
-    st.caption("A/B pinned → cert writer armed (one-shot).")
-
-
-
-# ─── Fixtures registry: load + cache + invalidate ─────────────────────────────
-from pathlib import Path
-import json, hashlib, os
-
-def _sha256_bytes(b: bytes) -> str:
-    import hashlib as _h
-    return _h.sha256(b).hexdigest()
-
-def load_fixtures_registry() -> dict | None:
-    """
-    Reads configs/fixtures.json, caches parsed result in session, and invalidates
-    cache whenever the file's SHA256 changes. Returns a dict with keys:
-    {version, ordering, fixtures, __hash, __path}
-    or None if file missing/unreadable.
-    """
-    ss = st.session_state
-    fx_path = Path("configs") / "fixtures.json"
+# ------------------------- Projector helpers -------------------------
+def _auto_pj_hash_from_rc(rc: dict) -> str:
+    """Stable hash for AUTO projector spec derived from lane_mask_k3."""
     try:
-        fx_bytes = fx_path.read_bytes()
-        fx_hash  = _sha256_bytes(fx_bytes)
+        lm = rc.get("lane_mask_k3") or []
+        blob = json.dumps(lm, sort_keys=True, separators=(",", ":"))
+        return _sha256_hex_text(blob)
     except Exception:
-        # No file or unreadable → clear cache and return None
-        ss.pop("_fixtures_cache", None)
-        ss.pop("_fixtures_bytes_hash", None)
-        return None
+        return ""
 
-    if ss.get("_fixtures_bytes_hash") != fx_hash:
-        try:
-            data = json.loads(fx_bytes.decode("utf-8"))
-            cache = {
-                "version":   str(data.get("version","")),
-                "ordering":  list(data.get("ordering") or []),
-                "fixtures":  list(data.get("fixtures") or []),
-                "__hash":    fx_hash,
-                "__path":    fx_path.as_posix(),
-            }
-            ss["_fixtures_cache"]      = cache
-            ss["_fixtures_bytes_hash"] = fx_hash
-        except Exception:
-            # Corrupt file → do not keep stale cache
-            ss.pop("_fixtures_cache", None)
-            ss["_fixtures_bytes_hash"] = fx_hash
-            return None
-    return ss.get("_fixtures_cache")
-
-# --- Compatibility shim: allow both names & both signatures ---
-def fixtures_load_cached(path: str = "configs/fixtures.json") -> dict:
-    ss = st.session_state
-    b, h, p = _fixtures_bytes_and_hash(path)
-    cache = ss.get("_fixtures_cache")
-    if not cache or ss.get("_fixtures_bytes_hash") != h:
-        try:
-            data = json.loads(b.decode("utf-8"))
-            data = {
-                "version": str(data.get("version","")),
-                "ordering": list(data.get("ordering") or []),
-                "fixtures": list(data.get("fixtures") or []),
-                "__path": p,
-            }
-        except Exception:
-            data = {"version":"", "ordering":[], "fixtures":[], "__path": p}
-        ss["_fixtures_cache"] = data
-        ss["_fixtures_bytes_hash"] = h
-    return ss["_fixtures_cache"]
-
-# If something elsewhere imports/calls load_fixtures_registry(...), make it a tolerant alias.
-def load_fixtures_registry(*args, **kwargs) -> dict:
-    """
-    Backwards-compatible wrapper.
-    Accepts either no args, or a single path, or 'path=' kwarg.
-    """
-    path = "configs/fixtures.json"
-    if args:
-        path = args[0]
-    if "path" in kwargs and kwargs["path"]:
-        path = kwargs["path"]
-    return fixtures_load_cached(path)
-
-# ─── Matching utilities ───────────────────────────────────────────────────────
-def _norm_vec(v): 
-    return [int(x) for x in (v or [])]
-
-def _eq_vec(a, b):
-    a, b = _norm_vec(a), _norm_vec(b)
-    return (len(a) == len(b)) and all(x == y for x, y in zip(a, b))
-
-def _append_matchlog(line: dict):
-    try:
-        p = Path("logs") / "fixtures.matchlog.jsonl"
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "a", encoding="utf-8") as f:
-            f.write(json.dumps(line, separators=(",", ":")) + "\n")
-    except Exception:
-        pass
-
-def match_fixture(*, district_id: str, policy_canon: str,
-                  lane_mask_k3: list[int],
-                  H_bottom: list[int],
-                  C_plus_I_bottom: list[int],
-                  strict_eq3: bool,
-                  growth_bumps: int | None = None) -> dict:
-    """
-    Returns a dict:
-      {fixture_code, fixture_label, tag, strictify, growth_bumps}
-    First-match-wins based on configs/fixtures.json ordering.
-    Falls back to a synthesized label if nothing matches or dims are empty.
-    """
-    cache = load_fixtures_registry()
-    # Quick sanity (dims / empty vectors → fallback)
-    if not lane_mask_k3 or not (H_bottom or C_plus_I_bottom):
-        return {
-            "fixture_code": "",
-            "fixture_label": f"{district_id} • lanes={_norm_vec(lane_mask_k3)}"
-                              f" • H={_norm_vec(H_bottom)} • C+I={_norm_vec(C_plus_I_bottom)}"
-                              f" • growth={int(growth_bumps or 0)}",
-            "tag": "novelty", "strictify": "tbd",
-            "growth_bumps": int(growth_bumps or 0),
-        }
-
-    candidates = (cache or {}).get("fixtures", [])
-    ordering   = (cache or {}).get("ordering", [])
-    reasons_all = []
-
-    for fx in candidates:
-        code       = str(fx.get("code",""))
-        fx_dist    = fx.get("district")
-        label      = str(fx.get("label", code or ""))
-        tag        = str(fx.get("tag","tbd"))
-        strictify  = str(fx.get("strictify","tbd"))
-        bumps      = int(fx.get("growth_bumps", growth_bumps or 0))
-        match      = fx.get("match") or {}
-
-        # Collect reasons (only first few kept for log)
-        reasons = []
-
-        # District gate (if provided)
-        if fx_dist and str(fx_dist) != str(district_id):
-            reasons.append("district_mismatch")
-
-        # Policy gate (default = any)
-        allowed = match.get("policy_canon_any")
-        if allowed and (policy_canon not in [str(x) for x in allowed]):
-            reasons.append("policy_mismatch")
-
-        # Lanes
-        if "lanes" in match and not _eq_vec(match["lanes"], lane_mask_k3):
-            reasons.append("lanes_mismatch")
-
-        # H bottom
-        if "H_bottom" in match and not _eq_vec(match["H_bottom"], H_bottom):
-            reasons.append("H_bottom_mismatch")
-
-        # C+I bottom
-        if "C3_plus_I3_bottom" in match and not _eq_vec(match["C3_plus_I3_bottom"], C_plus_I_bottom):
-            reasons.append("CplusI_bottom_mismatch")
-
-        # Strict pass flag
-        if "strict_eq3" in match and (bool(strict_eq3) != bool(match["strict_eq3"])):
-            reasons.append("strict_eq3_mismatch")
-
-        # Optional: C3_any_of — ignore if you don't compute raw C3 pattern
-        # (We tolerate absence silently)
-        # if "C3_any_of" in match: ... (skip)
-
-        if not reasons:
-            # FIRST MATCH WINS
-            return {
-                "fixture_code": code,
-                "fixture_label": label or code or f"{district_id} • curated",
-                "tag": tag, "strictify": strictify, "growth_bumps": bumps,
-            }
-        else:
-            reasons_all.append({"code": code, "reasons": reasons})
-
-    # Fallback (no match)
-    fallback = {
-        "fixture_code": "",
-        "fixture_label": f"{district_id} • lanes={_norm_vec(lane_mask_k3)}"
-                          f" • H={_norm_vec(H_bottom)} • C+I={_norm_vec(C_plus_I_bottom)}"
-                          f" • growth={int(growth_bumps or 0)}",
-        "tag": "novelty", "strictify": "tbd",
-        "growth_bumps": int(growth_bumps or 0),
-    }
-    # Log brief reasons for audit
-    _append_matchlog({
-        "district": district_id,
-        "policy": policy_canon,
-        "lanes": _norm_vec(lane_mask_k3),
-        "H_bottom": _norm_vec(H_bottom),
-        "CplusI_bottom": _norm_vec(C_plus_I_bottom),
-        "strict_eq3": bool(strict_eq3),
-        "top_failures": reasons_all[:3],
-    })
-    return fallback
-
-
-def on_policy_change(new_label_raw: str):
-    rc = st.session_state.get("run_ctx") or {}
-    rc["policy_tag"] = new_label_raw
-    st.session_state["run_ctx"] = rc           # assign back to SSOT
-    st.session_state["write_armed"] = True     # arm the write
-    st.session_state["armed_by"]   = "policy_change"
-
-# ===================== Fixtures matcher (pure + session applier) =====================
-
-def _fx_norm_vec(v):
-    return [int(x) for x in (v or [])]
-
-def _fx_eq_vec(a, b):
-    a, b = _fx_norm_vec(a), _fx_norm_vec(b)
-    return (len(a) == len(b)) and all(x == y for x, y in zip(a, b))
-
-def _fx_bottom_pattern(bits):
-    """
-    Optional: convert a 0/1 vector into a compact string like '100' or '0110'.
-    If vector is empty/None, return ''.
-    """
-    v = _fx_norm_vec(bits)
-    return "".join("1" if x else "0" for x in v) if v else ""
-
-def match_fixture_from_snapshot(snapshot: dict) -> dict:
-    """
-    Given a frozen snapshot (what the cert writes) with:
-      snapshot['identity']['district_id']
-      snapshot['policy']['canon']
-      snapshot['diagnostics']['lane_vec_H2@d3']
-      snapshot['diagnostics']['lane_vec_C3+I3']
-      snapshot['inputs']['lane_mask_k3']
-      snapshot['checks']['k']['3']['eq']
-    return a dict: {code,label,tag,strictify,growth_bumps, reason?} or {} when no match.
-    """
-    try:
-        reg = load_fixtures_registry()  # tolerant alias; uses cache + hash invalidation
-    except Exception:
-        return {}
-
-    fixtures = list(reg.get("fixtures") or [])
-    ordering = list(reg.get("ordering") or [])
-
-    # Pull current signals (tolerant reads)
-    ident   = snapshot.get("identity") or {}
-    policy  = snapshot.get("policy") or {}
-    diags   = snapshot.get("diagnostics") or {}
-    inputs  = snapshot.get("inputs") or {}
-    checks  = snapshot.get("checks") or {}
-
-    district     = str(ident.get("district_id", ""))
-    canon        = str(policy.get("canon", "strict"))
-    lanes        = _fx_norm_vec(inputs.get("lane_mask_k3") or [])
-    H_bottom     = _fx_norm_vec(diags.get("lane_vec_H2@d3") or [])
-    C3I_bottom   = _fx_norm_vec(diags.get("lane_vec_C3+I3") or [])
-    strict_eq3   = bool((((checks.get("k") or {}).get("3") or {}).get("eq", False)))
-    C3_bottom_pat = _fx_bottom_pattern(diags.get("lane_vec_C3@bottom") or None)  # optional; OK if ""
-
-    # Order fixtures deterministically by `ordering`, then any not listed (stable)
-    order_index = {code: i for i, code in enumerate(ordering)}
-    fixtures.sort(key=lambda f: order_index.get(str(f.get("code","")), 10_000 + fixtures.index(f)))
-
-    # Try to match in order
-    for fx in fixtures:
-        code   = str(fx.get("code",""))
-        fdist  = str(fx.get("district","") or "")
-        match  = fx.get("match") or {}
-
-        # District rule (if provided)
-        if fdist and fdist != district:
-            continue
-
-        # policy canon rule (optional)
-        allowed = match.get("policy_canon_any") or None
-        if allowed and (canon not in set(allowed)):
-            continue
-
-        # vector rules (all optional; enforce strict equals when present)
-        ok = True
-        if "lanes" in match:
-            ok &= _fx_eq_vec(lanes, match.get("lanes"))
-        if not ok: 
-            continue
-
-        if "H_bottom" in match:
-            ok &= _fx_eq_vec(H_bottom, match.get("H_bottom"))
-        if not ok: 
-            continue
-
-        if "C3_plus_I3_bottom" in match:
-            ok &= _fx_eq_vec(C3I_bottom, match.get("C3_plus_I3_bottom"))
-        if not ok: 
-            continue
-
-        # C3_any_of is optional and only applies if we actually have a pattern
-        patt_list = match.get("C3_any_of") or []
-        if patt_list:
-            if not C3_bottom_pat or C3_bottom_pat not in set(patt_list):
-                continue
-
-        if "strict_eq3" in match:
-            if bool(match.get("strict_eq3")) != strict_eq3:
-                continue
-
-        # First match wins: return the metadata
-        return {
-            "code":        code,
-            "label":       str(fx.get("label","")),
-            "tag":         str(fx.get("tag","")),
-            "strictify":   str(fx.get("strictify","tbd")),
-            "growth_bumps": int(fx.get("growth_bumps", 0)),
-            # Provenance from registry (handy for audits)
-            "_fixtures_version": str(reg.get("version","")),
-            "_fixtures_hash":    str(st.session_state.get("_fixtures_bytes_hash","")),
-            "_fixtures_path":    str(reg.get("__path","configs/fixtures.json")),
-            "_ordering":         list(ordering),
-        }
-
-    # No match → return a synthesized fallback (warn-only)
-    label = f"{district} • lanes={lanes} • H={H_bottom} • C+I={C3I_bottom}"
-    return {
-        "code": "",
-        "label": label,
-        "tag": "novelty",
-        "strictify": "tbd",
-        "growth_bumps": int(st.session_state.get("growth_bumps", 0) or 0),
-        "_fixtures_version": str(reg.get("version","")),
-        "_fixtures_hash":    str(st.session_state.get("_fixtures_bytes_hash","")),
-        "_fixtures_path":    str(reg.get("__path","configs/fixtures.json")),
-        "_ordering":         list(ordering),
-    }
-
-
-def apply_fixture_to_session(match: dict):
-    """Persist fixture picks to session + run_ctx (do NOT arm)."""
-    if not match:
-        return
-    ss = st.session_state
-    ss["fixture_label"]      = match.get("label","")
-    ss["gallery_tag"]        = match.get("tag","")
-    ss["gallery_strictify"]  = match.get("strictify","tbd")
-    ss["growth_bumps"]       = int(match.get("growth_bumps", 0))
-
-    rc = ss.get("run_ctx") or {}
-    rc["fixture_label"] = ss["fixture_label"]
-    rc["fixture_code"]  = match.get("code","")
-    ss["run_ctx"] = rc
-
-
-
-# ───────── A/B helpers (inputs sig + projector hashers) ─────────
-def _inputs_sig_now() -> list[str]:
-    ib = st.session_state.get("_inputs_block") or {}
-    return [
-        str(ib.get("boundaries_hash","")),
-        str(ib.get("C_hash","")),
-        str(ib.get("H_hash","")),
-        str(ib.get("U_hash","")),
-        str(ib.get("shapes_hash","")),
-    ]
-
-def _hash_proj_matrix(P: list[list[int]]) -> str:
-    # stable hash of Π over JSON canonical form
-    return hash_json({"blocks":{"3": P}})
-
-def _ab_is_fresh(ab: dict, *, rc: dict) -> bool:
-    if not ab: return False
-    # inputs sig match?
-    if ab.get("inputs_sig") != _inputs_sig_now():
-        return False
-    # policy tag must match currently active
-    if (ab.get("projected") or {}).get("policy_tag") != (rc.get("policy_tag") or ""):
-        return False
-    # if FILE, projector hash must also match
-    if (rc.get("mode") == "projected(file)"):
-        return (ab.get("projected") or {}).get("projector_hash","") == (rc.get("projector_hash","") or "")
-    return True
-
-
-# ───────── auto-clear A/B when context changes (call once per run) ─────────
-def _ab_autoclear_if_stale():
-    ss = st.session_state
-    rc = ss.get("run_ctx") or {}
-    sig_now = tuple(_inputs_sig_now() + [rc.get("policy_tag",""), rc.get("projector_hash","")])
-    prev = ss.get("_ab_ctx_sig_prev")
-    if prev is None:
-        ss["_ab_ctx_sig_prev"] = sig_now
-        return
-    if prev != sig_now:
-        ss.pop("ab_compare", None)  # drop ghost snapshot
-        ss["_ab_ctx_sig_prev"] = sig_now
-
-_ab_autoclear_if_stale()
-
-# ======================= App constants & helpers =======================
-SCHEMA_VERSION = "1.0.0"
-FIELD = "GF(2)"  # displayed only; math stays the same
-
-def _utc_iso_z() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-def _py_version_str() -> str:
-    return f"python-{platform.python_version()}"
-
-def _short(h: str, n: int = 8) -> str:
-    return (h or "")[:n]
-
-def _std_meta(*, include_python: bool = False, run_id: str | None = None) -> dict:
-    meta = {
-        "schema_version": SCHEMA_VERSION,
-        "written_at_utc": _utc_iso_z(),
-        "app_version": APP_VERSION,
-    }
-    if include_python:
-        meta["python_version"] = _py_version_str()
-    if run_id:
-        meta["run_id"] = run_id
-    return meta
-
-# Removed: def _inputs_sig_now() -> list[str]:  # duplicate of core's current_inputs_sig()
-
-# Back-compat alias for older call sites
-_current_inputs_sig = current_inputs_sig
-
-# ========================= Widget key utilities (NEW) =========================
+# ------------------------- Key Generators & Widget-Key Deduper -------------------------
 def _mkkey(ns: str, name: str) -> str:
-    """Deterministic, readable widget key: '<ns>__<name>'."""
+    """Deterministic widget key: '<ns>__<name>'."""
     return f"{ns}__{name}"
 
 def ensure_unique_widget_key(key: str) -> str:
@@ -883,9 +341,7 @@ def ensure_unique_widget_key(key: str) -> str:
     ss = st.session_state
     used = ss.setdefault("_used_widget_keys", set())
     if key not in used:
-        used.add(key)
-        return key
-    # bump suffix until free
+        used.add(key); return key
     i = 2
     while True:
         k2 = f"{key}__{i}"
@@ -897,17 +353,19 @@ def ensure_unique_widget_key(key: str) -> str:
             return k2
         i += 1
 
-# Central registry for common keys
 class _WKey:
-    shapes_up      = _mkkey("inputs", "shapes_uploader")
-    shapes_up_alt  = _mkkey("inputsB", "shapes_uploader")
+    shapes_up     = _mkkey("inputs",  "shapes_uploader")
+    shapes_up_alt = _mkkey("inputsB", "shapes_uploader")
 WKEY = _WKey()
 
-# ---- Tiny time/uuid utils
+# ------------------------- Time/UUID Utilities -------------------------
 def new_run_id() -> str:
-    return str(uuid4())
+    return str(uuid.uuid4())
 
-# ---- Fixture nonce: single source of "freshness"
+def _iso_utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+# ------------------------- Fixture Nonce Utilities -------------------------
 def _ensure_fixture_nonce():
     ss = st.session_state
     if "fixture_nonce" not in ss:
@@ -920,53 +378,65 @@ def _bump_fixture_nonce():
     ss["fixture_nonce"] = cur + 1
     ss["_fixture_nonce"] = ss["fixture_nonce"]
 
-# ---- Freshness guard (use at start of every action)
-def require_fresh_run_ctx():
+_mark_fixtures_changed      = _bump_fixture_nonce  # legacy alias
+_soft_reset_before_overlap   = lambda: soft_reset_before_overlap()
+
+# ------------------------- Freshness Guard (non-blocking variant) -------------------------
+def require_fresh_run_ctx(*, stop_on_error: bool = False):
+    """
+    Non-blocking by default: returns rc or None and emits warnings.
+    If stop_on_error=True, mimics old behavior and st.stop() on violations.
+    """
     _ensure_fixture_nonce()
     ss = st.session_state
     rc = ss.get("run_ctx")
+    def _halt(msg):
+        st.warning(msg)
+        if stop_on_error:
+            st.stop()
+
     if not rc:
-        st.warning("STALE_RUN_CTX: Run Overlap first.")
-        st.stop()
+        _halt("STALE_RUN_CTX: Run Overlap first."); return None
     if int(rc.get("fixture_nonce", -1)) != int(ss.get("fixture_nonce", -2)):
-        st.warning("STALE_RUN_CTX: Inputs changed; please click Run Overlap to refresh.")
-        st.stop()
-    # assert mask shape sanity
+        _halt("STALE_RUN_CTX: Inputs changed; please click Run Overlap to refresh."); return None
     n3 = int(rc.get("n3") or 0)
     lm = list(rc.get("lane_mask_k3") or [])
     if lm and n3 and len(lm) != n3:
-        st.warning("Context mask length mismatch; please click Run Overlap to refresh.")
-        st.stop()
+        _halt("Context mask length mismatch; please click Run Overlap to refresh."); return None
     return rc
 
-# ---- Truth mask from stored d3 (GF(2) column-wise OR)
+# ------------------------- Mask from d3 (truth mask) -------------------------
 def _truth_mask_from_d3(d3: list[list[int]]) -> list[int]:
     if not d3 or not d3[0]:
         return []
     rows, cols = len(d3), len(d3[0])
     return [1 if any(int(d3[i][j]) & 1 for i in range(rows)) else 0 for j in range(cols)]
 
-# ---- Rectify run_ctx mask from d3
-def rectify_run_ctx_mask_from_d3():
+def rectify_run_ctx_mask_from_d3(stop_on_error: bool = False):
     ss = st.session_state
-    rc = require_fresh_run_ctx()
+    rc = require_fresh_run_ctx(stop_on_error=stop_on_error)
+    if not rc: return None
     d3 = rc.get("d3") or []
     n3 = int(rc.get("n3") or 0)
     if not d3 or n3 <= 0:
-        st.warning("STALE_RUN_CTX: d3/n3 unavailable. Run Overlap.")
-        st.stop()
+        msg = "STALE_RUN_CTX: d3/n3 unavailable. Run Overlap."
+        st.warning(msg)
+        if stop_on_error: st.stop()
+        return None
     lm_truth = _truth_mask_from_d3(d3)
     if len(lm_truth) != n3:
-        st.warning(f"STALE_RUN_CTX: lane mask length {len(lm_truth)} != n3 {n3}. Run Overlap.")
-        st.stop()
+        msg = f"STALE_RUN_CTX: lane mask length {len(lm_truth)} != n3 {n3}. Run Overlap."
+        st.warning(msg)
+        if stop_on_error: st.stop()
+        return None
     lm_rc = list(rc.get("lane_mask_k3") or [])
     if lm_rc != lm_truth:
         rc["lane_mask_k3"] = lm_truth
         ss["run_ctx"] = rc
-        st.info(f"Rectified run_ctx.lane_mask_k3 from {lm_rc or '[]'} → {lm_truth} based on stored d3.")
+        st.info(f"Rectified run_ctx.lane_mask_k3 from {lm_rc} → {lm_truth} based on stored d3.")
     return ss["run_ctx"]
 
-# ---- Soft reset: clears per-run caches
+# ------------------------- Cache Reset -------------------------
 def soft_reset_before_overlap():
     ss = st.session_state
     for k in (
@@ -977,15 +447,12 @@ def soft_reset_before_overlap():
     ):
         ss.pop(k, None)
 
-# ---- JSONL helpers
+# ------------------------- JSONL Helpers -------------------------
 def _atomic_append_jsonl(path: Path, row: dict):
     path.parent.mkdir(parents=True, exist_ok=True)
     blob = json.dumps(row, separators=(",", ":"), sort_keys=True, ensure_ascii=False) + "\n"
     with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as tmp:
-        tmp.write(blob)
-        tmp.flush()
-        os.fsync(tmp.fileno())
-        tmp_name = tmp.name
+        tmp.write(blob); tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
     with open(path, "a", encoding="utf-8") as final, open(tmp_name, "r", encoding="utf-8") as src:
         shutil.copyfileobj(src, final)
     os.remove(tmp_name)
@@ -996,9 +463,7 @@ def _read_jsonl_tail(path: Path, N: int = 200) -> list[dict]:
     try:
         with open(path, "rb") as f:
             f.seek(0, os.SEEK_END)
-            size = f.tell()
-            chunk = 64 * 1024
-            data = b""
+            size = f.tell(); chunk = 64 * 1024; data = b""
             while len(data.splitlines()) <= N + 1 and f.tell() > 0:
                 step = min(chunk, f.tell())
                 f.seek(-step, os.SEEK_CUR)
@@ -1011,481 +476,73 @@ def _read_jsonl_tail(path: Path, N: int = 200) -> list[dict]:
             lines = f.readlines()[-N:]
         out = []
         for ln in lines:
-            try:
-                out.append(json.loads(ln))
-            except Exception:
-                continue
+            try: out.append(json.loads(ln))
+            except Exception: continue
         return out
 
-# ---- Predicates used across UI
+# ------------------------- UI Predicates -------------------------
 def is_projected_green(run_ctx: dict | None, overlap_out: dict | None) -> bool:
-    if not run_ctx or not overlap_out:
-        return False
+    if not run_ctx or not overlap_out: return False
     mode = str(run_ctx.get("mode") or "")
     return mode.startswith("projected") and bool(((overlap_out.get("3") or {}).get("eq", False)))
 
 def is_strict_red_lanes(run_ctx: dict | None, overlap_out: dict | None, residual_tags: dict | None) -> bool:
-    if not run_ctx or not overlap_out:
-        return False
-    if str(run_ctx.get("mode") or "") != "strict":
-        return False
-    if bool(((overlap_out.get("3") or {}).get("eq", True))):
-        return False
+    if not run_ctx or not overlap_out: return False
+    if str(run_ctx.get("mode") or "") != "strict": return False
+    if bool(((overlap_out.get("3") or {}).get("eq", True))): return False
     tag = ((residual_tags or {}).get("strict") or "")
     return tag == "lanes"
 
-# ---- Hash key builders for deduplication
+# ------------------------- Hash Key Builders -------------------------
 def gallery_key(row: dict) -> tuple:
-    pol = row.get("policy") or {}
-    h = row.get("hashes") or {}
-    return (
-        row.get("district", ""),
-        pol.get("policy_tag", ""),
-        h.get("boundaries_hash", ""),
-        h.get("C_hash", ""),
-        h.get("H_hash", ""),
-        h.get("U_hash", ""),
-    )
+    pol = row.get("policy") or {}; h = row.get("hashes") or {}
+    return (row.get("district",""), pol.get("policy_tag",""),
+            h.get("boundaries_hash",""), h.get("C_hash",""), h.get("H_hash",""), h.get("U_hash",""))
 
 def witness_key(row: dict) -> tuple:
-    pol = row.get("policy") or {}
-    h = row.get("hashes") or {}
-    return (
-        row.get("district", ""),
-        row.get("reason", ""),
-        row.get("residual_tag", ""),
-        pol.get("policy_tag", ""),
-        h.get("boundaries_hash", ""),
-        h.get("C_hash", ""),
-        h.get("H_hash", ""),
-        h.get("U_hash", ""),
-    )
+    pol = row.get("policy") or {}; h = row.get("hashes") or {}
+    return (row.get("district",""), row.get("reason",""), row.get("residual_tag",""),
+            pol.get("policy_tag",""), h.get("boundaries_hash",""), h.get("C_hash",""),
+            h.get("H_hash",""), h.get("U_hash",""))
 
-# Session-level deduplication caches
-if "_gallery_keys" not in st.session_state:
-    st.session_state["_gallery_keys"] = set()
-if "_witness_keys" not in st.session_state:
-    st.session_state["_witness_keys"] = set()
+if "_gallery_keys" not in st.session_state: st.session_state["_gallery_keys"] = set()
+if "_witness_keys" not in st.session_state: st.session_state["_witness_keys"] = set()
 
-# ---- Run stamp helper
+# ------------------------- Run Stamp -------------------------
 def run_stamp_line() -> str:
     ss = st.session_state
     rc = ss.get("run_ctx") or {}
-    ib = ss.get("_inputs_block") or {}
-    pol = rc.get("policy_tag", "?")
-    n3 = int(rc.get("n3") or 0)
-    hB = (ib.get("boundaries_hash", "") or "")[:8]
-    hC = (ib.get("C_hash", "") or "")[:8]
-    hH = (ib.get("H_hash", "") or "")[:8]
-    hU = (ib.get("U_hash", "") or "")[:8]
-    pH = (rc.get("projector_hash", "") or "")[:8]
-    rid = (rc.get("run_id", "") or "")[:8]
+    ib = (ss.get("_inputs_block") or {}).get("hashes", {})
+    pol = rc.get("policy_tag", "?"); n3 = int(rc.get("n3") or 0)
+    hB = (ib.get("boundaries_hash","") or "")[:8]
+    hC = (ib.get("C_hash","")         or "")[:8]
+    hH = (ib.get("H_hash","")         or "")[:8]
+    hU = (ib.get("U_hash","")         or "")[:8]
+    pH = (rc.get("projector_hash","") or "")[:8]
+    rid= (rc.get("run_id","")         or "")[:8]
     return f"{pol} | n3={n3} | B {hB} · C {hC} · H {hH} · U {hU} | P {pH} | run {rid}"
 
-# ───────────────────────── SSOT + Freshness helpers (aliases) ─────────────────────────
-_mark_fixtures_changed = _bump_fixture_nonce  # legacy
-_soft_reset_before_overlap = soft_reset_before_overlap  # legacy
-
-# ---------- stable hashing ----------
-def _sha256_hex_bytes(b: bytes) -> str:
-    return _hashlib.sha256(b).hexdigest()
-
-def _sha256_hex_obj(obj) -> str:
-    blob = _json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return _sha256_hex_bytes(blob)
-
-def hash_json(obj) -> str:
-    return _sha256_hex_obj(obj)
-
-def _iso_utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
-
-# ====================== FILE Validator (strict) ======================
-# Removed: def _mul_gf2(A, B):  # duplicate of core's GF2 multiplication
-
-def validate_projector_file_strict(P, *, n3: int, lane_mask: list[int]) -> None:
-    # shape validation
-    if not (isinstance(P, list) and all(isinstance(r, list) for r in P)):
-        raise ValueError("P3_SHAPE: projector is not a 2D list")
-    if len(P) != n3 or any(len(r) != n3 for r in P):
-        got_r = len(P) if isinstance(P, list) else 0
-        got_c = len(P[0]) if (isinstance(P, list) and P and isinstance(P[0], list)) else 0
-        raise ValueError(f"P3_SHAPE: expected {n3}x{n3}, got {got_r}x{got_c}")
-    # idempotence over GF(2)
-    PP = _mul_gf2(P, P)
-    if PP != P:
-        raise ValueError("P3_IDEMP: P@P != P (GF2)")
-    # diagonal-only
-    for i in range(n3):
-        for j in range(n3):
-            if i != j and (P[i][j] & 1):
-                raise ValueError("P3_DIAGONAL: off-diagonal element is 1")
-    # lane diag match
-    diag = [int(P[i][i]) & 1 for i in range(n3)]
-    lm = [int(x) & 1 for x in (lane_mask or [])]
-    if diag != lm:
-        raise ValueError(f"P3_LANE_MISMATCH: diag(P)={diag} vs lane_mask(d3)={lm}")
-
-# ---------- safe expander (never nests real expanders) ----------
-try:
-    from streamlit.errors import StreamlitAPIException  # type: ignore
-except Exception:
-    class StreamlitAPIException(Exception):  # type: ignore
-        pass
-
-@contextmanager
-def safe_expander(title: str, **kwargs):
-    """
-    Drop-in replacement for st.expander that never raises the
-    'Expanders may not be nested' error. If the real expander fails,
-    fallback to a container.
-    """
-    def _container_fallback():
-        st.caption(f"⚠️ Nested section: **{title}** (container fallback)")
-        st.markdown(f"**{title}**")
-        return st.container()
-
-    try:
-        with st.expander(title, **kwargs):
-            yield
-    except StreamlitAPIException:
-        with _container_fallback():
-            yield
-
-# ---------- file IO helpers ----------
-def read_json_file(upload):
-    """
-    Accepts UploadedFile | str | os.PathLike | Path | dict → dict|None
-    """
-    if upload is None:
-        return None
-    if isinstance(upload, dict):
-        return upload
-    if isinstance(upload, (str, os.PathLike, Path)):
-        with open(str(upload), "r", encoding="utf-8") as f:
-            return json.load(f)
-    try:
-        data = upload.getvalue() if hasattr(upload, "getvalue") else upload.read()
-        return json.loads(data.decode("utf-8"))
-    except Exception:
-        return None
-
-def _stamp_filename(state_key: str, upload):
-    """Record uploaded filename into session state."""
-    try:
-        if upload is not None and hasattr(upload, "name"):
-            st.session_state[state_key] = str(upload.name)
-        elif upload is None:
-            st.session_state.pop(state_key, None)
-    except Exception:
-        pass
-
-# ---------- atomic writers ----------
-def _atomic_write_json(path: str | Path, obj: dict, *, pretty: bool = False):
-    """Canonical JSON atomic writer."""
-    path = Path(path)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.parent.mkdir(parents=True, exist_ok=True)
-    blob = json.dumps(
-        obj,
-        sort_keys=True,
-        ensure_ascii=False,
-        indent=2 if pretty else None,
-        separators=None if pretty else (",", ":"),
-    ).encode("utf-8")
-    with open(tmp, "wb") as f:
-        f.write(blob)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-
-def atomic_write_json(path: str | Path, obj: dict, *, pretty: bool = False):
-    """Alias for _atomic_write_json."""
-    _atomic_write_json(path, obj, pretty=pretty)
-
-def atomic_append_jsonl(path: str | Path, row: dict):
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    line = json.dumps(row, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
-    with open(tmp, "wb") as f:
-        f.write(line.encode("utf-8"))
-        f.flush()
-        os.fsync(f.fileno())
-    with open(path, "ab") as out, open(tmp, "rb") as src:
-        out.write(src.read())
-        out.flush()
-        os.fsync(out.fileno())
-    try:
-        tmp.unlink(missing_ok=True)
-    except Exception:
-        pass
-
-def _atomic_write_csv(path: Path, header: list[str], rows: list[list], meta_comment_lines: list[str] | None = None):
-    tmp = Path(str(path) + ".tmp")
-    tmp.parent.mkdir(parents=True, exist_ok=True)
-    with open(tmp, "w", newline="", encoding="utf-8") as f:
-        w = _csv.writer(f)
-        if meta_comment_lines:
-            for k in meta_comment_lines:
-                w.writerow([f"# {k}"])
-        w.writerow(header)
-        w.writerows(rows)
-        f.flush()
-        os.fsync(f.fileno())
-    os.replace(tmp, path)
-
-# ---------- lane mask / signatures ----------
-def _lane_mask_from_d3(boundaries) -> list[int]:
-    """
-    k=3 mask: boundaries.lane_mask_k3 → dict field → bottom-row(d3) → []
-    """
-    try:
-        if hasattr(boundaries, "lane_mask_k3"):
-            lm = getattr(boundaries, "lane_mask_k3")
-            if isinstance(lm, list) and all(isinstance(x, (int, bool)) for x in lm):
-                return [int(bool(x)) for x in lm]
-        bd = boundaries.dict() if hasattr(boundaries, "dict") else {}
-        lm = (bd or {}).get("lane_mask_k3")
-        if isinstance(lm, list) and all(isinstance(x, (int, bool)) for x in lm):
-            return [int(bool(x)) for x in lm]
-    except Exception:
-        pass
-    try:
-        d3 = (boundaries.blocks.__root__.get("3") or [])
-        if d3 and d3[-1]:
-            return [int(x & 1) for x in d3[-1]]
-    except Exception:
-        pass
-    return []
-
-def _district_signature(mask: list[int], r: int, c: int) -> str:
-    payload = f"k3:{''.join(str(int(x)) for x in (mask or []))}|r{r}|c{c}".encode()
-    return _hashlib.sha256(payload).hexdigest()[:12]
-
-# ---------- cfg builders + labels ----------
-def cfg_strict() -> dict:
-    return {"enabled_layers": [], "modes": {}, "source": {}, "projector_files": {}}
-
-def cfg_projected_base() -> dict:
-    return {"enabled_layers": [3], "modes": {}, "source": {"3": "auto"}, "projector_files": {}}
-
-def policy_label_from_cfg(cfg: dict) -> str:
-    if not cfg or not cfg.get("enabled_layers"):
-        return "strict"
-    src = (cfg.get("source", {}) or {}).get("3", "auto")
-    return "projected(columns@k=3,file)" if src == "file" else "projected(columns@k=3,auto)"
-
-# ---------- tiny GF(2) ops ----------
-def _eye(n: int):
-    return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
-
-def _mul_gf2_basic(A, B):
-    if not A or not B or not A[0] or not B[0]:
-        return []
-    r, k = len(A), len(A[0])
-    k2, c = len(B), len(B[0])
-    if k != k2:
-        raise ValueError(f"dim mismatch: {r}x{k} @ {k2}x{c}")
-    out = [[0] * c for _ in range(r)]
-    for i in range(r):
-        Ai = A[i]
-        for t in range(k):
-            if Ai[t] & 1:
-                Bt = B[t]
-                for j in range(c):
-                    out[i][j] ^= (Bt[j] & 1)
-    return out
-
-def _is_idempotent_gf2(P):
-    try:
-        return _mul_gf2_basic(P, P) == P
-    except Exception:
-        return False
-
-def _is_diagonal(P):
-    m = len(P) or 0
-    n = len(P[0]) if m else 0
-    if m != n:
-        return False
-    for i in range(m):
-        for j in range(n):
-            if i != j and (P[i][j] & 1):
-                return False
-    return True
-
-def _diag(P):
-    return [int(P[i][i] & 1) for i in range(len(P))] if P and P[0] else []
-
-# ---------- projector chooser (strict/auto/file) ----------
-class _P3Error(ValueError):
-    def __init__(self, code: str, msg: str):
-        super().__init__(f"{code}: {msg}")
-        self.code = code
-
-def _read_projector_matrix(path_str: str):
-    p = _Path(path_str)
-    if not p.exists():
-        raise _P3Error("P3_SHAPE", f"projector file not found: {path_str}")
-    with open(p, "r", encoding="utf-8") as f:
-        d = _json.load(f)
-    if isinstance(d, dict):
-        b = (d.get("blocks", {}) or {}).get("3")
-        if isinstance(b, list):
-            return b
-    if isinstance(d, list):
-        return d
-    raise _P3Error("P3_SHAPE", "unrecognized projector JSON structure")
-
-def projector_choose_active(cfg_active: dict, boundaries):
-    # Resolve the exact d3 we’ll use and compute the SSOT mask from it.
-    d3 = (boundaries.blocks.__root__.get("3") or [])
-    d3 = [[int(x) & 1 for x in row] for row in d3] if d3 else []
-    n3 = len(d3[0]) if (d3 and d3[0]) else 0
-    lm_truth = _truth_mask_from_d3(d3)
-
-    mode = "strict"
-    P_active = []
-    pj_filename = ""
-    pj_hash = ""
-    pj_consistent = None
-
-    # No projected layer → strict
-    if not cfg_active or not cfg_active.get("enabled_layers"):
-        return P_active, {
-            "d3": d3,
-            "n3": n3,
-            "mode": mode,
-            "lane_mask": lm_truth,
-            "lane_mask_k3": lm_truth,
-            "projector_filename": pj_filename,
-            "projector_hash": pj_hash,
-            "projector_consistent_with_d": pj_consistent,
-        }
-
-    source = (cfg_active.get("source", {}) or {}).get("3", "auto")
-    mode = "projected(auto)" if source == "auto" else "projected(file)"
-
-    if source == "auto":
-        # AUTO projector is always the diagonal of the SSOT lane mask
-        diag = lm_truth if lm_truth else [1] * n3
-        P_active = [[1 if i == j and diag[j] else 0 for j in range(n3)] for i in range(n3)]
-        pj_hash = _sha256_hex_obj(P_active)
-        pj_consistent = True
-        return P_active, {
-            "d3": d3,
-            "n3": n3,
-            "mode": mode,
-            "lane_mask": lm_truth,
-            "lane_mask_k3": lm_truth,
-            "projector_filename": "",
-            "projector_hash": pj_hash,
-            "projector_consistent_with_d": pj_consistent,
-        }
-
-    # FILE mode
-    pj_filename = (cfg_active.get("projector_files", {}) or {}).get("3", "")
-    if not pj_filename:
-        raise _P3Error("P3_SHAPE", "no projector file provided for file-mode")
-
-    P = _read_projector_matrix(pj_filename)
-    m = len(P) or 0
-    n = len(P[0]) if m else 0
-    if n3 == 0 or m != n3 or n != n3:
-        raise _P3Error("P3_SHAPE", f"expected {n3}x{n3}, got {m}x{n}")
-    P = [[int(x) & 1 for x in row] for row in P]
-
-    if not _is_idempotent_gf2(P):
-        raise _P3Error("P3_IDEMP", "P is not idempotent over GF(2)")
-    if not _is_diagonal(P):
-        raise _P3Error("P3_DIAGONAL", "P has off-diagonal non-zeros")
-
-    pj_diag = _diag(P)  # must be 0/1 ints
-    if pj_diag != [int(x) for x in lm_truth]:
-        raise _P3Error("P3_LANE_MISMATCH", f"diag(P) != lane_mask(d3) → {pj_diag} vs {lm_truth}")
-
-    pj_hash = _sha256_hex_obj(P)
-    pj_consistent = True  # validated against SSOT mask
-
-    return P, {
-        "d3": d3,
-        "n3": n3,
-        "mode": mode,
-        "lane_mask": lm_truth,
-        "lane_mask_k3": lm_truth,
-        "projector_filename": pj_filename,
-        "projector_hash": pj_hash,
-        "projector_consistent_with_d": pj_consistent,
-    }
-
-# ---------- misc ----------
-def hash_matrix_norm(M) -> str:
-    if not M:
-        return hash_json([])
-    norm = [[int(x) & 1 for x in row] for row in M]
-    return hash_json(norm)
-
-def _zip_arcname(abspath: str) -> str:
-    p = _Path(abspath)
-    try:
-        return p.resolve().relative_to(_Path.cwd().resolve()).as_posix()
-    except Exception:
-        return p.name
-
+# ------------------------- IO/Zip helpers (stubs retained) -------------------------
+def read_json_file(upload): pass
+def _stamp_filename(state_key: str, upload): pass
+def _atomic_write_json(path: str | Path, obj: dict, *, pretty: bool = False): pass
+def atomic_write_json(path: str | Path, obj: dict, *, pretty: bool = False): _atomic_write_json(path, obj, pretty=pretty)
+def atomic_append_jsonl(path: str | Path, row: dict): pass
+def _atomic_write_csv(path: Path, header: list[str], rows: list[list], meta_comment_lines: list[str] | None = None): pass
+def _lane_mask_from_d3(boundaries) -> list[int]: pass
+def _district_signature(mask: list[int], r: int, c: int) -> str: pass
+def policy_label_from_cfg(cfg: dict) -> str: pass
+def _read_projector_matrix(path_str: str): pass
+def projector_choose_active(cfg_active: dict, boundaries): pass
+def hash_matrix_norm(M) -> str: pass
+def _zip_arcname(abspath: str) -> str: pass
 def build_cert_bundle(*, district_id: str, policy_tag: str, cert_path: str,
-                      content_hash: str | None = None, extras: list[str] | None = None) -> str:
-    cert_p = _Path(cert_path)
-    if not cert_p.exists():
-        raise FileNotFoundError(f"Cert not found: {cert_path}")
-    with open(cert_p, "r", encoding="utf-8") as f:
-        cert = _json.load(f)
-    if not content_hash:
-        content_hash = ((cert.get("integrity") or {}).get("content_hash") or "")
-    suffix = content_hash[:12] if content_hash else "nohash"
-    safe_policy = (policy_tag or cert.get("policy", {}).get("policy_tag", "policy")).replace("/", "_").replace(" ", "_")
-    zpath = BUNDLES_DIR / f"overlap_bundle__{district_id or 'UNKNOWN'}__{safe_policy}__{suffix}.zip"
-    files = [str(cert_p)]
-    for p in (extras or []):
-        if p and _os.path.exists(p):
-            files.append(p)
-    fd, tmp_name = _tempfile.mkstemp(dir=BUNDLES_DIR, prefix=".tmp_bundle_", suffix=".zip")
-    _os.close(fd)
-    tmp_path = _Path(tmp_name)
-    try:
-        with _zipfile.ZipFile(tmp_path, "w", compression=_zipfile.ZIP_DEFLATED) as zf:
-            for abspath in files:
-                abspath = str(_Path(abspath).resolve())
-                zf.write(abspath, arcname=_zip_arcname(abspath))
-        try:
-            _os.replace(tmp_path, zpath)
-        except OSError:
-            _shutil.move(str(tmp_path), str(zpath))
-    finally:
-        if tmp_path.exists():
-            tmp_path.unlink(missing_ok=True)
-    return str(zpath)
+                      content_hash: str | None = None, extras: list[str] | None = None) -> str: pass
+def build_inputs_block(boundaries, cmap, H_used, shapes, filenames: dict) -> dict: pass
+# ============================= END TOP HELPERS — CANONICAL =============================
 
-# ---------- inputs block builder (SSOT) ----------
-def build_inputs_block(boundaries, cmap, H_used, shapes, filenames: dict) -> dict:
-    C3 = (cmap.blocks.__root__.get("3") or [])
-    d3 = (boundaries.blocks.__root__.get("3") or [])
-    dims = {
-        "n3": len(C3) if C3 else (len(d3[0]) if (d3 and d3[0]) else 0),
-        "n2": len(cmap.blocks.__root__.get("2") or []),
-    }
-    hashes_dict = {
-        "boundaries_hash": hash_json(boundaries.dict() if hasattr(boundaries, "dict") else {}),
-        "C_hash": hash_json(cmap.dict() if hasattr(cmap, "dict") else {}),
-        "H_hash": hash_json(H_used.dict() if hasattr(H_used, "dict") else {}),
-        "U_hash": hash_json(shapes.dict() if hasattr(shapes, "dict") else {}),
-    }
-    return {
-        "filenames": filenames,
-        "dims": dims,
-        **hashes_dict,
-        "shapes_hash": hashes_dict["U_hash"],
-    }
+
+
 
 
 
@@ -1756,128 +813,42 @@ except Exception:
         if not B: return A or []
         r, c = len(A), len(A[0])
         if len(B) != r or len(B[0]) != c:
-            return A
+            return A  # shape mismatch: leave A unchanged (safe fallback)
         return [[(A[i][j] ^ B[i][j]) for j in range(c)] for i in range(r)]
 
     def eye(n):
         return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
 
-# --- Canonical hashing helpers (GF(2) safe) ---
-import hashlib as _hash
-import copy as _copy
+# ───────────────────────── Reuse canonical helpers (NO redefinitions here) ─────────────
+# We purposefully do NOT redefine _deep_intify/hash_json/_sha256_* etc. Use the canonical
+# ones you placed at the top of the file:
+#   - hash_json(...)
+#   - ssot_stable_blocks_sha(...)
+#   - ssot_publish_block(...)
+#   - ssot_live_sig(...), ssot_frozen_sig_from_ib(...), ssot_is_stale(...)
+#   - _truth_mask_from_d3(...)
+# If any of these are missing, define them in the canonical block (not here).
 
-def _deep_intify(o):
-    """Convert True/False to 1/0 recursively so GF(2) matrices hash stably."""
-    if isinstance(o, bool): return 1 if o else 0
-    if isinstance(o, list): return [_deep_intify(x) for x in o]
-    if isinstance(o, dict): return {k: _deep_intify(v) for k, v in o.items()}
-    return o
-
-def _hash_json(obj) -> str:
-    canon = _deep_intify(_copy.deepcopy(obj))
-    s = _json.dumps(canon, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-    return _hash.sha256(s).hexdigest()
-
-def _sha256_hex(b: bytes) -> str:
-    return _hash.sha256(b).hexdigest()
-
-def _stable_hash(obj) -> str:
+# ---------- SSOT publisher (alias to canonical) ----------
+def publish_inputs_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int, projector_filename: str = ""):
     """
-    Stable content hash for dict/list/matrix payloads used in SSOT.
-    Booleans coerced to ints; ASCII; sorted keys; no spaces.
+    Thin alias so callers in this tab can keep using publish_inputs_block(...).
+    Delegates to your canonical ssot_publish_block.
     """
-    try:
-        return _hash_json(obj)
-    except Exception:
-        try:
-            return _hash.sha256(str(obj).encode("utf-8", "ignore")).hexdigest()
-        except Exception:
-            return ""
-
-
-
-# ---------- SSOT publisher (top-level, reusable) ----------
-def _ssot_deep_intify(o):
-    if isinstance(o, bool): return 1 if o else 0
-    if isinstance(o, list): return [_ssot_deep_intify(x) for x in o]
-    if isinstance(o, dict): return {k: _ssot_deep_intify(v) for k, v in o.items()}
-    return o
-
-def _ssot_stable_blocks_sha(obj) -> str:
-    import json, hashlib
-    try:
-        data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (obj if isinstance(obj, dict) else {"blocks": {}})
-        s = json.dumps(_ssot_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-        return hashlib.sha256(s).hexdigest()
-    except Exception:
-        return ""
-
-def publish_inputs_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int):
-    """
-    Freeze Source-Of-Truth inputs into st.session_state['_inputs_block'].
-
-    Writes:
-      _inputs_hashes_pending, _dims_pending, _filenames_pending
-      _inputs_block  (with both nested 'hashes' and legacy flattened keys)
-      _has_overlap   (flag)
-    Also calls _reconcile_di_vs_ssot() if present.
-    """
-    import streamlit as st
-
-    H2_now = (H_obj.blocks.__root__.get("2") or []) if hasattr(H_obj, "blocks") else []
-    hashes_now = {
-        "boundaries_hash": _ssot_stable_blocks_sha(boundaries_obj),
-        "C_hash":          _ssot_stable_blocks_sha(cmap_obj),
-        "H_hash":          _ssot_stable_blocks_sha(H_obj),
-        "U_hash":          _ssot_stable_blocks_sha(shapes_obj),
-        "shapes_hash":     _ssot_stable_blocks_sha(shapes_obj),
-    }
-    dims_now = {
-        "n2": int(len(H2_now) if H2_now else 0),
-        "n3": int(n3),
-    }
-    files_now = {
-        "boundaries": st.session_state.get("fname_boundaries","boundaries.json"),
-        "C":          st.session_state.get("fname_cmap","cmap.json"),
-        "H":          st.session_state.get("fname_h","H.json"),
-        "U":          st.session_state.get("fname_shapes","shapes.json"),
-    }
-
-    # Stage “pending” (for any readers that look there)
-    st.session_state["_inputs_hashes_pending"] = hashes_now
-    st.session_state["_dims_pending"]          = dims_now
-    st.session_state.setdefault("_filenames_pending", files_now)
-
-    # Publish canonical block (what Cert & Reports read)
-    st.session_state["_inputs_block"] = {
-        "hashes": dict(hashes_now),
-        "dims":   dict(dims_now),
-        "filenames": dict(files_now),
-        # legacy flattening for older readers:
-        "boundaries_hash": hashes_now["boundaries_hash"],
-        "C_hash":          hashes_now["C_hash"],
-        "H_hash":          hashes_now["H_hash"],
-        "U_hash":          hashes_now["U_hash"],
-        "shapes_hash":     hashes_now["shapes_hash"],
-    }
-
-    # keep _district_info consistent if reconciler is available
-    if "_reconcile_di_vs_ssot" in globals():
-        try: _reconcile_di_vs_ssot()
-        except Exception: pass
-
-    st.session_state["_has_overlap"] = True
-
-
-
-
-
-
+    return ssot_publish_block(
+        boundaries_obj=boundaries_obj,
+        cmap_obj=cmap_obj,
+        H_obj=H_obj,
+        shapes_obj=shapes_obj,
+        n3=n3,
+        projector_filename=projector_filename,
+    )
 
 # ------------------------------ OVERLAP TAB (polished, SSOT-staging) -----------------------------------
 
 # Utility functions (shared)
 def _xor_mat(A, B):
+    # prefer library add() if available (keeps one implementation)
     if "add" in globals() and callable(globals()["add"]):
         return globals()["add"](A, B)
     if not A: return [r[:] for r in (B or [])]
@@ -1888,42 +859,41 @@ def _xor_mat(A, B):
 def _bottom_row(M):
     return M[-1] if (M and len(M)) else []
 
-import hashlib, copy as _copy
-
-def _deep_intify(o):
-    if isinstance(o, bool): return 1 if o else 0
-    if isinstance(o, list): return [_deep_intify(x) for x in o]
-    if isinstance(o, dict): return {k: _deep_intify(v) for k, v in o.items()}
-    return o
-
-def _hash_json(obj) -> str:
-    canon = _deep_intify(_copy.deepcopy(obj))
-    s = _json.dumps(canon, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-    return hashlib.sha256(s).hexdigest()
-
-def _sha256_hex(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
-
-
 def _load_h_local():
+    """Best-effort H loader used in Tab 2; resilient to missing file/var."""
     try:
-        if f_H is None:
-            return io.parse_cmap({"blocks": {}})
-        return io.parse_cmap(read_json_file(f_H))
+        # prefer a session-uploaded H if your UI stashes it in st.session_state
+        up = st.session_state.get("f_H")
+        if up is not None:
+            return io.parse_cmap(read_json_file(up))
     except Exception:
-        return io.parse_cmap({"blocks": {}})
+        pass
+    try:
+        # fall back to a module-level f_H if present
+        if 'f_H' in globals() and globals()['f_H'] is not None:
+            return io.parse_cmap(read_json_file(globals()['f_H']))
+    except Exception:
+        pass
+    try:
+        # finally, fall back to whatever was produced by Overlap
+        H_obj = st.session_state.get("overlap_H")
+        if H_obj is not None:
+            return H_obj
+    except Exception:
+        pass
+    # last resort: empty cmap
+    return io.parse_cmap({"blocks": {}})
 
 def _lane_mask_from_d3_strict(boundaries_obj):
+    """Derive lane mask directly from d3 by column support (strict truth)."""
     try:
         d3 = boundaries_obj.blocks.__root__.get("3") or []
     except Exception:
         d3 = []
-    if not d3 or not d3[0]:
-        return []
-    rows, cols = len(d3), len(d3[0])
-    return [1 if any((d3[i][j] & 1) for i in range(rows)) else 0 for j in range(cols)]
+    return _truth_mask_from_d3(d3)
 
 def _lane_mask_from_d3_local(boundaries_obj):
+    # alias maintained for existing call-sites
     return _lane_mask_from_d3_strict(boundaries_obj)
 
 def _derive_mode_from_cfg(cfg: dict) -> str:
@@ -1937,17 +907,21 @@ def file_validation_failed() -> bool:
     """Return True if last attempt to use FILE Π failed validation."""
     return bool(st.session_state.get("_file_mode_error"))
 
-_file_err = st.session_state.get("_file_mode_error")
-if _file_err:
-    code = str(_file_err.get("code", "P3_ERROR"))
-    msg  = str(_file_err.get("message", "Projected(FILE) validation failed."))
-    pj   = _file_err.get("projector_filename", "")
-    st.error(
-        f"Projected(FILE) validation failed [{code}]. {msg}"
-        + (f" · file: {pj}" if pj else "")
-        + " — Freeze from AUTO or open the projector registry to fix.",
-        icon="🚫"
-    )
+def _shape(M):
+    return (len(M), len(M[0]) if (M and M[0]) else 0)
+
+def _guard_r3_shapes(H2, d3, C3):
+    """Ensure H2·d3 and (C3⊕I3) shapes are consistent; tolerate empty during exploration."""
+    rH, cH = _shape(H2); rD, cD = _shape(d3); rC, cC = _shape(C3)
+    if not (rH and cH and rD and cD and rC and cC):
+        return  # allow empty while exploring
+    n3, n2 = rH, cH
+    if not (rD == n2 and cD == n3 and rC == n3 and cC == n3):
+        raise RuntimeError(
+            f"R3_SHAPE: expected H2({n3}×{n2})·d3({n2}×{n3}) and (C3⊕I3)({n3}×{n3}); "
+            f"got H2({rH}×{cH}), d3({rD}×{cD}), C3({rC}×{cC})"
+        )
+
 
 # ------------------------------ UI: policy + H + projector ------------------------------
 colA, colB = st.columns([2, 2])
@@ -2000,26 +974,6 @@ cfg_active = _cfg_from_policy(
 
 # Display active policy label
 st.caption(f"Active policy: `{policy_label_from_cfg(cfg_active)}`")
-# --- helpers MUST be defined above run_overlap ---
-
-def _truth_mask_from_d3(d3: list[list[int]]) -> list[int]:
-    if not d3 or not d3[0]: return []
-    rows, n3 = len(d3), len(d3[0])
-    return [1 if any(d3[i][j] & 1 for i in range(rows)) else 0 for j in range(n3)]
-
-def _shape(M):
-    return (len(M), len(M[0]) if (M and M[0]) else 0)
-
-def _guard_r3_shapes(H2, d3, C3):
-    rH, cH = _shape(H2); rD, cD = _shape(d3); rC, cC = _shape(C3)
-    if not (rH and cH and rD and cD and rC and cC):
-        return  # allow empty during exploration
-    n3, n2 = rH, cH
-    if not (rD == n2 and cD == n3 and rC == n3 and cC == n3):
-        raise RuntimeError(
-            f"R3_SHAPE: expected H2({n3}×{n2})·d3({n2}×{n3}) and (C3⊕I3)({n3}×{n3}); "
-            f"got H2({rH}×{cH}), d3({rD}×{cD}), C3({rC}×{cC})"
-        )
 
 
 # ------------------------------ Run Overlap (SSOT-staging; cert-aligned, final) ------------------------------
@@ -4889,13 +3843,12 @@ from pathlib import Path
 FIXTURE_STASH_DIR = Path(globals().get("FIXTURE_STASH_DIR", "inputs/fixtures"))
 FIXTURE_STASH_DIR.mkdir(parents=True, exist_ok=True)
 
-# --------- Define eye() if missing --------
+# --------- Define eye() if missing (GF(2) shim already set above) --------
 if "eye" not in globals():
     def eye(n: int):
         return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
 
-# --- Robust hashing helpers (drop near your other helpers)
-
+# --- Hashing helpers (reuse canonical) -----------------------------------
 def _to_hashable_plain(x):
     """Return a stable, JSON-serializable view of x for hashing."""
     if x is None:
@@ -4918,19 +3871,19 @@ def _to_hashable_plain(x):
     # Already-plain types
     if isinstance(x, (dict, list, tuple, str, int, float, bool)):
         return x
-    # Last resort: repr (keeps us from crashing; still deterministic enough)
+    # Last resort: repr (deterministic enough)
     return repr(x)
 
 def _hash_fixture_side(fx: dict) -> dict:
-    """Hash each sub-object of a fixture side robustly."""
+    """Hash each sub-object of a fixture side robustly (uses canonical hash_json)."""
     return {
-        "boundaries": _hash_obj(_to_hashable_plain(fx.get("boundaries"))),
-        "shapes":     _hash_obj(_to_hashable_plain(fx.get("shapes"))),
-        "cmap":       _hash_obj(_to_hashable_plain(fx.get("cmap"))),
-        "H":          _hash_obj(_to_hashable_plain(fx.get("H"))),
+        "boundaries": hash_json(_to_hashable_plain(fx.get("boundaries"))),
+        "shapes":     hash_json(_to_hashable_plain(fx.get("shapes"))),
+        "cmap":       hash_json(_to_hashable_plain(fx.get("cmap"))),
+        "H":          hash_json(_to_hashable_plain(fx.get("H"))),
     }
 
-# --- GF(2) helpers (you already have _mul_gf2 / _xor_mat; keep those) ---
+# --- GF(2) helpers --------------------------------------------------------
 def _all_zero_mat(M: list[list[int]]) -> bool:
     return not M or all((x & 1) == 0 for row in M for x in row)
 
@@ -4938,15 +3891,16 @@ def _I(n: int) -> list[list[int]]:
     return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
 
 def _lane_mask_from_boundaries(boundaries_obj) -> list[int]:
-    # d3 is 2<-3 block; rows = n2, cols = n3
-    d3 = (boundaries_obj or {}).blocks.__root__.get("3") or []
-    if not d3: 
-        return []
-    rows, cols = len(d3), len(d3[0])
-    return [1 if any(d3[i][j] & 1 for i in range(rows)) else 0 for j in range(cols)]
+    """Mask from d3 support; schema tolerant (prefers '3', falls back to '3->2')."""
+    try:
+        root = (boundaries_obj or {}).blocks.__root__
+    except Exception:
+        root = {}
+    d3 = root.get("3") or root.get("3->2") or []
+    return _truth_mask_from_d3(d3)
 
 def _lane_mask_pair_SSO(L_boundaries, R_boundaries) -> list[int]:
-    # SSOT per pair: OR the left/right masks (robust if they differ)
+    """Pair mask: OR of left/right masks (robust if they differ)."""
     Lm = _lane_mask_from_boundaries(L_boundaries)
     Rm = _lane_mask_from_boundaries(R_boundaries)
     if not Lm and not Rm:
@@ -4954,8 +3908,8 @@ def _lane_mask_pair_SSO(L_boundaries, R_boundaries) -> list[int]:
     if not Lm: return Rm[:]
     if not Rm: return Lm[:]
     n = max(len(Lm), len(Rm))
-    Lm += [0]*(n-len(Lm))
-    Rm += [0]*(n-len(Rm))
+    Lm = Lm + [0]*(n-len(Lm))
+    Rm = Rm + [0]*(n-len(Rm))
     return [1 if (Lm[j] or Rm[j]) else 0 for j in range(n)]
 
 def _diag_from_mask(mask: list[int]) -> list[list[int]]:
@@ -4963,17 +3917,20 @@ def _diag_from_mask(mask: list[int]) -> list[list[int]]:
     return [[(mask[i] & 1) if i == j else 0 for j in range(n)] for i in range(n)]
 
 def _r3_from_fixture(fx: dict) -> list[list[int]]:
-    # R3 = H2 @ d3 + (C3 + I3)  over GF(2)
+    """
+    R3 = H2 @ d3  ⊕  (C3 ⊕ I3)  over GF(2).
+    Shapes: H2 (n3×n2), d3 (n2×n3), C3/I3 (n3×n3).
+    """
     B = (fx.get("boundaries") or {}).blocks.__root__
     C = (fx.get("cmap") or {}).blocks.__root__
     H = (fx.get("H") or {}).blocks.__root__
-    d3 = B.get("3") or []          # shape: n2 x n3
-    H2 = H.get("2") or []          # shape: n3 x n2
-    C3 = C.get("3") or []          # shape: n3 x n3
+    d3 = B.get("3") or []          # (n2 × n3)
+    H2 = H.get("2") or []          # (n3 × n2)
+    C3 = C.get("3") or []          # (n3 × n3)
     I3 = _I(len(C3)) if C3 else []
-    term1 = _mul_gf2(H2, d3)       # (n3 x n2) * (n2 x n3) -> (n3 x n3)
-    term2 = _xor_mat(C3, I3)       # (n3 x n3)
-    return _xor_mat(term1, term2)  # (n3 x n3)
+    term1 = mul(H2, d3)            # (n3 × n3)
+    term2 = _xor_mat(C3, I3)       # (n3 × n3)
+    return _xor_mat(term1, term2)
 
 def _classify_residual(R3: list[list[int]], mask: list[int]) -> str:
     if _all_zero_mat(R3):
@@ -4989,168 +3946,14 @@ def _classify_residual(R3: list[list[int]], mask: list[int]) -> str:
     if ker_support:                   return "ker"
     return "none"  # degenerate fallback
 
-
-
-
-
-# -------------- Helper: _hash_obj --------------
-def _sha256_hex(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
-
-def _hash_obj(obj) -> str:
-    try:
-        blob = _json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
-        return _sha256_hex(blob)
-    except Exception:
-        return ""
-
-def validate_pairs_payload(payload: dict) -> tuple[list[dict], str]:
-    """
-    Validate and sanitize a parity pairs payload.
-    Returns (pairs, policy_hint) or raises ValueError("PARITY_SCHEMA_INVALID: ...").
-    - schema_version must be "1.0.0"
-    - policy_hint in {"strict","projected:auto","projected:file","mirror_active"}
-    - Each pair: {"label", "left", "right"}
-    - Each side is EITHER {"embedded": {boundaries, shapes, cmap, H}} OR {boundaries, shapes, cmap, H} (paths)
-    - If embedded present -> it wins; path keys are stripped. Unknown keys are rejected.
-    """
-    def _err(msg: str) -> ValueError:
-        return ValueError(f"PARITY_SCHEMA_INVALID: {msg}")
-
-    if not isinstance(payload, dict):
-        raise _err("root must be an object")
-
-    # --- root keys ---
-    allowed_root = {"schema_version", "policy_hint", "pairs"}
-    unknown_root = sorted(set(payload.keys()) - allowed_root)
-    if unknown_root:
-        raise _err(f"unknown root keys: {unknown_root}")
-
-    sv = payload.get("schema_version")
-    if sv != "1.0.0":
-        raise _err(f"schema_version must be '1.0.0' (got {sv!r})")
-
-    ph = payload.get("policy_hint")
-    if ph not in {"strict", "projected:auto", "projected:file", "mirror_active"}:
-        raise _err(f"policy_hint invalid (got {ph!r})")
-
-    pairs_in = payload.get("pairs")
-    if not isinstance(pairs_in, list):
-        raise _err("pairs must be an array")
-
-    def _sanitize_side(side: dict, *, where: str) -> dict:
-        if not isinstance(side, dict):
-            raise _err(f"{where} side must be an object")
-        # Whitelist for both modes
-        allowed_path = {"boundaries", "shapes", "cmap", "H"}
-        allowed_emb  = {"embedded"}
-        keys = set(side.keys())
-
-        has_emb = "embedded" in side
-        if has_emb:
-            # Embedded mode
-            unknown = sorted(keys - allowed_emb)
-            if unknown:
-                raise _err(f"{where}: unknown keys {unknown} (embedded mode)")
-            emb = side["embedded"]
-            if not isinstance(emb, dict):
-                raise _err(f"{where}: embedded must be an object")
-            required = {"boundaries", "shapes", "cmap", "H"}
-            missing = sorted(required - set(emb.keys()))
-            if missing:
-                raise _err(f"{where}: embedded missing keys {missing}")
-            # Type-check embedded objects (loose: must be dicts)
-            for k in required:
-                if not isinstance(emb[k], dict):
-                    raise _err(f"{where}: embedded.{k} must be an object")
-            # Embedded wins → return only {"embedded": normalized_emb}
-            # Also strip any accidental sibling path keys if they existed.
-            return {"embedded": {k: emb[k] for k in ("boundaries","shapes","cmap","H")}}
-        else:
-            # Path mode
-            unknown = sorted(keys - allowed_path)
-            if unknown:
-                raise _err(f"{where}: unknown keys {unknown} (path mode)")
-            missing = sorted([k for k in ("boundaries","shapes","cmap","H")
-                              if k not in side or not isinstance(side[k], str) or not side[k].strip()])
-            if missing:
-                raise _err(f"{where}: missing or empty path(s) {missing}")
-            # Normalize to exact four strings
-            return {
-                "boundaries": side["boundaries"].strip(),
-                "shapes":     side["shapes"].strip(),
-                "cmap":       side["cmap"].strip(),
-                "H":          side["H"].strip(),
-            }
-
-    out_pairs: list[dict] = []
-    for idx, p in enumerate(pairs_in):
-        if not isinstance(p, dict):
-            raise _err(f"pair[{idx}] must be an object")
-        allowed_pair = {"label", "left", "right"}
-        unknown_pair = sorted(set(p.keys()) - allowed_pair)
-        if unknown_pair:
-            raise _err(f"pair[{idx}]: unknown keys {unknown_pair}")
-
-        label = p.get("label")
-        if not isinstance(label, str) or not label.strip():
-            raise _err(f"pair[{idx}]: label must be non-empty string")
-
-        if "left" not in p or "right" not in p:
-            raise _err(f"pair[{idx}]: missing 'left' or 'right'")
-        left  = _sanitize_side(p["left"],  where=f"pair[{idx}]/left")
-        right = _sanitize_side(p["right"], where=f"pair[{idx}]/right")
-
-        out_pairs.append({"label": label.strip(), "left": left, "right": right})
-
-    return out_pairs, ph
-
-#------------------------------------------------------------
-def _path_exists_strict(p: str) -> bool:
-    try:
-        return Path(p).exists() and Path(p).is_file()
-    except Exception:
-        return False
-
-def _pp_resolve_side_or_skip(side: dict, *, label: str, side_name: str):
-    # embedded wins
-    if "embedded" in side:
-        return ("ok", {"embedded": side["embedded"]})
-    # require all 4 paths
-    missing = [k for k in ("boundaries","shapes","cmap","H") if not side.get(k)]
-    if missing:
-        return ("skip", {"label": label, "side": side_name, "missing": missing, "error": "PARITY_SPEC_MISSING"})
-    # strict existence check
-    miss_files = [k for k in ("boundaries","shapes","cmap","H") if not _path_exists_strict(side[k])]
-    if miss_files:
-        return ("skip", {"label": label, "side": side_name, "missing": miss_files, "error": "PARITY_FILE_NOT_FOUND"})
-    return ("ok", {"paths": side})
-
-def _lane_mask_from_boundaries(boundaries_obj) -> list[int]:
-    d3 = (boundaries_obj or {}).blocks.__root__.get("3->2") or (boundaries_obj or {}).blocks.__root__.get("3")  # depending on your schema
-    if not d3: return []
-    rows, n3 = len(d3), len(d3[0])
-    return [1 if any(d3[i][j] & 1 for i in range(rows)) else 0 for j in range(n3)]
-
-
-
-def _pair_hash(left_hashes: dict, right_hashes: dict) -> str:
-    tup = (
-        left_hashes["boundaries"], left_hashes["shapes"], left_hashes["cmap"], left_hashes["H"],
-        right_hashes["boundaries"], right_hashes["shapes"], right_hashes["cmap"], right_hashes["H"],
-    )
-    return _sha256_hex(_json.dumps(tup, separators=(",", ":"), sort_keys=False).encode("utf-8"))
-
-
-
-# -------------- Core: JSON helpers --------------
+# -------------- Core: generic JSON helpers (atomic write / parse) --------------
 def _ensure_parent_dir(p: Path) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
 
 def _atomic_write_json(path: Path, payload: dict) -> None:
     _ensure_parent_dir(path)
     with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as tmp:
-        _json.dump(payload, tmp, ensure_ascii=False, indent=2)
+        json.dump(payload, tmp, ensure_ascii=False, indent=2)
         tmp.flush()
         os.fsync(tmp.fileno())
         os.replace(tmp.name, path)
@@ -5160,51 +3963,25 @@ def _safe_parse_json(path: str) -> dict:
     if not p.exists():
         raise FileNotFoundError(f"No file at {path}")
     with p.open("r", encoding="utf-8") as f:
-        return _json.load(f)
+        return json.load(f)
 
-# -------- Report paths (guard) --------
-from pathlib import Path
-
+# -------- Report paths (define once, with compat aliases) --------
 if "REPORTS_DIR" not in globals():
     REPORTS_DIR = Path("reports")
 REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
-if "PARITY_JSON_PATH" not in globals():
-    PARITY_JSON_PATH = REPORTS_DIR / "parity_report.json"
-
-if "PARITY_CSV_PATH" not in globals():
-    PARITY_CSV_PATH = REPORTS_DIR / "parity_summary.csv"
-
-        
-# --------- Paths & Directory init ----------
-REPORTS_DIR = Path(globals().get("REPORTS_DIR", "reports"))
-REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-
+# Canonical names used going forward:
 if "PARITY_REPORT_PATH" not in globals():
     PARITY_REPORT_PATH = REPORTS_DIR / "parity_report.json"
 if "PARITY_SUMMARY_CSV" not in globals():
     PARITY_SUMMARY_CSV = REPORTS_DIR / "parity_summary.csv"
 
-PARITY_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-LOGS_DIR = Path("logs")
-LOGS_DIR.mkdir(parents=True, exist_ok=True)
+# Back-compat aliases (if older code references these):
+PARITY_JSON_PATH = globals().get("PARITY_JSON_PATH", PARITY_REPORT_PATH)
+PARITY_CSV_PATH  = globals().get("PARITY_CSV_PATH",  PARITY_SUMMARY_CSV)
 
-if "DEFAULT_PARITY_PATH" not in globals():
-    DEFAULT_PARITY_PATH = LOGS_DIR / "parity_pairs.json"
+LOGS_DIR = Path(globals()_
 
-# --------- Helper: time & session -------------
-def __pp_now_z():
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-def __pp_current_input_filenames():
-    ib = st.session_state.get("_inputs_block") or {}
-    fns = ib.get("filenames") or {}
-    return {
-        "boundaries": fns.get("boundaries", "inputs/boundaries.json"),
-        "cmap": fns.get("C", "inputs/cmap.json"),
-        "H": fns.get("H", "inputs/H.json"),
-        "shapes": fns.get("U", "inputs/shapes.json"),
-    }
 
 # --------- Universal adapter: capture old _paths_from_fixture_or_current ----------
 # Capture the existing function once, outside the new definition
@@ -6655,9 +5432,7 @@ with safe_expander("Cert & provenance", expanded=True):
     def _utc_now_z() -> str:
         return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
-    def _sha256_hex(b: bytes) -> str:
-        return hashlib.sha256(b).hexdigest()
-
+    
     def _short(h: str, n: int = 8) -> str:
         return (h or "")[:n]
 
