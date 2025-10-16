@@ -1548,11 +1548,56 @@ def _ab_is_fresh_now() -> bool:
     return True
 
 
+# --- Self-test helpers ---------------------------------------------------------
+def _policy_tag_now_from_rc(rc: dict) -> str:
+    """
+    Return the canonical policy tag for the current run context.
+    Prefer rc['policy_tag'] if present; else derive from rc['mode'].
+    """
+    pol = (rc or {}).get("policy_tag")
+    if pol:
+        return str(pol)
+
+    mode = str((rc or {}).get("mode",""))
+    # Minimal derivation if label isn't stamped yet
+    if mode == "strict":
+        return "strict"
+    if mode == "projected(file)":
+        # keep your canonical k=3 label format consistent with the rest of the app
+        return "projected(columns@k=3,file)"
+    if mode == "projected(auto)":
+        return "projected(columns@k=3,auto)"
+    # fallback (neutral)
+    return "projected(columns@k=3,auto)"
+
+def _ab_is_fresh_now() -> bool:
+    """
+    Compare the pinned A/B snapshot in session with the current SSOT + policy.
+    Returns True if it should embed; False if stale.
+    """
+    ss = st.session_state
+    ab = ss.get("ab_compare") or {}
+    if not ab:
+        return False  # no snapshot to embed
+
+    # Current canonical inputs sig (frozen SSOT)
+    frozen = tuple(ssot_frozen_sig_from_ib() or ())
+
+    # Current policy tag + projector hash (FILE only)
+    rc = ss.get("run_ctx") or {}
+    pol_now = _policy_tag_now_from_rc(rc)
+    pj_now  = rc.get("projector_hash","") if str(rc.get("mode","")) == "projected(file)" else ""
+
+    # Snapshot bits
+    ab_sig = tuple(ab.get("inputs_sig") or ())
+    ab_pol = str(ab.get("policy_tag",""))
+    ab_pj  = ((ab.get("projected") or {}).get("projector_hash","")
+              if str(rc.get("mode","")) == "projected(file)" else "")
+
+    return (ab_sig == frozen) and (ab_pol == pol_now) and (ab_pj == pj_now)
 
 # --- Self-tests (startup-friendly, no globals other than Streamlit + helpers) ---
 def run_self_tests():
-    import streamlit as st
-
     failures, warnings = [], []
 
     ss   = st.session_state
@@ -1561,14 +1606,15 @@ def run_self_tests():
     out  = ss.get("overlap_out") or {}
 
     # 1) SSOT completeness (read-only; just warn if blanks)
+    #    accept either nested hashes or legacy top-level
+    h = ib.get("hashes") or {}
     for k in ("boundaries_hash","C_hash","H_hash","U_hash"):
-        if not ib.get(k) and not ((ib.get("hashes") or {}).get(k)):
+        if not (ib.get(k) or h.get(k)):
             warnings.append(f"SSOT: missing {k}")
 
-    # 2) Freshness (don’t require side-channels; use your ssot_is_stale/guard)
+    # 2) Freshness (only after at least one publish)
     try:
-        if ss.get("_has_overlap"):  # only after first publish
-            # Prefer your v2 guard if present; else fallback
+        if ss.get("_has_overlap"):
             if "ssot_is_stale_v2" in globals() and callable(globals()["ssot_is_stale_v2"]):
                 if ssot_is_stale_v2():
                     warnings.append("SSOT_STALE: live inputs changed; run Overlap to refresh SSOT")
@@ -1578,75 +1624,42 @@ def run_self_tests():
     except Exception as e:
         warnings.append(f"SSOT_STALE_CHECK: {e}")
 
-    # 3) Mode sanity
+    # 3) Mode sanity (AUTO shouldn’t require FILE Π)
     mode = str(rc.get("mode",""))
-    if mode.startswith("projected(file)"):
+    if mode == "projected(file)":
         if not bool(rc.get("projector_consistent_with_d", False)):
             failures.append("FILE_OK: projected(file) not consistent with d3")
-    elif mode.startswith("projected(auto)"):
-        if "3" not in out:
+    elif mode == "projected(auto)":
+        if "3" not in (out or {}):
             warnings.append("AUTO_OK: no overlap_out present yet")
 
     # 4) A/B snapshot freshness (only warn if a snapshot exists)
     ab = ss.get("ab_compare") or {}
-    if ab:
-        frozen  = tuple(ssot_frozen_sig_from_ib() or ())
-        pol_now = _policy_tag_now_from_rc(rc)
-        pj_now  = rc.get("projector_hash","") if rc.get("mode") == "projected(file)" else ""
-        pj_ab   = ((ab.get("projected") or {}).get("projector_hash","")
-                   if rc.get("mode") == "projected(file)" else "")
-
-        if (tuple(ab.get("inputs_sig") or ()) != frozen or
-            str(ab.get("policy_tag",""))     != str(pol_now) or
-            str(pj_ab)                       != str(pj_now)):
-            warnings.append("AB_FRESH: A/B snapshot is stale (won’t embed)")
-
-    return failures, warnings
-
-
-
-
-
-
-
-    # AUTO_OK / FILE_OK
-    mode = str(rc.get("mode",""))
-    if mode.startswith("projected(file)"):
-        if not bool(rc.get("projector_consistent_with_d", False)):
-            failures.append("FILE_OK: projected(file) not consistent with d3")
-    elif mode.startswith("projected(auto)"):
-        if "3" not in (out or {}):
-            warnings.append("AUTO_OK: no overlap_out present yet")
-
-    # AB_FRESH
-    if ss.get("ab_compare") and not _ab_is_fresh_now():
+    if ab and not _ab_is_fresh_now():
         warnings.append("AB_FRESH: A/B snapshot is stale (won’t embed)")
 
-    # Core hashes present in SSOT
-    for k in ("boundaries_hash","C_hash","H_hash","U_hash"):
-        if not ib.get(k):
-            warnings.append(f"SSOT: missing {k}")
-
     return failures, warnings
 
-# Policy pill + run stamp (single rendering)
+# --- Policy pill + run stamp (single rendering) --------------------------------
 _rc = st.session_state.get("run_ctx") or {}
 _ib = st.session_state.get("_inputs_block") or {}
 policy_tag = _rc.get("policy_tag") or policy_label_from_cfg(cfg_active)
 n3 = _rc.get("n3") or ((_ib.get("dims") or {}).get("n3", 0))
 _short8 = lambda h: (h or "")[:8]
-bH = _short8(_ib.get("boundaries_hash","")); cH = _short8(_ib.get("C_hash",""))
-hH = _short8(_ib.get("H_hash",""));        uH = _short8(_ib.get("U_hash",""))
+bH = _short8((_ib.get("hashes") or {}).get("boundaries_hash", _ib.get("boundaries_hash","")))
+cH = _short8((_ib.get("hashes") or {}).get("C_hash",          _ib.get("C_hash","")))
+hH = _short8((_ib.get("hashes") or {}).get("H_hash",          _ib.get("H_hash","")))
+uH = _short8((_ib.get("hashes") or {}).get("U_hash",          _ib.get("U_hash","")))
 pH = _short8(_rc.get("projector_hash","")) if str(_rc.get("mode","")).startswith("projected(file)") else "—"
 
 st.markdown(f"**Policy:** `{policy_tag}`")
 st.caption(f"{policy_tag} | n3={n3} | b={bH} C={cH} H={hH} U={uH} P={pH}")
 
 # Gentle hint only if any core hash is blank
-if any(x in ("", None) for x in (_ib.get("boundaries_hash"), _ib.get("C_hash"), _ib.get("H_hash"), _ib.get("U_hash"))):
+if any(x in ("", None, "") for x in (bH, cH, hH, uH)):
     st.info("SSOT isn’t fully populated yet. Run Overlap once to publish provenance hashes.")
 
-# Self-tests banner (with startup-friendly behavior)
+# --- Run self-tests and render banner -----------------------------------------
 _fail, _warn = run_self_tests()
 if _fail:
     st.error("🚨 Plumbing not healthy — fix before exploration.")
@@ -1658,7 +1671,6 @@ if _fail:
             st.markdown("**Warnings:**")
             for w in _warn: st.write(f"- {w}")
 else:
-    # If not fully initialized, stay neutral; else show green
     if not (_ib.get("hashes") or _ib.get("boundaries_hash")):
         st.info("Awaiting first Overlap run…")
     else:
@@ -1666,6 +1678,8 @@ else:
         if _warn:
             st.info("Notes:")
             for w in _warn: st.write(f"- {w}")
+
+
 
 
 
