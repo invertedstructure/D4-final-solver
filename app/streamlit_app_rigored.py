@@ -102,6 +102,81 @@ DISTRICT_MAP: dict[str, str] = {
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
 
+def publish_inputs_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int):
+    """
+    Canonical SSOT publisher. Writes a frozen _inputs_block with:
+      - hashes (b, C, H, U/shapes)
+      - dims (n2, n3)
+      - filenames (best-effort)
+    Also updates:
+      - _inputs_hashes_pending / _dims_pending / _filenames_pending
+      - _has_overlap = True
+      - _last_ib_sig (for stale checks)
+    """
+    import json, hashlib
+
+    def _deep_intify(o):
+        if isinstance(o, bool): return 1 if o else 0
+        if isinstance(o, list): return [_deep_intify(x) for x in o]
+        if isinstance(o, dict): return {k: _deep_intify(v) for k, v in o.items()}
+        return o
+
+    def _stable_blocks_sha(obj) -> str:
+        try:
+            data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (obj if isinstance(obj, dict) else {"blocks": {}})
+            s = json.dumps(_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+            return hashlib.sha256(s).hexdigest()
+        except Exception:
+            return ""
+
+    # compute pieces
+    H2_now = (H_obj.blocks.__root__.get("2") or []) if H_obj else []
+    hashes_now = {
+        "boundaries_hash": _stable_blocks_sha(boundaries_obj),
+        "C_hash":          _stable_blocks_sha(cmap_obj),
+        "H_hash":          _stable_blocks_sha(H_obj),
+        "U_hash":          _stable_blocks_sha(shapes_obj),
+        "shapes_hash":     _stable_blocks_sha(shapes_obj),
+    }
+    dims_now = {
+        "n2": int(len(H2_now) if H2_now else 0),
+        "n3": int(n3 or 0),
+    }
+    files_now = {
+        "boundaries": st.session_state.get("fname_boundaries","boundaries.json"),
+        "C":          st.session_state.get("fname_cmap","cmap.json"),
+        "H":          st.session_state.get("fname_h","H.json"),
+        "U":          st.session_state.get("fname_shapes","shapes.json"),
+    }
+    # publish (pending)
+    st.session_state["_inputs_hashes_pending"] = hashes_now
+    st.session_state["_dims_pending"]          = dims_now
+    st.session_state.setdefault("_filenames_pending", files_now)
+
+    # publish canonical (what everyone reads)
+    st.session_state["_inputs_block"] = {
+        "hashes": dict(hashes_now),
+        "dims":   dict(dims_now),
+        "filenames": dict(files_now),
+        # legacy flattening for older readers:
+        "boundaries_hash": hashes_now["boundaries_hash"],
+        "C_hash":          hashes_now["C_hash"],
+        "H_hash":          hashes_now["H_hash"],
+        "U_hash":          hashes_now["U_hash"],
+        "shapes_hash":     hashes_now["shapes_hash"],
+    }
+
+    # mark health + memoize a sig that stale-checkers can rely on
+    st.session_state["_has_overlap"] = True
+    st.session_state["_last_ib_sig"] = (
+        hashes_now["boundaries_hash"],
+        hashes_now["C_hash"],
+        hashes_now["H_hash"],
+        hashes_now["U_hash"],
+        hashes_now["shapes_hash"],
+    )
+
+
 # ---- SSOT core: one publisher, one staleness check --------------------------
 def _stable_blocks_sha(obj) -> str:
     try:
@@ -2218,10 +2293,36 @@ def run_overlap():
         st.session_state["write_armed"] = True
         st.session_state["armed_by"]    = "overlap_run"
 
-# ---- Single canonical button ----
+# ---- Single canonical button (instrumented) ----
 if st.button("Run Overlap", key="btn_run_overlap_main"):
-    soft_reset_before_overlap()  # your helper
-    run_overlap()
+    try:
+        with st.spinner("Running Overlap…"):
+            # pre: snapshot for delta
+            _ib_before = dict(st.session_state.get("_inputs_block") or {})
+            _sig_before = (
+                (_ib_before.get("hashes") or {}).get("boundaries_hash", _ib_before.get("boundaries_hash","")),
+                (_ib_before.get("hashes") or {}).get("C_hash",          _ib_before.get("C_hash","")),
+                (_ib_before.get("hashes") or {}).get("H_hash",          _ib_before.get("H_hash","")),
+                (_ib_before.get("hashes") or {}).get("U_hash",          _ib_before.get("U_hash","")),
+                (_ib_before.get("hashes") or {}).get("shapes_hash",     _ib_before.get("shapes_hash","")),
+            )
+
+            soft_reset_before_overlap()  # your helper; must NOT clear _inputs_block
+            run_overlap()                # your function
+
+            _ib_after = dict(st.session_state.get("_inputs_block") or {})
+            _sig_after = (
+                (_ib_after.get("hashes") or {}).get("boundaries_hash", _ib_after.get("boundaries_hash","")),
+                (_ib_after.get("hashes") or {}).get("C_hash",          _ib_after.get("C_hash","")),
+                (_ib_after.get("hashes") or {}).get("H_hash",          _ib_after.get("H_hash","")),
+                (_ib_after.get("hashes") or {}).get("U_hash",          _ib_after.get("U_hash","")),
+                (_ib_after.get("hashes") or {}).get("shapes_hash",     _ib_after.get("shapes_hash","")),
+            )
+        st.success("Overlap completed.")
+        st.caption(f"SSOT sig (before → after): {list(_sig_before)} → {list(_sig_after)}")
+    except Exception as e:
+        st.exception(e)
+
 # -----------------------------------------------------------------------------------------------------------
 
 
