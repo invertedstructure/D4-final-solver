@@ -6362,6 +6362,37 @@ with safe_expander("Cert & provenance", expanded=True):
     H_obj = ss.get("overlap_H") or io.parse_cmap({"blocks": {}})
     C_obj = ss.get("overlap_C") or io.parse_cmap({"blocks": {}})
     ib    = dict(ss.get("_inputs_block") or {})
+    # --- SSOT ensure: publish pending hashes/dims/filenames into _inputs_block ---
+    def _publish_inputs_block_from_pending() -> bool:
+        ph = ss.get("_inputs_hashes_pending") or {}
+        pd = ss.get("_dims_pending") or {}
+        pf = ss.get("_filenames_pending") or {}
+
+        if not ph or not pd:
+            return False
+
+        blk = {
+            "hashes": dict(ph),
+            "dims":   dict(pd),
+            "filenames": dict(pf),
+            # legacy top-level keys for downstream readers:
+            "boundaries_hash": ph.get("boundaries_hash",""),
+            "C_hash":          ph.get("C_hash",""),
+            "H_hash":          ph.get("H_hash",""),
+            "U_hash":          ph.get("U_hash",""),
+            "shapes_hash":     ph.get("shapes_hash",""),
+        }
+        ss["_inputs_block"] = blk
+        return True
+
+    # if ib is missing or lacks hashes, publish from pending
+    if not ib or (not ib.get("hashes") and not ib.get("boundaries_hash")):
+        if _publish_inputs_block_from_pending():
+            ib = dict(ss.get("_inputs_block") or {})
+
+    # still empty? warn (non-fatal) so Reports won’t be confused
+    if not ib or not (ib.get("hashes") or ib.get("boundaries_hash")):
+        st.warning("SSOT inputs not staged; provenance hashes may be blank until Overlap runs.")
 
     # A/B one-shot ticket state
     ab_pin                 = dict(ss.get("ab_pin") or {"state":"idle","payload":None,"consumed":False})
