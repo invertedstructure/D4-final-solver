@@ -2187,36 +2187,76 @@ with st.expander("Debug · d3 & lane mask"):
         st.error(f"Debug probe failed: {e}")
 
     
-
 # -------------------- Health checks + compact, non-duplicated UI --------------------
+def _stable_blocks_sha(obj) -> str:
+    try:
+        data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (obj if isinstance(obj, dict) else {"blocks": {}})
+        s = json.dumps(_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        return hashlib.sha256(s).hexdigest()
+    except Exception:
+        return ""
+
+def _ab_is_fresh_now() -> bool:
+    ss = st.session_state
+    ab = ss.get("ab_compare") or {}
+    if not ab:
+        return False
+    ib = ss.get("_inputs_block") or {}
+    rc = ss.get("run_ctx") or {}
+    # inputs_sig equality
+    cur_sig = [
+        str((ib or {}).get("boundaries_hash","")),
+        str((ib or {}).get("C_hash","")),
+        str((ib or {}).get("H_hash","")),
+        str((ib or {}).get("U_hash","")),
+        str((ib or {}).get("shapes_hash","")),
+    ]
+    if list(ab.get("inputs_sig") or []) != cur_sig:
+        return False
+    # policy tag equality
+    pol_now = str((rc or {}).get("policy_tag") or "strict")
+    if ab.get("policy_tag","") != pol_now:
+        return False
+    # projector hash equality in FILE mode
+    if str((rc or {}).get("mode","")).startswith("projected(file)"):
+        if (ab.get("projected") or {}).get("projector_hash","") != (rc.get("projector_hash","") or ""):
+            return False
+    return True
+
 def run_self_tests():
     failures, warnings = [], []
-    ib = st.session_state.get("_inputs_block") or {}
-    di = st.session_state.get("_district_info") or {}
-    rc = st.session_state.get("run_ctx") or {}
-    ab = st.session_state.get("ab_compare") or {}
-    out = st.session_state.get("overlap_out") or {}
+    ss = st.session_state
+    ib = ss.get("_inputs_block") or {}
+    rc = ss.get("run_ctx") or {}
+    out = ss.get("overlap_out") or {}
 
-    # HASH_COHERENT: boundaries hash in SSOTs must match
-    bh_ib = ib.get("boundaries_hash", ""); bh_di = di.get("boundaries_hash", "")
-    if bh_ib and bh_di and bh_ib != bh_di:
-        failures.append("HASH_COHERENT: _inputs_block.boundaries_hash ≠ _district_info.boundaries_hash")
+    # HASH_COHERENT: compare IB hash with LIVE boundaries hash (authoritative)
+    bh_ib   = ib.get("boundaries_hash","")
+    bh_live = _stable_blocks_sha(boundaries) if 'boundaries' in globals() else ""
+    if bh_ib and bh_live and (bh_ib != bh_live):
+        failures.append("HASH_COHERENT: _inputs_block.boundaries_hash ≠ live(boundaries)")
+
+    # If _district_info carries a hash and it's different, warn (not fail)
+    di = ss.get("_district_info") or {}
+    bh_di = di.get("boundaries_hash","")
+    if bh_di and bh_ib and (bh_di != bh_ib):
+        warnings.append("HASH_SIDECHANNEL: _district_info.boundaries_hash differs from SSOT (will ignore _district_info).")
 
     # AUTO_OK / FILE_OK
-    mode = rc.get("mode", "")
+    mode = str(rc.get("mode",""))
     if mode.startswith("projected(file)"):
         if not bool(rc.get("projector_consistent_with_d", False)):
             failures.append("FILE_OK: projected(file) not consistent with d3")
     elif mode.startswith("projected(auto)"):
-        if "3" not in out:
+        if "3" not in (out or {}):
             warnings.append("AUTO_OK: no overlap_out present yet")
 
     # AB_FRESH
-    if ab:
-        if ab.get("inputs_sig") != _current_inputs_sig():
+    if ss.get("ab_compare"):
+        if not _ab_is_fresh_now():
             warnings.append("AB_FRESH: A/B snapshot is stale (won’t embed)")
 
-    # Four core hashes should exist
+    # Core hashes present in SSOT
     for k in ("boundaries_hash","C_hash","H_hash","U_hash"):
         if not ib.get(k):
             warnings.append(f"SSOT: missing {k}")
@@ -2227,18 +2267,18 @@ def run_self_tests():
 _rc = st.session_state.get("run_ctx") or {}
 _ib = st.session_state.get("_inputs_block") or {}
 policy_tag = _rc.get("policy_tag") or policy_label_from_cfg(cfg_active)
-n3 = _rc.get("n3") or (_ib.get("dims", {}) or {}).get("n3", 0)
+n3 = _rc.get("n3") or ((_ib.get("dims") or {}).get("n3", 0))
 _short8 = lambda h: (h or "")[:8]
 bH = _short8(_ib.get("boundaries_hash","")); cH = _short8(_ib.get("C_hash",""))
 hH = _short8(_ib.get("H_hash",""));        uH = _short8(_ib.get("U_hash",""))
-pH = _short8(_rc.get("projector_hash","")) if str(_rc.get("mode","")).startswith("projected") else "—"
+pH = _short8(_rc.get("projector_hash","")) if str(_rc.get("mode","")).startswith("projected(file)") else "—"
 
 st.markdown(f"**Policy:** `{policy_tag}`")
 st.caption(f"{policy_tag} | n3={n3} | b={bH} C={cH} H={hH} U={uH} P={pH}")
 
-# If any short hash is blank, hint to fix SSOT population
+# If any short hash is blank, hint to (re)publish SSOT
 if any(x in ("", None) for x in (_ib.get("boundaries_hash"), _ib.get("C_hash"), _ib.get("H_hash"), _ib.get("U_hash"))):
-    st.warning("Some provenance hashes are blank. Freeze SSOT in the Cert section to publish hashes/dims before running Reports.")
+    st.warning("Some provenance hashes are blank. Run Overlap (or the Cert 'publish SSOT' path) once to populate.")
 
 # Self-tests banner
 _fail, _warn = run_self_tests()
@@ -2257,27 +2297,7 @@ else:
         st.info("Notes:")
         for w in _warn: st.write(f"- {w}")
 
-# ── Residual chips + single A/B freshness pill (place under run-stamp) ─────────
-_rtags = st.session_state.get("residual_tags") or {}
-if _rtags:
-    s_tag = _rtags.get("strict", "—")
-    p_tag = _rtags.get("projected", "—") if str(_rc.get("mode","")).startswith("projected") else "—"
-    st.caption(f"Residuals → strict: `{s_tag}` · projected: `{p_tag}`")
 
-_ab = st.session_state.get("ab_compare") or {}
-if _ab:
-    fresh = (_ab.get("inputs_sig") == _current_inputs_sig())
-    st.caption("A/B snapshot: " + ("🟢 fresh (will embed in cert)" if fresh else "🟡 stale (won’t embed)"))
-    if not fresh:
-        c1, c2 = st.columns([2,3])
-        with c1:
-            if st.button("Clear stale A/B", key="btn_ab_clear"):
-                st.session_state.pop("ab_compare", None)
-                st.success("Cleared A/B snapshot. Re-run A/B to refresh.")
-        with c2:
-            st.caption("Tip: re-run A/B after changing inputs to refresh the snapshot.")
-else:
-    st.caption("A/B snapshot: —")
 
 # ====================== A/B Compare (strict vs ACTIVE projected) ======================
 
