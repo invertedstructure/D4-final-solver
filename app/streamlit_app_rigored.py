@@ -6895,7 +6895,7 @@ def _py_version_str() -> str:
     return f"python-{platform.python_version()}"
 
 def _count_files(root: Path) -> int:
-    if not root.exists(): 
+    if not root.exists():
         return 0
     n = 0
     for _, _, files in os.walk(root):
@@ -6972,7 +6972,8 @@ def build_everything_snapshot() -> str:
         parsed.append((p, data))
 
     if not parsed:
-        if st: st.info("Nothing to snapshot yet (no parsed certs).")
+        if st:
+            st.info("Nothing to snapshot yet (no parsed certs).")
         return ""
 
     proj_refs, districts, index_rows, manifest_files = set(), set(), [], []
@@ -7004,17 +7005,17 @@ def build_everything_snapshot() -> str:
 
         index_rows.append([
             _rel(p),
-            str(hashes.get("content_hash","")),
-            str(pol.get("policy_tag", pol.get("canon",""))),
+            str(hashes.get("content_hash", "")),
+            str(pol.get("policy_tag", pol.get("canon", ""))),
             str(did),
-            str(ident.get("run_id","")),
-            str(cert.get("written_at_utc","")),
+            str(ident.get("run_id", "")),
+            str(cert.get("written_at_utc", "")),
             _hx("boundaries_hash"),
             _hx("C_hash"),
             _hx("H_hash"),
             _hx("U_hash"),
-            str(pol.get("projector_hash","")),
-            str(pol.get("projector_filename","")),
+            str(pol.get("projector_hash", "")),
+            str(pol.get("projector_filename", "")),
         ])
 
     # Resolve & include referenced projectors
@@ -7083,22 +7084,28 @@ def build_everything_snapshot() -> str:
         "cert_path","content_hash","policy_tag","district_id","run_id","written_at_utc",
         "boundaries_hash","C_hash","H_hash","U_hash","projector_hash","projector_filename"
     ]
-    fd, idx_tmp = tempfile.mkstemp(prefix=".tmp_cert_index_", suffix=".csv"); os.close(fd)
+    fd, idx_tmp = tempfile.mkstemp(prefix=".tmp_cert_index_", suffix=".csv")
+    os.close(fd)
     try:
         with open(idx_tmp, "w", newline="", encoding="utf-8") as tf:
-            w = csv.writer(tf); w.writerow(index_header); w.writerows(index_rows)
+            w = csv.writer(tf)
+            w.writerow(index_header)
+            w.writerows(index_rows)
         with open(idx_tmp, "r", encoding="utf-8") as tf:
             index_csv_text = tf.read()
     finally:
-        try: os.remove(idx_tmp)
-        except Exception: pass
+        try:
+            os.remove(idx_tmp)
+        except Exception:
+            pass
 
     # Create ZIP (atomic)
     BUNDLES_DIR.mkdir(parents=True, exist_ok=True)
     tag   = next(iter(districts_sorted)) if len(districts_sorted) == 1 else "MULTI"
     zname = f"snapshot__{tag}__{_ymd_hms_compact()}.zip"
     zpath = BUNDLES_DIR / zname
-    fd, tmpname = tempfile.mkstemp(dir=BUNDLES_DIR, prefix=".tmp_snapshot_", suffix=".zip"); os.close(fd)
+    fd, tmpname = tempfile.mkstemp(dir=BUNDLES_DIR, prefix=".tmp_snapshot_", suffix=".zip")
+    os.close(fd)
     tmpzip = Path(tmpname)
 
     try:
@@ -7113,8 +7120,10 @@ def build_everything_snapshot() -> str:
         os.replace(tmpzip, zpath)
     finally:
         if tmpzip.exists():
-            try: tmpzip.unlink()
-            except Exception: pass
+            try:
+                tmpzip.unlink()
+            except Exception:
+                pass
 
     return str(zpath)
 
@@ -7205,7 +7214,8 @@ def _full_flush_workspace(delete_projectors: bool = False):
     summary["token"] = token
     summary["composite_cache_key_short"] = ckey[:12]
     return summary
- import os
+
+import os
 from pathlib import Path
 
 EXPORTS_NS = "exports_v2"  # keep consistent with the rest of your app
@@ -7267,8 +7277,6 @@ with safe_expander("Exports", expanded=False):
                     st.json(info)
             except Exception as e:
                 st.error(f"Flush failed: {e}")
-
-import os  # <-- Fixed indentation here, aligned with the previous block
                         
 
  
