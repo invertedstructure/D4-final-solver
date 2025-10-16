@@ -1417,10 +1417,7 @@ def _stable_hash(obj) -> str:
             return ""
 
 
-def fixtures_match_current(...):
-    reg = load_fixtures_registry()  # <-- use the tolerant alias
-    ordering = reg.get("ordering") or []
-    ...
+
 
 
 
@@ -1864,7 +1861,7 @@ def fixtures_match_current(*, district_id: str, policy_canon: str,
      "strictify": "tbd|no|yes", "growth_bumps": int}
     First match wins, following registry["ordering"].
     """
-    reg = fixtures_load_cached()
+    reg = load_fixtures_registry()  # <-- Use the shim loader here
     ordering = reg.get("ordering") or []
     fx = {f["code"]: f for f in reg.get("fixtures") or [] if isinstance(f, dict) and f.get("code")}
     def _matches(entry: dict) -> bool:
