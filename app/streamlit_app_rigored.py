@@ -1967,15 +1967,15 @@ def run_overlap():
         st.session_state["overlap_H"] = H_local
         st.session_state["overlap_C"] = cmap
         pub = ssot_publish_block(
-    boundaries_obj=boundaries,
-    cmap_obj=cmap,
-    H_obj=H_local,
-    shapes_obj=shapes,
-    n3=n3,
-    projector_filename=st.session_state["run_ctx"].get("projector_filename",""),
-)
-st.caption(f"SSOT sig (before → after): {list(pub['before'])} → {list(pub['after'])}")
-_reconcile_di_vs_ssot()
+            boundaries_obj=boundaries,
+            cmap_obj=cmap,
+            H_obj=H_local,
+            shapes_obj=shapes,
+            n3=n3,
+            projector_filename=st.session_state["run_ctx"].get("projector_filename",""),
+        )
+        st.caption(f"SSOT sig (before → after): {list(pub['before'])} → {list(pub['after'])}")
+        _reconcile_di_vs_ssot()
 
         
         
