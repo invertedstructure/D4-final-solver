@@ -4072,6 +4072,83 @@ if "eye" not in globals():
     def eye(n: int):
         return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
 
+# ==== Parity import/export shims (place above the expander) ====
+import io as _io, json as _json
+from pathlib import Path
+
+# Safe defaults for paths/dirs
+if "LOGS_DIR" not in globals():
+    LOGS_DIR = Path("logs"); LOGS_DIR.mkdir(parents=True, exist_ok=True)
+if "DEFAULT_PARITY_PATH" not in globals():
+    DEFAULT_PARITY_PATH = LOGS_DIR / "parity_pairs.json"
+
+def _file_mode_invalid_now() -> bool:
+    """
+    Disable export/import only when FILE Π is selected AND current Π is invalid.
+    Otherwise allow (strict/auto always allowed).
+    """
+    rc = st.session_state.get("run_ctx") or {}
+    mode_now = str(rc.get("mode",""))
+    if mode_now == "projected(file)":
+        return not bool(st.session_state.get("file_pi_valid", False))
+    return False
+
+def __pp_pairs_payload_from_queue(queue: list[dict] | None) -> dict:
+    """
+    Build a portable payload:
+      { schema_version, policy_hint, pairs: [...] }
+    Prefers 'parity_pairs_table' (editor), falls back to provided queue.
+    """
+    policy_hint = st.session_state.get("parity_policy_hint") or "strict"
+    pairs_src = st.session_state.get("parity_pairs_table")
+    if not pairs_src:
+        pairs_src = queue or st.session_state.get("parity_pairs") or []
+    # assume items already normalized by validate_pairs_payload or your editor
+    pairs = []
+    for p in pairs_src:
+        # keep only label/left/right; pass through embedded or path forms
+        pairs.append({
+            "label": p.get("label",""),
+            "left":  {**(p.get("left")  or {})},
+            "right": {**(p.get("right") or {})},
+        })
+    return {"schema_version":"1.0.0","policy_hint":policy_hint,"pairs":pairs}
+
+def _ensure_json_path_str(s: str | None) -> str:
+    s = (s or "").strip()
+    if not s:
+        return str(DEFAULT_PARITY_PATH)
+    p = Path(s)
+    if p.suffix.lower() != ".json":
+        p = p.with_suffix(".json")
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return str(p)
+
+def _export_pairs_to_path(path_str: str) -> str:
+    """
+    Write current pairs to JSON at path_str and return the path string.
+    """
+    out = Path(_ensure_json_path_str(path_str))
+    payload = __pp_pairs_payload_from_queue(st.session_state.get("parity_pairs"))
+    with out.open("w", encoding="utf-8") as f:
+        _json.dump(payload, f, ensure_ascii=False, indent=2)
+    return str(out)
+
+def _import_pairs_from_payload(payload: dict, *, merge: bool) -> int:
+    """
+    Validate payload and stash into session (table-driven).
+    """
+    pairs_sanitized, policy_hint = validate_pairs_payload(payload)
+    if merge and "parity_pairs_table" in st.session_state:
+        st.session_state["parity_pairs_table"].extend(pairs_sanitized)
+    else:
+        st.session_state["parity_pairs_table"] = pairs_sanitized
+    st.session_state["parity_policy_hint"] = policy_hint
+    # clear legacy queue to avoid confusion
+    st.session_state["parity_pairs"] = []
+    return len(st.session_state["parity_pairs_table"])
+
+
 # --- Hashing helpers (reuse canonical) -----------------------------------
 def _to_hashable_plain(x):
     """Return a stable, JSON-serializable view of x for hashing."""
