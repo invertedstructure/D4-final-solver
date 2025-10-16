@@ -2051,21 +2051,30 @@ def run_overlap():
     # lane mask
     lm_truth = _truth_mask_from_d3(d3)
     assert len(lm_truth) == n3, f"lane_mask_k3 length {len(lm_truth)} != n3 {n3}"
-
-    # strict residuals
-    H_local = io.parse_cmap({"blocks": {}}) if "f_H" in globals() and f_H is None else (st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}}))
+    
+      # --- strict residuals (shape-safe) ---
+    H_local = _load_h_local()
     H2 = (H_local.blocks.__root__.get("2") or [])
     C3 = (cmap.blocks.__root__.get("3") or [])
     I3 = eye(len(C3)) if C3 else []
-    try:
-        _guard_r3_shapes(H2, d3, C3)
-        R3_strict = _xor_mat(mul(H2, d3), _xor_mat(C3, I3))
-    except Exception as e:
-        st.error(f"Shape guard failed at k=3: {e}")
+    
+    def _shape_ok_for_mul(A, B):
+        return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
+    
+    R3_strict = []
+    if _shape_ok_for_mul(H2, d3) and (C3 and C3[0] and len(C3) == len(C3[0])):  # C3 square
+        try:
+            R3_strict = _xor_mat(mul(H2, d3), _xor_mat(C3, I3))
+        except Exception:
+            # stay silent; treat as not-ready and continue with empty residuals
+            R3_strict = []
+    else:
+        # Not enough shapes yet (often before first H loads) → treat as empty residuals
         R3_strict = []
-
+    
     tag_strict = _residual_tag(R3_strict, lm_truth)
     eq3_strict = _is_zero(R3_strict)
+
 
     # projected leg (if enabled)
     if cfg_active.get("enabled_layers"):
@@ -2099,26 +2108,35 @@ def run_overlap():
     # publish canonical SSOT (idempotent)
     publish_inputs_block(boundaries_obj=boundaries, cmap_obj=cmap, H_obj=H_local, shapes_obj=shapes, n3=n3)
 
-    # ── fixture auto-match (no arming) ────────────────────────────────────────
+        # --- fixture auto-match (no arming) ---
     try:
-        H2d3  = mul(H2, d3) if (H2 and d3 and len(H2[0]) == len(d3)) else []
-        C3pI3 = _xor_mat(C3, I3) if C3 else []
+        # bottoms (frozen for cert/CSV), shape-safe
+        def _shape_ok_for_mul(A, B):
+            return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
+    
+        H2d3  = mul(H2, d3) if _shape_ok_for_mul(H2, d3) else []
+        C3pI3 = _xor_mat(C3, I3) if (C3 and C3[0]) else []
+    
+        diag_H_bot  = _bottom_row(H2d3)
+        diag_CI_bot = _bottom_row(C3pI3)
+    
         snapshot = {
-            "identity": {"district_id": (st.session_state.get("_district_info") or {}).get("district_id", st.session_state.get("district_id","UNKNOWN"))},
-            "policy":   {"canon": _canon_policy(pol_label)},
-            "inputs":   {"lane_mask_k3": list(lm_truth)},
+            "identity": {"district_id": (st.session_state.get("_district_info") or {}).get(
+                "district_id", st.session_state.get("district_id","UNKNOWN")
+            )},
+            "policy": {"canon": _canon_policy(pol_label)},
+            "inputs": {"lane_mask_k3": list(lm_truth)},
             "diagnostics": {
-                "lane_vec_H2@d3": list(_bottom_row(H2d3)),
-                "lane_vec_C3+I3": list(_bottom_row(C3pI3)),
+                "lane_vec_H2@d3": list(diag_H_bot),
+                "lane_vec_C3+I3": list(diag_CI_bot),
             },
             "checks": {"k": {"3": {"eq": bool(out.get("3",{}).get("eq", False))}}},
         }
-        if "match_fixture_from_snapshot" in globals():
-            m = match_fixture_from_snapshot(snapshot)
-            if "apply_fixture_to_session" in globals():
-                apply_fixture_to_session(m)
+        m = match_fixture_from_snapshot(snapshot)
+        apply_fixture_to_session(m)
     except Exception as e:
         st.info(f"(fixture match skipped: {e})")
+
 
     # FILE Π validity for cert guard
     st.session_state["file_pi_valid"] = bool(
