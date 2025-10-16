@@ -1511,7 +1511,18 @@ with st.expander("Debug · d3 & lane mask"):
 
     
 
+
 # -------------------- Health checks + compact, non-duplicated UI --------------------
+import hashlib, json
+import streamlit as st
+
+# --- tiny utils used here ---
+def _deep_intify(o):
+    if isinstance(o, bool): return 1 if o else 0
+    if isinstance(o, list): return [_deep_intify(x) for x in o]
+    if isinstance(o, dict): return {k: _deep_intify(v) for k, v in o.items()}
+    return o
+
 def _stable_blocks_sha(obj) -> str:
     try:
         data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (obj if isinstance(obj, dict) else {"blocks": {}})
@@ -1520,111 +1531,87 @@ def _stable_blocks_sha(obj) -> str:
     except Exception:
         return ""
 
-def _ab_is_fresh_now() -> bool:
-    ss = st.session_state
-    ab = ss.get("ab_compare") or {}
-    if not ab:
-        return False
-    ib = ss.get("_inputs_block") or {}
-    rc = ss.get("run_ctx") or {}
+def _canon_policy(label_raw: str) -> str:
+        t = (label_raw or "").lower()
+        if "strict" in t: return "strict"
+        if "projected" in t and "file" in t: return "projected:file"
+        return "projected:auto"
 
-    cur_sig = [
-        str((ib or {}).get("boundaries_hash","")),
-        str((ib or {}).get("C_hash","")),
-        str((ib or {}).get("H_hash","")),
-        str((ib or {}).get("U_hash","")),
-        str((ib or {}).get("shapes_hash","")),
-    ]
-    if list(ab.get("inputs_sig") or []) != cur_sig:
-        return False
-
-    pol_now = str((rc or {}).get("policy_tag") or "strict")
-    if ab.get("policy_tag","") != pol_now:
-        return False
-
-    if str((rc or {}).get("mode","")).startswith("projected(file)"):
-        if (ab.get("projected") or {}).get("projector_hash","") != (rc.get("projector_hash","") or ""):
-            return False
-    return True
-
-
-# --- Self-test helpers ---------------------------------------------------------
 def _policy_tag_now_from_rc(rc: dict) -> str:
-    """
-    Return the canonical policy tag for the current run context.
-    Prefer rc['policy_tag'] if present; else derive from rc['mode'].
-    """
+    """Prefer stamped label; otherwise derive from rc['mode']."""
     pol = (rc or {}).get("policy_tag")
     if pol:
         return str(pol)
-
     mode = str((rc or {}).get("mode",""))
-    # Minimal derivation if label isn't stamped yet
-    if mode == "strict":
-        return "strict"
-    if mode == "projected(file)":
-        # keep your canonical k=3 label format consistent with the rest of the app
-        return "projected(columns@k=3,file)"
-    if mode == "projected(auto)":
-        return "projected(columns@k=3,auto)"
-    # fallback (neutral)
+    if mode == "strict":            return "strict"
+    if mode == "projected(file)":   return "projected(columns@k=3,file)"
+    if mode == "projected(auto)":   return "projected(columns@k=3,auto)"
     return "projected(columns@k=3,auto)"
 
-def _ab_is_fresh_now() -> bool:
-    """
-    Compare the pinned A/B snapshot in session with the current SSOT + policy.
-    Returns True if it should embed; False if stale.
-    """
-    ss = st.session_state
-    ab = ss.get("ab_compare") or {}
-    if not ab:
-        return False  # no snapshot to embed
+def _frozen_inputs_sig_from_ib(ib: dict) -> tuple[str,str,str,str,str]:
+    """Canonical 5-tuple (D,C,H,U,S) from SSOT; supports legacy and nested."""
+    h = (ib.get("hashes") or {})
+    return (
+        str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
+        str(h.get("C_hash",          ib.get("C_hash",""))),
+        str(h.get("H_hash",          ib.get("H_hash",""))),
+        str(h.get("U_hash",          ib.get("U_hash",""))),
+        str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
+    )
 
-    # Current canonical inputs sig (frozen SSOT)
-    frozen = tuple(ssot_frozen_sig_from_ib() or ())
+def _ab_is_fresh_now(*, rc: dict, ib: dict, ab_payload: dict) -> tuple[bool, str]:
+    """
+    Returns (fresh, reason). `reason` is "" if fresh, otherwise one of:
+    AB_STALE_INPUTS_SIG | AB_STALE_POLICY | AB_STALE_PROJECTOR_HASH | AB_NONE
+    """
+    if not ab_payload:
+        return (False, "AB_NONE")
 
-    # Current policy tag + projector hash (FILE only)
-    rc = ss.get("run_ctx") or {}
+    frozen = tuple(_frozen_inputs_sig_from_ib(ib))
+    ab_sig = tuple(ab_payload.get("inputs_sig") or ())
+    if ab_sig != frozen:
+        return (False, "AB_STALE_INPUTS_SIG")
+
     pol_now = _policy_tag_now_from_rc(rc)
-    pj_now  = rc.get("projector_hash","") if str(rc.get("mode","")) == "projected(file)" else ""
+    ab_pol  = str(ab_payload.get("policy_tag",""))
+    if ab_pol != pol_now:
+        return (False, "AB_STALE_POLICY")
 
-    # Snapshot bits
-    ab_sig = tuple(ab.get("inputs_sig") or ())
-    ab_pol = str(ab.get("policy_tag",""))
-    ab_pj  = ((ab.get("projected") or {}).get("projector_hash","")
-              if str(rc.get("mode","")) == "projected(file)" else "")
+    if str(rc.get("mode","")) == "projected(file)":
+        pj_now = rc.get("projector_hash","") or ""
+        pj_ab  = ((ab_payload.get("projected") or {}).get("projector_hash","") or "")
+        if pj_ab != pj_now:
+            return (False, "AB_STALE_PROJECTOR_HASH")
 
-    return (ab_sig == frozen) and (ab_pol == pol_now) and (ab_pj == pj_now)
+    return (True, "")
 
-# --- Self-tests (startup-friendly, no globals other than Streamlit + helpers) ---
+# --- Self-tests (startup-friendly, minimal) -----------------------------------
 def run_self_tests():
     failures, warnings = [], []
+    ss = st.session_state
+    ib = ss.get("_inputs_block") or {}
+    rc = ss.get("run_ctx") or {}
+    out = ss.get("overlap_out") or {}
 
-    ss   = st.session_state
-    ib   = ss.get("_inputs_block") or {}
-    rc   = ss.get("run_ctx") or {}
-    out  = ss.get("overlap_out") or {}
-
-    # 1) SSOT completeness (read-only; just warn if blanks)
-    #    accept either nested hashes or legacy top-level
+    # 1) SSOT completeness (support nested hashes)
     h = ib.get("hashes") or {}
     for k in ("boundaries_hash","C_hash","H_hash","U_hash"):
         if not (ib.get(k) or h.get(k)):
             warnings.append(f"SSOT: missing {k}")
 
-    # 2) Freshness (only after at least one publish)
+    # 2) Freshness (only after publish)
     try:
         if ss.get("_has_overlap"):
             if "ssot_is_stale_v2" in globals() and callable(globals()["ssot_is_stale_v2"]):
-                if ssot_is_stale_v2():
+                if ssot_is_stale_v2():  # type: ignore[name-defined]
                     warnings.append("SSOT_STALE: live inputs changed; run Overlap to refresh SSOT")
             elif "ssot_is_stale" in globals() and callable(globals()["ssot_is_stale"]):
-                if ssot_is_stale():
+                if ssot_is_stale():     # type: ignore[name-defined]
                     warnings.append("SSOT_STALE: live inputs changed; run Overlap to refresh SSOT")
     except Exception as e:
         warnings.append(f"SSOT_STALE_CHECK: {e}")
 
-    # 3) Mode sanity (AUTO shouldn’t require FILE Π)
+    # 3) Mode sanity
     mode = str(rc.get("mode",""))
     if mode == "projected(file)":
         if not bool(rc.get("projector_consistent_with_d", False)):
@@ -1633,31 +1620,49 @@ def run_self_tests():
         if "3" not in (out or {}):
             warnings.append("AUTO_OK: no overlap_out present yet")
 
-    # 4) A/B snapshot freshness (only warn if a snapshot exists)
+    # 4) A/B snapshot freshness (only warn if snapshot exists)
     ab = ss.get("ab_compare") or {}
-    if ab and not _ab_is_fresh_now():
-        warnings.append("AB_FRESH: A/B snapshot is stale (won’t embed)")
+    if ab:
+        fresh, _reason = _ab_is_fresh_now(rc=rc, ib=ib, ab_payload=ab)
+        if not fresh:
+            warnings.append("AB_FRESH: A/B snapshot is stale (won’t embed)")
 
     return failures, warnings
 
 # --- Policy pill + run stamp (single rendering) --------------------------------
 _rc = st.session_state.get("run_ctx") or {}
 _ib = st.session_state.get("_inputs_block") or {}
-policy_tag = _rc.get("policy_tag") or policy_label_from_cfg(cfg_active)
+policy_tag = _rc.get("policy_tag") or policy_label_from_cfg(cfg_active)  # keep your existing policy labeler
 n3 = _rc.get("n3") or ((_ib.get("dims") or {}).get("n3", 0))
-_short8 = lambda h: (h or "")[:8]
-bH = _short8((_ib.get("hashes") or {}).get("boundaries_hash", _ib.get("boundaries_hash","")))
-cH = _short8((_ib.get("hashes") or {}).get("C_hash",          _ib.get("C_hash","")))
-hH = _short8((_ib.get("hashes") or {}).get("H_hash",          _ib.get("H_hash","")))
-uH = _short8((_ib.get("hashes") or {}).get("U_hash",          _ib.get("U_hash","")))
+def _short8(h): return (h or "")[:8]
+_h = (_ib.get("hashes") or {})
+bH = _short8(_h.get("boundaries_hash", _ib.get("boundaries_hash","")))
+cH = _short8(_h.get("C_hash",          _ib.get("C_hash","")))
+hH = _short8(_h.get("H_hash",          _ib.get("H_hash","")))
+uH = _short8(_h.get("U_hash",          _ib.get("U_hash","")))
 pH = _short8(_rc.get("projector_hash","")) if str(_rc.get("mode","")).startswith("projected(file)") else "—"
 
 st.markdown(f"**Policy:** `{policy_tag}`")
 st.caption(f"{policy_tag} | n3={n3} | b={bH} C={cH} H={hH} U={uH} P={pH}")
 
 # Gentle hint only if any core hash is blank
-if any(x in ("", None, "") for x in (bH, cH, hH, uH)):
+if any(x in ("", None) for x in (_h.get("boundaries_hash"), _h.get("C_hash"), _h.get("H_hash"), _h.get("U_hash"))):
     st.info("SSOT isn’t fully populated yet. Run Overlap once to publish provenance hashes.")
+
+# --- A/B status chip (no HTML repr; no duplicate logic) ------------------------
+ab_pin = st.session_state.get("ab_pin") or {}
+if ab_pin.get("state") == "pinned":
+    fresh, reason = _ab_is_fresh_now(
+        rc=_rc,
+        ib=_ib,
+        ab_payload=(ab_pin.get("payload") or {})
+    )
+    if fresh:
+        st.success("A/B: Pinned · Fresh (will embed)")
+    else:
+        st.warning(f"A/B: Pinned · Stale ({reason})")
+else:
+    st.caption("A/B: —")
 
 # --- Run self-tests and render banner -----------------------------------------
 _fail, _warn = run_self_tests()
@@ -1678,7 +1683,6 @@ else:
         if _warn:
             st.info("Notes:")
             for w in _warn: st.write(f"- {w}")
-
 
 
 
@@ -3877,236 +3881,172 @@ with safe_expander("Gallery (canonical)", expanded=False):
 
 
 
+# ========================== Projector Freezer (AUTO → FILE) ==========================
+# Helpers are guarded so you can paste this anywhere without redefinition noise.
 
-# -------------------------- FREEZER HELPERS -------------------------------------------
+import os, json, shutil, tempfile, hashlib
+from pathlib import Path
+from datetime import datetime, timezone
+import streamlit as st
 
-PROJECTORS_DIR = Path("projectors")
-PROJECTORS_DIR.mkdir(parents=True, exist_ok=True)
-PJ_REG_PATH = PROJECTORS_DIR / "projector_registry.jsonl"
-
+# ---------- tiny utils ----------
 def _utc_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat() + "Z"
 
 def _sha256_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
-
-def _atomic_write_json(path: Path, payload: dict):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    blob = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    with tempfile.NamedTemporaryFile("wb", delete=False, dir=path.parent) as tmp:
-        tmp.write(blob); tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
-    os.replace(tmp_name, path)
-    return _sha256_bytes(blob), len(blob)
-
-def _append_registry_row(row: dict) -> bool:
-    # in-session dedupe based on (district, projector_hash)
-    key = (row.get("district", ""), row.get("projector_hash", ""))
-    seen = st.session_state.setdefault("_pj_registry_keys", set())
-    if key in seen:
-        return False
-    seen.add(key)
-    PROJECTORS_DIR.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", delete=False, dir=PROJECTORS_DIR, encoding="utf-8") as tmp:
-        tmp.write(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n")
-        tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
-    with open(PJ_REG_PATH, "a", encoding="utf-8") as final, open(tmp_name, "r", encoding="utf-8") as src:
-        shutil.copyfileobj(src, final)
-    os.remove(tmp_name)
-    return True
 
 def _diag_projector_from_lane_mask(lm: list[int]) -> list[list[int]]:
     n = len(lm or [])
     return [[1 if (i == j and int(lm[j]) == 1) else 0 for j in range(n)] for i in range(n)]
 
-def _freeze_projector(*, district_id: str, lane_mask_k3: list[int], filename_hint: str | None = None) -> dict:
-    if not lane_mask_k3:
-        raise ValueError("No lane mask available (run Overlap first).")
-    P3 = _diag_projector_from_lane_mask(lane_mask_k3)
-    name = filename_hint or f"projector_{district_id or 'UNKNOWN'}.json"
-    pj_path = PROJECTORS_DIR / name
-    payload = {"schema_version": "1.0.0", "written_at_utc": _utc_iso(), "blocks": {"3": P3}}
-    pj_hash, pj_size = _atomic_write_json(pj_path, payload)
-    return {"path": str(pj_path), "projector_hash": pj_hash, "bytes": pj_size, "lane_mask_k3": lane_mask_k3[:]}
+# Atomic write that returns sha256 over the *bytes we wrote*
+def _atomic_write_json(path: Path, payload: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    blob = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    with tempfile.NamedTemporaryFile("wb", delete=False, dir=path.parent) as tmp:
+        tmp.write(blob); tmp.flush(); os.fsync(tmp.fileno())
+        tmp_name = tmp.name
+    os.replace(tmp_name, path)
+    return _sha256_bytes(blob), len(blob)
 
-def _validate_projector_file(pj_path: str) -> dict:
-    # Use same validator used by overlap (raises ValueError with P3_* on fail)
-    cfg_file = _cfg_from_policy("projected(file)", pj_path)
-    _, meta = projector_choose_active(cfg_file, boundaries)
-    return meta
+def _append_registry_row(row: dict) -> bool:
+    pj_dir = Path(st.session_state.get("PROJECTORS_DIR","projectors"))
+    reg    = pj_dir / "projector_registry.jsonl"
+    # in-session dedupe by (district, projector_hash)
+    key = (row.get("district",""), row.get("projector_hash",""))
+    seen = st.session_state.setdefault("_pj_registry_keys", set())
+    if key in seen:
+        return False
+    seen.add(key)
+    pj_dir.mkdir(parents=True, exist_ok=True)
+    # atomic append via temp file
+    with tempfile.NamedTemporaryFile("w", delete=False, dir=pj_dir, encoding="utf-8") as tmp:
+        tmp.write(json.dumps(row, separators=(",", ":"), sort_keys=True) + "\n")
+        tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
+    with open(reg, "a", encoding="utf-8") as final, open(tmp_name, "r", encoding="utf-8") as src:
+        shutil.copyfileobj(src, final)
+    os.remove(tmp_name)
+    return True
 
-def _simulate_overlap_with_cfg(cfg_forced: dict):
-    """
-    Run a FILE overlap without touching the policy widget. Populates:
-      run_ctx, overlap_out, residual_tags, overlap_policy_label
-    """
-    P_active, meta = projector_choose_active(cfg_forced, boundaries)
+# Public: freeze AUTO → FILE using current SSOT / run_ctx, then re-run Overlap
+def freeze_auto_projector_to_file(*, filename: str, overwrite: bool = False) -> dict:
+    ss = st.session_state
+    rc = dict(ss.get("run_ctx") or {})
+    mode_now = str(rc.get("mode",""))
+    if mode_now != "projected(auto)":
+        raise RuntimeError("Not in projected(auto) — run Overlap with AUTO first.")
 
-    # Context
-    d3 = meta.get("d3") if "d3" in meta else (boundaries.blocks.__root__.get("3") or [])
-    n3 = meta.get("n3") if "n3" in meta else (len(d3[0]) if (d3 and d3[0]) else 0)
-    lane_mask = meta.get("lane_mask", [])
-    mode = meta.get("mode", "projected(file)")
-
-    # Compute strict residual R3 = H2 @ d3 XOR (C3 XOR I3)
-    H_used = st.session_state.get("overlap_H") or _load_h_local()
-    H2 = (H_used.blocks.__root__.get("2") or [])
-    C3 = (cmap.blocks.__root__.get("3") or [])
-    I3 = eye(len(C3)) if C3 else []
-
-    def _xor(A, B):
-        if not A: return [r[:] for r in (B or [])]
-        if not B: return [r[:] for r in (A or [])]
-        r, c = len(A), len(A[0])
-        return [[(A[i][j] ^ B[i][j]) & 1 for j in range(c)] for i in range(r)]
-
-    def _is_zero(M): return (not M) or all(all((x & 1) == 0 for x in row) for row in M)
-
-    R3_strict = _xor(mul(H2, d3), _xor(C3, I3)) if (H2 and d3 and C3) else []
-    R3_proj   = mul(R3_strict, P_active) if (R3_strict and P_active) else []
-
-    def _residual_tag(R, lm):
-        if not R or not lm: return "none"
-        rows = len(R)
-        lanes_idx = [j for j, m in enumerate(lm) if m]
-        ker_idx   = [j for j, m in enumerate(lm) if not m]
-        def _col_nz(j): return any(R[i][j] & 1 for i in range(rows))
-        lanes = any(_col_nz(j) for j in lanes_idx) if lanes_idx else False
-        ker   = any(_col_nz(j) for j in ker_idx)   if ker_idx   else False
-        if not lanes and not ker: return "none"
-        if lanes and not ker:     return "lanes"
-        if ker and not lanes:     return "ker"
-        return "mixed"
-
-    tag_strict = _residual_tag(R3_strict, lane_mask)
-    tag_proj   = _residual_tag(R3_proj,   lane_mask)
-
-    out = {"3": {"eq": bool(_is_zero(R3_proj)), "n_k": n3}, "2": {"eq": True}}
-
-    st.session_state["overlap_out"] = out
-    st.session_state["residual_tags"] = {"strict": tag_strict, "projected": tag_proj}
-    st.session_state["overlap_cfg"] = cfg_forced
-    st.session_state["overlap_policy_label"] = policy_label_from_cfg(cfg_forced)
-    st.session_state["run_ctx"] = {
-        "policy_tag": policy_label_from_cfg(cfg_forced),
-        "mode": mode,
-        "d3": d3, "n3": n3, "lane_mask_k3": lane_mask,
-        "P_active": P_active,
-        "projector_filename": meta.get("projector_filename", ""),
-        "projector_hash": meta.get("projector_hash", ""),
-        "projector_consistent_with_d": meta.get("projector_consistent_with_d", None),
-        "errors": [],
-    }
-
-# ---------------------------- Projector Freezer (AUTO → FILE, no UI flip) ----------------------------
-with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
-    _ss = st.session_state
-    _di = _ss.get("_district_info") or {}
-    district_id = _di.get("district_id", "UNKNOWN")
-
-    # Read rc up-front (used below)
-    rc = dict(_ss.get("run_ctx") or {})
     n3 = int(rc.get("n3") or 0)
     lm = list(rc.get("lane_mask_k3") or [])
-    k3_green = bool((((_ss.get("overlap_out") or {}).get("3") or {}).get("eq", False)))
+    if n3 <= 0 or len(lm) != n3:
+        raise ValueError("Invalid lane mask or n3; run Overlap again.")
 
-    # Freshness gate (warn only)
-    stale = ssot_is_stale()
-    _toggle_key_freezer = ensure_unique_widget_key("allow_stale_ssot__freezer")
-    allow_stale_freezer = st.toggle("Allow writing with stale SSOT", value=False, key=_toggle_key_freezer)
+    # Build diagonal Π and validate with your strict helper (if present)
+    P = _diag_projector_from_lane_mask(lm)
+    if "validate_projector_file_strict" in globals() and callable(globals()["validate_projector_file_strict"]):
+        validate_projector_file_strict(P, n3=n3, lane_mask=lm)  # type: ignore[name-defined]
 
-    if stale:
-        st.warning("STALE_RUN_CTX: Inputs changed; please click Run Overlap to refresh.")
-    # (do not st.stop() here)
+    # Save Π
+    pj_dir  = Path(ss.get("PROJECTORS_DIR","projectors")); pj_dir.mkdir(parents=True, exist_ok=True)
+    pj_path = pj_dir / (filename or f"projector_{(ss.get('_district_info') or {}).get('district_id','UNKNOWN')}.json")
+    if pj_path.exists() and not overwrite:
+        raise FileExistsError(f"Projector exists: {pj_path.name}")
 
-    # Eligibility: must be currently in projected(auto), n3 > 0, mask sane, and k=3 is green
-    mode_now = str(rc.get("mode", ""))
-    elig_freeze = (mode_now == "projected(auto)" and n3 > 0 and len(lm) == n3 and k3_green)
+    payload = {"schema_version": "1.0.0", "written_at_utc": _utc_iso(), "blocks": {"3": P}}
+    pj_hash, pj_bytes = _atomic_write_json(pj_path, payload)
 
-    st.caption("Freeze current AUTO Π → file, switch to FILE, re-run Overlap, and force a cert write.")
+    # Switch active policy to FILE and stamp path; cfg_active is assumed global in this app
+    cfg_active.setdefault("source", {})["3"] = "file"          # type: ignore[name-defined]
+    cfg_active.setdefault("projector_files", {})["3"] = pj_path.as_posix()  # type: ignore[name-defined]
+    ss["ov_policy_choice"] = "projected(file)"
+    ss["ov_last_pj_path"]  = pj_path.as_posix()
 
-    # Inputs
-    pj_basename  = st.text_input(
-        "Filename",
-        value=f"projector_{district_id or 'UNKNOWN'}.json",
-        key="pj_freeze_name_final2"
-    )
-    overwrite_ok = st.checkbox("Overwrite if exists", value=False, key="pj_freeze_overwrite_final2")
+    # Bump any caches/nonce
+    if "_mark_fixtures_changed" in globals() and callable(globals()["_mark_fixtures_changed"]):
+        _mark_fixtures_changed()  # type: ignore[name-defined]
+    else:
+        ss["_fixture_nonce"] = int(ss.get("_fixture_nonce", 0)) + 1
+        for k in ("overlap_out","residual_tags","overlap_cfg","overlap_policy_label"):
+            ss.pop(k, None)
 
-    # Global FILE Π invalid gate (render-time convenience)
-    fm_bad   = file_validation_failed()
-    help_txt = "Disabled because projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π."
+    # Re-run Overlap in FILE mode
+    run_overlap()  # type: ignore[name-defined]
 
-    # Final disabled state
-    disabled = fm_bad or (not elig_freeze)
-    tip = help_txt if fm_bad else (None if elig_freeze else "Enabled when current run is projected(auto) and k=3 is green.")
+    # Registry append (best-effort)
+    try:
+        district_id = (ss.get("_district_info") or {}).get("district_id", ss.get("district_id","UNKNOWN"))
+        _append_registry_row({
+            "schema_version": "1.0.0",
+            "written_at_utc": _utc_iso(),
+            "app_version": globals().get("APP_VERSION","v0.1-core"),
+            "district": district_id,
+            "lane_mask_k3": lm,
+            "filename": pj_path.as_posix(),
+            "projector_hash": pj_hash,
+            "bytes": pj_bytes,
+        })
+    except Exception:
+        pass
 
-    # Ensure the projectors dir exists (robust default)
-    PROJECTORS_DIR = Path(_ss.get("PROJECTORS_DIR", "projectors"))
-    PROJECTORS_DIR.mkdir(parents=True, exist_ok=True)
+    # Arm cert write on this pass
+    ss["should_write_cert"] = True
+    ss.pop("_last_cert_write_key", None)
 
-    if st.button("Freeze Π → FILE & re-run",
-                 key="btn_freeze_final2",
-                 disabled=disabled,
-                 help=(tip or "Freeze AUTO to FILE and re-run")):
+    return {"path": pj_path.as_posix(), "projector_hash": pj_hash, "bytes": pj_bytes}
+
+# ---------------------------- UI: Freezer Expander ----------------------------
+with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
+    ss = st.session_state
+    rc = dict(ss.get("run_ctx") or {})
+    di = ss.get("_district_info") or {}
+    district_id = di.get("district_id","UNKNOWN")
+
+    # Freshness (warn only)
+    is_stale = False
+    try:
+        if "ssot_is_stale" in globals() and callable(globals()["ssot_is_stale"]):
+            is_stale = ssot_is_stale()  # type: ignore[name-defined]
+    except Exception:
+        pass
+    _k_toggle = ensure_unique_widget_key("freezer_allow_stale") if "ensure_unique_widget_key" in globals() else "freezer_allow_stale"
+    allow_stale = st.toggle("Allow writing with stale SSOT", value=False, key=_k_toggle)
+    if is_stale and not allow_stale:
+        st.warning("STALE_RUN_CTX: Inputs changed; click Run Overlap to refresh before freezing.")
+
+    # Eligibility
+    k3_green = bool((((ss.get("overlap_out") or {}).get("3") or {}).get("eq", False)))
+    mode_now = str(rc.get("mode",""))
+    n3       = int(rc.get("n3") or 0)
+    lm       = list(rc.get("lane_mask_k3") or [])
+    elig     = (mode_now == "projected(auto)" and n3 > 0 and len(lm) == n3 and k3_green)
+
+    st.caption("Freeze current AUTO Π → file, switch to projected(file), re-run Overlap, and arm cert write.")
+
+    _k_name = ensure_unique_widget_key("pj_freeze_name") if "ensure_unique_widget_key" in globals() else "pj_freeze_name"
+    _k_ow   = ensure_unique_widget_key("pj_freeze_overwrite") if "ensure_unique_widget_key" in globals() else "pj_freeze_overwrite"
+    name    = st.text_input("Filename", value=f"projector_{district_id or 'UNKNOWN'}.json", key=_k_name)
+    overwrite_ok = st.checkbox("Overwrite if exists", value=False, key=_k_ow)
+
+    # If current FILE Π is invalid, we still allow freezing from AUTO (that’s the fix).
+    fm_bad = False
+    try:
+        fm_bad = bool(ss.get("file_pi_valid") is False and mode_now == "projected(file)")
+    except Exception:
+        pass
+
+    disabled = (not elig)
+    tip = None if elig else "Enabled when current run is projected(auto) and k=3 is green."
+
+    _k_btn = ensure_unique_widget_key("btn_freeze_auto_to_file") if "ensure_unique_widget_key" in globals() else "btn_freeze_auto_to_file"
+    if st.button("Freeze Π → FILE & re-run", key=_k_btn, disabled=disabled, help=(tip or "Freeze AUTO to FILE and re-run")):
         try:
-            # Guard rc one more time
-            rc = dict(_ss.get("run_ctx") or {})
-            n3 = int(rc.get("n3") or 0)
-            lm = list(rc.get("lane_mask_k3") or [])
-            if mode_now != "projected(auto)":
-                st.warning("Current run is not projected(auto). Click Run Overlap with AUTO first.")
-                st.stop()
-            if n3 <= 0 or len(lm) != n3:
-                st.warning("Context invalid (n3/mask mismatch). Click Run Overlap and try again.")
-                st.stop()
-
-            # Build Π from lane mask (diagonal projector over k=3)
-            P_freeze = [[1 if (i == j and lm[j]) else 0 for j in range(n3)] for i in range(n3)]
-
-            # Validate strictly (uses your existing helper)
-            validate_projector_file_strict(P_freeze, n3=n3, lane_mask=lm)
-
-            # Save projector atomically + compute hash
-            pj_path = PROJECTORS_DIR / pj_basename
-            if pj_path.exists() and not overwrite_ok:
-                st.warning("Projector file already exists. Enable 'Overwrite if exists' or choose a new name.")
-                st.stop()
-            payload = {"schema_version": "1.0.0", "blocks": {"3": P_freeze}}
-
-            tmp = pj_path.with_suffix(pj_path.suffix + ".tmp")
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(payload, f, ensure_ascii=False, indent=2)
-                f.flush(); os.fsync(f.fileno())
-            os.replace(tmp, pj_path)
-
-            pj_hash = hash_json(payload)
-
-            # Switch UI policy to FILE & stamp the path so cfg_active picks it up
-            st.session_state["ov_policy_choice"] = "projected(file)"
-            cfg_active.setdefault("source", {})["3"] = "file"
-            cfg_active.setdefault("projector_files", {})["3"] = pj_path.as_posix()
-            st.session_state["ov_last_pj_path"] = pj_path.as_posix()
-
-            # Bump nonce / clear overlap caches
-            if "_mark_fixtures_changed" in globals():
-                _mark_fixtures_changed()
-            else:
-                st.session_state["_fixture_nonce"] = int(st.session_state.get("_fixture_nonce", 0)) + 1
-                for k in ("overlap_out", "residual_tags", "overlap_cfg", "overlap_policy_label"):
-                    st.session_state.pop(k, None)
-
-            # Re-run Overlap immediately (fresh FILE mode)
-            if "_soft_reset_before_overlap" in globals():
-                _soft_reset_before_overlap()
-            run_overlap()
-
-            # Force cert write this pass (bypass debounce)
-            st.session_state["should_write_cert"] = True
-            st.session_state.pop("_last_cert_write_key", None)
-
-            st.success(f"Π saved → {pj_path.name} · {pj_hash[:12]}… and switched to FILE.")
+            info = freeze_auto_projector_to_file(filename=name, overwrite=overwrite_ok)
+            st.success(f"Π saved → {Path(info['path']).name} · {info['projector_hash'][:12]}… and switched to FILE.")
         except Exception as e:
             st.error(f"Freeze failed: {e}")
+
+
 
 
 # ----------------- IMPORTS -----------------
