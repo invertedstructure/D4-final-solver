@@ -1257,6 +1257,11 @@ def run_overlap():
         if ker_support:   return "ker"
         return "none"
 
+    def _diag_from_mask(lm: list[int]) -> list[list[int]]:
+        n = len(lm or [])
+        return [[1 if (i == j and int(lm[j]) == 1) else 0 for j in range(n)] for i in range(n)]
+
+
     def _shape_ok_for_mul(A, B):  # GF(2) matrix multiply compatibility
         return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
 
@@ -1358,10 +1363,11 @@ def run_overlap():
     tag_strict = _residual_tag(R3_strict, lm_truth)
     eq3_strict = _is_zero(R3_strict)
 
-    # projected leg (if enabled)
+        # projected leg (if enabled)
     if cfg_active.get("enabled_layers"):
-        P_eff   = meta.get("P_active") or P_active or []   # safe coalesce
-        R3_proj = mul(R3_strict, P_eff) if (R3_strict and P_eff) else []
+        # Strong fallback: if AUTO didn’t supply a projector, synthesize diag(lane_mask)
+        P_eff = (meta.get("P_active") or P_active or _diag_from_mask(lm_truth)) if lm_truth else (meta.get("P_active") or P_active or [])
+        R3_proj  = mul(R3_strict, P_eff) if (R3_strict and P_eff) else []
         eq3_proj = _is_zero(R3_proj)
         tag_proj = _residual_tag(R3_proj, lm_truth)
         out = {"3": {"eq": bool(eq3_proj), "n_k": n3}, "2": {"eq": True}}
@@ -1369,6 +1375,28 @@ def run_overlap():
     else:
         out = {"3": {"eq": bool(eq3_strict), "n_k": n3}, "2": {"eq": True}}
         st.session_state["residual_tags"] = {"strict": tag_strict}
+        # just after you compute R3_strict / out / tags and have lm_truth, H2, C3, I3:
+
+    # --- compute lane-bottom diagnostics for matcher (shape-safe)
+    def _bottom_row(M): return M[-1] if (M and len(M)) else []
+    def _xor(A,B):
+        if not A: return [r[:] for r in (B or [])]
+        if not B: return [r[:] for r in (A or [])]
+        r,c = len(A), len(A[0]); return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
+    def _shape_ok(A,B): return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
+    H2d3  = mul(H2, d3) if _shape_ok(H2, d3) else []
+    C3pI3 = _xor(C3, I3) if (C3 and C3[0]) else []
+    idx   = [j for j,m in enumerate(lm_truth or []) if m]
+    lane_vec_H2d3  = [_bottom_row(H2d3)[j]  for j in idx] if (H2d3 and idx) else []
+    lane_vec_C3pI3 = [_bottom_row(C3pI3)[j] for j in idx] if (C3pI3 and idx) else []
+    
+    # --- auto-apply fixture (no UI)
+    _apply_fixture_after_overlap(
+        rc=st.session_state.get("run_ctx") or rc,
+        diag={"lane_vec_H2@d3": lane_vec_H2d3, "lane_vec_C3+I3": lane_vec_C3pI3},
+    )
+    
+
 
     # persist run_ctx (SSOT for cert)
     pol_lbl = policy_label_from_cfg(cfg_active)
@@ -1467,6 +1495,117 @@ inputs_complete = bool(
 )
 
 # -----------------------------------------------------------------------------------------------------------
+# ---------------- Fixture registry (cache + matcher) ----------------
+_FIXTURE_CACHE = {"hash":"", "data":None}
+
+def _sha256_text(s: str) -> str:
+    import hashlib
+    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+def _load_fixtures_json() -> tuple[dict, str]:
+    """Load configs/fixtures.json (or return empty), with hash for cache-busting."""
+    p = Path("configs/fixtures.json")
+    if not p.exists():
+        return {"version":"","ordering":[],"fixtures":[]}, ""
+    txt = p.read_text(encoding="utf-8")
+    h   = _sha256_text(txt)
+    try:
+        data = json.loads(txt)
+    except Exception:
+        data = {"version":"","ordering":[],"fixtures":[]}
+    return data, h
+
+def _get_fixtures_cached() -> dict:
+    data, h = _load_fixtures_json()
+    if h and _FIXTURE_CACHE["hash"] == h and _FIXTURE_CACHE["data"] is not None:
+        return _FIXTURE_CACHE["data"]
+    _FIXTURE_CACHE["hash"] = h
+    _FIXTURE_CACHE["data"] = data
+    return data
+
+def _vec_eq(a, b) -> bool:
+    aa = [int(x) for x in (a or [])]
+    bb = [int(x) for x in (b or [])]
+    return (len(aa) == len(bb)) and (aa == bb)
+
+def _apply_fixture_after_overlap(*, rc: dict, diag: dict) -> dict:
+    """
+    Decide fixture from registry and stamp session + rc.
+    Returns the small fixture dict used by cert/gallery.
+    """
+    ss = st.session_state
+    reg = _get_fixtures_cached() or {}
+    ordering = list(reg.get("ordering") or [])
+    fixtures = list(reg.get("fixtures") or [])
+
+    district = (ss.get("_district_info") or {}).get("district_id", rc.get("district_id","UNKNOWN"))
+    policy_canon = str(rc.get("policy_tag") or "strict").lower()
+
+    lane_mask      = list(rc.get("lane_mask_k3") or [])
+    lane_vec_H2    = list(diag.get("lane_vec_H2@d3") or [])
+    lane_vec_C3pI3 = list(diag.get("lane_vec_C3+I3") or [])
+
+    # Build a lookup by code in declared order
+    code_to_fixture = {fx.get("code"): fx for fx in fixtures}
+    ordered = [code_to_fixture[c] for c in ordering if c in code_to_fixture] + [fx for fx in fixtures if fx.get("code") not in ordering]
+
+    chosen = {}
+    for fx in ordered:
+        m = fx.get("match") or {}
+        # district
+        if m.get("district") and str(m["district"]) != str(district):
+            continue
+        # policy set (if provided)
+        pol_any = [str(x).lower() for x in (m.get("policy_canon_any") or [])]
+        if pol_any and (policy_canon not in pol_any):
+            continue
+        # vectors
+        if "lanes" in m and not _vec_eq(m["lanes"], lane_mask):
+            continue
+        if "H_bottom" in m and not _vec_eq(m["H_bottom"], lane_vec_H2):
+            continue
+        if "C3_plus_I3_bottom" in m and not _vec_eq(m["C3_plus_I3_bottom"], lane_vec_C3pI3):
+            continue
+        # boolean strict eq (optional)
+        if "strict_eq3" in m:
+            # use any strict tag you computed, or recompute eq3_strict if you expose it here
+            pass  # optional in this minimal matcher
+        chosen = {
+            "fixture_code":  fx.get("code",""),
+            "fixture_label": fx.get("label",""),
+            "tag":           fx.get("tag",""),
+            "strictify":     fx.get("strictify","tbd"),
+            "growth_bumps":  int(fx.get("growth_bumps", 0)),
+        }
+        break
+
+    # Fallback (never block)
+    if not chosen:
+        chosen = {
+            "fixture_code":  "",
+            "fixture_label": f"{district} • lanes={lane_mask} • H={lane_vec_H2} • C+I={lane_vec_C3pI3}",
+            "tag":           "novelty",
+            "strictify":     "tbd",
+            "growth_bumps":  int(st.session_state.get("growth_bumps", 0) or 0),
+        }
+
+    # Stamp into session + rc for cert/gallery
+    ss["fixture_label"]   = chosen["fixture_label"]
+    ss["gallery_tag"]     = chosen["tag"]
+    ss["gallery_strictify"]= chosen["strictify"]
+    ss["growth_bumps"]    = chosen["growth_bumps"]
+
+    rc2 = dict(rc)
+    rc2["fixture_label"]  = chosen["fixture_label"]
+    rc2["fixture_code"]   = chosen["fixture_code"]
+    st.session_state["run_ctx"] = rc2
+
+    # Registry provenance into inputs (cert will copy from here)
+    fx = _get_fixtures_cached()
+    fxh = _FIXTURE_CACHE["hash"] or ""
+    ss.setdefault("_fixtures_cache", fx)
+    ss["_fixtures_bytes_hash"] = fxh
+    return chosen
 
 
     
