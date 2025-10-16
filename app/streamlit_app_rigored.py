@@ -102,6 +102,30 @@ DISTRICT_MAP: dict[str, str] = {
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
 
+# tolerant canonical inputs-sig helper (0 or 1 arg)
+def current_inputs_sig(*args, **kwargs) -> tuple[str, str, str, str, str]:
+    """
+    Canonical 5-tuple: (D, C, H, U, SHAPES). Missing pieces -> "".
+    Accepts 0 args (reads from st.session_state["_inputs_block"]) or
+    1 positional arg / keyword _ib providing an inputs_block dict.
+    """
+    _ib = None
+    if args:
+        _ib = args[0]
+    _ib = kwargs.get("_ib", _ib)
+
+    ss = st.session_state
+    ib = dict(_ib or (ss.get("_inputs_block") or {}))
+    h  = dict(ib.get("hashes") or {})
+    return (
+        str(h.get("boundaries_hash") or ""),
+        str(h.get("C_hash")         or ""),
+        str(h.get("H_hash")         or ""),
+        str(h.get("U_hash")         or ""),
+        str(h.get("shapes_hash")    or ""),
+    )
+
+
 def current_inputs_sig(_ib: dict | None = None) -> tuple[str, str, str, str, str]:
     """
     Canonical 5-tuple of input hashes in this exact order:
