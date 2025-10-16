@@ -2017,8 +2017,6 @@ def _guard_r3_shapes(H2, d3, C3):
 
 # ------------------------------ Run Overlap (SSOT-staging; cert-aligned, final) ------------------------------
 def run_overlap():
-    import json, hashlib
-
     # ── tiny locals ────────────────────────────────────────────────────────────
     def _canon_policy(label_raw: str) -> str:
         t = (label_raw or "").lower()
@@ -2031,20 +2029,8 @@ def run_overlap():
         rows, n3 = len(d3), len(d3[0])
         return [1 if any(d3[i][j] & 1 for i in range(rows)) else 0 for j in range(n3)]
 
-    def _shape(M): return (len(M), len(M[0]) if (M and M[0]) else 0)
-
-    def _guard_r3_shapes(H2, d3, C3):
-        rH, cH = _shape(H2); rD, cD = _shape(d3); rC, cC = _shape(C3)
-        if not (rH and cH and rD and cD and rC and cC):  # allow empties during exploration
-            return
-        n3, n2 = rH, cH
-        if not (rD == n2 and cD == n3 and rC == n3 and cC == n3):
-            raise RuntimeError(
-                f"R3_SHAPE: expected H2({n3}x{n2})·d3({n2}x{n3}) and (C3 XOR I3)({n3}x{n3}); "
-                f"got H2({rH}x{cH}), d3({rD}x{cD}), C3({rC}x{cC})"
-            )
-
     def _xor_mat(A, B):
+        # prefer library 'add' when present
         if "add" in globals() and callable(globals()["add"]):
             return globals()["add"](A, B)
         if not A: return [r[:] for r in (B or [])]
@@ -2054,6 +2040,9 @@ def run_overlap():
 
     def _bottom_row(M): return M[-1] if (M and len(M)) else []
     def _is_zero(M):  return (not M) or all(all((x & 1) == 0 for x in row) for row in M)
+    def _shape(M):    return (len(M), len(M[0]) if (M and M[0]) else 0)
+    def _shape_ok_for_mul(A, B):  # GF(2) matrix multiply compatibility
+        return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
 
     def _residual_tag(R, lm):
         if not R or not lm: return "none"
@@ -2068,37 +2057,10 @@ def run_overlap():
         if ker_resid and not lanes_resid:     return "ker"
         return "mixed"
 
-    def _deep_intify(o):
-        if isinstance(o, bool): return 1 if o else 0
-        if isinstance(o, list): return [_deep_intify(x) for x in o]
-        if isinstance(o, dict): return {k: _deep_intify(v) for k, v in o.items()}
-        return o
-
-    def _stable_blocks_sha(obj) -> str:
-        try:
-            data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (obj if isinstance(obj, dict) else {"blocks": {}})
-            s = json.dumps(_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-            return hashlib.sha256(s).hexdigest()
-        except Exception:
-            return ""
-
-    def current_inputs_sig() -> tuple[str, str, str, str, str]:
-        """Canonical 5-tuple from frozen _inputs_block (legacy keys tolerated)."""
-        ib = st.session_state.get("_inputs_block") or {}
-        h  = (ib.get("hashes") or {})
-        return (
-            str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
-            str(h.get("C_hash",          ib.get("C_hash",""))),
-            str(h.get("H_hash",          ib.get("H_hash",""))),
-            str(h.get("U_hash",          ib.get("U_hash",""))),
-            str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
-        )
-
-   
     # ── clear per-run artifacts (keep A/B pin, fixtures cache, frozen IB) ─────
     keep = {"ab_pin", "_fixtures_cache", "_fixtures_bytes_hash", "_inputs_block", "_last_ib_sig"}
     for k in ("proj_meta","run_ctx","residual_tags","overlap_out",
-              "overlap_H","overlap_cfg","overlap_policy_label","_file_mode_error"):
+              "overlap_H","overlap_C","overlap_cfg","overlap_policy_label","_file_mode_error"):
         if k not in keep:
             st.session_state.pop(k, None)
 
@@ -2106,32 +2068,40 @@ def run_overlap():
     try:
         P_active, meta = projector_choose_active(cfg_active, boundaries)
     except ValueError as e:
-        pjfn = (cfg_active.get("projector_files", {}) or {}).get("3", "")
-        d3_now = (boundaries.blocks.__root__.get("3") or [])
-        n3_now = len(d3_now[0]) if (d3_now and d3_now[0]) else 0
-        pol_label = policy_label_from_cfg(cfg_active)
+        # Build minimal SSOT so the cert block can witness SKIP_FILE_PI_INVALID
+        pjfn    = (cfg_active.get("projector_files", {}) or {}).get("3", "")
+        d3_now  = (boundaries.blocks.__root__.get("3") or [])
+        n3_now  = len(d3_now[0]) if (d3_now and d3_now[0]) else 0
+        pol_lbl = policy_label_from_cfg(cfg_active)
 
         st.session_state["run_ctx"] = {
-            "policy_tag": pol_label, "mode": "projected(file)",
+            "policy_tag": pol_lbl, "mode": "projected(file)",
             "d3": d3_now, "n3": n3_now, "lane_mask_k3": _truth_mask_from_d3(d3_now),
             "P_active": [],
             "projector_filename": pjfn, "projector_hash": "",
             "projector_consistent_with_d": False,
             "source": (cfg_active.get("source") or {}), "errors": [str(e)],
         }
-        st.session_state["overlap_out"] = {"3": {"eq": False, "n_k": n3_now}, "2": {"eq": True}}
-        st.session_state["overlap_cfg"] = cfg_active
-        st.session_state["overlap_policy_label"] = pol_label
+        st.session_state["overlap_out"]            = {"3": {"eq": False, "n_k": n3_now}, "2": {"eq": True}}
+        st.session_state["overlap_cfg"]            = cfg_active
+        st.session_state["overlap_policy_label"]   = pol_lbl
 
         # Freeze SSOT even on FILE error (no projector field)
-        H_local = io.parse_cmap({"blocks": {}}) if "f_H" in globals() and f_H is None else (st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}}))
+        H_local = _load_h_local()
         st.session_state["overlap_H"] = H_local
-        publish_inputs_block(boundaries_obj=boundaries, cmap_obj=cmap, H_obj=H_local, shapes_obj=shapes, n3=n3_now)
+        st.session_state["overlap_C"] = cmap
+        publish_inputs_block(
+            boundaries_obj=boundaries,
+            cmap_obj=cmap,
+            H_obj=H_local,
+            shapes_obj=shapes,
+            n3=n3_now,
+        )
 
         st.session_state["file_pi_valid"]   = False
         st.session_state["file_pi_reasons"] = [str(e)]
-        st.session_state["write_armed"] = True
-        st.session_state["armed_by"]    = "file_invalid"
+        st.session_state["write_armed"]     = True
+        st.session_state["armed_by"]        = "file_invalid"
         st.error(f"Projected(FILE) validation failed: {e}")
         return
 
@@ -2143,30 +2113,23 @@ def run_overlap():
     # lane mask
     lm_truth = _truth_mask_from_d3(d3)
     assert len(lm_truth) == n3, f"lane_mask_k3 length {len(lm_truth)} != n3 {n3}"
-    
-      # --- strict residuals (shape-safe) ---
+
+    # strict residuals (shape-safe)
     H_local = _load_h_local()
     H2 = (H_local.blocks.__root__.get("2") or [])
     C3 = (cmap.blocks.__root__.get("3") or [])
     I3 = eye(len(C3)) if C3 else []
-    
-    def _shape_ok_for_mul(A, B):
-        return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
-    
+
     R3_strict = []
     if _shape_ok_for_mul(H2, d3) and (C3 and C3[0] and len(C3) == len(C3[0])):  # C3 square
         try:
             R3_strict = _xor_mat(mul(H2, d3), _xor_mat(C3, I3))
         except Exception:
-            # stay silent; treat as not-ready and continue with empty residuals
             R3_strict = []
-    else:
-        # Not enough shapes yet (often before first H loads) → treat as empty residuals
-        R3_strict = []
-    
+    # else leave as []
+
     tag_strict = _residual_tag(R3_strict, lm_truth)
     eq3_strict = _is_zero(R3_strict)
-
 
     # projected leg (if enabled)
     if cfg_active.get("enabled_layers"):
@@ -2180,12 +2143,12 @@ def run_overlap():
         st.session_state["residual_tags"] = {"strict": tag_strict}
 
     # persist run_ctx (SSOT for cert)
-    pol_label = policy_label_from_cfg(cfg_active)
-    st.session_state["overlap_out"] = out
-    st.session_state["overlap_cfg"] = cfg_active
-    st.session_state["overlap_policy_label"] = pol_label
+    pol_lbl = policy_label_from_cfg(cfg_active)
+    st.session_state["overlap_out"]          = out
+    st.session_state["overlap_cfg"]          = cfg_active
+    st.session_state["overlap_policy_label"] = pol_lbl
     st.session_state["run_ctx"] = {
-        "policy_tag": pol_label, "mode": mode,
+        "policy_tag": pol_lbl, "mode": mode,
         "d3": d3, "n3": n3, "lane_mask_k3": lm_truth,
         "P_active": P_active,
         "projector_filename": meta.get("projector_filename", ""),
@@ -2197,30 +2160,29 @@ def run_overlap():
     st.session_state["overlap_H"] = H_local
     st.session_state["overlap_C"] = cmap
 
-    # publish canonical SSOT (idempotent)
-    publish_inputs_block(boundaries_obj=boundaries, cmap_obj=cmap, H_obj=H_local, shapes_obj=shapes, n3=n3)
+    # publish canonical SSOT (idempotent single source of truth)
+    publish_inputs_block(
+        boundaries_obj=boundaries,
+        cmap_obj=cmap,
+        H_obj=H_local,
+        shapes_obj=shapes,
+        n3=n3,
+    )
 
-        # --- fixture auto-match (no arming) ---
+    # --- fixture auto-match (no arming) --------------------------------------
     try:
-        # bottoms (frozen for cert/CSV), shape-safe
-        def _shape_ok_for_mul(A, B):
-            return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
-    
         H2d3  = mul(H2, d3) if _shape_ok_for_mul(H2, d3) else []
         C3pI3 = _xor_mat(C3, I3) if (C3 and C3[0]) else []
-    
-        diag_H_bot  = _bottom_row(H2d3)
-        diag_CI_bot = _bottom_row(C3pI3)
-    
+
         snapshot = {
             "identity": {"district_id": (st.session_state.get("_district_info") or {}).get(
                 "district_id", st.session_state.get("district_id","UNKNOWN")
             )},
-            "policy": {"canon": _canon_policy(pol_label)},
+            "policy": {"canon": _canon_policy(pol_lbl)},
             "inputs": {"lane_mask_k3": list(lm_truth)},
             "diagnostics": {
-                "lane_vec_H2@d3": list(diag_H_bot),
-                "lane_vec_C3+I3": list(diag_CI_bot),
+                "lane_vec_H2@d3": list(_bottom_row(H2d3)),
+                "lane_vec_C3+I3": list(_bottom_row(C3pI3)),
             },
             "checks": {"k": {"3": {"eq": bool(out.get("3",{}).get("eq", False))}}},
         }
@@ -2229,23 +2191,30 @@ def run_overlap():
     except Exception as e:
         st.info(f"(fixture match skipped: {e})")
 
-
     # FILE Π validity for cert guard
-    st.session_state["file_pi_valid"] = bool(
+    st.session_state["file_pi_valid"]   = bool(
         (mode == "projected(file)") and meta.get("projector_consistent_with_d", False)
         or (mode != "projected(file)")
     )
     st.session_state["file_pi_reasons"] = []
 
     # ── pre-arm cert writer only if material key changed (using frozen IB) ────
-    ib_sig = current_inputs_sig()  # 5-tuple from frozen _inputs_block
-    policy_canon = _canon_policy(pol_label)
-    pass_vec = (bool(out.get("2",{}).get("eq", False)), bool(out.get("3",{}).get("eq", False)))
-    proj_hash = st.session_state["run_ctx"].get("projector_hash","") if policy_canon == "projected:file" else ""
-    overlap_write_key = (ib_sig, policy_canon, pass_vec, proj_hash)
+    ib = st.session_state.get("_inputs_block") or {}
+    h  = (ib.get("hashes") or {})
+    ib_sig = (
+        str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
+        str(h.get("C_hash",          ib.get("C_hash",""))),
+        str(h.get("H_hash",          ib.get("H_hash",""))),
+        str(h.get("U_hash",          ib.get("U_hash",""))),
+        str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
+    )
+    policy_canon = _canon_policy(pol_lbl)
+    pass_vec     = (bool(out.get("2",{}).get("eq", False)), bool(out.get("3",{}).get("eq", False)))
+    proj_hash    = st.session_state["run_ctx"].get("projector_hash","") if policy_canon == "projected:file" else ""
+    overlap_key  = (ib_sig, policy_canon, pass_vec, proj_hash)
 
-    if st.session_state.get("_last_overlap_key") != overlap_write_key:
-        st.session_state["_last_overlap_key"] = overlap_write_key
+    if st.session_state.get("_last_overlap_key") != overlap_key:
+        st.session_state["_last_overlap_key"] = overlap_key
         st.session_state["write_armed"] = True
         st.session_state["armed_by"]    = "overlap_run"
 
@@ -2254,6 +2223,7 @@ if st.button("Run Overlap", key="btn_run_overlap_main"):
     soft_reset_before_overlap()  # your helper
     run_overlap()
 # -----------------------------------------------------------------------------------------------------------
+
 
 
 
