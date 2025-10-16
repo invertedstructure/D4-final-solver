@@ -7068,61 +7068,59 @@ def build_everything_snapshot() -> str:
 
  
 
-                with tab3:
-                    st.subheader("Triangle gate (Echo)")
-                
-                    # Second homotopy H' (the first H is taken from tab2 via session_state)
-                    f_H2 = st.file_uploader("Second homotopy H' (JSON)", type=["json"], key="H2_up")
-                    _stamp_filename("fname_H2", f_H2)
-                    d_H2 = read_json_file(f_H2) if f_H2 else None
-                    H2 = io.parse_cmap(d_H2) if d_H2 else None
-                
-                
-                
-                    # Pull H from tab2 (if loaded)
-                    H = st.session_state.get("H_obj")
-                
-                    # Reuse the same active policy you compute in tab2 (strict/projected)
-                    # If you compute cfg_active in tab2's scope, rebuild it here the same way or store it in session_state
-                    cfg_active = st.session_state.get("cfg_active")  # if you saved it; otherwise rebuild
-                
-                    if st.button("Run Triangle"):
-                        if boundaries is None or cmap is None:
-                            st.error("Load Boundaries and C in Unit tab first.")
-                        elif H is None:
-                            st.error("Upload H in Overlap tab first.")
-                        elif H2 is None:
-                            st.error("Upload H' here.")
-                        else:
-                            try:
-                                outT = triangle_gate.triangle_check(
-                                    boundaries, cmap, H, H2,
-                                    projection_config=cfg_active,
-                                    projector_cache=projector.preload_projectors_from_files(cfg_active)
-                                )
-                                st.json(outT)
-                            except TypeError:
-                                # fallback if triangle_check doesn’t yet accept projection kwargs
-                                outT = triangle_gate.triangle_check(boundaries, cmap, H, H2)
-                                st.warning("Triangle running in STRICT path (no projection kwargs).")
-                                st.json(outT)
-                
-                
-                with tab4:
-                    st.subheader("Towers")
-                    sched_str = st.text_input("Schedule (comma-separated I/C)", "I,C,C,I,C")
-                    sched = [s.strip().upper() for s in sched_str.split(",") if s.strip()]
-                    if any(s not in ("I","C") for s in sched):
-                        st.error("Schedule must contain only I or C")
-                    else:
-                        if st.button("Run Tower & save CSV"):
-                            reports_dir = "reports"
-                            os.makedirs(reports_dir, exist_ok=True)
-                            csv_path = os.path.join(reports_dir, f"tower-hashes_{seed}_{len(sched)}steps.csv")
-                            towers.run_tower(sched, cmap, shapes, seed, csv_path, schedule_name="custom")
-                            st.success(f"Saved: {csv_path}")
-                            with open(csv_path, "r", encoding="utf-8") as f:
-                                st.download_button("Download CSV", f.read(), file_name=os.path.basename(csv_path), mime="text/csv")
+with tab3:
+    st.subheader("Triangle gate (Echo)")
+    
+    # Second homotopy H' (the first H is taken from tab2 via session_state)
+    f_H2 = st.file_uploader("Second homotopy H' (JSON)", type=["json"], key="H2_up")
+    _stamp_filename("fname_H2", f_H2)
+    d_H2 = read_json_file(f_H2) if f_H2 else None
+    H2 = io.parse_cmap(d_H2) if d_H2 else None
+    
+    # Pull H from tab2 (if loaded)
+    H = st.session_state.get("H_obj")
+    
+    # Reuse the same active policy you compute in tab2 (strict/projected)
+    # If you compute cfg_active in tab2's scope, rebuild it here the same way or store it in session_state
+    cfg_active = st.session_state.get("cfg_active")  # if you saved it; otherwise rebuild
+    
+    if st.button("Run Triangle"):
+        if boundaries is None or cmap is None:
+            st.error("Load Boundaries and C in Unit tab first.")
+        elif H is None:
+            st.error("Upload H in Overlap tab first.")
+        elif H2 is None:
+            st.error("Upload H' here.")
+        else:
+            try:
+                outT = triangle_gate.triangle_check(
+                    boundaries, cmap, H, H2,
+                    projection_config=cfg_active,
+                    projector_cache=projector.preload_projectors_from_files(cfg_active)
+                )
+                st.json(outT)
+            except TypeError:
+                # fallback if triangle_check doesn’t yet accept projection kwargs
+                outT = triangle_gate.triangle_check(boundaries, cmap, H, H2)
+                st.warning("Triangle running in STRICT path (no projection kwargs).")
+                st.json(outT)
+
+# Ensure tab4 is aligned with tab3
+with tab4:
+    st.subheader("Towers")
+    sched_str = st.text_input("Schedule (comma-separated I/C)", "I,C,C,I,C")
+    sched = [s.strip().upper() for s in sched_str.split(",") if s.strip()]
+    if any(s not in ("I","C") for s in sched):
+        st.error("Schedule must contain only I or C")
+    else:
+        if st.button("Run Tower & save CSV"):
+            reports_dir = "reports"
+            os.makedirs(reports_dir, exist_ok=True)
+            csv_path = os.path.join(reports_dir, f"tower-hashes_{seed}_{len(sched)}steps.csv")
+            towers.run_tower(sched, cmap, shapes, seed, csv_path, schedule_name="custom")
+            st.success(f"Saved: {csv_path}")
+            with open(csv_path, "r", encoding="utf-8") as f:
+                st.download_button("Download CSV", f.read(), file_name=os.path.basename(csv_path), mime="text/csv")
 
 
 
