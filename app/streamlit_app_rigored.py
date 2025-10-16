@@ -102,17 +102,7 @@ DISTRICT_MAP: dict[str, str] = {
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
 
-def current_inputs_sig(_ib: dict | None = None) -> tuple[str, str, str, str, str]:
-    """Canonical 5-tuple: D, C, H, U, SHAPES ('' if absent)."""
-    ib = dict(_ib or (st.session_state.get("_inputs_block") or {}))
-    h  = dict(ib.get("hashes") or {})
-    return (
-        str(h.get("boundaries_hash") or ""),
-        str(h.get("C_hash")         or ""),
-        str(h.get("H_hash")         or ""),
-        str(h.get("U_hash")         or ""),       # ok if missing → ""
-        str(h.get("shapes_hash")    or ""),       # must be present for “complete”
-    )
+
 #---------------------------------------------------------------------#
 def _auto_pj_hash_from_rc(rc: dict) -> str:
     try:
