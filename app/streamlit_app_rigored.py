@@ -103,16 +103,23 @@ DISTRICT_MAP: dict[str, str] = {
 }
 
 def current_inputs_sig(_ib: dict | None = None) -> tuple[str, str, str, str, str]:
-    """Canonical 5-tuple: D, C, H, U, SHAPES ('' if absent)."""
-    ib = dict(_ib or (st.session_state.get("_inputs_block") or {}))
+    """
+    Canonical 5-tuple of input hashes in this exact order:
+    D, C, H, U, SHAPES. If a piece is missing, return "" for that slot.
+    Accepts an optional _ib (inputs_block) to compare arbitrary snapshots,
+    otherwise reads from st.session_state["_inputs_block"].
+    """
+    ss = st.session_state
+    ib = dict(_ib or (ss.get("_inputs_block") or {}))
     h  = dict(ib.get("hashes") or {})
     return (
         str(h.get("boundaries_hash") or ""),
         str(h.get("C_hash")         or ""),
         str(h.get("H_hash")         or ""),
-        str(h.get("U_hash")         or ""),       # ok if missing → ""
-        str(h.get("shapes_hash")    or ""),       # must be present for “complete”
+        str(h.get("U_hash")         or ""),
+        str(h.get("shapes_hash")    or ""),
     )
+
 #---------------------------------------------------------------------#
 def _auto_pj_hash_from_rc(rc: dict) -> str:
     try:
