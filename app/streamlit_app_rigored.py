@@ -5738,9 +5738,9 @@ with st.expander("Parity pairs: import/export"):
 # --------- END -----------------
 
 
-
-
-# ============================== Cert & Provenance ==============================
+    
+    
+    # ============================== Cert & Provenance ==============================
 with safe_expander("Cert & provenance", expanded=True):
     import os, json, hashlib, platform, time
     from pathlib import Path
@@ -6347,6 +6347,7 @@ with safe_expander("Cert & provenance", expanded=True):
             build_b2_gallery(debounce=True)
     except Exception as e:
         st.info(f"(B2 gallery build skipped: {e})")
+
 
 
 
