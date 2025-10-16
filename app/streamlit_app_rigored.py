@@ -690,6 +690,32 @@ def safe_expander(label: str, expanded: bool = False):
             yield
         return _noop()
 
+# ---- Policy/config helpers (minimal, canonical) ----
+def cfg_strict() -> dict:
+    return {
+        "enabled_layers": [],
+        "source": {},               # no layer sources in strict
+        "projector_files": {},      # none
+    }
+
+def cfg_projected_base() -> dict:
+    return {
+        "enabled_layers": [3],      # we project layer 3
+        "source": {"3": "auto"},    # default projector source
+        "projector_files": {},      # filled only for 'file'
+    }
+
+def policy_label_from_cfg(cfg: dict) -> str:
+    if not cfg or not cfg.get("enabled_layers"):
+        return "strict"
+    src = (cfg.get("source") or {}).get("3", "auto")
+    mode = "file" if src == "file" else "auto"
+    # keep your established label shape
+    return f"projected(columns@k=3,{mode})"
+
+# (optional) projector-file validator; keep as no-op if you don't need it yet
+def validate_projector_file_strict(P, *, n3: int, lane_mask: list[int]):
+    return  # implement later if you want strict checks for Π
 
 
 
