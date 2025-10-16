@@ -101,6 +101,109 @@ DISTRICT_MAP: dict[str, str] = {
     "28f8db2a822cb765e841a35c2850a745c667f4228e782d0cfdbcb710fd4fecb9": "D3",
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
+# ===== SSOT canon (v2) — single source of truth for hashes/dims/filenames =====
+from typing import Tuple
+
+def _deep_intify_v2(o):
+    if isinstance(o, bool): return 1 if o else 0
+    if isinstance(o, list): return [_deep_intify_v2(x) for x in o]
+    if isinstance(o, dict): return {k: _deep_intify_v2(v) for k, v in o.items()}
+    return o
+
+def stable_blocks_sha_v2(obj) -> str:
+    import json, hashlib
+    try:
+        data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (obj if isinstance(obj, dict) else {"blocks": {}})
+        s = json.dumps(_deep_intify_v2(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        return hashlib.sha256(s).hexdigest()
+    except Exception:
+        return ""
+
+def frozen_sig_from_ib_v2() -> Tuple[str,str,str,str,str] or tuple:
+    ib = st.session_state.get("_inputs_block") or {}
+    if not ib: return ()
+    h = ib.get("hashes") or {}
+    b = str(h.get("boundaries_hash", ib.get("boundaries_hash","")))
+    C = str(h.get("C_hash",          ib.get("C_hash","")))
+    H = str(h.get("H_hash",          ib.get("H_hash","")))
+    U = str(h.get("U_hash",          ib.get("U_hash","")))
+    S = str(h.get("shapes_hash",     ib.get("shapes_hash","")))
+    if not any((b, C, H, U, S)): return ()
+    return (b, C, H, U, S)
+
+def live_sig_now_v2() -> Tuple[str,str,str,str,str]:
+    H_obj = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
+    return (
+        stable_blocks_sha_v2(boundaries),
+        stable_blocks_sha_v2(cmap),
+        stable_blocks_sha_v2(H_obj),
+        stable_blocks_sha_v2(shapes),
+        stable_blocks_sha_v2(shapes),
+    )
+
+def publish_inputs_block_v2(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int):
+    """Freeze canonical _inputs_block and memoize live/frozen sigs atomically."""
+    ss = st.session_state
+    H2 = (H_obj.blocks.__root__.get("2") or []) if H_obj else []
+    hashes = {
+        "boundaries_hash": stable_blocks_sha_v2(boundaries_obj),
+        "C_hash":          stable_blocks_sha_v2(cmap_obj),
+        "H_hash":          stable_blocks_sha_v2(H_obj),
+        "U_hash":          stable_blocks_sha_v2(shapes_obj),
+        "shapes_hash":     stable_blocks_sha_v2(shapes_obj),
+    }
+    dims = {"n2": int(len(H2) if H2 else 0), "n3": int(n3 or 0)}
+    files = {
+        "boundaries": ss.get("fname_boundaries","boundaries.json"),
+        "cmap":       ss.get("fname_cmap","cmap.json"),
+        "H":          ss.get("fname_h","H.json"),
+        "U":          ss.get("fname_shapes","shapes.json"),
+        "shapes":     ss.get("fname_shapes","shapes.json"),
+    }
+    rc = ss.get("run_ctx") or {}
+    if rc.get("projector_filename"):
+        files["projector"] = rc["projector_filename"]
+
+    before = frozen_sig_from_ib_v2()
+    ss["_inputs_block"] = {
+        "hashes": dict(hashes),
+        "dims":   dict(dims),
+        "filenames": dict(files),
+        # legacy top level
+        "boundaries_hash": hashes["boundaries_hash"],
+        "C_hash":          hashes["C_hash"],
+        "H_hash":          hashes["H_hash"],
+        "U_hash":          hashes["U_hash"],
+        "shapes_hash":     hashes["shapes_hash"],
+    }
+    after = (hashes["boundaries_hash"], hashes["C_hash"], hashes["H_hash"], hashes["U_hash"], hashes["shapes_hash"])
+
+    # freshness flags (and a one-frame guard to silence stale right after publish)
+    ss["_has_overlap"] = True
+    ss["_last_ib_sig"] = after
+    ss["_ssot_live_sig_at_publish"] = live_sig_now_v2()
+    ss["_ssot_just_published_v2"] = True
+    return {"before": before, "after": after}
+
+def ssot_is_stale_v2() -> bool:
+    ss = st.session_state
+    # if we literally just published this render, don't mark stale
+    if ss.pop("_ssot_just_published_v2", False): 
+        return False
+    if not ss.get("_has_overlap"):   # never stale before first publish
+        return False
+    frozen = frozen_sig_from_ib_v2()
+    if not frozen:
+        return False
+    # compare against last-live-at-publish first (handles same-render comparisons)
+    live_at_pub = ss.get("_ssot_live_sig_at_publish")
+    if live_at_pub and tuple(frozen) == tuple(live_at_pub):
+        return False
+    # fallback: recompute live now
+    return tuple(frozen) != tuple(live_sig_now_v2())
+# ===== end SSOT canon (v2) ====================================================
+
+
 # ─── SSOT freshness check (startup/one-frame safe) ───────────────────────────
 from typing import Tuple
 
@@ -2340,24 +2443,30 @@ def run_overlap():
         st.session_state["overlap_cfg"]            = cfg_active
         st.session_state["overlap_policy_label"]   = pol_lbl
 
-        # Freeze SSOT even on FILE error (no projector field)
+                # Freeze SSOT even on FILE error (no projector field)
         H_local = _load_h_local()
         st.session_state["overlap_H"] = H_local
         st.session_state["overlap_C"] = cmap
-        publish_inputs_block(
+        
+        # Canonical v2 freezer (idempotent; also sets _has_overlap + guards stale-on-same-render)
+        sig_info = publish_inputs_block_v2(
             boundaries_obj=boundaries,
             cmap_obj=cmap,
             H_obj=H_local,
             shapes_obj=shapes,
             n3=n3_now,
         )
-
+        st.caption(f"SSOT sig (before → after): {list(sig_info['before'])} → {list(sig_info['after'])}")
+        
+        # FILE Π invalid flags + single-flight witness arm
         st.session_state["file_pi_valid"]   = False
         st.session_state["file_pi_reasons"] = [str(e)]
         st.session_state["write_armed"]     = True
         st.session_state["armed_by"]        = "file_invalid"
+        
         st.error(f"Projected(FILE) validation failed: {e}")
         return
+
 
     # ── success path (d3/mode) ────────────────────────────────────────────────
     d3   = meta.get("d3") if "d3" in meta else (boundaries.blocks.__root__.get("3") or [])
@@ -2567,11 +2676,12 @@ def _ab_is_fresh_now() -> bool:
             return False
     return True
 
+_fail, _warn = run_self_tests()
+
 def run_self_tests():
     failures, warnings = [], []
     ib = st.session_state.get("_inputs_block") or {}
     rc = st.session_state.get("run_ctx") or {}
-    ab = st.session_state.get("ab_compare") or {}
     out = st.session_state.get("overlap_out") or {}
 
     # SSOT completeness (read-only)
@@ -2579,20 +2689,24 @@ def run_self_tests():
         if not ib.get(k):
             warnings.append(f"SSOT: missing {k}")
 
-    # Require freshness rather than side-channel hash comparisons
-    if ssot_is_stale():
+    # freshness (v2)
+    if ssot_is_stale_v2():
         warnings.append("SSOT_STALE: live inputs changed; run Overlap to refresh SSOT")
 
+    # projector validations etc...
     mode = rc.get("mode","")
     if mode.startswith("projected(file)") and not bool(rc.get("projector_consistent_with_d", False)):
         failures.append("FILE_OK: projected(file) not consistent with d3")
     elif mode.startswith("projected(auto)") and "3" not in out:
         warnings.append("AUTO_OK: no overlap_out present yet")
 
-    if ab and (ab.get("inputs_sig") != list(current_inputs_sig())):
+    # A/B freshness vs frozen sig (use v2 canonical reader)
+    ab = st.session_state.get("ab_compare") or {}
+    if ab and (tuple(ab.get("inputs_sig") or ()) != frozen_sig_from_ib_v2()):
         warnings.append("AB_FRESH: A/B snapshot is stale (won’t embed)")
 
     return failures, warnings
+
 
 
 
