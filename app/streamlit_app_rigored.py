@@ -7399,107 +7399,99 @@ def _flush_workspace_safe(delete_projectors: bool=False):
         "files_removed": files_removed, "token": token,
         "composite_cache_key_short": ckey[:12],
     }
-# ─────────────────────────── FULL WORKSPACE FLUSH ───────────────────────────
-def _full_flush_workspace(delete_projectors: bool = False):
-    """
-    Deletes persisted outputs on disk (certs/logs/reports/bundles).
-    Keeps inputs intact. Optionally deletes projectors.
-    Resets session_state keys and recreates empty dirs.
-    """
-    import streamlit as st  # local import
 
-    summary = {
+# ─────────────────────────── FULL WORKSPACE FLUSH (helpers) ───────────────────────────
+def _session_flush_run_cache_safe():
+    """Wrapper that prefers app's reset if available; otherwise minimal fallback."""
+    if "_session_flush_run_cache" in globals() and callable(_session_flush_run_cache):
+        return _session_flush_run_cache()
+    # minimal fallback: just bump nonce + new cache key
+    ts = _utc_iso_z()
+    salt = secrets.token_hex(2).upper()
+    token = f"RUN-FLUSH-{ts}-{salt}"
+    ckey  = hashlib.sha256((ts + salt).encode("utf-8")).hexdigest()
+    st.session_state["_fixture_nonce"] = int(st.session_state.get("_fixture_nonce", 0)) + 1
+    st.session_state["_composite_cache_key"] = ckey
+    st.session_state["_last_flush_token"] = token
+    return {"token": token, "ckey_short": ckey[:12]}
+
+def _flush_workspace_safe(*, delete_projectors: bool = False):
+    """Wrapper that uses your full flush if present."""
+    if "_full_flush_workspace" in globals() and callable(_full_flush_workspace):
+        return _full_flush_workspace(delete_projectors=delete_projectors)
+    # final fallback: no-op summary
+    return {
         "when": _utc_iso_z(),
         "deleted_dirs": [],
         "recreated_dirs": [],
         "files_removed": 0,
-        "token": "",
-        "composite_cache_key_short": "",
+        "token": "FLUSH-NOOP",
+        "composite_cache_key_short": (st.session_state.get("_composite_cache_key","") or "")[:12],
     }
 
-    # Clear session state (idempotent)
-    for k in (
-        "_inputs_block", "_district_info", "run_ctx", "overlap_out", "overlap_H",
-        "residual_tags", "ab_compare", "last_cert_path", "cert_payload",
-        "last_run_id", "_gallery_keys", "_last_boundaries_hash",
-        "_projector_cache", "_projector_cache_ab", "parity_pairs",
-        "parity_last_report_pairs", "selftests_snapshot"
-    ):
-        st.session_state.pop(k, None)
-
-    # Remove dirs and recreate
-    dirs = [CERTS_DIR, LOGS_DIR, REPORTS_DIR, BUNDLES_DIR]
-    if delete_projectors:
-        dirs.append(PROJECTORS_DIR)
-
-    removed_files_count = 0
-    for d in dirs:
-        if d.exists():
-            removed_files_count += _count_files(d)
-            shutil.rmtree(d)
-        d.mkdir(parents=True, exist_ok=True)
-        summary["deleted_dirs"].append(str(d))
-        summary["recreated_dirs"].append(str(d))
-    summary["files_removed"] = removed_files_count
-
-    # New cache key + token
-    ts = _utc_iso_z()
-    salt = secrets.token_hex(2).upper()
-    token = f"FLUSH-{ts}-{salt}"
-    ckey = hashlib.sha256((ts + salt).encode("utf-8")).hexdigest()
-    st.session_state["_composite_cache_key"] = ckey
-    st.session_state["_last_flush_token"] = token
-    summary["token"] = token
-    summary["composite_cache_key_short"] = ckey[:12]
-    return summary
-
-import os
-from pathlib import Path
-
-EXPORTS_NS = "exports_v2"  # keep consistent with the rest of your app
+# ─────────────────────────── EXPORTS (Snapshot + Flush) ───────────────────────────
+EXPORTS_NS = "exports_v2"  # keep consistent across app
 
 with safe_expander("Exports", expanded=False):
     c1, c2 = st.columns(2)
 
-   # ── Snapshot button
-with c1:
-    if st.button("Build Snapshot ZIP", key=_mkkey(EXPORTS_NS, "btn_build_snapshot")):
-        try:
-            zp = build_everything_snapshot()
-            if zp:
-                st.success(f"Snapshot ready → {zp}")
-                with open(zp, "rb") as fz:
-                    st.download_button("Download snapshot.zip", fz,
-                                       file_name=os.path.basename(zp),
-                                       key=_mkkey(EXPORTS_NS, "dl_snapshot_zip"))
-        except Exception as e:
-            st.error(f"Snapshot failed: {e}")
-# place this in your “Exports” section, column c2
-with c2:
-    st.caption("Flush / Reset")
-    if st.button("Quick Reset (session only)",
-                 key=_mkkey(EXPORTS_NS, "btn_quick_reset_session"),
-                 help="Clears computed session data, bumps nonce; does not touch files."):
-        out = _session_flush_run_cache_safe()
-        st.success(f"Run cache flushed · token={out['token']} · key={out['ckey_short']}")
+    # ── Snapshot (left column)
+    with c1:
+        if st.button("Build Snapshot ZIP", key=_mkkey(EXPORTS_NS, "btn_build_snapshot")):
+            try:
+                zp = build_everything_snapshot()
+                if zp:
+                    st.success(f"Snapshot ready → {zp}")
+                    with open(zp, "rb") as fz:
+                        st.download_button(
+                            "Download snapshot.zip",
+                            fz,
+                            file_name=os.path.basename(zp),
+                            key=_mkkey(EXPORTS_NS, "dl_snapshot_zip"),
+                        )
+                else:
+                    st.info("Nothing to snapshot yet.")
+            except Exception as e:
+                st.error(f"Snapshot failed: {e}")
 
-    inc_pj  = st.checkbox("Also remove projectors (full flush)",
-                          value=False, key=_mkkey(EXPORTS_NS, "flush_inc_pj"))
-    confirm = st.checkbox("I understand this deletes files on disk",
-                          value=False, key=_mkkey(EXPORTS_NS, "ff_confirm"))
-    if st.button("Full Flush (certs/logs/reports/bundles)",
-                 key=_mkkey(EXPORTS_NS, "btn_full_flush"),
-                 disabled=not confirm,
-                 help="Deletes persisted outputs; keeps inputs. Bumps nonce & resets session."):
-        try:
-            info = _flush_workspace_safe(delete_projectors=inc_pj)
-            st.success(f"Workspace flushed · {info['token']}")
-            st.caption(f"New cache key: `{info['composite_cache_key_short']}`")
-            with st.expander("Flush details"):
-                st.json(info)
-        except Exception as e:
-            st.error(f"Flush failed: {e}")
+    # ── Flush / Reset (right column)
+    with c2:
+        st.caption("Flush / Reset")
 
+        if st.button(
+            "Quick Reset (session only)",
+            key=_mkkey(EXPORTS_NS, "btn_quick_reset_session"),
+            help="Clears computed session data, bumps nonce; does not touch files.",
+        ):
+            out = _session_flush_run_cache_safe()
+            st.success(f"Run cache flushed · token={out['token']} · key={out['ckey_short']}")
+
+        inc_pj = st.checkbox(
+            "Also remove projectors (full flush)",
+            value=False,
+            key=_mkkey(EXPORTS_NS, "flush_inc_pj"),
+        )
+        confirm = st.checkbox(
+            "I understand this deletes files on disk",
+            value=False,
+            key=_mkkey(EXPORTS_NS, "ff_confirm"),
+        )
+
+        if st.button(
+            "Full Flush (certs/logs/reports/bundles)",
+            key=_mkkey(EXPORTS_NS, "btn_full_flush"),
+            disabled=not confirm,
+            help="Deletes persisted outputs; keeps inputs. Bumps nonce & resets session.",
+        ):
+            try:
+                info = _flush_workspace_safe(delete_projectors=inc_pj)
+                st.success(f"Workspace flushed · {info['token']}")
+                st.caption(f"New cache key: `{info['composite_cache_key_short']}`")
+                # NO NESTED EXPANDER: use a checkbox+container for details
+                if st.checkbox("Show flush details", key=_mkkey(EXPORTS_NS, "show_flush_details")):
+                    st.json(info)
+            except Exception as e:
+                st.error(f"Flush failed: {e}")
 
 
 
