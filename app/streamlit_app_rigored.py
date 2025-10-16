@@ -1697,6 +1697,79 @@ def _stable_hash(obj) -> str:
 
 
 
+# ---------- SSOT publisher (top-level, reusable) ----------
+def _ssot_deep_intify(o):
+    if isinstance(o, bool): return 1 if o else 0
+    if isinstance(o, list): return [_ssot_deep_intify(x) for x in o]
+    if isinstance(o, dict): return {k: _ssot_deep_intify(v) for k, v in o.items()}
+    return o
+
+def _ssot_stable_blocks_sha(obj) -> str:
+    import json, hashlib
+    try:
+        data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (obj if isinstance(obj, dict) else {"blocks": {}})
+        s = json.dumps(_ssot_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+        return hashlib.sha256(s).hexdigest()
+    except Exception:
+        return ""
+
+def publish_inputs_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int):
+    """
+    Freeze Source-Of-Truth inputs into st.session_state['_inputs_block'].
+
+    Writes:
+      _inputs_hashes_pending, _dims_pending, _filenames_pending
+      _inputs_block  (with both nested 'hashes' and legacy flattened keys)
+      _has_overlap   (flag)
+    Also calls _reconcile_di_vs_ssot() if present.
+    """
+    import streamlit as st
+
+    H2_now = (H_obj.blocks.__root__.get("2") or []) if hasattr(H_obj, "blocks") else []
+    hashes_now = {
+        "boundaries_hash": _ssot_stable_blocks_sha(boundaries_obj),
+        "C_hash":          _ssot_stable_blocks_sha(cmap_obj),
+        "H_hash":          _ssot_stable_blocks_sha(H_obj),
+        "U_hash":          _ssot_stable_blocks_sha(shapes_obj),
+        "shapes_hash":     _ssot_stable_blocks_sha(shapes_obj),
+    }
+    dims_now = {
+        "n2": int(len(H2_now) if H2_now else 0),
+        "n3": int(n3),
+    }
+    files_now = {
+        "boundaries": st.session_state.get("fname_boundaries","boundaries.json"),
+        "C":          st.session_state.get("fname_cmap","cmap.json"),
+        "H":          st.session_state.get("fname_h","H.json"),
+        "U":          st.session_state.get("fname_shapes","shapes.json"),
+    }
+
+    # Stage “pending” (for any readers that look there)
+    st.session_state["_inputs_hashes_pending"] = hashes_now
+    st.session_state["_dims_pending"]          = dims_now
+    st.session_state.setdefault("_filenames_pending", files_now)
+
+    # Publish canonical block (what Cert & Reports read)
+    st.session_state["_inputs_block"] = {
+        "hashes": dict(hashes_now),
+        "dims":   dict(dims_now),
+        "filenames": dict(files_now),
+        # legacy flattening for older readers:
+        "boundaries_hash": hashes_now["boundaries_hash"],
+        "C_hash":          hashes_now["C_hash"],
+        "H_hash":          hashes_now["H_hash"],
+        "U_hash":          hashes_now["U_hash"],
+        "shapes_hash":     hashes_now["shapes_hash"],
+    }
+
+    # keep _district_info consistent if reconciler is available
+    if "_reconcile_di_vs_ssot" in globals():
+        try: _reconcile_di_vs_ssot()
+        except Exception: pass
+
+    st.session_state["_has_overlap"] = True
+
+
 
 
 
