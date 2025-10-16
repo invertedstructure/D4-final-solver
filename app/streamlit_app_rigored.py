@@ -101,6 +101,125 @@ DISTRICT_MAP: dict[str, str] = {
     "28f8db2a822cb765e841a35c2850a745c667f4228e782d0cfdbcb710fd4fecb9": "D3",
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
+# ─── SSOT freshness check (startup/one-frame safe) ───────────────────────────
+from typing import Tuple
+
+def _frozen_sig_from_ib() -> Tuple[str,str,str,str,str] or tuple:
+    ib = st.session_state.get("_inputs_block") or {}
+    if not ib: return ()
+    h = ib.get("hashes") or {}
+    b = str(h.get("boundaries_hash", ib.get("boundaries_hash","")))
+    C = str(h.get("C_hash",          ib.get("C_hash","")))
+    H = str(h.get("H_hash",          ib.get("H_hash","")))
+    U = str(h.get("U_hash",          ib.get("U_hash","")))
+    S = str(h.get("shapes_hash",     ib.get("shapes_hash","")))
+    if not any((b, C, H, U, S)): return ()
+    return (b, C, H, U, S)
+
+def _live_sig_now() -> Tuple[str,str,str,str,str]:
+    H_obj = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
+    return (
+        _stable_blocks_sha(boundaries),
+        _stable_blocks_sha(cmap),
+        _stable_blocks_sha(H_obj),
+        _stable_blocks_sha(shapes),
+        _stable_blocks_sha(shapes),
+    )
+
+def ssot_is_stale() -> bool:
+    ss = st.session_state
+    # If we literally just published this render, don't flag stale
+    if ss.pop("_ssot_just_published", False):
+        return False
+    if not ss.get("_has_overlap"):    # never stale before first publish
+        return False
+    frozen = _frozen_sig_from_ib()
+    if not frozen:
+        return False
+    live = _live_sig_now()
+    return tuple(frozen) != tuple(live)
+
+
+# ─── Canonical SSOT publisher (freeze Inputs Block) ───────────────────────────
+def publish_inputs_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int):
+    import json, hashlib
+    ss = st.session_state
+
+    def _deep_intify(o):
+        if isinstance(o, bool): return 1 if o else 0
+        if isinstance(o, list): return [_deep_intify(x) for x in o]
+        if isinstance(o, dict): return {k: _deep_intify(v) for k, v in o.items()}
+        return o
+
+    def _stable_blocks_sha(obj) -> str:
+        try:
+            data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (obj if isinstance(obj, dict) else {"blocks": {}})
+            s = json.dumps(_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+            return hashlib.sha256(s).hexdigest()
+        except Exception:
+            return ""
+
+    # BEFORE sig (if already frozen)
+    ib_before = ss.get("_inputs_block") or {}
+    h_before  = ib_before.get("hashes") or {}
+    before_sig = (
+        str(h_before.get("boundaries_hash", ib_before.get("boundaries_hash",""))),
+        str(h_before.get("C_hash",          ib_before.get("C_hash",""))),
+        str(h_before.get("H_hash",          ib_before.get("H_hash",""))),
+        str(h_before.get("U_hash",          ib_before.get("U_hash",""))),
+        str(h_before.get("shapes_hash",     ib_before.get("shapes_hash",""))),
+    )
+
+    # Compute current hashes/dims/files
+    H2 = (H_obj.blocks.__root__.get("2") or []) if H_obj else []
+    hashes = {
+        "boundaries_hash": _stable_blocks_sha(boundaries_obj),
+        "C_hash":          _stable_blocks_sha(cmap_obj),
+        "H_hash":          _stable_blocks_sha(H_obj),
+        "U_hash":          _stable_blocks_sha(shapes_obj),
+        "shapes_hash":     _stable_blocks_sha(shapes_obj),
+    }
+    dims = {"n2": int(len(H2) if H2 else 0), "n3": int(n3 or 0)}
+    files = {
+        "boundaries": ss.get("fname_boundaries","boundaries.json"),
+        "cmap":       ss.get("fname_cmap","cmap.json"),
+        "H":          ss.get("fname_h","H.json"),
+        "U":          ss.get("fname_shapes","shapes.json"),
+        "shapes":     ss.get("fname_shapes","shapes.json"),
+    }
+    # include projector filename when present
+    rc = ss.get("run_ctx") or {}
+    if rc.get("projector_filename"):
+        files["projector"] = rc["projector_filename"]
+
+    # Write canonical block (+ legacy flattening)
+    ss["_inputs_block"] = {
+        "hashes": dict(hashes),
+        "dims":   dict(dims),
+        "filenames": dict(files),
+        # legacy top level:
+        "boundaries_hash": hashes["boundaries_hash"],
+        "C_hash":          hashes["C_hash"],
+        "H_hash":          hashes["H_hash"],
+        "U_hash":          hashes["U_hash"],
+        "shapes_hash":     hashes["shapes_hash"],
+    }
+
+    after_sig = (
+        hashes["boundaries_hash"],
+        hashes["C_hash"],
+        hashes["H_hash"],
+        hashes["U_hash"],
+        hashes["shapes_hash"],
+    )
+
+    # Bookkeeping: mark that we have a frozen SSOT and memoize the sig
+    ss["_has_overlap"]   = True
+    ss["_last_ib_sig"]   = after_sig
+    ss["_ssot_just_published"] = True  # one-frame guard to silence stale UI
+
+    return {"before": before_sig, "after": after_sig}
+
 # ─── SSOT freshness (canonical, annotation-safe) ─────────────────────────────
 from typing import Tuple
 
