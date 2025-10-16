@@ -1325,7 +1325,7 @@ except ValueError as e:
     st.session_state["write_armed"]     = True
     st.session_state["armed_by"]        = "file_invalid"
     st.error(f"Projected(FILE) validation failed: {e}")
-    return  # stop run_overlap here
+        return  # stop run_overlap here
 
 # ---- success path (strict + projected residuals; persist SSOT) --------------------
 # meta may carry d3/n3/mode; fall back to boundaries
