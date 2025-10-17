@@ -1390,7 +1390,30 @@ def run_overlap():
     idx   = [j for j,m in enumerate(lm_truth or []) if m]
     lane_vec_H2d3  = [_bottom_row(H2d3)[j]  for j in idx] if (H2d3 and idx) else []
     lane_vec_C3pI3 = [_bottom_row(C3pI3)[j] for j in idx] if (C3pI3 and idx) else []
+        # bottom rows
+    def _bottom_row(M): return M[-1] if (M and len(M)) else []
+    bottom_H2d3  = _bottom_row(H2d3)
+    bottom_C3pI3 = _bottom_row(C3pI3)
     
+    # mask by lane_mask_k3 truth (FIRST!)
+    idx = [j for j,m in enumerate(lm_truth or []) if m]
+    lane_vec_H2d3  = [bottom_H2d3[j]  for j in idx] if (bottom_H2d3 and idx) else []
+    lane_vec_C3pI3 = [bottom_C3pI3[j] for j in idx] if (bottom_C3pI3 and idx) else []
+    
+    snapshot_for_fixture = {
+        "identity": {"district_id": district_id},
+        "policy":   {"canon": policy_label_from_cfg(cfg_active)},
+        "inputs":   {"lane_mask_k3": lm_truth},
+        "diagnostics": {
+            "lane_vec_H2@d3": lane_vec_H2d3,
+            "lane_vec_C3+I3": lane_vec_C3pI3,
+        },
+        "checks": {"k":{"3":{"eq": bool(eq3_strict)}}},
+        "growth": {"growth_bumps": int(st.session_state.get("growth_bumps",0) or 0)},
+    }
+    fx = match_fixture_from_snapshot(snapshot_for_fixture)
+    apply_fixture_to_session(fx)
+
     # --- auto-apply fixture (no UI)
     _apply_fixture_after_overlap(
         rc=st.session_state.get("run_ctx") or rc,
@@ -6413,6 +6436,58 @@ with safe_expander("Cert & provenance", expanded=True):
         else:
             ab_fresh = True
             ab_status = REASON.AB_EMBEDDED
+                # --- Auto-label on write (runs only if fixture_label isn't set yet) ---
+    try:
+        if not st.session_state.get("fixture_label"):
+            rc = st.session_state.get("run_ctx") or {}
+            di = st.session_state.get("_district_info") or {}
+            district_id = di.get("district_id", "UNKNOWN")
+            policy_canon = (_policy_tag_now(rc) if " _policy_tag_now" in globals() else str(rc.get("policy_tag","strict")))
+    
+            # Use the same masked diagnostics you already compute for checks
+            lane_mask = list(rc.get("lane_mask_k3") or [])
+            # These two should already exist in this block; recompute cheaply if not
+            H_used = st.session_state.get("overlap_H") or _load_h_local()
+            d3     = rc.get("d3") or []
+            C3     = (cmap.blocks.__root__.get("3") or [])
+            H2     = (H_used.blocks.__root__.get("2") or [])
+            I3     = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
+            def _shape_ok(A,B): return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
+            def _xor(A,B):
+                if not A: return [r[:] for r in (B or [])]
+                if not B: return [r[:] for r in (A or [])]
+                r,c = len(A), len(A[0])
+                return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
+            H2d3  = mul(H2, d3) if _shape_ok(H2, d3) else []
+            C3pI3 = _xor(C3, I3) if (C3 and C3[0]) else []
+            bottom = (H2d3[-1] if (H2d3 and len(H2d3)) else [])
+            bottom_ci = (C3pI3[-1] if (C3pI3 and len(C3pI3)) else [])
+            idx = [j for j,m in enumerate(lane_mask or []) if m]
+            lane_vec_H2d3  = [bottom[j]    for j in idx] if (bottom and idx) else []
+            lane_vec_C3pI3 = [bottom_ci[j] for j in idx] if (bottom_ci and idx) else []
+    
+            # strict eq3 from the currently staged Overlap result
+            out = st.session_state.get("overlap_out") or {}
+            strict_eq3 = bool(((out.get("3") or {}).get("eq", False)))
+    
+            snapshot_for_fixture = {
+                "identity": {"district_id": district_id},
+                "policy":   {"canon": policy_canon},
+                "inputs":   {"lane_mask_k3": lane_mask},
+                "diagnostics": {
+                    "lane_vec_H2@d3": lane_vec_H2d3,
+                    "lane_vec_C3+I3": lane_vec_C3pI3,
+                },
+                "checks":   {"k": {"3": {"eq": strict_eq3}}},
+                "growth":   {"growth_bumps": int(st.session_state.get("growth_bumps", 0) or 0)},
+            }
+    
+            fx = match_fixture_from_snapshot(snapshot_for_fixture)  # registry-driven
+            apply_fixture_to_session(fx)  # stamps fixture_label/tag/strictify/growth into session + rc
+    except Exception:
+        # Never block a cert write on labeling
+        pass
+
 
     # ---------------- Identity (includes fixture fields) ----------------
     identity = {
