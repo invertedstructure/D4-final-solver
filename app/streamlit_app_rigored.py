@@ -4879,6 +4879,49 @@ with st.container():
     st.code(json.dumps(dbg, indent=2))
 # ========================== /Projector Freezer ==========================
 
+# --- compat shim: keep old callers happy --------------------------------------
+def _projected_k3_eq_now(*, rc: dict, **kwargs) -> dict:
+    """
+    Returns {"eq_strict": bool, "eq_projected": bool, "used_diag_fallback": bool}.
+    Proxies to _recompute_eqs(rc) if available; otherwise computes locally.
+    """
+    # Fast path: reuse the freezer’s helper if present
+    if "_recompute_eqs" in globals() and callable(globals()["_recompute_eqs"]):
+        return _recompute_eqs(rc)  # type: ignore[name-defined]
+
+    # Fallback: minimal local compute (shape-safe)
+    import streamlit as st
+    ss = st.session_state
+    boundaries_ = kwargs.get("boundaries") or globals().get("boundaries")
+    cmap_       = kwargs.get("cmap")       or globals().get("cmap")
+    H_obj       = kwargs.get("H_obj")      or ss.get("overlap_H")
+
+    def _shape_ok(A,B): 
+        try: return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
+        except Exception: return False
+    def _xor(A,B):
+        if not A: return [r[:] for r in (B or [])]
+        if not B: return [r[:] for r in (A or [])]
+        r,c = len(A), len(A[0])
+        return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
+    def _is_zero(M): 
+        return (not M) or all((x & 1) == 0 for row in M for x in row)
+
+    d3 = rc.get("d3") or ((boundaries_.blocks.__root__.get("3") or []) if boundaries_ else [])
+    H2 = (getattr(H_obj, "blocks", None).__root__.get("2") if getattr(H_obj, "blocks", None) else []) or []
+    C3 = ((cmap_.blocks.__root__.get("3") or []) if cmap_ else [])
+    I3 = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
+
+    R3s = _xor(mul(H2, d3), _xor(C3, I3)) if (_shape_ok(H2,d3) and C3 and C3[0] and len(C3)==len(C3[0])) else []
+    lm  = list(rc.get("lane_mask_k3") or [])
+    P   = rc.get("P_active") or ([[1 if (i==j and lm[j]) else 0 for j in range(len(lm))] for i in range(len(lm))] if lm else [])
+    R3p = mul(R3s, P) if (R3s and P) else []
+
+    return {
+        "eq_strict": _is_zero(R3s),
+        "eq_projected": _is_zero(R3p),
+        "used_diag_fallback": bool(P and not rc.get("P_active"))
+    }
 
 
 
