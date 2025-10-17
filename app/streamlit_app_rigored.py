@@ -5157,11 +5157,99 @@ def _safe_build_b2_gallery(debounce: bool = True):
             raise
 
 # ============================== /B2 Gallery Compiler (final) ==============================
+# ===== A/B gallery helpers (stable ID, safe append) =====
+import json, hashlib, time
+from pathlib import Path
+import streamlit as st
 
+def _ab_hash_obj(obj: dict) -> str:
+    """Stable SHA256 over a canonicalized (ints not bools) JSON."""
+    def _deep_intify(o):
+        if isinstance(o, bool): return 1 if o else 0
+        if isinstance(o, list): return [_deep_intify(x) for x in o]
+        if isinstance(o, dict): return {k: _deep_intify(v) for k,v in o.items()}
+        return o
+    canon = _deep_intify(json.loads(json.dumps(obj, sort_keys=True, separators=(",",":"))))
+    return hashlib.sha256(json.dumps(canon, sort_keys=True, separators=(",",":")).encode("ascii")).hexdigest()
+
+def _ab_ssot_key() -> str:
+    """Combine the 5 inputs hashes into one SSOT key; fallback to empty if missing."""
+    ih = st.session_state.get("inputs_hashes") or {}
+    keys = ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")
+    tup  = [ih.get(k,"") for k in keys]
+    return hashlib.sha256(("|".join(tup)).encode("utf-8")).hexdigest() if any(tup) else ""
+
+def _ab_fingerprint(payload: dict) -> str:
+    """
+    Build the dedupe key from A/B essentials + SSOT.
+    We purposefully ignore volatile fields (timestamps, UI flags).
+    """
+    ssot_key = _ab_ssot_key()
+    essentials = {
+        "policy": payload.get("policy",""),
+        "mode": payload.get("mode",""),
+        "n3": payload.get("n3", 0),
+        "lanes": payload.get("lanes", []),
+        "eq": payload.get("eq", {}),  # e.g. {"strict": True, "projected": True}
+        "lane_vecs": {
+            "H2@d3": payload.get("diagnostics", {}).get("lane_vec_H2@d3", []),
+            "C3+I3": payload.get("diagnostics", {}).get("lane_vec_C3+I3", []),
+        },
+        "ssot_key": ssot_key,
+    }
+    return _ab_hash_obj(essentials)
+
+def ab_embed_to_gallery(ab_payload: dict, *, file_path: str | None = None):
+    """
+    Append A/B to gallery with stable, SSOT-aware ID.
+    - No “fresh”/pin gating.
+    - Never overwrites—dedup only if identical fingerprint.
+    """
+    ss = st.session_state
+    ss.setdefault("ab_gallery", [])
+    ss.setdefault("_ab_seen_ids", set())
+
+    gid = _ab_fingerprint(ab_payload)
+    if gid in ss["_ab_seen_ids"]:
+        # already in gallery; still bump a nonce so UI rerenders cleanly
+        ss["ab_ui_nonce"] = int(ss.get("ab_ui_nonce", 0)) + 1
+        return {"id": gid, "status": "dup"}
+
+    item = {
+        "id": gid,
+        "ts": int(time.time()),
+        "policy": ab_payload.get("policy",""),
+        "mode": ab_payload.get("mode",""),
+        "n3": int(ab_payload.get("n3", 0) or 0),
+        "eq": {
+            "strict": bool((ab_payload.get("eq") or {}).get("strict", False)),
+            "projected": bool((ab_payload.get("eq") or {}).get("projected", False)),
+        },
+        "lane_vecs": {
+            "H2@d3": (ab_payload.get("diagnostics", {}) or {}).get("lane_vec_H2@d3", []),
+            "C3+I3": (ab_payload.get("diagnostics", {}) or {}).get("lane_vec_C3+I3", []),
+        },
+        "ssot_key": _ab_ssot_key(),
+        "path": (file_path or ""),
+    }
+    ss["ab_gallery"].append(item)
+    ss["_ab_seen_ids"].add(gid)
+    ss["ab_ui_nonce"] = int(ss.get("ab_ui_nonce", 0)) + 1  # avoid widget-key reuse
+    # optional registry on disk (non-blocking)
+    try:
+        reg = Path("logs") / "ab_gallery.jsonl"
+        reg.parent.mkdir(parents=True, exist_ok=True)
+        with open(reg, "a", encoding="utf-8") as f:
+            f.write(json.dumps(item, separators=(",",":"), sort_keys=True) + "\n")
+    except Exception:
+        pass
+    return {"id": gid, "status": "added"}
+# ===== /helpers =====
 # ========================= Gallery · Append & Dedupe (cert-required, canonical schema) =========================
 from pathlib import Path
 from datetime import datetime, timezone
-import os, json
+import os, json, hashlib
+import streamlit as st
 
 LOGS_DIR = Path(globals().get("LOGS_DIR", "logs"))
 GALLERY_JSONL = LOGS_DIR / "gallery.jsonl"
@@ -5170,14 +5258,16 @@ GALLERY_JSONL.parent.mkdir(parents=True, exist_ok=True)
 # Canonical row schema (columns used by build_b2_gallery):
 # district, fixture, projected, hash_d, hash_U, hash_suppC, hash_suppH,
 # growth, tag, strictify, lane_vec_H2, lane_vec_C3pI3, ab_embedded, content_hash
+#
+# Extras we add (safe for your builder): ssot_key, ab_id, written_at_utc
 
+# ---- helpers -----------------------------------------------------------------
 def _canon_policy_norm(s: str) -> str:
     t = (s or "").lower()
     if "strict" in t:
         return "strict"
     if "projected" in t and "file" in t:
         return "projected:file"
-    # default any other projected form to auto
     if "projected" in t:
         return "projected:auto"
     if "file" in t:
@@ -5191,6 +5281,47 @@ def _as_json_vec(v) -> str:
         return json.dumps(v, separators=(",", ":"), ensure_ascii=True)
     except Exception:
         return "[]"
+
+def _ssot_key_from_inputs(i_hashes: dict) -> str:
+    keys = ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")
+    vals = [str(i_hashes.get(k, "")) for k in keys]
+    if not any(vals):
+        return ""
+    return hashlib.sha256("|".join(vals).encode("utf-8")).hexdigest()
+
+def _ab_id_from_cert(cert: dict, ssot_key: str) -> str:
+    """Stable, SSOT-aware A/B fingerprint from cert (if enough bits exist)."""
+    if not cert:
+        return ""
+    diags = cert.get("diagnostics") or {}
+    eq = (cert.get("eq") or cert.get("overlap_out") or {})
+    # try to pull strict/projected booleans if your cert exposes them
+    eq_s = None
+    eq_p = None
+    try:
+        # common shapes seen in your app
+        eq_s = bool(((eq.get("3") or {}).get("eq", None)))
+    except Exception:
+        pass
+    try:
+        eq_p = bool(((cert.get("projected") or {}).get("k3_eq")) or None)
+    except Exception:
+        pass
+
+    essentials = {
+        "pol": _canon_policy_norm((cert.get("policy") or {}).get("canon","") or (cert.get("policy") or {}).get("label_raw","")),
+        "n3": int(((cert.get("inputs") or {}).get("dims") or {}).get("n3") or 0),
+        "lv_H2": diags.get("lane_vec_H2@d3", []),
+        "lv_C3pI3": diags.get("lane_vec_C3+I3", []),
+        "eq_s": eq_s,
+        "eq_p": eq_p,
+        "ssot": ssot_key,
+    }
+    try:
+        canon = json.loads(json.dumps(essentials, sort_keys=True, separators=(",",":")))
+        return hashlib.sha256(json.dumps(canon, sort_keys=True, separators=(",",":")).encode("ascii")).hexdigest()
+    except Exception:
+        return ""
 
 def _gallery_row_from_cert(cert: dict) -> dict:
     """Project a cert payload to the canonical B2 row schema (robust to missing keys)."""
@@ -5240,6 +5371,10 @@ def _gallery_row_from_cert(cert: dict) -> dict:
 
     ab_emb     = bool(ab_embed.get("fresh", False))
 
+    # Extras (safe): ssot_key + ab_id (for debug/ops)
+    ssot_key   = _ssot_key_from_inputs(inputs_h)
+    ab_id      = _ab_id_from_cert(cert, ssot_key)
+
     row = {
         "district":        district,
         "fixture":         fixture,
@@ -5255,7 +5390,9 @@ def _gallery_row_from_cert(cert: dict) -> dict:
         "lane_vec_C3pI3":  lv_C3pI3,
         "ab_embedded":     ab_emb,
         "content_hash":    content_h,
-        # not canonical, but nice in the tail view:
+        # Extras (not required by builder):
+        "ssot_key":        ssot_key,
+        "ab_id":           ab_id,
         "written_at_utc":  str(cert.get("written_at_utc") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")),
     }
     return row
@@ -5264,6 +5401,24 @@ def _atomic_append_jsonl(path: Path, row: dict) -> None:
     blob = (json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
     with open(path, "ab") as f:
         f.write(blob); f.flush(); os.fsync(f.fileno())
+
+def _read_jsonl_all(path: Path) -> list[dict]:
+    out = []
+    try:
+        if not path.exists():
+            return out
+        with open(path, "r", encoding="utf-8") as f:
+            for ln in f:
+                ln = ln.strip()
+                if not ln:
+                    continue
+                try:
+                    out.append(json.loads(ln))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+    return out
 
 def _read_jsonl_tail(path: Path, N: int = 100) -> list[dict]:
     out = []
@@ -5284,6 +5439,32 @@ def _read_jsonl_tail(path: Path, N: int = 100) -> list[dict]:
         pass
     return out
 
+def _atomic_rewrite_jsonl(path: Path, rows: list[dict]) -> None:
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False, separators=(",", ":")) + "\n")
+        f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+# Merge/update strategy:
+# - If (district, fixture, content_hash) already present and the incoming row has ab_embedded=True,
+#   we will set ab_embedded=True on the existing row and rewrite the file atomically.
+def _merge_ab_flag_if_needed(path: Path, key_tuple: tuple, incoming_row: dict) -> bool:
+    if not incoming_row.get("ab_embedded", False):
+        return False
+    rows = _read_jsonl_all(path)
+    changed = False
+    kd, kf, kc = key_tuple
+    for r in rows:
+        if r.get("district","") == kd and r.get("fixture","") == kf and r.get("content_hash","") == kc:
+            if not r.get("ab_embedded", False):
+                r["ab_embedded"] = True
+                changed = True
+    if changed:
+        _atomic_rewrite_jsonl(path, rows)
+    return changed
+
 # Optional shim: call your B2 builder if it exists, treat "no changes" as normal.
 def _safe_build_b2_gallery(debounce: bool = True):
     try:
@@ -5291,7 +5472,6 @@ def _safe_build_b2_gallery(debounce: bool = True):
         csvp, valp, rec = build_b2_gallery(debounce=debounce)  # noqa: F821
         st.caption(f"B2 gallery: rows_written={rec.get('rows_written', 0)}")
     except NameError:
-        # Builder not loaded in this run; keep quiet but informative
         st.info("(B2 gallery builder not loaded yet)")
     except RuntimeError as e:
         if "no changes since last build" in str(e).lower():
@@ -5301,13 +5481,45 @@ def _safe_build_b2_gallery(debounce: bool = True):
     except Exception as e:
         st.info(f"(B2 gallery build skipped: {e})")
 
-# session caches for dedupe
+# Public upsert you can call from your A/B handler (no button needed)
+def gallery_upsert_from_cert(cert: dict) -> dict:
+    row = _gallery_row_from_cert(cert)
+    if not row or not row.get("district") or not row.get("fixture") or not row.get("content_hash"):
+        return {"status":"skipped", "reason":"incomplete-row"}
+
+    key = (row.get("district",""), row.get("fixture",""), row.get("content_hash",""))
+    # First try to merge ab flag on duplicates
+    merged = _merge_ab_flag_if_needed(GALLERY_JSONL, key, row)
+    if merged:
+        _safe_build_b2_gallery(debounce=True)
+        return {"status":"merged", "key": key}
+
+    # Otherwise append if not seen
+    seen = False
+    try:
+        with open(GALLERY_JSONL, "r", encoding="utf-8") as f:
+            for ln in f:
+                try:
+                    r = json.loads(ln)
+                    if (r.get("district",""), r.get("fixture",""), r.get("content_hash","")) == key:
+                        seen = True; break
+                except Exception:
+                    continue
+    except Exception:
+        seen = False
+
+    if not seen:
+        _atomic_append_jsonl(GALLERY_JSONL, row)
+        _safe_build_b2_gallery(debounce=True)
+        return {"status":"appended", "key": key}
+
+    return {"status":"dup", "key": key}
+
+# ---- UI ----------------------------------------------------------------------
 ss = st.session_state
-ss.setdefault("_gallery_seen_keys", set())
 ss.setdefault("_gallery_bootstrapped", False)
 
 def _gallery_key(row: dict) -> tuple:
-    # Deterministic dedupe: same cert for same fixture once per district
     return (row.get("district",""), row.get("fixture",""), row.get("content_hash",""))
 
 # prefer safe_expander if present; fallback to st.expander
@@ -5358,15 +5570,6 @@ with expander_ctx:
                 key="gal_tag_v2"
             )
 
-    # Bootstrap dedupe cache once from tail
-    if not ss["_gallery_bootstrapped"]:
-        for tail_row in _read_jsonl_tail(GALLERY_JSONL, N=200):
-            try:
-                ss["_gallery_seen_keys"].add(_gallery_key(tail_row))
-            except Exception:
-                continue
-        ss["_gallery_bootstrapped"] = True
-
     # Append button (disabled w/o cert or missing fixture label)
     disabled = (not has_cert) or (not row.get("fixture"))
     tip = None if has_cert else "Disabled until a cert is available."
@@ -5375,15 +5578,22 @@ with expander_ctx:
 
     if st.button("Add to Gallery", key="btn_gallery_append_v2", disabled=disabled, help=tip or "Append row to gallery.jsonl"):
         try:
-            k = _gallery_key(row)
-            if k in ss["_gallery_seen_keys"]:
-                st.info("Duplicate skipped (same district/fixture/content_hash).")
-            else:
-                _atomic_append_jsonl(GALLERY_JSONL, row)
-                ss["_gallery_seen_keys"].add(k)
-                st.success("Gallery row appended.")
-                # Keep CSV in sync (quiet if unchanged/not loaded)
+            key = _gallery_key(row)
+            # Prefer merge (so A/B 'ab_embedded' sticks on duplicates)
+            merged = _merge_ab_flag_if_needed(GALLERY_JSONL, key, row)
+            if merged:
+                st.success("Gallery row updated (A/B embedded).")
                 _safe_build_b2_gallery(debounce=True)
+            else:
+                # No merge → append if new
+                rows_tail = _read_jsonl_tail(GALLERY_JSONL, N=200)
+                seen = any(_gallery_key(r) == key for r in rows_tail)
+                if seen:
+                    st.info("Duplicate skipped (same district/fixture/content_hash).")
+                else:
+                    _atomic_append_jsonl(GALLERY_JSONL, row)
+                    st.success("Gallery row appended.")
+                    _safe_build_b2_gallery(debounce=True)
         except Exception as e:
             st.error(f"Gallery append failed: {e}")
 
@@ -5411,13 +5621,14 @@ with expander_ctx:
                     })
                 st.dataframe(pd.DataFrame(view), use_container_width=True, hide_index=True)
             except Exception:
-                # pandas not available — render a simple JSON tail
                 st.json(tail)
         else:
             st.caption("Gallery is empty.")
     except Exception as e:
         st.warning(f"Could not render gallery tail: {e}")
 # ======================= end Gallery (canonical) =======================
+
+
 
 
 
