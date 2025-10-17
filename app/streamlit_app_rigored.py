@@ -1319,7 +1319,6 @@ def _resolve_projector(cfg_active: dict, boundaries) -> tuple[list[list[int]], d
     return P_active, meta
 
         
-
 # ------------------------------ Run Overlap (SSOT-staging; cert-aligned, final) ------------------------------
 def run_overlap():
     # ── tiny locals ────────────────────────────────────────────────────────────
@@ -1355,7 +1354,6 @@ def run_overlap():
         n = len(lm or [])
         return [[1 if (i == j and int(lm[j]) == 1) else 0 for j in range(n)] for i in range(n)]
 
-
     def _shape_ok_for_mul(A, B):  # GF(2) matrix multiply compatibility
         return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
 
@@ -1364,26 +1362,26 @@ def run_overlap():
     for k in (
         "proj_meta", "run_ctx", "residual_tags", "overlap_out",
         "overlap_H", "overlap_C", "overlap_cfg", "overlap_policy_label",
-        "_file_mode_error"
+        "overlap_policy_tag", "_file_mode_error"
     ):
         if k not in _keep:
             st.session_state.pop(k, None)
 
     # ── STEP 2: projector resolve (handles projected:file fail path) ──────────────────
     try:
-        # If you didn't add the helper, swap the next line back to: P_active, meta = projector_choose_active(cfg_active, boundaries)
+        # If you don't have _resolve_projector, use: P_active, meta = projector_choose_active(cfg_active, boundaries)
         P_active, meta = _resolve_projector(cfg_active, boundaries)
     except ValueError as e:
         # Determine intended mode from policy source
         source3 = (cfg_active.get("source") or {}).get("3", "auto")
         mode_str = "projected(file)" if source3 == "file" else "projected(auto)"
-    
+
         pjfn    = (cfg_active.get("projector_files", {}) or {}).get("3", "")
         d3_now  = (boundaries.blocks.__root__.get("3") or [])
         n3_now  = (len(d3_now[0]) if (d3_now and d3_now[0]) else 0)
         lm_now  = _truth_mask_from_d3(d3_now)
         pol_lbl = policy_label_from_cfg(cfg_active)
-    
+
         st.session_state["run_ctx"] = {
             "policy_tag": pol_lbl, "mode": mode_str,
             "d3": d3_now, "n3": n3_now, "lane_mask_k3": lm_now,
@@ -1397,7 +1395,7 @@ def run_overlap():
         st.session_state["overlap_cfg"]          = cfg_active
         st.session_state["overlap_policy_label"] = pol_lbl
         st.session_state["overlap_policy_tag"]   = pol_lbl
-    
+
         # Freeze SSOT even on resolver error
         H_local = _load_h_local()
         st.session_state["overlap_H"] = H_local
@@ -1412,24 +1410,23 @@ def run_overlap():
                 if mode_str != "projected(file)" else pjfn),
         )
         st.caption(f"SSOT sig (before → after): {list(pub['before'])} → {list(pub['after'])}")
-    
-        try: 
+
+        try:
             _reconcile_di_vs_ssot()
-        except Exception: 
+        except Exception:
             pass
 
-    # Only mark FILE invalid if we’re actually in FILE mode
-    st.session_state["file_pi_valid"]   = (mode_str != "projected(file)")
-    st.session_state["file_pi_reasons"] = ([str(e)] if mode_str == "projected(file)" else [])
-    st.session_state["write_armed"]     = True
-    st.session_state["armed_by"]        = ("file_invalid" if mode_str == "projected(file)" else "overlap_run")
+        # FILE invalid only if we’re actually in FILE mode
+        st.session_state["file_pi_valid"]   = (mode_str != "projected(file)")
+        st.session_state["file_pi_reasons"] = ([str(e)] if mode_str == "projected(file)" else [])
+        st.session_state["write_armed"]     = True
+        st.session_state["armed_by"]        = ("file_invalid" if mode_str == "projected(file)" else "overlap_run")
 
-    if mode_str == "projected(file)":
-        st.error(f"Projected(FILE) validation failed: {e}")
-    else:
-        st.info("AUTO mode selected; projector FILE not required. Continuing without Π.")
-    return
-
+        if mode_str == "projected(file)":
+            st.error(f"Projected(FILE) validation failed: {e}")
+        else:
+            st.info("AUTO mode selected; projector FILE not required. Continuing without Π.")
+        return  # early exit on resolve failure
 
     # ---- success path (strict + projected residuals; persist SSOT) --------------------
     # meta may carry d3/n3/mode; fall back to boundaries
@@ -1446,7 +1443,7 @@ def run_overlap():
     H_local = _load_h_local()
     H2 = (H_local.blocks.__root__.get("2") or [])
     C3 = (cmap.blocks.__root__.get("3") or [])
-    I3 = eye(len(C3)) if C3 else []
+    I3 = [[1 if i == j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
 
     R3_strict = []
     if _shape_ok_for_mul(H2, d3) and C3 and C3[0] and (len(C3) == len(C3[0])):  # C3 square
@@ -1458,19 +1455,15 @@ def run_overlap():
     tag_strict = _residual_tag(R3_strict, lm_truth)
     eq3_strict = _is_zero(R3_strict)
 
-    # projected leg (if enabled)
-    if cfg_active.get("enabled_layers"):
-        # Strong fallback: if AUTO didn’t supply a projector, synthesize diag(lane_mask)
-        P_eff = (meta.get("P_active") or P_active or _diag_from_mask(lm_truth)) if lm_truth else (meta.get("P_active") or P_active or [])
-        R3_proj  = mul(R3_strict, P_eff) if (R3_strict and P_eff) else []
-        eq3_proj = _is_zero(R3_proj)
-        tag_proj = _residual_tag(R3_proj, lm_truth)
-        out = {"3": {"eq": bool(eq3_proj), "n_k": n3}, "2": {"eq": True}}
-        st.session_state["residual_tags"] = {"strict": tag_strict, "projected": tag_proj}
-    else:
-        out = {"3": {"eq": bool(eq3_strict), "n_k": n3}, "2": {"eq": True}}
-        st.session_state["residual_tags"] = {"strict": tag_strict}
-        # just after you compute R3_strict / out / tags and have lm_truth, H2, C3, I3:
+    # --- projected leg (always compute; AUTO may not supply P_active) ---
+    P_eff = (meta.get("P_active") or P_active or _diag_from_mask(lm_truth)) if lm_truth else (meta.get("P_active") or P_active or [])
+    R3_proj  = mul(R3_strict, P_eff) if (R3_strict and P_eff) else []
+    eq3_proj = _is_zero(R3_proj)
+    tag_proj = _residual_tag(R3_proj, lm_truth)
+
+    # Stamp projected result as the authoritative k=3 equality for this run
+    out = {"3": {"eq": bool(eq3_proj), "n_k": n3}, "2": {"eq": True}}
+    st.session_state["residual_tags"] = {"strict": tag_strict, "projected": tag_proj}
 
     # --- compute lane-bottom diagnostics for matcher (shape-safe)
     def _bottom_row(M): return M[-1] if (M and len(M)) else []
@@ -1479,51 +1472,57 @@ def run_overlap():
         if not B: return [r[:] for r in (A or [])]
         r,c = len(A), len(A[0]); return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
     def _shape_ok(A,B): return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
+
     H2d3  = mul(H2, d3) if _shape_ok(H2, d3) else []
     C3pI3 = _xor(C3, I3) if (C3 and C3[0]) else []
-    idx   = [j for j,m in enumerate(lm_truth or []) if m]
-    lane_vec_H2d3  = [_bottom_row(H2d3)[j]  for j in idx] if (H2d3 and idx) else []
-    lane_vec_C3pI3 = [_bottom_row(C3pI3)[j] for j in idx] if (C3pI3 and idx) else []
-        # bottom rows
-    def _bottom_row(M): return M[-1] if (M and len(M)) else []
+
     bottom_H2d3  = _bottom_row(H2d3)
     bottom_C3pI3 = _bottom_row(C3pI3)
-    
-    # mask by lane_mask_k3 truth (FIRST!)
+
     idx = [j for j,m in enumerate(lm_truth or []) if m]
     lane_vec_H2d3  = [bottom_H2d3[j]  for j in idx] if (bottom_H2d3 and idx) else []
     lane_vec_C3pI3 = [bottom_C3pI3[j] for j in idx] if (bottom_C3pI3 and idx) else []
-    
-    snapshot_for_fixture = {
-        "identity": {"district_id": district_id},
-        "policy":   {"canon": policy_label_from_cfg(cfg_active)},
-        "inputs":   {"lane_mask_k3": lm_truth},
-        "diagnostics": {
-            "lane_vec_H2@d3": lane_vec_H2d3,
-            "lane_vec_C3+I3": lane_vec_C3pI3,
-        },
-        "checks": {"k":{"3":{"eq": bool(eq3_strict)}}},
-        "growth": {"growth_bumps": int(st.session_state.get("growth_bumps",0) or 0)},
-    }
-    fx = match_fixture_from_snapshot(snapshot_for_fixture)
-    apply_fixture_to_session(fx)
 
-    # --- auto-apply fixture (no UI)
-    _apply_fixture_after_overlap(
-        rc=st.session_state.get("run_ctx") or rc,
-        diag={"lane_vec_H2@d3": lane_vec_H2d3, "lane_vec_C3+I3": lane_vec_C3pI3},
-        lane_mask_k3=lm_truth,
-    )
+    # --- auto-apply fixture (no UI); prefer registry matcher if present
+    di = st.session_state.get("_district_info") or {}
+    district_id = di.get("district_id", "UNKNOWN")
+    pol_lbl = policy_label_from_cfg(cfg_active)
+
+    if ("match_fixture_from_snapshot" in globals()) and ("apply_fixture_to_session" in globals()):
+        snapshot_for_fixture = {
+            "identity": {"district_id": district_id},
+            "policy":   {"canon": pol_lbl},
+            "inputs":   {"lane_mask_k3": lm_truth},
+            "diagnostics": {
+                "lane_vec_H2@d3": lane_vec_H2d3,
+                "lane_vec_C3+I3": lane_vec_C3pI3,
+            },
+            "checks": {"k":{"3":{"eq": bool(eq3_strict)}}},
+            "growth": {"growth_bumps": int(st.session_state.get("growth_bumps",0) or 0)},
+        }
+        try:
+            fx = match_fixture_from_snapshot(snapshot_for_fixture)  # registry-driven
+            apply_fixture_to_session(fx)  # stamps fixture_label/tag/strictify/growth into session + rc
+        except Exception:
+            pass
+    elif "_apply_fixture_after_overlap" in globals():
+        try:
+            _apply_fixture_after_overlap(
+                rc=st.session_state.get("run_ctx") or {},
+                diag={"lane_vec_H2@d3": lane_vec_H2d3, "lane_vec_C3+I3": lane_vec_C3pI3},
+            )
+        except Exception:
+            pass
 
     # persist run_ctx (SSOT for cert)
-    pol_lbl = policy_label_from_cfg(cfg_active)
     st.session_state["overlap_out"]          = out
     st.session_state["overlap_cfg"]          = cfg_active
-    st.session_state["overlap_policy_tag"] = pol_lbl
+    st.session_state["overlap_policy_label"] = pol_lbl
+    st.session_state["overlap_policy_tag"]   = pol_lbl
     st.session_state["run_ctx"] = {
         "policy_tag": pol_lbl, "mode": mode,
         "d3": d3, "n3": n3, "lane_mask_k3": lm_truth,
-        "P_active": meta.get("P_active", P_active),
+        "P_active": (meta.get("P_active", P_active) or _diag_from_mask(lm_truth)),
         "projector_filename": meta.get("projector_filename", ""),
         "projector_hash": meta.get("projector_hash", ""),
         "projector_consistent_with_d": meta.get("projector_consistent_with_d", None),
@@ -1553,8 +1552,8 @@ def run_overlap():
     # normalize/stamp rc for downstream freshness logic
     rc = st.session_state.get("run_ctx") or {}
     rc.update({
-        "mode":       policy_label_from_cfg(cfg_active).replace("projected(columns@k=3,", "projected(").rstrip(")")+")",
-        "policy_tag": policy_label_from_cfg(cfg_active),
+        "mode":       policy_label_from_cfg(cfg_active).replace("projected(columns@k=3,", "projected(").rstrip(")") + ")",
+        "policy_tag": pol_lbl,
         "n3":         int((st.session_state.get("_inputs_block") or {}).get("dims", {}).get("n3") or 0),
         "lane_mask_k3": list(st.session_state.get("_district_info", {}).get("lane_mask_k3") or lm_truth),
         "projector_filename": (st.session_state.get("ov_last_pj_path") or rc.get("projector_filename","")),
@@ -1562,44 +1561,30 @@ def run_overlap():
     if rc["mode"] == "projected(file)":
         rc["projector_hash"] = rc.get("projector_hash") or meta.get("projector_hash","") or ""
     elif rc["mode"] == "projected(auto)":
-        rc["projector_hash"] = _auto_pj_hash_from_rc(rc)
+        rc["projector_hash"] = _auto_pj_hash_from_rc(rc) if " _auto_pj_hash_from_rc" in globals() else (rc.get("projector_hash","") or "")
     # stamp inputs_sig from frozen SSOT
-    rc["inputs_sig"] = current_inputs_sig(_ib=st.session_state.get("_inputs_block") or {})
+    if "current_inputs_sig" in globals():
+        rc["inputs_sig"] = current_inputs_sig(_ib=st.session_state.get("_inputs_block") or {})
+    else:
+        ib = st.session_state.get("_inputs_block") or {}
+        h  = ib.get("hashes") or {}
+        rc["inputs_sig"] = [
+            str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
+            str(h.get("C_hash",          ib.get("C_hash",""))),
+            str(h.get("H_hash",          ib.get("H_hash",""))),
+            str(h.get("U_hash",          ib.get("U_hash",""))),
+            str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
+        ]
     st.session_state["run_ctx"] = rc
-    
-    
-       
+
+    # mark FILE Π validation ok on success path
+    st.session_state["file_pi_valid"]   = True
+    st.session_state["file_pi_reasons"] = []
+    st.session_state["write_armed"]     = True
+    st.session_state["armed_by"]        = "overlap_run"
+# -------------------------------- end run_overlap --------------------------------
 
 
-# ---- Single canonical button (instrumented) ----
-if st.button("Run Overlap", key="btn_run_overlap_main"):
-    try:
-        with st.spinner("Running Overlap…"):
-            # pre: snapshot for delta
-            _ib_before = dict(st.session_state.get("_inputs_block") or {})
-            _sig_before = (
-                (_ib_before.get("hashes") or {}).get("boundaries_hash", _ib_before.get("boundaries_hash","")),
-                (_ib_before.get("hashes") or {}).get("C_hash",          _ib_before.get("C_hash","")),
-                (_ib_before.get("hashes") or {}).get("H_hash",          _ib_before.get("H_hash","")),
-                (_ib_before.get("hashes") or {}).get("U_hash",          _ib_before.get("U_hash","")),
-                (_ib_before.get("hashes") or {}).get("shapes_hash",     _ib_before.get("shapes_hash","")),
-            )
-
-            soft_reset_before_overlap()  # your helper; must NOT clear _inputs_block
-            run_overlap()                # your function
-
-            _ib_after = dict(st.session_state.get("_inputs_block") or {})
-            _sig_after = (
-                (_ib_after.get("hashes") or {}).get("boundaries_hash", _ib_after.get("boundaries_hash","")),
-                (_ib_after.get("hashes") or {}).get("C_hash",          _ib_after.get("C_hash","")),
-                (_ib_after.get("hashes") or {}).get("H_hash",          _ib_after.get("H_hash","")),
-                (_ib_after.get("hashes") or {}).get("U_hash",          _ib_after.get("U_hash","")),
-                (_ib_after.get("hashes") or {}).get("shapes_hash",     _ib_after.get("shapes_hash","")),
-            )
-        st.success("Overlap completed.")
-        st.caption(f"SSOT sig (before → after): {list(_sig_before)} → {list(_sig_after)}")
-    except Exception as e:
-        st.exception(e)
 # ---- inputs completeness (define before using in debugger) ----
 _h = (st.session_state.get("_inputs_block") or {}).get("hashes") or {}
 inputs_complete = bool(
@@ -2122,6 +2107,57 @@ with safe_expander("A/B compare (strict vs active projected)", expanded=False):
                 ss.pop("ab_compare", None); ss.pop("ab_pin", None)
                 st.success("Cleared A/B snapshot. Re-run A/B to refresh.")
 # =====================================================================================================
+# ====================== A/B Sanity Probe (shapes + sparsity) ======================
+with safe_expander("A/B sanity probe", expanded=False):
+    try:
+        rc   = st.session_state.get("run_ctx") or {}
+        d3   = rc.get("d3") or (boundaries.blocks.__root__.get("3") or [])
+        lm   = list(rc.get("lane_mask_k3") or [])
+        Hobj = st.session_state.get("overlap_H") or _load_h_local()
+        H2   = (Hobj.blocks.__root__.get("2") or []) if Hobj else []
+        C3   = (cmap.blocks.__root__.get("3") or [])
+        I3   = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
+        Pact = rc.get("P_active") or []
+
+        def _xor(A,B):
+            if not A: return [r[:] for r in (B or [])]
+            if not B: return [r[:] for r in (A or [])]
+            r,c = len(A), len(A[0])
+            return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
+
+        def _shape_ok(A,B): return bool(A and B and A[0] and B and (len(A[0]) == len(B)))
+        def _nz_cols(M):
+            if not M: return []
+            r, c = len(M), len(M[0])
+            return [j for j in range(c) if any(M[i][j] & 1 for i in range(r))]
+
+        R3s = _xor(mul(H2, d3), _xor(C3, I3)) if (_shape_ok(H2, d3) and C3 and C3[0] and len(C3)==len(C3[0])) else []
+        R3p = mul(R3s, Pact) if (R3s and Pact) else []
+
+        # What if projected(auto) used diag(lanes)?
+        Pdiag = [[1 if (i==j and (lm[j] if j < len(lm) else 0)) else 0
+                  for j in range(len(C3) if C3 else 0)]
+                 for i in range(len(C3) if C3 else 0)]
+        R3p_diag = mul(R3s, Pdiag) if (R3s and Pdiag and Pdiag[0]) else []
+
+        st.write({
+            "shapes": {
+                "H2": [len(H2), len(H2[0]) if H2 else 0],
+                "d3": [len(d3), len(d3[0]) if d3 else 0],
+                "C3": [len(C3), len(C3[0]) if C3 else 0],
+                "P_active": [len(Pact), len(Pact[0]) if Pact else 0],
+            },
+            "R3_strict_nz_cols": _nz_cols(R3s),
+            "R3_projected_nz_cols": _nz_cols(R3p),
+            "R3_projected_diagMask_nz_cols": _nz_cols(R3p_diag),
+            "eq": {
+                "strict": (not R3s) or (len(_nz_cols(R3s))==0),
+                "projected_active": (not R3p) or (len(_nz_cols(R3p))==0),
+                "projected_diagMask": (not R3p_diag) or (len(_nz_cols(R3p_diag))==0),
+            }
+        })
+    except Exception as e:
+        st.error(f"Probe failed: {e}")
 
 
 # ===================== A/B Diagnostics (compact strip) =====================
