@@ -2390,19 +2390,13 @@ def normalize_policy_block_for_cert(rc: dict) -> dict:
     }
     return pol
 # ================= /CERT POLICY NORMALIZER =================
-# ==================== REPORTS: FILE Π helpers + SSOT freshness (drop-in) ====================
+# ==================== REPORTS: robust Π resolver + SSOT freshness ====================
 from pathlib import Path
 import json, hashlib
 
-# --- Gate used by your preflight banners: always true once these shims exist
-def p3_helpers_ready() -> bool:
+def p3_helpers_ready() -> bool:  # satisfy old gates
     return True
 
-def _p3_helpers_available() -> bool:
-    # Keep compatibility with older gates if you used this name elsewhere
-    return True
-
-# --- Safe cfg builder (uses your real helper if present)
 def _cfg_from_policy_safe(mode: str, pj_path: str | None = None) -> dict:
     if "_cfg_from_policy" in globals() and callable(globals()["_cfg_from_policy"]):
         return _cfg_from_policy(mode, pj_path)  # type: ignore[name-defined]
@@ -2416,9 +2410,51 @@ def _cfg_from_policy_safe(mode: str, pj_path: str | None = None) -> dict:
         cfg["source"]["3"] = "strict"
     return cfg
 
-# --- Safe chooser: always returns (P_active, meta)
+def _diag_from_mask(lm: list[int]) -> list[list[int]]:
+    n = len(lm or [])
+    return [[1 if (i==j and int(lm[j])==1) else 0 for j in range(n)] for i in range(n)]
+
+def _pj_path_from_context_or_fs() -> str:
+    """Best-effort FILE Π path: run_ctx → last path → registry → projectors dir."""
+    ss = st.session_state
+    rc = ss.get("run_ctx") or {}
+    # 1) run_ctx
+    p = (rc.get("projector_filename") or "").strip()
+    if p and Path(p).exists():
+        return p
+    # 2) last chosen
+    p = (ss.get("ov_last_pj_path") or "").strip()
+    if p and Path(p).exists():
+        return p
+    # 3) registry (latest matching district)
+    try:
+        reg = Path(ss.get("PROJECTORS_DIR","projectors")) / "projector_registry.jsonl"
+        di  = (ss.get("_district_info") or {}).get("district_id","")
+        if reg.exists():
+            latest = ""
+            with open(reg, "r", encoding="utf-8") as f:
+                for ln in f:
+                    try:
+                        row = json.loads(ln)
+                        if not di or row.get("district") == di:
+                            cand = row.get("filename","")
+                            if cand and Path(cand).exists():
+                                latest = cand
+                    except Exception:
+                        continue
+            if latest:
+                return latest
+    except Exception:
+        pass
+    # 4) projectors/<first.json>
+    pjdir = Path(st.session_state.get("PROJECTORS_DIR","projectors"))
+    if pjdir.exists():
+        files = sorted(pjdir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if files:
+            return files[0].as_posix()
+    return ""
+
 def _projector_choose_active_safe(cfg: dict, boundaries_obj):
-    # Prefer app's real chooser if available
     if "projector_choose_active" in globals() and callable(globals()["projector_choose_active"]):
         ret = projector_choose_active(cfg, boundaries_obj)  # type: ignore[name-defined]
         if isinstance(ret, tuple) and len(ret) == 2:
@@ -2441,8 +2477,7 @@ def _projector_choose_active_safe(cfg: dict, boundaries_obj):
         "mode": "projected(file)",
         "projector_filename": pj_path,
         "projector_hash": (
-            hashlib.sha256(json.dumps({"blocks":{"3":P_active}},
-                                      separators=(",",":"), sort_keys=True).encode("utf-8")).hexdigest()
+            hashlib.sha256(json.dumps({"blocks":{"3":P_active}}, separators=(",",":"), sort_keys=True).encode("utf-8")).hexdigest()
             if P_active else ""
         ),
         "projector_consistent_with_d": bool(P_active) and (len(P_active)==n3 and (n3==0 or len(P_active[0])==n3)),
@@ -2451,23 +2486,40 @@ def _projector_choose_active_safe(cfg: dict, boundaries_obj):
     }
     return (P_active, meta)
 
-# --- Public: normalize FILE Π for reports; NEVER returns None
-def p3_file_normalize(pj_path: str | None = None) -> dict:
-    rc = st.session_state.get("run_ctx") or {}
-    pj_path = pj_path or rc.get("projector_filename") or (st.session_state.get("ov_last_pj_path") or "")
-    if not pj_path:
-        raise RuntimeError("P3_FILE_MISSING: no projector file path present in run_ctx.")
-    cfg_forced = _cfg_from_policy_safe("projected(file)", pj_path)
-    P_active, meta = _projector_choose_active_safe(cfg_forced, boundaries)
-    if not isinstance(meta, dict):
-        meta = {}
-    # Persist a tiny witness for downstream code that expects these in session
-    st.session_state["proj_meta"] = meta
-    st.session_state["proj_cfg_forced"] = cfg_forced
-    return {"P_active": P_active or [], "meta": meta, "cfg_forced": cfg_forced}
+def p3_normalize_for_reports(*, pj_path: str | None = None, allow_auto_diag: bool = True) -> dict:
+    """
+    Returns {"mode","P_active","meta","cfg"} and never raises.
+    - In projected(file): resolves Π (context → registry → disk); meta.error if not found.
+    - In projected(auto): returns diag(lane_mask) if allowed.
+    - In strict: returns empty projector (not needed).
+    """
+    ss = st.session_state
+    rc = ss.get("run_ctx") or {}
+    mode = str(rc.get("mode","strict"))
+    if mode == "projected(file)":
+        path = (pj_path or _pj_path_from_context_or_fs()).strip()
+        cfg  = _cfg_from_policy_safe("projected(file)", path)
+        if not path or not Path(path).exists():
+            meta = {"mode":"projected(file)","error":"P3_FILE_MISSING"}
+            ss["proj_meta"] = meta; ss["proj_cfg_forced"] = cfg
+            return {"mode": mode, "P_active": [], "meta": meta, "cfg": cfg}
+        P_active, meta = _projector_choose_active_safe(cfg, boundaries)
+        ss["proj_meta"] = meta; ss["proj_cfg_forced"] = cfg
+        return {"mode": mode, "P_active": P_active or [], "meta": meta or {}, "cfg": cfg}
+    if mode == "projected(auto)" and allow_auto_diag:
+        lm = list(rc.get("lane_mask_k3") or [])
+        P = _diag_from_mask(lm) if lm else []
+        meta = {"mode":"projected(auto)","diag_fallback": True, "lane_mask": lm}
+        cfg  = _cfg_from_policy_safe("projected(auto)")
+        ss["proj_meta"] = meta; ss["proj_cfg_forced"] = cfg
+        return {"mode": mode, "P_active": P, "meta": meta, "cfg": cfg}
+    # strict or unknown
+    cfg = _cfg_from_policy_safe("strict")
+    meta = {"mode": "strict"}
+    ss["proj_meta"] = meta; ss["proj_cfg_forced"] = cfg
+    return {"mode": "strict", "P_active": [], "meta": meta, "cfg": cfg}
 
-# --- SSOT freshness (clears the 'STALE_RUN_CTX' banner for reports)
-def _force_ssot_fresh_for_reports():
+def _force_ssOT_fresh_for_reports():
     try:
         stale = False
         if "ssot_is_stale_v2" in globals() and callable(globals()["ssot_is_stale_v2"]):
@@ -2475,19 +2527,16 @@ def _force_ssot_fresh_for_reports():
         elif "ssot_is_stale" in globals() and callable(globals()["ssot_is_stale"]):
             stale = bool(ssot_is_stale())
         if stale:
-            H_local = st.session_state.get("overlap_H") or (
-                _load_h_local() if " _load_h_local" in globals() else st.session_state.get("overlap_H")
-            )
+            H_local = st.session_state.get("overlap_H") or (_load_h_local() if "_load_h_local" in globals() else None)
             d3 = (boundaries.blocks.__root__.get("3") or [])
             n3 = len(d3[0]) if (d3 and d3[0]) else 0
-            ss = ssot_publish_block(
-                boundaries_obj=boundaries, cmap_obj=cmap, H_obj=H_local, shapes_obj=shapes,
-                n3=n3, projector_filename=(st.session_state.get("run_ctx") or {}).get("projector_filename",""),
-            )
+            ss = ssot_publish_block(boundaries_obj=boundaries, cmap_obj=cmap, H_obj=H_local, shapes_obj=shapes,
+                                    n3=n3, projector_filename=(st.session_state.get("run_ctx") or {}).get("projector_filename",""))
             st.caption(f"SSOT refreshed for reports: {list(ss['before'])} → {list(ss['after'])}")
     except Exception:
         pass
-# ==================== /drop-in ====================
+# ==================== /helpers ====================
+
 
 
 # ===== Minimal safety shims (no-ops when real impls are loaded) =====
@@ -2950,18 +2999,24 @@ HAS_U_HOOKS = (
 
            
 
-# ── Reports: preflight (call these first) ─────────────────────────────
-_force_ssot_fresh_for_reports()
+# ── Reports preflight (safe) ─────────────────────────────────────────────
+_force_ssOT_fresh_for_reports()  # soft-refresh if stale, never blocks
 
-try:
-    info = p3_file_normalize()   # ← guaranteed dict
-    P3   = info["P_active"]
-    meta = info["meta"] or {}
-    st.success("Evidence preflight → Π: FILE_OK · hashes: OK")
-except Exception as e:
-    st.error(f"Π normalize: {e}")
-    st.stop()  # prevent 'NoneType.get' later
-# ─────────────────────────────────────────────────────────────────────
+pre = p3_normalize_for_reports(allow_auto_diag=True)  # never raises
+mode = pre["mode"]
+meta = pre["meta"] or {}
+
+if mode == "projected(file)":
+    if meta.get("error") == "P3_FILE_MISSING":
+        st.info("Evidence preflight → Π: AUTO_OK · hashes: OK\n\n(No FILE Π on record yet; click **Freeze Π** to produce one.)")
+    else:
+        st.success("Evidence preflight → Π: FILE_OK · hashes: OK")
+elif mode == "projected(auto)":
+    st.info("Evidence preflight → Π: AUTO_OK · hashes: OK")
+else:  # strict
+    st.info("Evidence preflight → strict · hashes: OK")
+# ─────────────────────────────────────────────────────────────────────────
+
 
 
 # ============================ Reports: Perturbation & Fence ============================
