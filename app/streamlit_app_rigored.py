@@ -4884,9 +4884,10 @@ def freeze_auto_projector_to_file(*, filename: str, overwrite: bool=False) -> di
 
     return {"path": pj_path.as_posix(), "projector_hash": pj_hash, "lane_mask_k3": lm[:], "n3": n3}
 
+
 # ====================== Projector Freezer (AUTO → FILE, no UI flip) ======================
 from pathlib import Path
-import os, json, hashlib, tempfile
+import os, json, hashlib
 
 PROJECTORS_DIR = Path(globals().get("PROJECTORS_DIR", "projectors"))
 PROJECTORS_DIR.mkdir(parents=True, exist_ok=True)
@@ -4996,14 +4997,27 @@ def _freeze_auto_projector_to_file(*, filename: str, overwrite: bool=False) -> d
             "errors": [],
         }
 
-    # Arm a cert write (single pass)
+    # Arm a cert write (make sure the writer sees this)
+    ss["write_armed"] = True
+    ss["armed_by"]    = "freezer"
     ss["should_write_cert"] = True
     ss.pop("_last_cert_write_key", None)
     ss["ov_last_pj_path"] = pj_path.as_posix()
 
+    # Little witness for debugging
+    try:
+        w = Path("logs") / "witnesses.jsonl"
+        w.parent.mkdir(parents=True, exist_ok=True)
+        with open(w, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"ts": _utc_iso_z(), "event":"FREEZE_OK", "file": pj_path.as_posix(), "hash": pj_hash})+"\n")
+    except Exception:
+        pass
+
     return {"path": pj_path.as_posix(), "projector_hash": pj_hash}
 
-with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
+# ---------- UI (stable keys; not nested inside other expanders) ----------
+_freezer_box = safe_expander("Projector Freezer (AUTO → FILE, no UI flip)", expanded=False) if "safe_expander" in globals() else st.container()
+with _freezer_box:
     ss = st.session_state
     di = ss.get("_district_info") or {}
     district_id = di.get("district_id","UNKNOWN")
@@ -5016,8 +5030,7 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
             is_stale = ssot_is_stale()  # type: ignore[name-defined]
     except Exception:
         pass
-    _k_toggle = ensure_unique_widget_key("freezer_allow_stale") if "ensure_unique_widget_key" in globals() else "freezer_allow_stale"
-    allow_stale = st.toggle("Allow writing with stale SSOT", value=False, key=_k_toggle)
+    allow_stale = st.toggle("Allow writing with stale SSOT", value=False, key="freezer_allow_stale")
     if is_stale and not allow_stale:
         st.warning("STALE_RUN_CTX: Inputs changed; click Run Overlap to refresh before freezing.")
 
@@ -5033,16 +5046,13 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
     elig = (mode_now == "projected(auto)" and n3 > 0 and len(lm) == n3 and k3_green_recomputed)
 
     st.caption("Freeze current AUTO Π → file, re-run Overlap in FILE (no policy widget flip), and arm cert write.")
-    _k_name = ensure_unique_widget_key("pj_freeze_name") if "ensure_unique_widget_key" in globals() else "pj_freeze_name"
-    _k_ow   = ensure_unique_widget_key("pj_freeze_overwrite") if "ensure_unique_widget_key" in globals() else "pj_freeze_overwrite"
-    name    = st.text_input("Filename", value=f"projector_{district_id or 'UNKNOWN'}.json", key=_k_name)
-    overwrite_ok = st.checkbox("Overwrite if exists", value=False, key=_k_ow)
+    name = st.text_input("Filename", value=f"projector_{district_id or 'UNKNOWN'}.json", key="freezer_pj_name")
+    overwrite_ok = st.checkbox("Overwrite if exists", value=False, key="freezer_overwrite")
 
     disabled = (not elig)
     tip = None if elig else "Enabled when current run is projected(auto), mask is valid, and recomputed k=3 is GREEN."
 
-    _k_btn = ensure_unique_widget_key("btn_freeze_auto_to_file") if "ensure_unique_widget_key" in globals() else "btn_freeze_auto_to_file"
-    if st.button("Freeze Π → FILE & re-run", key=_k_btn, disabled=disabled, help=(tip or "Freeze AUTO to FILE and re-run")):
+    if st.button("Freeze Π → FILE & re-run", key="btn_freeze_auto_to_file", disabled=disabled, help=(tip or "Freeze AUTO to FILE and re-run")):
         try:
             info = _freeze_auto_projector_to_file(filename=name, overwrite=overwrite_ok)
             st.success(f"Π saved → {Path(info['path']).name} · {info['projector_hash'][:12]}… and FILE overlap re-run.")
@@ -5057,7 +5067,7 @@ with _dbg_ctx:
     out = dict(ss.get("overlap_out") or {})
     H_used = ss.get("overlap_H") or _load_h_local()
     eqs_now = _projected_k3_eq_now(rc=rc, boundaries=boundaries, cmap=cmap, H_obj=H_used)
-    dbg = {
+    st.json({
         "mode_now": str(rc.get("mode","")),
         "n3": int(rc.get("n3") or 0),
         "lane_mask_k3": list(rc.get("lane_mask_k3") or []),
@@ -5065,9 +5075,7 @@ with _dbg_ctx:
         "projector_hash": rc.get("projector_hash",""),
         "overlap_out_k3_eq": bool(((out.get("3") or {}).get("eq", False))),
         "recomputed": eqs_now,  # {"eq_strict","eq_projected","used_diag_fallback"}
-    }
-    st.json(dbg)
-
+    })
 
 
 
