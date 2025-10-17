@@ -4825,6 +4825,49 @@ def freeze_auto_projector_to_file(*, filename: str, overwrite: bool=False) -> di
         pass
 
     return {"path": pj_path.as_posix(), "projector_hash": pj_hash}
+# --- compat shim: keep old callers happy --------------------------------------
+def _projected_k3_eq_now(*, rc: dict, **kwargs) -> dict:
+    """
+    Returns {"eq_strict": bool, "eq_projected": bool, "used_diag_fallback": bool}.
+    Proxies to _recompute_eqs(rc) if available; otherwise computes locally.
+    """
+    # Fast path: reuse the freezer’s helper if present
+    if "_recompute_eqs" in globals() and callable(globals()["_recompute_eqs"]):
+        return _recompute_eqs(rc)  # type: ignore[name-defined]
+
+    # Fallback: minimal local compute (shape-safe)
+    import streamlit as st
+    ss = st.session_state
+    boundaries_ = kwargs.get("boundaries") or globals().get("boundaries")
+    cmap_       = kwargs.get("cmap")       or globals().get("cmap")
+    H_obj       = kwargs.get("H_obj")      or ss.get("overlap_H")
+
+    def _shape_ok(A,B): 
+        try: return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
+        except Exception: return False
+    def _xor(A,B):
+        if not A: return [r[:] for r in (B or [])]
+        if not B: return [r[:] for r in (A or [])]
+        r,c = len(A), len(A[0])
+        return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
+    def _is_zero(M): 
+        return (not M) or all((x & 1) == 0 for row in M for x in row)
+
+    d3 = rc.get("d3") or ((boundaries_.blocks.__root__.get("3") or []) if boundaries_ else [])
+    H2 = (getattr(H_obj, "blocks", None).__root__.get("2") if getattr(H_obj, "blocks", None) else []) or []
+    C3 = ((cmap_.blocks.__root__.get("3") or []) if cmap_ else [])
+    I3 = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
+
+    R3s = _xor(mul(H2, d3), _xor(C3, I3)) if (_shape_ok(H2,d3) and C3 and C3[0] and len(C3)==len(C3[0])) else []
+    lm  = list(rc.get("lane_mask_k3") or [])
+    P   = rc.get("P_active") or ([[1 if (i==j and lm[j]) else 0 for j in range(len(lm))] for i in range(len(lm))] if lm else [])
+    R3p = mul(R3s, P) if (R3s and P) else []
+
+    return {
+        "eq_strict": _is_zero(R3s),
+        "eq_projected": _is_zero(R3p),
+        "used_diag_fallback": bool(P and not rc.get("P_active"))
+    }
 
 # ---------------------------- UI: Freezer (no widget conflicts) ----------------------------
 with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
@@ -4879,113 +4922,9 @@ with st.container():
     st.code(json.dumps(dbg, indent=2))
 # ========================== /Projector Freezer ==========================
 
-# --- compat shim: keep old callers happy --------------------------------------
-def _projected_k3_eq_now(*, rc: dict, **kwargs) -> dict:
-    """
-    Returns {"eq_strict": bool, "eq_projected": bool, "used_diag_fallback": bool}.
-    Proxies to _recompute_eqs(rc) if available; otherwise computes locally.
-    """
-    # Fast path: reuse the freezer’s helper if present
-    if "_recompute_eqs" in globals() and callable(globals()["_recompute_eqs"]):
-        return _recompute_eqs(rc)  # type: ignore[name-defined]
-
-    # Fallback: minimal local compute (shape-safe)
-    import streamlit as st
-    ss = st.session_state
-    boundaries_ = kwargs.get("boundaries") or globals().get("boundaries")
-    cmap_       = kwargs.get("cmap")       or globals().get("cmap")
-    H_obj       = kwargs.get("H_obj")      or ss.get("overlap_H")
-
-    def _shape_ok(A,B): 
-        try: return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
-        except Exception: return False
-    def _xor(A,B):
-        if not A: return [r[:] for r in (B or [])]
-        if not B: return [r[:] for r in (A or [])]
-        r,c = len(A), len(A[0])
-        return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
-    def _is_zero(M): 
-        return (not M) or all((x & 1) == 0 for row in M for x in row)
-
-    d3 = rc.get("d3") or ((boundaries_.blocks.__root__.get("3") or []) if boundaries_ else [])
-    H2 = (getattr(H_obj, "blocks", None).__root__.get("2") if getattr(H_obj, "blocks", None) else []) or []
-    C3 = ((cmap_.blocks.__root__.get("3") or []) if cmap_ else [])
-    I3 = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
-
-    R3s = _xor(mul(H2, d3), _xor(C3, I3)) if (_shape_ok(H2,d3) and C3 and C3[0] and len(C3)==len(C3[0])) else []
-    lm  = list(rc.get("lane_mask_k3") or [])
-    P   = rc.get("P_active") or ([[1 if (i==j and lm[j]) else 0 for j in range(len(lm))] for i in range(len(lm))] if lm else [])
-    R3p = mul(R3s, P) if (R3s and P) else []
-
-    return {
-        "eq_strict": _is_zero(R3s),
-        "eq_projected": _is_zero(R3p),
-        "used_diag_fallback": bool(P and not rc.get("P_active"))
-    }
 
 
 
-# ---------- UI (stable keys; not nested inside other expanders) ----------
-_freezer_box = safe_expander("Projector Freezer (AUTO → FILE, no UI flip)", expanded=False) if "safe_expander" in globals() else st.container()
-with _freezer_box:
-    ss = st.session_state
-    di = ss.get("_district_info") or {}
-    district_id = di.get("district_id","UNKNOWN")
-    rc = dict(ss.get("run_ctx") or {})
-
-    # Freshness (warn only)
-    is_stale = False
-    try:
-        if "ssot_is_stale" in globals() and callable(globals()["ssot_is_stale"]):
-            is_stale = ssot_is_stale()  # type: ignore[name-defined]
-    except Exception:
-        pass
-    allow_stale = st.toggle("Allow writing with stale SSOT", value=False, key="freezer_allow_stale")
-    if is_stale and not allow_stale:
-        st.warning("STALE_RUN_CTX: Inputs changed; click Run Overlap to refresh before freezing.")
-
-    # Recompute projected green inline (source of truth)
-    H_used = ss.get("overlap_H") or _load_h_local()
-    eqs = _projected_k3_eq_now(rc=rc, boundaries=boundaries, cmap=cmap, H_obj=H_used)
-
-    mode_now = str(rc.get("mode",""))
-    n3       = int(rc.get("n3") or 0)
-    lm       = list(rc.get("lane_mask_k3") or [])
-    k3_green_recomputed = bool(eqs.get("eq_projected", False))
-
-    elig = (mode_now == "projected(auto)" and n3 > 0 and len(lm) == n3 and k3_green_recomputed)
-
-    st.caption("Freeze current AUTO Π → file, re-run Overlap in FILE (no policy widget flip), and arm cert write.")
-    name = st.text_input("Filename", value=f"projector_{district_id or 'UNKNOWN'}.json", key="freezer_pj_name")
-    overwrite_ok = st.checkbox("Overwrite if exists", value=False, key="freezer_overwrite")
-
-    disabled = (not elig)
-    tip = None if elig else "Enabled when current run is projected(auto), mask is valid, and recomputed k=3 is GREEN."
-
-    if st.button("Freeze Π → FILE & re-run", key="btn_freeze_auto_to_file", disabled=disabled, help=(tip or "Freeze AUTO to FILE and re-run")):
-        try:
-            info = _freeze_auto_projector_to_file(filename=name, overwrite=overwrite_ok)
-            st.success(f"Π saved → {Path(info['path']).name} · {info['projector_hash'][:12]}… and FILE overlap re-run.")
-        except Exception as e:
-            st.error(f"Freeze failed: {e}")
-
-# ---------------------------- Freezer debugger (standalone; not nested) ----------------------------
-_dbg_ctx = safe_expander("Freezer debugger", expanded=False) if "safe_expander" in globals() else st.container()
-with _dbg_ctx:
-    ss = st.session_state
-    rc = dict(ss.get("run_ctx") or {})
-    out = dict(ss.get("overlap_out") or {})
-    H_used = ss.get("overlap_H") or _load_h_local()
-    eqs_now = _projected_k3_eq_now(rc=rc, boundaries=boundaries, cmap=cmap, H_obj=H_used)
-    st.json({
-        "mode_now": str(rc.get("mode","")),
-        "n3": int(rc.get("n3") or 0),
-        "lane_mask_k3": list(rc.get("lane_mask_k3") or []),
-        "projector_filename": rc.get("projector_filename",""),
-        "projector_hash": rc.get("projector_hash",""),
-        "overlap_out_k3_eq": bool(((out.get("3") or {}).get("eq", False))),
-        "recomputed": eqs_now,  # {"eq_strict","eq_projected","used_diag_fallback"}
-    })
 
 
 
