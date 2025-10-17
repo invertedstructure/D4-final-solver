@@ -1916,37 +1916,29 @@ else:
             for w in _warn: st.write(f"- {w}")
 
 
-# ====================== A/B Compare (strict vs ACTIVE projected) — fresh, pinned, canonical ======================
+# ====================== A/B Compare (strict vs ACTIVE projected) — resilient ======================
 import streamlit as st
 from datetime import datetime
 import json, hashlib
 
-# --- tiny locals (safe alongside your globals) ---
-def _utc_iso_z():
-    return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
-
+def _utc_iso_z(): return datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 def _shape_ok(A,B):
     try: return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
     except Exception: return False
-
 def _eye(n): return [[1 if i==j else 0 for j in range(n)] for i in range(n)]
 def _is_zero(M): return (not M) or all((x & 1) == 0 for row in M for x in row)
-
 def _xor_gf2(A,B):
     if not A: return [r[:] for r in (B or [])]
     if not B: return [r[:] for r in (A or [])]
     r, c = len(A), len(A[0])
     return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
-
 def _diag_from_mask(lm):
     n = len(lm or [])
     return [[1 if (i==j and int(lm[j])==1) else 0 for j in range(n)] for i in range(n)]
-
 def _col_support_vec(M):
     if not M or not M[0]: return []
     r, c = len(M), len(M[0])
     return [1 if any(M[i][j] & 1 for i in range(r)) else 0 for j in range(c)]
-
 def _auto_projector_hash_from_lm(lm):
     blob = json.dumps([int(x) & 1 for x in (lm or [])], separators=(",", ":"), sort_keys=True).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()
@@ -1954,7 +1946,6 @@ def _auto_projector_hash_from_lm(lm):
 def _inputs_sig_now_from_ib(ib):
     ib = ib or {}
     h = (ib.get("hashes") or {})
-    # exact order (boundaries, C, H, U, shapes)
     return [
         str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
         str(h.get("C_hash",          ib.get("C_hash",""))),
@@ -1966,27 +1957,22 @@ def _inputs_sig_now_from_ib(ib):
 def _canonical_policy_tag(rc):
     rc = rc or {}
     try:
-        # prefer your label helper if available
         return str(rc.get("policy_tag") or policy_label_from_cfg(cfg_active))
     except Exception:
-        t = (rc.get("policy_tag") or "").lower()
-        if not t:
-            m = str(rc.get("mode",""))
-            if m == "strict": return "strict"
-            if m == "projected(file)": return "projected(columns@k=3,file)"
-            if m == "projected(auto)": return "projected(columns@k=3,auto)"
+        m = str(rc.get("mode",""))
+        if m == "strict": return "strict"
+        if m == "projected(file)": return "projected(columns@k=3,file)"
+        if m == "projected(auto)": return "projected(columns@k=3,auto)"
         return str(rc.get("policy_tag") or "strict")
 
 def _strict_R3(H2, d3, C3):
     if "mul" not in globals() or not callable(globals()["mul"]):
         raise RuntimeError("R3_MUL_MISSING: mul(H2,d3) not available.")
-    # shapes: H2 n3×n2 ; d3 n2×n3 ; C3 n3×n3
     if not (H2 and d3 and C3): raise RuntimeError("R3_INPUTS_MISSING")
     rH, cH = len(H2), len(H2[0]); rD, cD = len(d3), len(d3[0]); rC, cC = len(C3), len(C3[0])
     n2, n3 = rD, cD
     ok = (rH==n3 and cH==n2 and rD==n2 and cD==n3 and rC==n3 and cC==n3)
-    if not ok:
-        raise RuntimeError(f"R3_SHAPE: H2({rH}×{cH}) d3({rD}×{cD}) C3({rC}×{cC}) vs n2={n2}, n3={n3}")
+    if not ok: raise RuntimeError(f"R3_SHAPE: H2({rH}×{cH}) d3({rD}×{cD}) C3({rC}×{cC}) expected n2={n2},n3={n3}")
     M = mul(H2, d3)  # type: ignore[name-defined]
     I3 = _eye(n3)
     C3p = [[(C3[i][j] ^ I3[i][j]) & 1 for j in range(n3)] for i in range(n3)]
@@ -2002,14 +1988,13 @@ def _projected_R3(R3s, P):
     return mul(R3s, P)  # type: ignore[name-defined]
 
 def _choose_P_active_and_hash(rc):
-    """Return (P_active, pj_hash, mode_used). Falls back to diag(lm) for AUTO or chooser-missing."""
     mode_now = str(rc.get("mode",""))
     lm = list(rc.get("lane_mask_k3") or [])
     if mode_now == "projected(file)":
         pj_path = rc.get("projector_filename","")
         cfg = (_cfg_from_policy("projected(file)", pj_path)  # type: ignore[name-defined]
                if "_cfg_from_policy" in globals() else {"source":{"3":"file"}, "projector_files":{"3": pj_path}})
-        # Try chooser
+        # Preferred chooser
         try:
             if "projector_choose_active" in globals() and callable(globals()["projector_choose_active"]):
                 ret = projector_choose_active(cfg, boundaries)  # type: ignore[name-defined]
@@ -2024,10 +2009,10 @@ def _choose_P_active_and_hash(rc):
                     return P_active, pj_hash, "file"
         except Exception:
             pass
-        # Fallback: try read JSON file directly
+        # Fallback: parse file
         try:
-            from pathlib import Path
-            payload = json.loads(Path(pj_path).read_text(encoding="utf-8"))
+            from pathlib import Path as _Path
+            payload = json.loads(_Path(pj_path).read_text(encoding="utf-8"))
             P_f = (payload.get("blocks",{}) or {}).get("3", []) or []
             if P_f:
                 pj_hash = hashlib.sha256(
@@ -2036,7 +2021,7 @@ def _choose_P_active_and_hash(rc):
                 return P_f, pj_hash, "file"
         except Exception:
             pass
-        # Final fallback → diag(lm)
+        # Final fallback: diag(lm)
         return _diag_from_mask(lm), _auto_projector_hash_from_lm(lm), "auto-fallback"
     # AUTO
     return _diag_from_mask(lm), _auto_projector_hash_from_lm(lm), "auto"
@@ -2058,7 +2043,7 @@ def _ab_unpin_if_sig_changed():
     cur = _ab_current_sig()
     pin = ss.get("ab_pin") or {}
     if pin.get("sig") != cur:
-        ss["ab_pin"] = {}  # drop stale
+        ss["ab_pin"] = {}
 
 def _ab_is_fresh_payload(rc: dict, ib: dict, ab_payload: dict) -> tuple[bool,str]:
     try:
@@ -2080,17 +2065,14 @@ def _pin_ab_for_cert(strict_out: dict, projected_out: dict):
     ss = st.session_state
     ib = ss.get("_inputs_block") or {}
     rc = ss.get("run_ctx") or {}
-
     inputs_sig = []
     if "ssot_frozen_sig_from_ib" in globals():
         try: inputs_sig = list(ssot_frozen_sig_from_ib() or [])
         except Exception: pass
     if not inputs_sig:
         inputs_sig = _inputs_sig_now_from_ib(ib)
-
     pol_tag = _canonical_policy_tag(rc)
     pj_hash = (rc.get("projector_hash","") if str(rc.get("mode","")) == "projected(file)" else "")
-
     payload = {
         "pair_tag": f"strict__VS__{pol_tag}",
         "inputs_sig": inputs_sig,
@@ -2101,14 +2083,15 @@ def _pin_ab_for_cert(strict_out: dict, projected_out: dict):
     }
     ss["ab_pin"] = {"state":"pinned", "fresh": True, "sig": _ab_current_sig(), "payload": payload}
 
-# ---------------- UI container ----------------
+# ---- UI container (no inline ternaries) ----
 _expander = globals().get("safe_expander", None)
 expander_ctx = (_expander("A/B compare (strict vs active projected)", expanded=False)
                 if callable(_expander) else st.expander("A/B compare (strict vs active projected)", expanded=False))
 
 with expander_ctx:
     ss = st.session_state
-    # Stale nudges (non-blocking)
+
+    # Non-blocking stale nudges + SSOT backfill
     if "stale_run_ctx_guard" in globals():
         try: stale_run_ctx_guard()
         except Exception: pass
@@ -2119,18 +2102,29 @@ with expander_ctx:
         try: _backfill_inputs_hashes_from_cert_or_state()
         except Exception: pass
 
-    # Banner
+    # Banner (explicit if/else; no expression rendering)
     ab_pin = ss.get("ab_pin") or {}
     rc     = ss.get("run_ctx") or {}
     ib     = ss.get("_inputs_block") or {}
     if ab_pin.get("state") == "pinned":
         fresh, reason = _ab_is_fresh_payload(rc=rc, ib=ib, ab_payload=(ab_pin.get("payload") or {}))
-        st.success("A/B: Pinned · Fresh (will embed)") if fresh else st.warning(f"A/B: Pinned · Stale ({reason})")
+        if fresh:
+            st.success("A/B: Pinned · Fresh (will embed)")
+        else:
+            st.warning(f"A/B: Pinned · Stale ({reason})")
     else:
         st.caption("A/B: —")
 
-    # Button
-    if st.button("Run A/B compare", key="btn_ab_compare_run"):
+    # Debounce / reentrancy guard
+    if "_ab_busy" not in ss:
+        ss["_ab_busy"] = False
+
+    run_clicked = st.button("Run A/B compare", key="btn_ab_compare_run")
+    if run_clicked:
+        if ss["_ab_busy"]:
+            st.info("A/B compare is already running…")
+            st.stop()
+        ss["_ab_busy"] = True
         try:
             _ab_unpin_if_sig_changed()
 
@@ -2140,7 +2134,7 @@ with expander_ctx:
                 st.warning("Active policy is strict — run Overlap in projected(auto/file) first to compare.")
                 st.stop()
 
-            # Pull SSOT blocks
+            # Pull fresh blocks each run
             H_used = ss.get("overlap_H") or (_load_h_local() if "_load_h_local" in globals() else io.parse_cmap({"blocks": {}}))
             B0, C0 = boundaries, cmap
             d3 = (B0.blocks.__root__.get("3") or [])
@@ -2151,18 +2145,18 @@ with expander_ctx:
             R3s, H2d3, C3pI3 = _strict_R3(H2, d3, C3)
             eq_s = _is_zero(R3s)
 
-            # Projected leg
+            # Projected leg (chooser → file → diag(lm))
             P_active, pj_hash, mode_used = _choose_P_active_and_hash(rc)
             R3p = _projected_R3(R3s, P_active)
             eq_p = _is_zero(R3p)
 
-            # Lane vectors for diagnostics
+            # Diag vectors
             lane_vec_H2d3   = _col_support_vec(H2d3)
             lane_vec_C3plus = _col_support_vec(C3pI3)
 
-            # Package recompute snapshot (nice to inspect in UI)
+            # Snapshot for UI
             pair_tag = f"strict__VS__{_canonical_policy_tag(rc)}"
-            ab_payload = {
+            ss["ab_compare"] = {
                 "pair_tag": pair_tag,
                 "inputs_sig": _inputs_sig_now_from_ib(ib),
                 "lane_mask_k3": list(rc.get("lane_mask_k3") or []),
@@ -2194,7 +2188,6 @@ with expander_ctx:
                 },
                 "written_at_utc": _utc_iso_z(),
             }
-            ss["ab_compare"] = ab_payload
 
             # Pin for cert/gallery embed
             _pin_ab_for_cert(
@@ -2203,13 +2196,13 @@ with expander_ctx:
             )
 
             st.success(f"A/B updated → strict={'✅' if eq_s else '❌'} · projected={'✅' if eq_p else '❌'} · {pair_tag}")
-            if st.checkbox("Show A/B snapshot payload", value=False, key="ab_show_payload"):
-                st.json(ab_payload)
 
         except Exception as e:
             st.error(f"A/B compare failed: {e}")
+        finally:
+            ss["_ab_busy"] = False
 
-    # Diagnostics from the last run (recomputed snapshot)
+    # Diagnostics (from last run)
     snap = ss.get("ab_compare") or {}
     if snap:
         rc_now  = ss.get("run_ctx") or {}
@@ -2232,6 +2225,7 @@ with expander_ctx:
         fresh, _ = _ab_is_fresh_payload(rc=rc_now, ib=(ss.get('_inputs_block') or {}), ab_payload=(pin.get("payload") or {})) if pin.get("state")=="pinned" else (False,"")
         st.caption(f"A/B pin: {'present' if pin else '—'}\n\nfresh: {'🟢 yes' if fresh else '⚠️ no'}")
 # ====================== /A/B Compare ======================
+
 
 
 
