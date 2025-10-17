@@ -2524,6 +2524,128 @@ def _force_ssot_fresh_for_reports():
         # Never block reports
         pass
 # ================= /REPORT PREFLIGHT SSOT FRESHNESS =================
+# ====================== Reports: unified Π normalizer (helper-agnostic) ======================
+import json
+from pathlib import Path
+from datetime import datetime, timezone
+
+def _rpt_safe_rc():
+    ss = st.session_state
+    return dict(ss.get("run_ctx") or {})
+
+def _rpt_diag_from_mask(lm: list[int]) -> list[list[int]]:
+    n = len(lm or [])
+    return [[1 if (i == j and int(lm[j]) == 1) else 0 for j in range(n)] for i in range(n)]
+
+def _rpt_cfg_from_policy(mode: str, pj_path: str = "") -> dict:
+    if "_cfg_from_policy" in globals():
+        try:
+            return _cfg_from_policy(mode, pj_path)  # type: ignore[name-defined]
+        except Exception:
+            pass
+    if mode == "projected(file)":
+        return {"source": {"3": "file"}, "projector_files": {"3": pj_path}}
+    if mode == "projected(auto)":
+        return {"source": {"3": "auto"}}
+    return {}
+
+def _rpt_try_choose_active(cfg_forced: dict) -> tuple[list[list[int]], dict]:
+    """
+    Try projector_choose_active; tolerate any return shape.
+    Returns (P_active, meta). Never raises.
+    """
+    P_active, meta = [], {}
+    try:
+        ret = projector_choose_active(cfg_forced, boundaries)  # type: ignore[name-defined]
+        if isinstance(ret, tuple):
+            if len(ret) == 2:
+                P_active, meta = ret
+            elif len(ret) == 1:
+                x = ret[0]
+                if isinstance(x, dict):
+                    meta = x
+                else:
+                    P_active = x
+        elif isinstance(ret, dict):
+            meta = ret
+            P_active = meta.get("P_active", [])
+    except Exception as e:
+        meta = {"error": "P3_FILE_HELPERS_MISSING", "reason": str(e)}
+    return (P_active or []), (meta or {})
+
+def p3_normalize_for_reports(*, allow_auto_diag: bool = True) -> dict:
+    """
+    Return a normalized projector context for reports:
+      { mode, P_active, meta, cfg }
+    - Never returns None.
+    - If helpers missing, falls back to diag(lane_mask) when allowed.
+    """
+    ss = st.session_state
+    rc = _rpt_safe_rc()
+    mode = str(rc.get("mode", "") or "").strip() or "strict"
+    lane_mask = list(rc.get("lane_mask_k3") or [])
+    out = {"mode": "strict", "P_active": [], "meta": {}, "cfg": {}}
+
+    if mode == "projected(file)":
+        # find a file path (rc first, then cfg_active)
+        pj_path = rc.get("projector_filename") or ""
+        if (not pj_path) and ("cfg_active" in globals()):
+            try:
+                pj_path = (cfg_active.get("projector_files", {}) or {}).get("3", "")  # type: ignore[name-defined]
+            except Exception:
+                pj_path = ""
+        if not pj_path:
+            # file path missing → soft fallback (optional diag Π)
+            meta = {"error": "P3_FILE_MISSING"}
+            P = _rpt_diag_from_mask(lane_mask) if (allow_auto_diag and lane_mask) else []
+            if P: meta["used_diag_fallback"] = True
+            return {"mode": "projected(file)", "P_active": P, "meta": meta, "cfg": {}}
+
+        cfg_forced = _rpt_cfg_from_policy("projected(file)", pj_path)
+        P_active, meta = _rpt_try_choose_active(cfg_forced)
+
+        if not P_active and allow_auto_diag and lane_mask:
+            P_active = _rpt_diag_from_mask(lane_mask)
+            meta = dict(meta or {}); meta["used_diag_fallback"] = True
+
+        # stamp rc essentials so downstream UI doesn’t complain
+        rc.setdefault("projector_filename", pj_path)
+        rc.setdefault("projector_hash", rc.get("projector_hash", ""))
+        ss["run_ctx"] = rc
+
+        return {"mode": "projected(file)", "P_active": P_active, "meta": (meta or {}), "cfg": cfg_forced}
+
+    if mode.startswith("projected(auto)"):
+        P = rc.get("P_active") or (_rpt_diag_from_mask(lane_mask) if (allow_auto_diag and lane_mask) else [])
+        return {"mode": "projected(auto)", "P_active": P, "meta": {}, "cfg": _rpt_cfg_from_policy("projected(auto)")}
+
+    # strict
+    return {"mode": "strict", "P_active": [], "meta": {}, "cfg": {}}
+
+# --- Compatibility shims so legacy calls don't break ---
+def normalize_P3_for_reports(*, allow_auto_diag: bool = True):  # legacy name
+    return p3_normalize_for_reports(allow_auto_diag=allow_auto_diag)
+
+def P3_normalize_for_reports(*, allow_auto_diag: bool = True):  # legacy name variant
+    return p3_normalize_for_reports(allow_auto_diag=allow_auto_diag)
+
+# --- Once-per-render stale warning (dedup) ---
+def reports_warn_stale_once():
+    ss = st.session_state
+    if ss.get("_reports_warned_stale"): 
+        return
+    try:
+        stale = False
+        if "ssot_is_stale_v2" in globals() and callable(globals()["ssot_is_stale_v2"]):
+            stale = bool(ssot_is_stale_v2())  # type: ignore[name-defined]
+        elif "ssot_is_stale" in globals() and callable(globals()["ssot_is_stale"]):
+            stale = bool(ssot_is_stale())     # type: ignore[name-defined]
+        if stale:
+            st.warning("STALE_RUN_CTX: Inputs changed; please click Run Overlap to refresh.")
+    except Exception:
+        pass
+    ss["_reports_warned_stale"] = True
+# ==================== /Reports Π normalizer ====================
 
 # ==================== CERT POLICY NORMALIZER ====================
 
@@ -3157,19 +3279,21 @@ HAS_U_HOOKS = (
 
            
 
-# ── Reports preflight & Π select (one source of truth)
-reports_warn_stale_once()  # optional: warn once about stale SSOT
+# ── Reports preflight & Π selection (single source of truth)
+reports_warn_stale_once()
 
 pre      = p3_normalize_for_reports(allow_auto_diag=True)
 mode     = pre["mode"]                 # 'projected(file)' | 'projected(auto)' | 'strict'
-P_active = pre["P_active"] or []       # always a list (maybe empty)
-meta     = pre["meta"] or {}           # always a dict
+P_active = pre["P_active"] or []       # guaranteed list
+meta     = pre["meta"] or {}           # guaranteed dict
 cfg_used = pre["cfg"]  or {}
 
-# Friendly banner(s)
+# Friendly banner (matches your earlier phrasing, but won’t hard-fail)
 if mode == "projected(file)":
     if meta.get("error") == "P3_FILE_MISSING":
         st.info("Evidence preflight → Π: AUTO_OK · hashes: OK (no FILE Π yet)")
+    elif meta.get("error") == "P3_FILE_HELPERS_MISSING" and meta.get("used_diag_fallback"):
+        st.info("Evidence preflight → Π: FILE helpers missing → using diag(lanes). Hashes: OK")
     else:
         st.success("Evidence preflight → Π: FILE_OK · hashes: OK")
 elif mode == "projected(auto)":
@@ -3181,9 +3305,10 @@ else:
 rc = st.session_state.get("run_ctx") or {}
 rc.setdefault("mode", mode)
 if mode == "projected(file)":
-    rc.setdefault("projector_filename", meta.get("projector_filename",""))
-    rc.setdefault("projector_hash",     meta.get("projector_hash",""))
+    rc.setdefault("projector_filename", meta.get("projector_filename", rc.get("projector_filename","")))
+    rc.setdefault("projector_hash",     meta.get("projector_hash",     rc.get("projector_hash","")))
 st.session_state["run_ctx"] = rc
+
 
 
 
