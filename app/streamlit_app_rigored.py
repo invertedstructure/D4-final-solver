@@ -4871,13 +4871,62 @@ def freeze_auto_projector_to_file(*, filename: str, overwrite: bool=False) -> di
 
     return {"path": pj_path.as_posix(), "projector_hash": pj_hash, "lane_mask_k3": lm[:], "n3": n3}
 
-# ---------------------------- Projector Freezer (AUTO → FILE, no UI flip) ----------------------------
+# ====================== Projector Freezer (AUTO → FILE, no UI flip) ======================
+from pathlib import Path
+import os, json, hashlib, tempfile
+
 PROJECTORS_DIR = Path(globals().get("PROJECTORS_DIR", "projectors"))
 PROJECTORS_DIR.mkdir(parents=True, exist_ok=True)
 
 def _sha256_text(s: str) -> str:
-    import hashlib
     return hashlib.sha256(s.encode("utf-8")).hexdigest()
+
+def _diag_from_mask(lm: list[int]) -> list[list[int]]:
+    n = len(lm or [])
+    return [[1 if (i == j and int(lm[j]) == 1) else 0 for j in range(n)] for i in range(n)]
+
+def _shape_ok(A,B) -> bool:
+    return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
+
+def _xor(A,B):
+    if not A: return [r[:] for r in (B or [])]
+    if not B: return [r[:] for r in (A or [])]
+    r,c = len(A), len(A[0])
+    return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
+
+def _is_zero(M) -> bool:
+    return (not M) or all((x & 1) == 0 for row in M for x in row)
+
+def _projected_k3_eq_now(*, rc: dict, boundaries, cmap, H_obj) -> dict:
+    """
+    Pure recompute of strict/projected k=3 equality from current SSOT (+ diag fallback).
+    Returns {"eq_strict": bool, "eq_projected": bool, "used_diag_fallback": bool}.
+    """
+    d3 = rc.get("d3") or (boundaries.blocks.__root__.get("3") or [])
+    H2 = (getattr(H_obj, "blocks", None).__root__.get("2") if getattr(H_obj, "blocks", None) else []) or []
+    C3 = (cmap.blocks.__root__.get("3") or [])
+    I3 = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
+
+    R3_strict = []
+    if _shape_ok(H2, d3) and C3 and C3[0] and (len(C3) == len(C3[0])):
+        try:
+            R3_strict = _xor(mul(H2, d3), _xor(C3, I3))
+        except Exception:
+            R3_strict = []
+
+    lm = list(rc.get("lane_mask_k3") or [])
+    P_active = rc.get("P_active")
+    used_diag = False
+    if not P_active:
+        P_active = _diag_from_mask(lm) if lm else []
+        used_diag = bool(P_active)
+
+    R3_proj = mul(R3_strict, P_active) if (R3_strict and P_active) else []
+    return {
+        "eq_strict": _is_zero(R3_strict),
+        "eq_projected": _is_zero(R3_proj),
+        "used_diag_fallback": used_diag,
+    }
 
 def _freeze_auto_projector_to_file(*, filename: str, overwrite: bool=False) -> dict:
     """
@@ -4897,11 +4946,10 @@ def _freeze_auto_projector_to_file(*, filename: str, overwrite: bool=False) -> d
 
     # Build diagonal Π
     P_freeze = [[1 if (i == j and lm[j]) else 0 for j in range(n3)] for i in range(n3)]
-    # Optional strict validation, if you have a helper:
     if "validate_projector_file_strict" in globals():
         validate_projector_file_strict(P_freeze, n3=n3, lane_mask=lm)
 
-    # Write projector atomically
+    # Write projector
     pj_path = PROJECTORS_DIR / filename
     payload = {"schema_version":"1.0.0","blocks":{"3":P_freeze}}
     pj_json = json.dumps(payload, ensure_ascii=False, separators=(",",":"), sort_keys=True)
@@ -4911,21 +4959,20 @@ def _freeze_auto_projector_to_file(*, filename: str, overwrite: bool=False) -> d
     with open(tmp, "w", encoding="utf-8") as f:
         f.write(pj_json); f.flush(); os.fsync(f.fileno())
     os.replace(tmp, pj_path)
-
     pj_hash = _sha256_text(pj_json)
 
-    # Re-run Overlap in FILE mode without touching the policy widget
+    # Build a forced FILE cfg (no policy widget mutation)
     if "_cfg_from_policy" in globals():
         cfg_forced = _cfg_from_policy("projected(file)", pj_path.as_posix())
     else:
-        # Minimal forced cfg if your helper isn't present
         cfg_forced = {"source":{"3":"file"}, "projector_files":{"3": pj_path.as_posix()}}
 
+    # Run a FILE overlap pass without flipping the UI control
     if "_simulate_overlap_with_cfg" in globals():
         _simulate_overlap_with_cfg(cfg_forced)
     else:
-        # Fallback: directly resolve + compute like your Overlap does (kept short)
-        P_active, meta = projector_choose_active(cfg_forced, boundaries)  # must exist in your app
+        P_active, meta = projector_choose_active(cfg_forced, boundaries)
+        # Minimal rc update
         ss["run_ctx"] = {
             "policy_tag": policy_label_from_cfg(cfg_forced), "mode":"projected(file)",
             "d3": (boundaries.blocks.__root__.get("3") or []),
@@ -4933,13 +4980,12 @@ def _freeze_auto_projector_to_file(*, filename: str, overwrite: bool=False) -> d
             "projector_filename": pj_path.as_posix(), "projector_hash": pj_hash,
             "projector_consistent_with_d": meta.get("projector_consistent_with_d", True),
             "source": (cfg_forced.get("source") or {}),
+            "errors": [],
         }
-        # recompute out minimally or call your existing run_overlap with cfg_forced if available
 
-    # Arm write for this pass
+    # Arm a cert write (single pass)
     ss["should_write_cert"] = True
     ss.pop("_last_cert_write_key", None)
-    # Stash for UI
     ss["ov_last_pj_path"] = pj_path.as_posix()
 
     return {"path": pj_path.as_posix(), "projector_hash": pj_hash}
@@ -4949,10 +4995,6 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
     di = ss.get("_district_info") or {}
     district_id = di.get("district_id","UNKNOWN")
     rc = dict(ss.get("run_ctx") or {})
-    mode_now = str(rc.get("mode",""))
-    n3 = int(rc.get("n3") or 0)
-    lm = list(rc.get("lane_mask_k3") or [])
-    k3_green = bool((((ss.get("overlap_out") or {}).get("3") or {}).get("eq", False)))
 
     # Freshness (warn only)
     is_stale = False
@@ -4966,18 +5008,25 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
     if is_stale and not allow_stale:
         st.warning("STALE_RUN_CTX: Inputs changed; click Run Overlap to refresh before freezing.")
 
-    # Eligibility: must currently be AUTO, have sane mask, and projected leg GREEN
-    elig = (mode_now == "projected(auto)" and n3 > 0 and len(lm) == n3 and k3_green)
-    st.caption("Freeze current AUTO Π → file, re-run Overlap in FILE (without touching the policy widget), and arm cert write.")
+    # Recompute projected green inline (source of truth)
+    H_used = ss.get("overlap_H") or _load_h_local()
+    eqs = _projected_k3_eq_now(rc=rc, boundaries=boundaries, cmap=cmap, H_obj=H_used)
 
+    mode_now = str(rc.get("mode",""))
+    n3       = int(rc.get("n3") or 0)
+    lm       = list(rc.get("lane_mask_k3") or [])
+    k3_green_recomputed = bool(eqs.get("eq_projected", False))
+
+    elig = (mode_now == "projected(auto)" and n3 > 0 and len(lm) == n3 and k3_green_recomputed)
+
+    st.caption("Freeze current AUTO Π → file, re-run Overlap in FILE (no policy widget flip), and arm cert write.")
     _k_name = ensure_unique_widget_key("pj_freeze_name") if "ensure_unique_widget_key" in globals() else "pj_freeze_name"
     _k_ow   = ensure_unique_widget_key("pj_freeze_overwrite") if "ensure_unique_widget_key" in globals() else "pj_freeze_overwrite"
     name    = st.text_input("Filename", value=f"projector_{district_id or 'UNKNOWN'}.json", key=_k_name)
     overwrite_ok = st.checkbox("Overwrite if exists", value=False, key=_k_ow)
 
-    # Final disabled state
     disabled = (not elig)
-    tip = None if elig else "Enabled when current run is projected(auto), mask is valid, and k=3 is green."
+    tip = None if elig else "Enabled when current run is projected(auto), mask is valid, and recomputed k=3 is GREEN."
 
     _k_btn = ensure_unique_widget_key("btn_freeze_auto_to_file") if "ensure_unique_widget_key" in globals() else "btn_freeze_auto_to_file"
     if st.button("Freeze Π → FILE & re-run", key=_k_btn, disabled=disabled, help=(tip or "Freeze AUTO to FILE and re-run")):
@@ -4986,6 +5035,26 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
             st.success(f"Π saved → {Path(info['path']).name} · {info['projector_hash'][:12]}… and FILE overlap re-run.")
         except Exception as e:
             st.error(f"Freeze failed: {e}")
+
+# ---------------------------- Freezer debugger (standalone; not nested) ----------------------------
+_dbg_ctx = safe_expander("Freezer debugger", expanded=False) if "safe_expander" in globals() else st.container()
+with _dbg_ctx:
+    ss = st.session_state
+    rc = dict(ss.get("run_ctx") or {})
+    out = dict(ss.get("overlap_out") or {})
+    H_used = ss.get("overlap_H") or _load_h_local()
+    eqs_now = _projected_k3_eq_now(rc=rc, boundaries=boundaries, cmap=cmap, H_obj=H_used)
+    dbg = {
+        "mode_now": str(rc.get("mode","")),
+        "n3": int(rc.get("n3") or 0),
+        "lane_mask_k3": list(rc.get("lane_mask_k3") or []),
+        "projector_filename": rc.get("projector_filename",""),
+        "projector_hash": rc.get("projector_hash",""),
+        "overlap_out_k3_eq": bool(((out.get("3") or {}).get("eq", False))),
+        "recomputed": eqs_now,  # {"eq_strict","eq_projected","used_diag_fallback"}
+    }
+    st.json(dbg)
+
 # ---------------------------- Freezer debugger (standalone; not nested) ----------------------------
 _dbg_ctx = safe_expander("Freezer debugger", expanded=False) if "safe_expander" in globals() else st.container()
 with _dbg_ctx:
