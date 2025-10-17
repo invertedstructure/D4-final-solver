@@ -2211,6 +2211,164 @@ FIELD          = "GF(2)"     # identity.field in all JSON payloads
 # 2) Guard enum (must match certs / parity)
 GUARD_ENUM = ["grid", "wiggle", "echo", "fence", "ker_guard", "none", "error"]
 
+# ==================== REPORTS: unified Π resolver + shims (drop-in) ====================
+from pathlib import Path
+import json, hashlib
+
+def _diag_from_mask__reports(lm: list[int]) -> list[list[int]]:
+    n = len(lm or [])
+    return [[1 if (i==j and int(lm[j])==1) else 0 for j in range(n)] for i in range(n)]
+
+def _cfg_from_policy_safe__reports(mode: str, pj_path: str | None = None) -> dict:
+    if "_cfg_from_policy" in globals() and callable(globals()["_cfg_from_policy"]):
+        return _cfg_from_policy(mode, pj_path)  # type: ignore[name-defined]
+    cfg = {"source": {}, "projector_files": {}}
+    if mode == "projected(file)":
+        cfg["source"]["3"] = "file"
+        cfg["projector_files"]["3"] = pj_path or ""
+    elif mode == "projected(auto)":
+        cfg["source"]["3"] = "auto"
+    else:
+        cfg["source"]["3"] = "strict"
+    return cfg
+
+def _pj_path_from_context_or_fs__reports() -> str:
+    ss = st.session_state
+    rc = ss.get("run_ctx") or {}
+    # 1) run_ctx
+    p = (rc.get("projector_filename") or "").strip()
+    if p and Path(p).exists(): return p
+    # 2) last UI path
+    p = (ss.get("ov_last_pj_path") or "").strip()
+    if p and Path(p).exists(): return p
+    # 3) registry by district (last hit wins)
+    try:
+        reg = Path(ss.get("PROJECTORS_DIR","projectors")) / "projector_registry.jsonl"
+        di  = (ss.get("_district_info") or {}).get("district_id","")
+        if reg.exists():
+            latest = ""
+            with open(reg, "r", encoding="utf-8") as f:
+                for ln in f:
+                    try:
+                        row = json.loads(ln)
+                        if not di or row.get("district") == di:
+                            cand = row.get("filename","")
+                            if cand and Path(cand).exists():
+                                latest = cand
+                    except Exception: 
+                        continue
+            if latest: return latest
+    except Exception:
+        pass
+    # 4) newest in projectors/
+    pjdir = Path(st.session_state.get("PROJECTORS_DIR","projectors"))
+    if pjdir.exists():
+        files = sorted(pjdir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if files: return files[0].as_posix()
+    return ""
+
+def _choose_active_safe__reports(cfg: dict, boundaries_obj):
+    """
+    Always return (P_active, meta). Never throw. Works with or without your internal chooser.
+    """
+    # Preferred path
+    if "projector_choose_active" in globals() and callable(globals()["projector_choose_active"]):
+        try:
+            ret = projector_choose_active(cfg, boundaries_obj)  # type: ignore[name-defined]
+            if isinstance(ret, tuple) and len(ret) == 2:
+                return ret
+            if isinstance(ret, dict):
+                return (ret.get("P_active", []), ret)
+            return (ret, {})
+        except Exception:
+            pass
+
+    # Fallback: load Π directly from file if present
+    pj_path = (cfg.get("projector_files") or {}).get("3", "") or ""
+    P_active = []
+    try:
+        payload = json.loads(Path(pj_path).read_text(encoding="utf-8"))
+        P_active = (payload.get("blocks", {}) or {}).get("3", []) or []
+    except Exception:
+        P_active = []
+
+    d3 = (boundaries_obj.blocks.__root__.get("3") or [])
+    n3 = len(d3[0]) if (d3 and d3[0]) else 0
+    meta = {
+        "mode": "projected(file)" if pj_path else "projected(auto)",
+        "projector_filename": pj_path,
+        "projector_hash": (
+            hashlib.sha256(
+                json.dumps({"blocks":{"3":P_active}}, separators=(",",":"), sort_keys=True
+            ).encode("utf-8")).hexdigest() if P_active else ""
+        ),
+        "projector_consistent_with_d": bool(P_active) and (len(P_active)==n3 and (n3==0 or len(P_active[0])==n3)),
+        "d3": d3, "n3": n3, "lane_mask": [
+            1 if any(d3[i][j] & 1 for i in range(len(d3))) else 0 for j in range(n3)
+        ] if n3 else [],
+        "P_active": P_active,
+    }
+    return (P_active, meta)
+
+def p3_normalize_for_reports(*, pj_path: str | None = None, allow_auto_diag: bool = True) -> dict:
+    """
+    Unified normalizer used by reports. Returns a dict with keys:
+      mode, P_active, meta, cfg
+    Never raises; no Nones.
+    """
+    ss = st.session_state
+    rc = ss.get("run_ctx") or {}
+    mode = str(rc.get("mode","strict"))
+
+    if mode == "projected(file)":
+        path = (pj_path or _pj_path_from_context_or_fs__reports()).strip()
+        cfg  = _cfg_from_policy_safe__reports("projected(file)", path)
+        if not path or not Path(path).exists():
+            meta = {"mode":"projected(file)","error":"P3_FILE_MISSING"}
+            ss["proj_meta"] = meta; ss["proj_cfg_forced"] = cfg
+            return {"mode": "projected(file)", "P_active": [], "meta": meta, "cfg": cfg}
+        P_active, meta = _choose_active_safe__reports(cfg, boundaries)
+        ss["proj_meta"] = (meta or {}); ss["proj_cfg_forced"] = cfg
+        return {"mode": "projected(file)", "P_active": (P_active or []), "meta": (meta or {}), "cfg": cfg}
+
+    if mode == "projected(auto)" and allow_auto_diag:
+        lm = list(rc.get("lane_mask_k3") or [])
+        P  = _diag_from_mask__reports(lm) if lm else []
+        cfg  = _cfg_from_policy_safe__reports("projected(auto)")
+        meta = {"mode":"projected(auto)","diag_fallback": True, "lane_mask": lm}
+        ss["proj_meta"] = meta; ss["proj_cfg_forced"] = cfg
+        return {"mode": "projected(auto)", "P_active": P, "meta": meta, "cfg": cfg}
+
+    # strict or unknown
+    cfg = _cfg_from_policy_safe__reports("strict")
+    meta = {"mode":"strict"}
+    ss["proj_meta"] = meta; ss["proj_cfg_forced"] = cfg
+    return {"mode": "strict", "P_active": [], "meta": meta, "cfg": cfg}
+
+# ---- SHIMS for any legacy callers (all return the dict above) -----------------
+def _p3_normalize_for_reports(*args, **kwargs):        return p3_normalize_for_reports(*kwargs, **{}) if kwargs else p3_normalize_for_reports()
+def normalize_P3_for_reports(*args, **kwargs):         return p3_normalize_for_reports(*kwargs, **{}) if kwargs else p3_normalize_for_reports()
+def normalize_projector_for_reports(*args, **kwargs):  return p3_normalize_for_reports(*kwargs, **{}) if kwargs else p3_normalize_for_reports()
+def P3_normalize_for_reports(*args, **kwargs):         return p3_normalize_for_reports(*kwargs, **{}) if kwargs else p3_normalize_for_reports()
+
+# Optional: silence repetitive stale banners (warn once)
+if "_reports_stale_warned" not in st.session_state:
+    st.session_state["_reports_stale_warned"] = False
+
+def reports_warn_stale_once():
+    try:
+        stale = False
+        if "ssot_is_stale_v2" in globals() and callable(globals()["ssot_is_stale_v2"]):
+            stale = bool(ssot_is_stale_v2())
+        elif "ssot_is_stale" in globals() and callable(globals()["ssot_is_stale"]):
+            stale = bool(ssot_is_stale())
+        if stale and not st.session_state["_reports_stale_warned"]:
+            st.warning("STALE_RUN_CTX: Inputs changed; please click Run Overlap to refresh.")
+            st.session_state["_reports_stale_warned"] = True
+    except Exception:
+        pass
+# ==================== /REPORTS shims ====================
+
 # --- Evidence preflight helpers (display-only status + run-time guards) ---
 def _hashes_status():
     ib = st.session_state.get("_inputs_block") or {}
@@ -2999,23 +3157,35 @@ HAS_U_HOOKS = (
 
            
 
-# ── Reports preflight (safe) ─────────────────────────────────────────────
-_force_ssOT_fresh_for_reports()  # soft-refresh if stale, never blocks
+# ── Reports preflight & Π select (one source of truth)
+reports_warn_stale_once()  # optional: warn once about stale SSOT
 
-pre = p3_normalize_for_reports(allow_auto_diag=True)  # never raises
-mode = pre["mode"]
-meta = pre["meta"] or {}
+pre      = p3_normalize_for_reports(allow_auto_diag=True)
+mode     = pre["mode"]                 # 'projected(file)' | 'projected(auto)' | 'strict'
+P_active = pre["P_active"] or []       # always a list (maybe empty)
+meta     = pre["meta"] or {}           # always a dict
+cfg_used = pre["cfg"]  or {}
 
+# Friendly banner(s)
 if mode == "projected(file)":
     if meta.get("error") == "P3_FILE_MISSING":
-        st.info("Evidence preflight → Π: AUTO_OK · hashes: OK\n\n(No FILE Π on record yet; click **Freeze Π** to produce one.)")
+        st.info("Evidence preflight → Π: AUTO_OK · hashes: OK (no FILE Π yet)")
     else:
         st.success("Evidence preflight → Π: FILE_OK · hashes: OK")
 elif mode == "projected(auto)":
     st.info("Evidence preflight → Π: AUTO_OK · hashes: OK")
-else:  # strict
+else:
     st.info("Evidence preflight → strict · hashes: OK")
-# ─────────────────────────────────────────────────────────────────────────
+
+# If downstream expects rc bits, stamp them defensively (non-destructive)
+rc = st.session_state.get("run_ctx") or {}
+rc.setdefault("mode", mode)
+if mode == "projected(file)":
+    rc.setdefault("projector_filename", meta.get("projector_filename",""))
+    rc.setdefault("projector_hash",     meta.get("projector_hash",""))
+st.session_state["run_ctx"] = rc
+
+
 
 
 
