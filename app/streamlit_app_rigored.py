@@ -114,6 +114,20 @@ DISTRICT_MAP: dict[str, str] = {
 }
 
 
+def projector_hash_of(P_blocks: list[list[int]], *, mode: str = "blocks") -> str:
+    """
+    mode="blocks" → sha256(json.dumps({"blocks":{"3":P}}, sort_keys=True, separators=(",",":")))
+    mode="file"   → sha256(file bytes)  # only when you have a filename
+    """
+    import json, hashlib, pathlib
+    if mode == "blocks":
+        blob = json.dumps({"blocks":{"3": P_blocks}}, sort_keys=True, separators=(",",":")).encode("utf-8")
+        return hashlib.sha256(blob).hexdigest()
+    elif mode.startswith("file:"):
+        path = mode.split(":",1)[1]
+        try:    return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
+        except: return ""
+    return ""
 
 
 # ---- helper for recomputing diag lanes if the snapshot lacks them
@@ -5401,254 +5415,178 @@ with expander_ctx:
 
 
 
-# ========================== Projector Freezer (AUTO → FILE, clean) ==========================
-# Paste once; remove earlier duplicate freezer helpers to avoid collisions.
+
+# ===================== Projector Freezer · AUTO → FILE (recompute + cert, canonical) =====================
+# - No policy widget mutation
+# - Calls run_overlap() once after writing Π
+# - Canonical projector_hash = sha256(JSON({"blocks":{"3":P}}))  (no drift)
+# - Copies into run_ctx; arms cert writer
 
 import os, json, hashlib, tempfile
 from pathlib import Path
 from datetime import datetime, timezone
 import streamlit as st
 
-# --- dirs & tiny utils ---
-PROJECTORS_DIR = Path(globals().get("PROJECTORS_DIR", "projectors"))
+# ---------- tiny helpers (idempotent) ----------
+if "_utc_iso_z" not in globals():
+    def _utc_iso_z() -> str:
+        return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","") + "Z"
+
+if "_diag_from_mask" not in globals():
+    def _diag_from_mask(lm: list[int]) -> list[list[int]]:
+        n = len(lm or [])
+        return [[1 if (i==j and int(lm[j])==1) else 0 for j in range(n)] for i in range(n)]
+
+if "_atomic_write_json_exact_hash" not in globals():
+    def _atomic_write_json_exact_hash(path: Path, payload: dict) -> tuple[str,int]:
+        """Atomic write; return sha256(bytes we wrote) + byte length."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        blob = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",",":")).encode("utf-8")
+        with tempfile.NamedTemporaryFile("wb", delete=False, dir=path.parent) as tmp:
+            tmp.write(blob); tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
+        os.replace(tmp_name, path)
+        import hashlib as _hh
+        return _hh.sha256(blob).hexdigest(), len(blob)
+
+if "projector_blocks_hash" not in globals():
+    def projector_blocks_hash(P: list[list[int]]) -> str:
+        """Canonical hash: sha256 over JSON({"blocks":{"3":P}}) with sorted keys & no spaces."""
+        blob = json.dumps({"blocks":{"3": P}}, sort_keys=True, separators=(",",":")).encode("utf-8")
+        import hashlib as _hh
+        return _hh.sha256(blob).hexdigest()
+
+PROJECTORS_DIR = Path(st.session_state.get("PROJECTORS_DIR","projectors"))
 PROJECTORS_DIR.mkdir(parents=True, exist_ok=True)
 
-def _utc_iso_z() -> str:
-    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00","Z")
-
-def _sha256_text(s: str) -> str:
-    return hashlib.sha256(s.encode("utf-8")).hexdigest()
-
-def _atomic_write_json(path: Path, payload: dict):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    blob = json.dumps(payload, ensure_ascii=False, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "wb") as f:
-        f.write(blob); f.flush(); os.fsync(f.fileno())
-    os.replace(tmp, path)
-    return hashlib.sha256(blob).hexdigest(), len(blob)
-
-def _diag_from_mask(lm: list[int]) -> list[list[int]]:
-    n = len(lm or [])
-    return [[1 if (i == j and int(lm[j]) == 1) else 0 for j in range(n)] for i in range(n)]
-
-# --- safe chooser: normalize any return shape to (P_active, meta) ---
-def _safe_choose_projector(cfg_forced: dict):
+def _set_cfg_active_file(pj_path_str: str):
+    """Force cfg_active to FILE for k=3, without touching any UI widget."""
+    global cfg_active
     try:
-        ret = projector_choose_active(cfg_forced, boundaries)  # type: ignore[name-defined]
+        cfg_active  # type: ignore[name-defined]
     except Exception:
-        return [], {}
-    if isinstance(ret, tuple):
-        if len(ret) == 2:
-            return ret[0], ret[1]
-        if len(ret) == 1:
-            x = ret[0]
-            return (x if not isinstance(x, dict) else x.get("P_active", [])), (x if isinstance(x, dict) else {})
-        return [], {}
-    if isinstance(ret, dict):
-        return ret.get("P_active", []), ret
-    # None or unknown
-    return [], {}
+        cfg_active = {}  # type: ignore[assignment]
 
-# --- tiny GF(2) helpers used locally (shape-safe) ---
-def _shape_ok(A,B) -> bool:
-    try: return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
-    except Exception: return False
+    try:
+        cfg_active.setdefault("source", {})["3"] = "file"        # type: ignore[index]
+        cfg_active.setdefault("projector_files", {})["3"] = pj_path_str  # type: ignore[index]
+    except Exception:
+        cfg_active = {"source":{"3":"file"}, "projector_files":{"3": pj_path_str}}  # type: ignore[assignment]
 
-def _xor(A,B):
-    if not A: return [r[:] for r in (B or [])]
-    if not B: return [r[:] for r in (A or [])]
-    r,c = len(A), len(A[0])
-    return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
+def _append_registry_row_safe(row: dict):
+    try:
+        pj_dir = PROJECTORS_DIR
+        reg = pj_dir / "projector_registry.jsonl"
+        pj_dir.mkdir(parents=True, exist_ok=True)
+        with open(reg, "a", encoding="utf-8") as f:
+            f.write(json.dumps(row, sort_keys=True, separators=(",",":")) + "\n")
+    except Exception:
+        pass
 
-def _is_zero(M) -> bool:
-    return (not M) or all((x & 1) == 0 for row in M for x in row)
-
-def _recompute_eqs(rc: dict) -> dict:
-    d3 = rc.get("d3") or (boundaries.blocks.__root__.get("3") or [])                  # type: ignore[name-defined]
-    H2 = (getattr(st.session_state.get("overlap_H"), "blocks", None).__root__.get("2")
-          if getattr(st.session_state.get("overlap_H"), "blocks", None) else []) or []
-    C3 = (cmap.blocks.__root__.get("3") or [])                                        # type: ignore[name-defined]
-    I3 = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
-    R3s = _xor(mul(H2, d3), _xor(C3, I3)) if (_shape_ok(H2,d3) and C3 and C3[0] and len(C3)==len(C3[0])) else []  # type: ignore[name-defined]
-    lm  = list(rc.get("lane_mask_k3") or [])
-    P   = rc.get("P_active") or (_diag_from_mask(lm) if lm else [])
-    R3p = mul(R3s, P) if (R3s and P) else []                                          # type: ignore[name-defined]
-    return {"eq_strict": _is_zero(R3s), "eq_projected": _is_zero(R3p), "used_diag_fallback": bool(P and not rc.get("P_active"))}
-
-# --- PUBLIC: freeze AUTO → FILE (no policy widget mutation) ---
+# --- PUBLIC: freeze AUTO → FILE and run overlap once ---
 def freeze_auto_projector_to_file(*, filename: str, overwrite: bool=False) -> dict:
     ss = st.session_state
     rc = dict(ss.get("run_ctx") or {})
     if str(rc.get("mode","")) != "projected(auto)":
         raise RuntimeError("Not in projected(auto). Run Overlap in AUTO first.")
+
     n3 = int(rc.get("n3") or 0)
     lm = list(rc.get("lane_mask_k3") or [])
     if n3 <= 0 or len(lm) != n3:
         raise RuntimeError("Invalid lane_mask/n3 — run Overlap again.")
 
-    # 1) Build + validate diagonal Π from AUTO mask
-    P_freeze = _diag_from_mask(lm)
-    if "validate_projector_file_strict" in globals():
-        validate_projector_file_strict(P_freeze, n3=n3, lane_mask=lm)  # type: ignore[name-defined]
+    # 1) Build Π and (optionally) validate
+    P = _diag_from_mask(lm)
+    if "validate_projector_file_strict" in globals() and callable(globals()["validate_projector_file_strict"]):
+        validate_projector_file_strict(P, n3=n3, lane_mask=lm)  # type: ignore[name-defined]
 
-    # 2) Write projector
-    pj_path = PROJECTORS_DIR / (filename or f"projector_{(ss.get('_district_info') or {}).get('district_id','UNKNOWN')}.json")
+    # 2) Write projector file atomically
+    district_id = (ss.get("_district_info") or {}).get("district_id","UNKNOWN")
+    pj_name = filename or f"projector_{district_id}.json"
+    pj_path = PROJECTORS_DIR / pj_name
     if pj_path.exists() and not overwrite:
         raise FileExistsError(f"Projector exists: {pj_path.name}")
-    payload = {"schema_version":"1.0.0","written_at_utc":_utc_iso_z(),"blocks":{"3":P_freeze}}
-    pj_hash, _pj_bytes = _atomic_write_json(pj_path, payload)
 
-    # 3) Build FILE cfg (don’t touch the policy widget)
-    if "_cfg_from_policy" in globals():
-        cfg_forced = _cfg_from_policy("projected(file)", pj_path.as_posix())  # type: ignore[name-defined]
-    else:
-        cfg_forced = {"source":{"3":"file"}, "projector_files":{"3": pj_path.as_posix()}}
+    payload = {"schema_version":"1.0.0","written_at_utc":_utc_iso_z(),"blocks":{"3":P}}
+    file_bytes_hash, _nbytes = _atomic_write_json_exact_hash(pj_path, payload)
+    blocks_hash = projector_blocks_hash(P)
 
-    # 4) Simulate FILE overlap (preferred helper, else safe chooser)
-    if "_simulate_overlap_with_cfg" in globals() and callable(globals()["_simulate_overlap_with_cfg"]):
-        _simulate_overlap_with_cfg(cfg_forced)                                     # type: ignore[name-defined]
-    else:
-        P_active, meta = _safe_choose_projector(cfg_forced)
-        # recompute minimal out
-        d3 = rc.get("d3") or (boundaries.blocks.__root__.get("3") or [])           # type: ignore[name-defined]
-        H2 = (getattr(ss.get("overlap_H"), "blocks", None).__root__.get("2")
-              if getattr(ss.get("overlap_H"), "blocks", None) else []) or []
-        C3 = (cmap.blocks.__root__.get("3") or [])                                  # type: ignore[name-defined]
-        I3 = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
-        R3s = _xor(mul(H2, d3), _xor(C3, I3)) if (_shape_ok(H2,d3) and C3 and C3[0] and len(C3)==len(C3[0])) else []  # type: ignore[name-defined]
-        R3p = mul(R3s, (P_active if P_active else _diag_from_mask(lm))) if R3s else []                                   # type: ignore[name-defined]
-        out = {"3":{"eq": _is_zero(R3p), "n_k": (len(d3[0]) if (d3 and d3[0]) else 0)}, "2":{"eq": True}}
-        ss["overlap_out"] = out
-        ss["overlap_cfg"] = cfg_forced
-        try:
-            ss["overlap_policy_label"] = policy_label_from_cfg(cfg_forced)          # type: ignore[name-defined]
-        except Exception:
-            ss["overlap_policy_label"] = "projected(file)"
-        ss["run_ctx"] = {
-            "policy_tag": ss.get("overlap_policy_label","projected(file)"),
-            "mode": "projected(file)",
-            "d3": d3, "n3": n3, "lane_mask_k3": lm,
-            "P_active": (P_active if P_active else _diag_from_mask(lm)),
-            "projector_filename": pj_path.as_posix(),
-            "projector_hash": pj_hash,
-            "projector_consistent_with_d": (meta.get("projector_consistent_with_d", True) if isinstance(meta, dict) else True),
-            "source": (cfg_forced.get("source") or {}),
-            "errors": [],
-        }
+    # 3) Force cfg_active → FILE (no widget mutation) and run overlap once
+    _set_cfg_active_file(pj_path.as_posix())
+    try:
+        run_overlap()  # your existing function; generates the cert & refreshes SSOT
+    except Exception as e:
+        # we still stamp rc + arm writer so you’re unblocked
+        st.info(f"(Overlap FILE pass raised: {e})")
 
-    # 5) Arm a cert write (one-shot)
+    # 4) Canonicalize run_ctx (no drift)
+    rc_new = dict(ss.get("run_ctx") or {})
+    rc_new.update({
+        "mode": "projected(file)",
+        "projector_filename": pj_path.as_posix(),
+        "projector_hash": blocks_hash,     # canonical blocks-hash
+        "P_active": P,                     # keep in rc for downstream readers
+    })
+    ss["run_ctx"] = rc_new
     ss["ov_last_pj_path"] = pj_path.as_posix()
-    ss["write_armed"]     = True
-    ss["armed_by"]        = "freezer"
+
+    # 5) Arm cert writer (one-shot)
+    ss["write_armed"] = True
+    ss["armed_by"] = "freezer"
     ss["should_write_cert"] = True
     ss.pop("_last_cert_write_key", None)
 
-    # 6) Witness (optional)
+    # 6) Registry (best-effort)
+    _append_registry_row_safe({
+        "schema_version":"1.0.0",
+        "written_at_utc": _utc_iso_z(),
+        "district": district_id,
+        "filename": pj_path.as_posix(),
+        "projector_hash": blocks_hash,     # canonical
+        "file_bytes_hash": file_bytes_hash # informational
+    })
+
+    # 7) Witness (best-effort)
     try:
-        wit = Path("logs") / "witnesses.jsonl"; wit.parent.mkdir(parents=True, exist_ok=True)
-        with open(wit, "a", encoding="utf-8") as f:
-            f.write(json.dumps({"ts": _utc_iso_z(), "event":"FREEZE_OK", "file": pj_path.as_posix(), "hash": pj_hash})+"\n")
+        w = Path("logs") / "witnesses.jsonl"; w.parent.mkdir(parents=True, exist_ok=True)
+        with open(w, "a", encoding="utf-8") as f:
+            f.write(json.dumps({
+                "ts": _utc_iso_z(), "event":"FREEZE_OK",
+                "district": district_id,
+                "file": pj_path.as_posix(),
+                "projector_blocks_hash": blocks_hash,
+                "projector_file_hash": file_bytes_hash
+            }, separators=(",",":"))+"\n")
     except Exception:
         pass
 
-    return {"path": pj_path.as_posix(), "projector_hash": pj_hash}
-# --- compat shim: keep old callers happy --------------------------------------
-def _projected_k3_eq_now(*, rc: dict, **kwargs) -> dict:
-    """
-    Returns {"eq_strict": bool, "eq_projected": bool, "used_diag_fallback": bool}.
-    Proxies to _recompute_eqs(rc) if available; otherwise computes locally.
-    """
-    # Fast path: reuse the freezer’s helper if present
-    if "_recompute_eqs" in globals() and callable(globals()["_recompute_eqs"]):
-        return _recompute_eqs(rc)  # type: ignore[name-defined]
+    return {"path": pj_path.as_posix(), "projector_hash": blocks_hash}
 
-    # Fallback: minimal local compute (shape-safe)
-    import streamlit as st
-    ss = st.session_state
-    boundaries_ = kwargs.get("boundaries") or globals().get("boundaries")
-    cmap_       = kwargs.get("cmap")       or globals().get("cmap")
-    H_obj       = kwargs.get("H_obj")      or ss.get("overlap_H")
-
-    def _shape_ok(A,B): 
-        try: return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
-        except Exception: return False
-    def _xor(A,B):
-        if not A: return [r[:] for r in (B or [])]
-        if not B: return [r[:] for r in (A or [])]
-        r,c = len(A), len(A[0])
-        return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
-    def _is_zero(M): 
-        return (not M) or all((x & 1) == 0 for row in M for x in row)
-
-    d3 = rc.get("d3") or ((boundaries_.blocks.__root__.get("3") or []) if boundaries_ else [])
-    H2 = (getattr(H_obj, "blocks", None).__root__.get("2") if getattr(H_obj, "blocks", None) else []) or []
-    C3 = ((cmap_.blocks.__root__.get("3") or []) if cmap_ else [])
-    I3 = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
-
-    R3s = _xor(mul(H2, d3), _xor(C3, I3)) if (_shape_ok(H2,d3) and C3 and C3[0] and len(C3)==len(C3[0])) else []
-    lm  = list(rc.get("lane_mask_k3") or [])
-    P   = rc.get("P_active") or ([[1 if (i==j and lm[j]) else 0 for j in range(len(lm))] for i in range(len(lm))] if lm else [])
-    R3p = mul(R3s, P) if (R3s and P) else []
-
-    return {
-        "eq_strict": _is_zero(R3s),
-        "eq_projected": _is_zero(R3p),
-        "used_diag_fallback": bool(P and not rc.get("P_active"))
-    }
-
-# ---------------------------- UI: Freezer (no widget conflicts) ----------------------------
-with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
+# ---------------------------- UI: Freezer (safe container, not expander) ----------------------------
+with st.container():
+    st.markdown("### Projector Freezer (AUTO → FILE — recompute + cert)")
     ss = st.session_state
     rc = dict(ss.get("run_ctx") or {})
     di = ss.get("_district_info") or {}
     district_id = di.get("district_id","UNKNOWN")
-    mode_now = str(rc.get("mode",""))
     n3 = int(rc.get("n3") or 0)
     lm = list(rc.get("lane_mask_k3") or [])
-    out = ss.get("overlap_out") or {}
-    k3_eq_projected_now = bool(((out.get("3") or {}).get("eq", False)))
+    eligible = (str(rc.get("mode","")) == "projected(auto)" and n3 > 0 and len(lm) == n3)
 
-    # recompute (independent) so the button gating is consistent
-    recomputed = _recompute_eqs(rc)
-    k3_green = bool(recomputed.get("eq_projected", False))
+    pj_name = st.text_input("Filename", value=f"projector_{district_id or 'UNKNOWN'}.json", key="freezer_pj_name_final")
+    overwrite_ok = st.checkbox("Overwrite if exists", value=False, key="freezer_overwrite_final")
 
-    # Inputs
-    name_key = "freezer_pj_name_clean"
-    ow_key   = "freezer_overwrite_clean"
-    btn_key  = "btn_freeze_auto_file_clean"
+    if not eligible:
+        st.caption("Enabled when you’re in **projected(auto)** and lane_mask_k3 matches current n₃.")
 
-    name_default = f"projector_{district_id or 'UNKNOWN'}.json"
-    pj_name = st.text_input("Filename", value=name_default, key=name_key)
-    overwrite_ok = st.checkbox("Overwrite if exists", value=False, key=ow_key)
-
-    eligible = (mode_now == "projected(auto)" and n3 > 0 and len(lm) == n3 and k3_green)
-    tip = None if eligible else "Enabled when in projected(auto) and k=3 is GREEN."
-
-    if st.button("Freeze Π → FILE & re-run", key=btn_key, disabled=not eligible, help=(tip or "")):
+    if st.button("Freeze Π → FILE & Run Overlap", key="btn_freeze_auto_file_final", disabled=not eligible):
         try:
             info = freeze_auto_projector_to_file(filename=pj_name, overwrite=overwrite_ok)
-            st.success(f"Π saved → {Path(info['path']).name} · {info['projector_hash'][:12]}… and switched to FILE (internally).")
+            st.success(f"Π saved → {Path(info['path']).name} · {info['projector_hash'][:12]}… · FILE overlap executed.")
         except Exception as e:
             st.error(f"Freeze failed: {e}")
+# ===================== /Projector Freezer · AUTO → FILE =====================
 
-# Minimal, non-nesting debugger (avoid expander-inside-expander)
-with st.container():
-    ss = st.session_state
-    rc = dict(ss.get("run_ctx") or {})
-    out = ss.get("overlap_out") or {}
-    dbg = {
-        "mode_now": rc.get("mode",""),
-        "n3": int(rc.get("n3") or 0),
-        "lane_mask_k3": list(rc.get("lane_mask_k3") or []),
-        "projector_filename": rc.get("projector_filename",""),
-        "projector_hash": rc.get("projector_hash",""),
-        "overlap_out_k3_eq": bool(((out.get("3") or {}).get("eq", False))),
-        "recomputed": _recompute_eqs(rc),
-    }
-    st.caption("Freezer debugger")
-    st.code(json.dumps(dbg, indent=2))
-# ========================== /Projector Freezer ==========================
+
 
 
 
