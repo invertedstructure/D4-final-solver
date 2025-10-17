@@ -2303,7 +2303,7 @@ with safe_expander("A/B compare (strict vs active projected)", expanded=False):
 
             # Pin cert block (adds embed_sig + one-shot ticket)
             _pin_ab_for_cert(out_strict, out_proj)
-            payload["embed_sig"] = _ab_embed_sig()
+            ab_payload["embed_sig"] = _ab_embed_sig()
             fresh = (ab_payload.get("embed_sig","") == _ab_embed_sig())
 
 
