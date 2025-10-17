@@ -3371,6 +3371,13 @@ if "FIELD" not in globals():           FIELD          = "GF(2)"
 if "APP_VERSION" not in globals():     APP_VERSION    = "v0.1-core"
 if "GUARD_ENUM" not in globals():      GUARD_ENUM     = ["grid","wiggle","echo","fence","ker_guard","none","error"]
 
+def warn_stale_once(msg="STALE_RUN_CTX: Inputs changed; please click Run Overlap to refresh."):
+    ss = st.session_state
+    if not ss.get("_stale_warned_once"):
+        st.warning(msg)
+        ss["_stale_warned_once"] = True
+
+
 # ---- tiny shared helpers (safe; idempotent) ----
 def _utc_iso_z() -> str:
     try:
