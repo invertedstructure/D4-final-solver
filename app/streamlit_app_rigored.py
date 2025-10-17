@@ -113,7 +113,13 @@ DISTRICT_MAP: dict[str, str] = {
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
 
+def warn_stale_once(msg="STALE_RUN_CTX: Inputs changed; please click Run Overlap to refresh."):
+    ss = st.session_state
+    if not ss.get("_stale_warned_once"):
+        st.warning(msg)
+        ss["_stale_warned_once"] = True
 
+    
 def projector_hash_of(P_blocks: list[list[int]], *, mode: str = "blocks") -> str:
     """
     mode="blocks" → sha256(json.dumps({"blocks":{"3":P}}, sort_keys=True, separators=(",",":")))
