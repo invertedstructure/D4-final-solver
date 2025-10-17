@@ -4646,12 +4646,12 @@ with safe_expander("Gallery (canonical)", expanded=False):
                 ss["_gallery_seen_keys"].add(k)
                 st.success("Gallery row appended.")
                 # keep CSV in sync, if builder is present
-                try:
-                    _safe_build_b2_gallery(debounce=True)
-                except NameError:
-                    st.info("(B2 gallery builder not loaded yet)")
-                except Exception as e:
-                    st.info(f"(B2 gallery build skipped: {e})")
+        try:
+            _safe_build_b2_gallery(debounce=True)
+        except NameError:
+            st.info("(B2 gallery builder not loaded yet)")
+        except Exception as e:
+            st.info(f"(B2 gallery build skipped: {e})")        
 
 
     # Tail view (compact)
