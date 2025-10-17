@@ -2150,6 +2150,19 @@ with safe_expander("A/B compare (strict vs active projected)", expanded=False):
 
         except Exception as e:
             st.error(f"A/B compare failed: {e}")
+            #--------------------------------------
+            st.session_state.setdefault("_ab_busy", False)
+            if st.button("Run A/B compare", key="btn_ab_compare_main"):
+                if st.session_state["_ab_busy"]:
+                    st.info("A/B compare is already running…")
+                else:
+                    st.session_state["_ab_busy"] = True
+                    try:
+                        # … your existing A/B logic …
+                        pass
+                    finally:
+                        st.session_state["_ab_busy"] = False
+
 
     # Diagnostics view (derive from recomputed/pinned snapshot, not overlap_out)
     snap = ss.get("ab_compare") or {}
@@ -5055,24 +5068,6 @@ with _dbg_ctx:
     }
     st.json(dbg)
 
-# ---------------------------- Freezer debugger (standalone; not nested) ----------------------------
-_dbg_ctx = safe_expander("Freezer debugger", expanded=False) if "safe_expander" in globals() else st.container()
-with _dbg_ctx:
-    ss = st.session_state
-    rc = dict(ss.get("run_ctx") or {})
-    out = dict(ss.get("overlap_out") or {})
-    tags = dict(ss.get("residual_tags") or {})
-    pjv = {
-        "mode_now": str(rc.get("mode","")),
-        "n3": int(rc.get("n3") or 0),
-        "lane_mask_k3": list(rc.get("lane_mask_k3") or []),
-        "projector_filename": rc.get("projector_filename",""),
-        "projector_hash": rc.get("projector_hash",""),
-        "projector_consistent_with_d": rc.get("projector_consistent_with_d", None),
-        "k3_eq_projected": bool(((out.get("3") or {}).get("eq", False))),
-        "tags": tags,
-    }
-    st.json(pjv)
 
 
 
