@@ -113,6 +113,175 @@ DISTRICT_MAP: dict[str, str] = {
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
 
+# ================== SSOT refresh — canonical, swap-safe (H/C/B/U) ==================
+import json as _json
+
+def _canon_dict(obj):
+    """Best-effort: turn Pydantic-ish or model-ish objects into plain dicts."""
+    try:
+        # pydantic v2
+        if hasattr(obj, "model_dump") and callable(obj.model_dump):
+            return obj.model_dump()
+    except Exception:
+        pass
+    try:
+        # pydantic v1
+        if hasattr(obj, "dict") and callable(obj.dict):
+            return obj.dict()
+    except Exception:
+        pass
+    # stream schema with .blocks.__root__
+    try:
+        if hasattr(obj, "blocks"):
+            root = getattr(obj.blocks, "__root__", None)
+            if root is not None:
+                return {"blocks": root}
+    except Exception:
+        pass
+    # already a plain-ish structure
+    return obj
+
+def _lane_mask_from_d3(d3):
+    if not d3 or not d3[0]:
+        return []
+    n2, n3 = len(d3), len(d3[0])
+    return [1 if any(int(d3[i][j]) & 1 for i in range(n2)) else 0 for j in range(n3)]
+
+def _current_fixtures():
+    """Return (B, C, H, U) preferring freshest session entries."""
+    ss = st.session_state
+    B = globals().get("boundaries")
+    C = globals().get("cmap")
+    U = globals().get("shapes")
+
+    # prefer any explicit H uploaded/parsed this run; fall back to overlap_H
+    H = ss.get("H_obj") or ss.get("uploaded_H") or ss.get("overlap_H")
+    if H is None and "io" in globals():
+        try:
+            H = io.parse_cmap({"blocks": {}})
+        except Exception:
+            H = None
+    return B, C, H, U
+
+def _hash_inputs_tuple(B, C, H, U):
+    """Compute canonical content hashes using your existing _hash_json helper."""
+    # Guard: rely on your helper; if missing, do a stable JSON dump hash
+    def _hj(x):
+        if " _hash_json " in globals() or "_hash_json" in globals():
+            try:
+                return _hash_json(_canon_dict(x))
+            except Exception:
+                pass
+        try:
+            blob = _json.dumps(_canon_dict(x), separators=(",", ":"), sort_keys=True)
+            return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+        except Exception:
+            return ""
+    hb = _hj(B); hc = _hj(C); hh = _hj(H); hu = _hj(U)
+    # shapes_hash == U in your schema naming
+    return {
+        "boundaries_hash": hb,
+        "C_hash":          hc,
+        "H_hash":          hh,
+        "U_hash":          hu,
+        "shapes_hash":     hu,
+    }
+
+def _rebuild_inputs_block(B, C, H, U):
+    """Rebuild dims + lane_mask_k3 deterministically from current B."""
+    try:
+        d3 = (B.blocks.__root__.get("3") or [])
+    except Exception:
+        d3 = []
+    n2 = len(d3)
+    n3 = len(d3[0]) if (d3 and d3[0]) else 0
+    lm = _lane_mask_from_d3(d3)
+    return {"dims": {"n2": n2, "n3": n3}, "lane_mask_k3": lm}
+
+def _refresh_run_ctx_min(rc, B):
+    """Make rc consistent with current B and lane-mask (no widget flips)."""
+    try:
+        d3 = (B.blocks.__root__.get("3") or [])
+    except Exception:
+        d3 = []
+    n3 = len(d3[0]) if (d3 and d3[0]) else 0
+    lm = _lane_mask_from_d3(d3)
+    rc = dict(rc or {})
+    rc.update({
+        "d3": d3,
+        "n3": n3,
+        "lane_mask_k3": lm,
+    })
+    # if in projected(auto) and Π missing, use diag(lm) as active Π
+    if str(rc.get("mode","")).startswith("projected"):
+        if not rc.get("P_active"):
+            rc["P_active"] = [[1 if (i==j and (j < len(lm) and int(lm[j])==1)) else 0
+                               for j in range(n3)] for i in range(n3)] if n3 else []
+    return rc
+
+def _maybe_refresh_ssot_for_ab(*, force_overlap: bool=False):
+    """
+    Canonical SSOT refresh:
+      - Snap latest B/C/H/U
+      - Ensure overlap_H is the H we just loaded
+      - Rebuild _inputs_block (dims + lane_mask)
+      - Recompute inputs_hashes with your canonical hasher
+      - Optionally run your Overlap flows (strict + projected(auto))
+      - Refresh run_ctx to match current B
+    """
+    ss = st.session_state
+
+    # 1) pick fixtures now
+    B, C, H, U = _current_fixtures()
+
+    # 2) make H the working H for overlap
+    if H is not None:
+        ss["overlap_H"] = H
+
+    # 3) rebuild inputs block (dims + lane mask)
+    ib_bits = _rebuild_inputs_block(B, C, H, U)
+
+    # 4) compute canonical inputs hashes
+    ih = _hash_inputs_tuple(B, C, H, U)
+
+    # 5) publish SSOT to session (copy-only)
+    ss["_inputs_block"] = {
+        **(ss.get("_inputs_block") or {}),
+        "dims": ib_bits["dims"],
+        "lane_mask_k3": ib_bits["lane_mask_k3"],
+        "hashes": ih,
+    }
+    ss["inputs_hashes"] = ih
+
+    # 6) best-effort projector normalization (no exceptions)
+    if "normalize_projector_into_run_ctx" in globals():
+        try: normalize_projector_into_run_ctx()
+        except Exception: pass
+
+    # 7) optional: run overlap strict + projected(auto) using current fixtures
+    if force_overlap and "run_overlap" in globals() and callable(globals()["run_overlap"]):
+        try:
+            run_overlap(policy="strict")
+        except Exception:
+            pass
+        try:
+            run_overlap(policy="projected(auto)")
+        except Exception:
+            pass
+
+    # 8) refresh run_ctx minimal to match current boundaries/lane-mask
+    ss["run_ctx"] = _refresh_run_ctx_min(ss.get("run_ctx") or {}, B)
+
+    # 9) tiny breadcrumb so you can see change (not required)
+    try:
+        st.caption("SSOT refreshed • n2={n2} n3={n3}".format(**ss["_inputs_block"]["dims"]))
+    except Exception:
+        pass
+
+    return True
+# ======================================================================
+
+
 def warn_stale_once(msg="STALE_RUN_CTX: Inputs changed; please click Run Overlap to refresh."):
     ss = st.session_state
     if not ss.get("_stale_warned_once"):
