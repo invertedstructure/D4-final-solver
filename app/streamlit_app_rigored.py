@@ -2552,7 +2552,7 @@ with ctx:
                 # 2) Matrix recompute (don’t trust overlap_out)
                 out_s  = _ab_recompute_strict(H2, d3, C3)
                 out_p, dbg = _ab_recompute_projected(H2, d3, C3, lm)
-                vH, vCI = _ab_lane_vectors_diag(H2, d3, C3, lm)
+                vH, vCI = _ab_lane_vectors_bottom(H2, d3, C3, lm)
 
                 # 3) Pin for cert writer + embed
                 _ab_pin_for_cert(out_s, out_p)
