@@ -2068,6 +2068,74 @@ if "_lane_bottoms_for_diag" not in globals():
         return ([bH[j] for j in idx] if (bH and idx) else [],
                 [bC[j] for j in idx] if (bC and idx) else [])
 # =================== /A/B compat shims ===================
+# ============== A/B policy + embed signature helpers (compat) ==============
+import hashlib as _hash
+import json as _json
+import streamlit as st
+
+if "_canonical_policy_tag" not in globals():
+    def _canonical_policy_tag(rc: dict | None) -> str:
+        rc = rc or {}
+        # 1) If your app already stamped a label, trust it.
+        lbl = rc.get("policy_tag")
+        if lbl:
+            return str(lbl)
+        # 2) If your app exposes a policy label helper, use it.
+        if "policy_label_from_cfg" in globals() and "cfg_active" in globals():
+            try:
+                return str(policy_label_from_cfg(cfg_active))  # type: ignore[name-defined]
+            except Exception:
+                pass
+        # 3) Fallback from mode → canonical strings used across your UI.
+        m = str(rc.get("mode", "strict")).lower()
+        if m == "strict":
+            return "strict"
+        if "projected" in m and "file" in m:
+            return "projected(columns@k=3,file)"
+        if "projected" in m:
+            return "projected(columns@k=3,auto)"
+        return "strict"
+
+if "_inputs_sig_now_from_ib" not in globals():
+    def _inputs_sig_now_from_ib(ib: dict | None) -> list[str]:
+        ib = ib or {}
+        h = (ib.get("hashes") or {})
+        return [
+            str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
+            str(h.get("C_hash",          ib.get("C_hash",""))),
+            str(h.get("H_hash",          ib.get("H_hash",""))),
+            str(h.get("U_hash",          ib.get("U_hash",""))),
+            str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
+        ]
+
+if "_ab_embed_sig" not in globals():
+    def _ab_embed_sig() -> str:
+        """
+        Canonical signature that gates whether a pinned A/B snapshot is still
+        'fresh' enough to embed into the cert/gallery. Includes:
+          - frozen/current inputs_sig
+          - canonical policy tag
+          - projector hash (only for projected(file))
+        """
+        ss = st.session_state
+        rc = ss.get("run_ctx") or {}
+        ib = ss.get("_inputs_block") or {}
+
+        # Prefer frozen sig if your SSOT helper exists; else current inputs.
+        try:
+            if "ssot_frozen_sig_from_ib" in globals() and callable(globals()["ssot_frozen_sig_from_ib"]):
+                inputs_sig = list(ssot_frozen_sig_from_ib() or [])  # type: ignore[name-defined]
+            else:
+                inputs_sig = _inputs_sig_now_from_ib(ib)
+        except Exception:
+            inputs_sig = _inputs_sig_now_from_ib(ib)
+
+        pol = _canonical_policy_tag(rc)
+        pj  = rc.get("projector_hash","") if str(rc.get("mode","")) == "projected(file)" else ""
+
+        blob = {"inputs": inputs_sig, "policy": pol, "projector_hash": pj}
+        return _hash.sha256(_json.dumps(blob, separators=(",", ":"), sort_keys=True).encode("ascii")).hexdigest()
+# ============ /A/B policy + embed signature helpers (compat) ============
 
 
 
