@@ -4904,23 +4904,7 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
         except Exception as e:
             st.error(f"Freeze failed: {e}")
 
-# Minimal, non-nesting debugger (avoid expander-inside-expander)
-with st.container():
-    ss = st.session_state
-    rc = dict(ss.get("run_ctx") or {})
-    out = ss.get("overlap_out") or {}
-    dbg = {
-        "mode_now": rc.get("mode",""),
-        "n3": int(rc.get("n3") or 0),
-        "lane_mask_k3": list(rc.get("lane_mask_k3") or []),
-        "projector_filename": rc.get("projector_filename",""),
-        "projector_hash": rc.get("projector_hash",""),
-        "overlap_out_k3_eq": bool(((out.get("3") or {}).get("eq", False))),
-        "recomputed": _recompute_eqs(rc),
-    }
-    st.caption("Freezer debugger")
-    st.code(json.dumps(dbg, indent=2))
-# ========================== /Projector Freezer ==========================
+
 
 
 
