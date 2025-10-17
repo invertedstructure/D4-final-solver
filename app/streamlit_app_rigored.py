@@ -113,6 +113,9 @@ DISTRICT_MAP: dict[str, str] = {
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
 
+
+
+
 # ---- helper for recomputing diag lanes if the snapshot lacks them
 def _ab_diag_vectors(rc, H_used, cmap_obj):
     def _xor(A,B):
@@ -2252,6 +2255,142 @@ def _require_projected_file_allowed_for_run():
 def _disallow_auto_for_evidence():
     if (st.session_state.get("run_ctx") or {}).get("mode") == "projected(auto)":
         raise RuntimeError("P3_AUTO_DISALLOWED: use strict or projected(file) for evidence reports.")
+# ==================== PROJECTOR FILE HELPERS (robust fallback) ====================
+
+from pathlib import Path
+import json
+
+def _p3_helpers_available() -> bool:
+    return ("projector_choose_active" in globals())
+
+def _cfg_from_policy_safe(mode: str, pj_path: str | None = None) -> dict:
+    """
+    Safe, minimal cfg builder. Use when _cfg_from_policy is not available.
+    """
+    if "_cfg_from_policy" in globals() and callable(globals()["_cfg_from_policy"]):
+        return _cfg_from_policy(mode, pj_path)  # type: ignore[name-defined]
+    cfg = {"source": {}, "projector_files": {}}
+    if mode == "projected(file)":
+        cfg["source"]["3"] = "file"
+        cfg["projector_files"]["3"] = (pj_path or "")
+    elif mode == "projected(auto)":
+        cfg["source"]["3"] = "auto"
+    else:
+        cfg["source"]["3"] = "strict"
+    return cfg
+
+def _projector_choose_active_safe(cfg: dict, boundaries_obj):
+    """
+    Return (P_active, meta) no matter what. If your real chooser is missing,
+    we read the JSON file and build meta ourselves.
+    """
+    # Prefer the app's real chooser if present.
+    if "projector_choose_active" in globals() and callable(globals()["projector_choose_active"]):
+        ret = projector_choose_active(cfg, boundaries_obj)  # type: ignore[name-defined]
+        if isinstance(ret, tuple) and len(ret) == 2:
+            return ret
+        # Be forgiving with older returns
+        if isinstance(ret, dict):
+            return (ret.get("P_active", []), ret)
+        return (ret, {})
+    # Fallback: read Π from file
+    pj = (cfg.get("projector_files") or {}).get("3", "")
+    P_active, meta = [], {}
+    try:
+        payload = json.loads(Path(pj).read_text(encoding="utf-8"))
+        P_active = (payload.get("blocks", {}) or {}).get("3", []) or []
+    except Exception:
+        P_active = []
+    # Build minimal meta
+    d3 = (boundaries_obj.blocks.__root__.get("3") or [])
+    n3 = len(d3[0]) if (d3 and d3[0]) else 0
+    lm_truth = [1 if any(d3[i][j] & 1 for i in range(len(d3))) else 0 for j in range(n3)] if n3 else []
+    meta = {
+        "mode": "projected(file)",
+        "projector_filename": pj,
+        "projector_hash": hashlib.sha256(json.dumps({"blocks":{"3":P_active}},separators=(",",":"),sort_keys=True).encode("utf-8")).hexdigest() if P_active else "",
+        "projector_consistent_with_d": bool(P_active) and (len(P_active)==n3 and len(P_active[0])==n3),
+        "d3": d3, "n3": n3, "lane_mask": lm_truth,
+        "P_active": P_active,
+    }
+    return (P_active, meta)
+
+def p3_file_normalize(pj_path: str | None = None) -> dict:
+    """
+    Normalize FILE Π view for reports: always returns a dict with
+      {"P_active", "meta", "cfg_forced"}.
+    Raises on unrecoverable errors.
+    """
+    # Build forced FILE cfg from rc if path not given
+    rc = st.session_state.get("run_ctx") or {}
+    pj_path = pj_path or rc.get("projector_filename") or (st.session_state.get("ov_last_pj_path") or "")
+    if not pj_path:
+        raise RuntimeError("No projector file path in run_ctx.")
+    cfg_forced = _cfg_from_policy_safe("projected(file)", pj_path)
+
+    P_active, meta = _projector_choose_active_safe(cfg_forced, boundaries)
+    if not isinstance(meta, dict):
+        meta = {}
+    return {"P_active": P_active or [], "meta": meta, "cfg_forced": cfg_forced}
+# ================= /PROJECTOR FILE HELPERS =================
+
+# ==================== REPORT PREFLIGHT SSOT FRESHNESS ====================
+
+def _force_ssot_fresh_for_reports():
+    """
+    If SSOT changed, publish it so reports start from a frozen, fresh sig.
+    This mirrors what your cert writer expects and clears the UI warning.
+    """
+    try:
+        # Prefer your v2 freshness detector
+        stale = False
+        if "ssot_is_stale_v2" in globals() and callable(globals()["ssot_is_stale_v2"]):
+            stale = bool(ssot_is_stale_v2())
+        elif "ssot_is_stale" in globals() and callable(globals()["ssot_is_stale"]):
+            stale = bool(ssot_is_stale())
+        if stale:
+            H_local = st.session_state.get("overlap_H") or _load_h_local()
+            d3 = (boundaries.blocks.__root__.get("3") or [])
+            n3 = len(d3[0]) if (d3 and d3[0]) else 0
+            pub = ssot_publish_block(
+                boundaries_obj=boundaries,
+                cmap_obj=cmap,
+                H_obj=H_local,
+                shapes_obj=shapes,
+                n3=n3,
+                projector_filename=(st.session_state.get("run_ctx") or {}).get("projector_filename",""),
+            )
+            # Optional feedback:
+            st.caption(f"SSOT refreshed for reports: {list(pub['before'])} → {list(pub['after'])}")
+    except Exception:
+        # Never block reports
+        pass
+# ================= /REPORT PREFLIGHT SSOT FRESHNESS =================
+
+# ==================== CERT POLICY NORMALIZER ====================
+
+def _canon_policy_from_rc(rc: dict) -> str:
+    t = str(rc.get("policy_tag","")).lower()
+    if "strict" in t: return "strict"
+    if "projected" in t and "file" in t: return "projected(file)"
+    return "projected(auto)"
+
+def normalize_policy_block_for_cert(rc: dict) -> dict:
+    """
+    Build a consistent policy block for the cert from current rc.
+    """
+    canon = _canon_policy_from_rc(rc)
+    label = rc.get("policy_tag") or canon
+    pol = {
+        "canon": label,             # e.g. "projected(columns@k=3,file)"
+        "label_raw": label,
+        "projector_mode": ("file" if "file" in canon else ("auto" if "projected" in canon else "strict")),
+        "projector_hash": rc.get("projector_hash","") if "file" in canon else "",
+        "projector_filename": rc.get("projector_filename","") if "file" in canon else "",
+    }
+    return pol
+# ================= /CERT POLICY NORMALIZER =================
+
 
 # ===== Minimal safety shims (no-ops when real impls are loaded) =====
 if "APP_VERSION" not in globals():
