@@ -4004,6 +4004,463 @@ with st.expander("Coverage Sampling", expanded=st.session_state.get("_cov_sampli
                                    mime="text/csv")
 # ===================== /Coverage Sampling =====================
 
+# ====================== B2 Gallery Builder (CSV + manifest) ======================
+import os, json, csv, hashlib
+from pathlib import Path
+from datetime import datetime
+
+def _b2_norm_vec(v):
+    try: return [int(x) for x in (v or [])]
+    except Exception: return []
+
+def _b2_vec_json(v):
+    try: return json.dumps(_b2_norm_vec(v), separators=(",", ":"))
+    except Exception: return "[]"
+
+def _b2_short(h): return (h or "")[:12]
+
+def _b2_collect_certs():
+    """Yield (path, payload) for all certs under logs/certs/**/**.json newest→oldest."""
+    root = Path("logs") / "certs"
+    if not root.exists(): return []
+    files = list(root.rglob("*.json"))
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    out = []
+    for p in files:
+        try:
+            out.append((p, json.loads(p.read_text(encoding="utf-8"))))
+        except Exception:
+            continue
+    return out
+
+def _b2_row_from_cert(cert):
+    """Map one cert → normalized CSV row dict or None (if missing fixture_label)."""
+    identity   = cert.get("identity", {}) or {}
+    policy     = cert.get("policy", {}) or {}
+    inputs     = cert.get("inputs", {}) or {}
+    checks     = cert.get("checks", {}) or {}
+    diags      = cert.get("diagnostics", {}) or {}
+    registry   = (inputs.get("registry") or {})
+    hashes     = (inputs.get("hashes") or {})
+    ab_embed   = cert.get("ab_embed", {}) or {}
+    gallery    = cert.get("gallery", {}) or {}
+    content    = (cert.get("hashes") or {}).get("content_hash", "")
+
+    district   = identity.get("district_id", "UNKNOWN")
+    fixture    = identity.get("fixture_label", "") or ""   # must exist
+    fixture_code = identity.get("fixture_code", "") or ""
+    if not fixture:
+        return None  # skip — we want explicit fixture labels in CSV
+
+    canon      = policy.get("canon") or policy.get("projector_mode") or "strict"
+    # normalize projected canon naming
+    if canon == "auto": canon = "projected:auto"
+    if canon == "file": canon = "projected:file"
+
+    hash_d     = policy.get("projector_hash", "")  # only for projected:file
+    hash_U     = hashes.get("U_hash", "")
+    hash_C     = hashes.get("C_hash", "")
+    hash_H     = hashes.get("H_hash", "")
+
+    growth     = int((cert.get("growth") or {}).get("growth_bumps", 0))
+    tag        = str(gallery.get("tag", ""))
+    strictify  = str(gallery.get("strictify", "tbd"))
+
+    lane_H2    = _b2_vec_json(diags.get("lane_vec_H2@d3"))
+    lane_CI    = _b2_vec_json(diags.get("lane_vec_C3+I3"))
+
+    ab_embedded = bool(ab_embed.get("fresh", False))
+
+    row = {
+        "district":      district,
+        "fixture":       fixture,
+        "projected":     canon,
+        "hash_d":        hash_d,
+        "hash_U":        hash_U,
+        "hash_suppC":    hash_C,
+        "hash_suppH":    hash_H,
+        "growth":        str(growth),
+        "tag":           tag,
+        "strictify":     strictify,
+        "lane_vec_H2":   lane_H2,
+        "lane_vec_C3pI3":lane_CI,
+        "ab_embedded":   "true" if ab_embedded else "false",
+        "content_hash":  content,
+        "fixture_code":  fixture_code,  # optional helper column
+        # (provenance of registry helps audits; harmless in manifest, not in CSV)
+        "_fx_ver":       registry.get("fixtures_version",""),
+    }
+    return row
+
+def _b2_sort_key(row, curated_order):
+    # curated codes first by ordering; then no-code by fixture label
+    code = row.get("fixture_code","") or ""
+    if code and code in curated_order:
+        return (0, curated_order.index(code), row.get("fixture",""))
+    return (1, 10**9, row.get("fixture",""))
+
+def _b2_best_pick(rows):
+    """
+    For a given (district, fixture) bucket, pick ONE row by:
+      1) A/B-embedded projected (canon in {projected:auto, projected:file}), newest
+      2) else projected (auto/file), newest
+      3) else strict, newest
+    Caller must pass rows already newest→oldest.
+    """
+    def is_proj(r): return r.get("projected") in ("projected:auto","projected:file")
+    def is_ab(r):   return r.get("ab_embedded") == "true"
+    # newest first already
+    for r in rows:
+        if is_proj(r) and is_ab(r): return r
+    for r in rows:
+        if is_proj(r): return r
+    for r in rows:
+        if r.get("projected") == "strict": return r
+    return rows[0] if rows else None
+
+def build_b2_gallery(debounce: bool = True):
+    """
+    Scans certs, selects one row per (district, fixture), writes:
+      logs/reports/b2_gallery.csv
+      logs/reports/b2_gallery.manifest.json
+    Debounced by content signature of (district, fixture, content_hash).
+    """
+    reports_dir = Path("logs") / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    csv_path  = reports_dir / "b2_gallery.csv"
+    man_path  = reports_dir / "b2_gallery.manifest.json"
+
+    # collect + map
+    certs = _b2_collect_certs()
+    rows_all = []
+    missing_fixture = []
+    vector_parse_issues = 0
+    curated_order = []
+
+    # pull curated ordering from cached fixtures (if present)
+    fx_cache = st.session_state.get("_fixtures_cache") or {}
+    curated_order = list(fx_cache.get("ordering") or [])
+
+    for p, cert in certs:
+        r = _b2_row_from_cert(cert)
+        if r is None:
+            missing_fixture.append(p.name)
+            continue
+        # validate vectors parse (warn-only)
+        try:
+            json.loads(r["lane_vec_H2"]); json.loads(r["lane_vec_C3pI3"])
+        except Exception:
+            vector_parse_issues += 1
+        rows_all.append(r)
+
+    # debounce signature
+    sig_elems = sorted({ (r["district"], r["fixture"], r["content_hash"]) for r in rows_all })
+    sig_bytes = json.dumps(sig_elems, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    sig_hash  = hashlib.sha256(sig_bytes).hexdigest()
+
+    if debounce:
+        last_sig = (json.loads(man_path.read_text())["signature"]
+                    if man_path.exists() else "")
+        if last_sig == sig_hash:
+            raise RuntimeError("no changes since last build")
+
+    # bucket by (district, fixture)
+    buckets = {}
+    for r in rows_all:
+        buckets.setdefault((r["district"], r["fixture"]), []).append(r)
+
+    # pick best per bucket (newest already due to cert scan order)
+    picked = []
+    for key, brs in buckets.items():
+        picked.append(_b2_best_pick(brs))
+
+    # sort by curated ordering (via fixture_code), then label
+    picked.sort(key=lambda r: _b2_sort_key(r, curated_order))
+
+    # write CSV (atomic)
+    tmp = csv_path.with_suffix(".csv.tmp")
+    fieldnames = ["district","fixture","projected","hash_d","hash_U","hash_suppC","hash_suppH",
+                  "growth","tag","strictify","lane_vec_H2","lane_vec_C3pI3","ab_embedded","content_hash","fixture_code"]
+    with open(tmp, "w", newline="\n", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=fieldnames, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
+        w.writeheader()
+        for r in picked:
+            w.writerow({k: r.get(k,"") for k in fieldnames})
+    os.replace(tmp, csv_path)
+
+    # manifest
+    manifest = {
+        "written_at_utc": datetime.utcnow().replace(microsecond=0).isoformat()+"Z",
+        "rows": len(picked),
+        "districts": sorted({ r["district"] for r in picked }),
+        "fixture_codes_seen": sorted({ r.get("fixture_code","") for r in picked if r.get("fixture_code") }),
+        "unknown_fixtures": sum(1 for r in picked if not r.get("fixture_code")),
+        "signature": sig_hash,
+        "missing_fixture_label": missing_fixture,
+        "vector_parse_issues": vector_parse_issues,
+        "source_certs": [ {"district": r["district"], "fixture": r["fixture"], "content_hash": r["content_hash"]} for r in picked ],
+    }
+    man_tmp = man_path.with_suffix(".json.tmp")
+    with open(man_tmp, "w", encoding="utf-8") as mf:
+        mf.write(json.dumps(manifest, indent=2, sort_keys=True))
+    os.replace(man_tmp, man_path)
+
+    st.success(f"B2 gallery built → {csv_path.as_posix()} ({len(picked)} rows)")
+    st.caption(f"manifest: {man_path.as_posix()}")
+
+
+# ============================== B2 Gallery Compiler (final) ==============================
+import os, json, re, csv, hashlib
+from pathlib import Path
+from datetime import datetime
+
+REPORTS_DIR = Path("logs") / "reports"
+CERTS_ROOTS = [Path("logs") / "certs"]   # add more roots if you keep certs elsewhere
+REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# -------- helpers (pure) --------
+_G_RE = re.compile(r"^g(\d+)$", re.IGNORECASE)
+
+def _canon_policy(label_or_canon: str) -> str:
+    t = (label_or_canon or "").lower()
+    if "strict" in t: return "strict"
+    if "projected" in t and "file" in t: return "projected:file"
+    return "projected:auto"
+
+def _g_index(fixture: str):
+    if not fixture: return (9999, fixture or "")
+    m = _G_RE.match(fixture.strip())
+    if not m: return (9999, fixture)
+    try: return (int(m.group(1)), fixture.upper())
+    except: return (9999, fixture)
+
+def _parse_ts_z(ts: str):
+    try: return datetime.fromisoformat((ts or "").replace("Z", "+00:00"))
+    except: return datetime.min
+
+def _selection_rank(cert: dict) -> tuple:
+    pol = _canon_policy((cert.get("policy") or {}).get("canon") or (cert.get("policy") or {}).get("label_raw",""))
+    ab_fresh = bool((cert.get("ab_embed") or {}).get("fresh", False))
+    if ab_fresh and pol in {"projected:auto","projected:file"}:
+        pri = 3
+    elif pol in {"projected:auto","projected:file"}:
+        pri = 2
+    elif pol == "strict":
+        pri = 1
+    else:
+        pri = 0
+    return (pri, _parse_ts_z(cert.get("written_at_utc","")))
+
+def _scan_cert_paths(roots: list[Path]) -> list[Path]:
+    out = []
+    for root in roots:
+        if root.exists():
+            out.extend(root.rglob("overlap__*.json"))
+    return out
+
+def _load_json(p: Path):
+    try:
+        return json.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+
+def _row_from_cert(cert: dict) -> dict | None:
+    ident   = (cert.get("identity") or {})
+    policy  = (cert.get("policy") or {})
+    inputs  = (cert.get("inputs") or {})
+    hashes  = (inputs.get("hashes") or {})
+    diag    = (cert.get("diagnostics") or {})
+    gallery = (cert.get("gallery") or {})
+    ab      = (cert.get("ab_embed") or {})
+    if not ident.get("district_id") or not ident.get("fixture_label"):
+        return None  # skip ambiguous rows
+
+    pol = _canon_policy(policy.get("canon") or policy.get("label_raw",""))
+    proj_hash = policy.get("projector_hash","") if pol == "projected:file" else ""
+
+    # lane vectors → JSON strings (stable)
+    def _json_vec(v):
+        try:
+            if isinstance(v, list): vv = [int(x) for x in v]
+            else: vv = v
+            s = json.dumps(vv, separators=(",",":"))
+            json.loads(s)  # sanity
+            return s
+        except Exception:
+            return json.dumps([])
+
+    return {
+        "district":    ident.get("district_id",""),
+        "fixture":     ident.get("fixture_label",""),
+        "projected":   pol,
+        "hash_d":      proj_hash,
+        "hash_U":      hashes.get("U_hash","") or "",
+        "hash_suppC":  hashes.get("C_hash","") or "",
+        "hash_suppH":  hashes.get("H_hash","") or "",
+        "growth":      (cert.get("growth") or {}).get("growth_bumps", 0),
+        "tag":         gallery.get("tag",""),
+        "strictify":   gallery.get("strictify","tbd"),
+        "lane_vec_H2": _json_vec(diag.get("lane_vec_H2@d3", [])),
+        "lane_vec_C3pI3": _json_vec(diag.get("lane_vec_C3+I3", [])),
+        "ab_embedded": bool(ab.get("fresh", False)),
+        "content_hash": (cert.get("hashes") or {}).get("content_hash",""),
+    }
+
+def _witness_gallery(line: dict):
+    try:
+        p = Path("logs") / "witnesses.jsonl"
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with open(p, "a", encoding="utf-8") as f:
+            f.write(json.dumps(line, separators=(",",":")) + "\n")
+    except Exception:
+        pass
+
+# -------- builder (callable) --------
+def build_b2_gallery(*, debounce: bool = True) -> tuple[Path, Path, dict]:
+    cert_paths = _scan_cert_paths(CERTS_ROOTS)
+
+    groups: dict[tuple[str,str], list[tuple[dict,Path]]] = {}
+    skipped_no_fixture = []
+    loaded = 0
+
+    for p in cert_paths:
+        cert = _load_json(p)
+        if cert is None:
+            continue
+        loaded += 1
+        ident = (cert.get("identity") or {})
+        district = ident.get("district_id","")
+        fixture  = (ident.get("fixture_label","") or "").strip()
+        if not district or not fixture:
+            skipped_no_fixture.append(p.name)
+            continue
+        groups.setdefault((district, fixture), []).append((cert, p))
+
+    # Pick best per group
+    picked_rows = []
+    for (district, fixture), items in groups.items():
+        # sort desc by priority, then by timestamp
+        items_sorted = sorted(items, key=lambda cp: _selection_rank(cp[0]), reverse=True)
+        best_cert = items_sorted[0][0]
+        row = _row_from_cert(best_cert)
+        if row:
+            picked_rows.append(row)
+
+    # Sort rows by (district, g_index/fixture)
+    picked_rows.sort(key=lambda r: (r["district"], _g_index(r["fixture"])))
+
+    # Debounce hash (on (district, fixture, content_hash))
+    key_set = sorted(f"{r['district']}|{r['fixture']}|{r['content_hash']}" for r in picked_rows)
+    build_hash = hashlib.sha256(("\n".join(key_set)).encode("utf-8")).hexdigest()
+    state_path = REPORTS_DIR / "b2_gallery.state.json"
+    previous_hash = ""
+    if debounce and state_path.exists():
+        try:
+            previous_hash = json.loads(state_path.read_text(encoding="utf-8")).get("last_gallery_build_hash","")
+        except Exception:
+            previous_hash = ""
+
+    # Prepare outputs
+    csv_path = REPORTS_DIR / "b2_gallery.csv"
+    tmp_path = REPORTS_DIR / "b2_gallery.csv.tmp"
+    validation_path = REPORTS_DIR / "b2_gallery.validation.json"
+
+    # If unchanged and debounce on → short-circuit
+    if debounce and picked_rows and build_hash == previous_hash:
+        receipt = {
+            "rows_written": 0,
+            "skipped_no_fixture_label": skipped_no_fixture,
+            "vector_parse_issues": 0,  # vectors already normalized to JSON
+            "missing_hash_counts": {
+                "C_hash": sum(1 for r in picked_rows if not r["hash_suppC"]),
+                "H_hash": sum(1 for r in picked_rows if not r["hash_suppH"]),
+                "U_hash": sum(1 for r in picked_rows if not r["hash_U"]),
+            },
+            "last_gallery_build_hash": build_hash,
+            "certs_scanned": len(cert_paths),
+            "certs_loaded": loaded,
+            "debounced": True,
+        }
+        validation_path.write_text(json.dumps(receipt, indent=2, sort_keys=True), encoding="utf-8")
+        _witness_gallery({
+            "ts": datetime.utcnow().replace(microsecond=0).isoformat()+"Z",
+            "outcome": "B2_DEBOUNCED",
+            "rows": len(picked_rows),
+            "hash": build_hash,
+        })
+        return csv_path, validation_path, receipt
+
+    # Write CSV atomically
+    header = [
+        "district","fixture","projected","hash_d","hash_U","hash_suppC","hash_suppH",
+        "growth","tag","strictify","lane_vec_H2","lane_vec_C3pI3","ab_embedded","content_hash"
+    ]
+    with open(tmp_path, "w", encoding="utf-8", newline="") as f:
+        w = csv.DictWriter(f, fieldnames=header, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
+        w.writeheader()
+        for r in picked_rows:
+            w.writerow(r)
+        f.write("\n")  # trailing newline for clean diffs
+    os.replace(tmp_path, csv_path)
+
+    # Validation receipt
+    receipt = {
+        "rows_written": len(picked_rows),
+        "skipped_no_fixture_label": skipped_no_fixture,
+        "vector_parse_issues": 0,
+        "missing_hash_counts": {
+            "C_hash": sum(1 for r in picked_rows if not r["hash_suppC"]),
+            "H_hash": sum(1 for r in picked_rows if not r["hash_suppH"]),
+            "U_hash": sum(1 for r in picked_rows if not r["hash_U"]),
+        },
+        "last_gallery_build_hash": build_hash,
+        "certs_scanned": len(cert_paths),
+        "certs_loaded": loaded,
+        "debounced": False,
+    }
+    validation_path.write_text(json.dumps(receipt, indent=2, sort_keys=True), encoding="utf-8")
+    state_path.write_text(json.dumps({"last_gallery_build_hash": build_hash}, indent=2, sort_keys=True), encoding="utf-8")
+
+    _witness_gallery({
+        "ts": datetime.utcnow().replace(microsecond=0).isoformat()+"Z",
+        "outcome": "B2_BUILT",
+        "rows": len(picked_rows),
+        "hash": build_hash,
+        "csv": csv_path.as_posix()
+    })
+    return csv_path, validation_path, receipt
+
+# -------- lightweight UI wrapper (safe to call anywhere) --------
+def render_b2_gallery_controls():
+    with st.container():
+        st.markdown("### B2 — Lane exploration gallery (CSV)")
+        col1, col2 = st.columns([1,3])
+        with col1:
+            if st.button("Build Gallery CSV", key="btn_b2_build"):
+                csvp, valp, rec = build_b2_gallery(debounce=False)
+                st.success(f"Built → `{csvp.as_posix()}` · rows={rec['rows_written']}")
+                with st.expander("Validation receipt"):
+                    st.json(rec)
+        with col2:
+            if (REPORTS_DIR / "b2_gallery.csv").exists():
+                st.caption(f"Latest: `{(REPORTS_DIR / 'b2_gallery.csv').as_posix()}`")
+            else:
+                st.caption("No gallery built yet.")
+
+def _safe_build_b2_gallery(debounce: bool = True):
+    try:
+        csvp, valp, rec = build_b2_gallery(debounce=debounce)
+        # Optional tiny receipt:
+        st.caption(f"B2 gallery: rows_written={rec.get('rows_written', 0)}")
+    except RuntimeError as e:
+        # Debounce “no changes” is normal; keep quiet
+        if "no changes since last build" in str(e).lower():
+            st.caption("B2 gallery: unchanged")
+        else:
+            # surface other runtime errors
+            raise
+
+# ============================== /B2 Gallery Compiler (final) ==============================
 
 # ========================= Gallery · Append & Dedupe (cert-required, canonical schema) =========================
 from pathlib import Path
@@ -4190,11 +4647,12 @@ with safe_expander("Gallery (canonical)", expanded=False):
                 st.success("Gallery row appended.")
                 # keep CSV in sync, if builder is present
                 try:
-                    build_b2_gallery(debounce=True)  # type: ignore[name-defined]
+                    _safe_build_b2_gallery(debounce=True)
+                except NameError:
+                    st.info("(B2 gallery builder not loaded yet)")
                 except Exception as e:
                     st.info(f"(B2 gallery build skipped: {e})")
-        except Exception as e:
-            st.error(f"Gallery append failed: {e}")
+
 
     # Tail view (compact)
     try:
@@ -6855,450 +7313,6 @@ with safe_expander("Cert & provenance", expanded=True):
 
 
 
-# ====================== B2 Gallery Builder (CSV + manifest) ======================
-import os, json, csv, hashlib
-from pathlib import Path
-from datetime import datetime
-
-def _b2_norm_vec(v):
-    try: return [int(x) for x in (v or [])]
-    except Exception: return []
-
-def _b2_vec_json(v):
-    try: return json.dumps(_b2_norm_vec(v), separators=(",", ":"))
-    except Exception: return "[]"
-
-def _b2_short(h): return (h or "")[:12]
-
-def _b2_collect_certs():
-    """Yield (path, payload) for all certs under logs/certs/**/**.json newest→oldest."""
-    root = Path("logs") / "certs"
-    if not root.exists(): return []
-    files = list(root.rglob("*.json"))
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    out = []
-    for p in files:
-        try:
-            out.append((p, json.loads(p.read_text(encoding="utf-8"))))
-        except Exception:
-            continue
-    return out
-
-def _b2_row_from_cert(cert):
-    """Map one cert → normalized CSV row dict or None (if missing fixture_label)."""
-    identity   = cert.get("identity", {}) or {}
-    policy     = cert.get("policy", {}) or {}
-    inputs     = cert.get("inputs", {}) or {}
-    checks     = cert.get("checks", {}) or {}
-    diags      = cert.get("diagnostics", {}) or {}
-    registry   = (inputs.get("registry") or {})
-    hashes     = (inputs.get("hashes") or {})
-    ab_embed   = cert.get("ab_embed", {}) or {}
-    gallery    = cert.get("gallery", {}) or {}
-    content    = (cert.get("hashes") or {}).get("content_hash", "")
-
-    district   = identity.get("district_id", "UNKNOWN")
-    fixture    = identity.get("fixture_label", "") or ""   # must exist
-    fixture_code = identity.get("fixture_code", "") or ""
-    if not fixture:
-        return None  # skip — we want explicit fixture labels in CSV
-
-    canon      = policy.get("canon") or policy.get("projector_mode") or "strict"
-    # normalize projected canon naming
-    if canon == "auto": canon = "projected:auto"
-    if canon == "file": canon = "projected:file"
-
-    hash_d     = policy.get("projector_hash", "")  # only for projected:file
-    hash_U     = hashes.get("U_hash", "")
-    hash_C     = hashes.get("C_hash", "")
-    hash_H     = hashes.get("H_hash", "")
-
-    growth     = int((cert.get("growth") or {}).get("growth_bumps", 0))
-    tag        = str(gallery.get("tag", ""))
-    strictify  = str(gallery.get("strictify", "tbd"))
-
-    lane_H2    = _b2_vec_json(diags.get("lane_vec_H2@d3"))
-    lane_CI    = _b2_vec_json(diags.get("lane_vec_C3+I3"))
-
-    ab_embedded = bool(ab_embed.get("fresh", False))
-
-    row = {
-        "district":      district,
-        "fixture":       fixture,
-        "projected":     canon,
-        "hash_d":        hash_d,
-        "hash_U":        hash_U,
-        "hash_suppC":    hash_C,
-        "hash_suppH":    hash_H,
-        "growth":        str(growth),
-        "tag":           tag,
-        "strictify":     strictify,
-        "lane_vec_H2":   lane_H2,
-        "lane_vec_C3pI3":lane_CI,
-        "ab_embedded":   "true" if ab_embedded else "false",
-        "content_hash":  content,
-        "fixture_code":  fixture_code,  # optional helper column
-        # (provenance of registry helps audits; harmless in manifest, not in CSV)
-        "_fx_ver":       registry.get("fixtures_version",""),
-    }
-    return row
-
-def _b2_sort_key(row, curated_order):
-    # curated codes first by ordering; then no-code by fixture label
-    code = row.get("fixture_code","") or ""
-    if code and code in curated_order:
-        return (0, curated_order.index(code), row.get("fixture",""))
-    return (1, 10**9, row.get("fixture",""))
-
-def _b2_best_pick(rows):
-    """
-    For a given (district, fixture) bucket, pick ONE row by:
-      1) A/B-embedded projected (canon in {projected:auto, projected:file}), newest
-      2) else projected (auto/file), newest
-      3) else strict, newest
-    Caller must pass rows already newest→oldest.
-    """
-    def is_proj(r): return r.get("projected") in ("projected:auto","projected:file")
-    def is_ab(r):   return r.get("ab_embedded") == "true"
-    # newest first already
-    for r in rows:
-        if is_proj(r) and is_ab(r): return r
-    for r in rows:
-        if is_proj(r): return r
-    for r in rows:
-        if r.get("projected") == "strict": return r
-    return rows[0] if rows else None
-
-def build_b2_gallery(debounce: bool = True):
-    """
-    Scans certs, selects one row per (district, fixture), writes:
-      logs/reports/b2_gallery.csv
-      logs/reports/b2_gallery.manifest.json
-    Debounced by content signature of (district, fixture, content_hash).
-    """
-    reports_dir = Path("logs") / "reports"
-    reports_dir.mkdir(parents=True, exist_ok=True)
-    csv_path  = reports_dir / "b2_gallery.csv"
-    man_path  = reports_dir / "b2_gallery.manifest.json"
-
-    # collect + map
-    certs = _b2_collect_certs()
-    rows_all = []
-    missing_fixture = []
-    vector_parse_issues = 0
-    curated_order = []
-
-    # pull curated ordering from cached fixtures (if present)
-    fx_cache = st.session_state.get("_fixtures_cache") or {}
-    curated_order = list(fx_cache.get("ordering") or [])
-
-    for p, cert in certs:
-        r = _b2_row_from_cert(cert)
-        if r is None:
-            missing_fixture.append(p.name)
-            continue
-        # validate vectors parse (warn-only)
-        try:
-            json.loads(r["lane_vec_H2"]); json.loads(r["lane_vec_C3pI3"])
-        except Exception:
-            vector_parse_issues += 1
-        rows_all.append(r)
-
-    # debounce signature
-    sig_elems = sorted({ (r["district"], r["fixture"], r["content_hash"]) for r in rows_all })
-    sig_bytes = json.dumps(sig_elems, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    sig_hash  = hashlib.sha256(sig_bytes).hexdigest()
-
-    if debounce:
-        last_sig = (json.loads(man_path.read_text())["signature"]
-                    if man_path.exists() else "")
-        if last_sig == sig_hash:
-            raise RuntimeError("no changes since last build")
-
-    # bucket by (district, fixture)
-    buckets = {}
-    for r in rows_all:
-        buckets.setdefault((r["district"], r["fixture"]), []).append(r)
-
-    # pick best per bucket (newest already due to cert scan order)
-    picked = []
-    for key, brs in buckets.items():
-        picked.append(_b2_best_pick(brs))
-
-    # sort by curated ordering (via fixture_code), then label
-    picked.sort(key=lambda r: _b2_sort_key(r, curated_order))
-
-    # write CSV (atomic)
-    tmp = csv_path.with_suffix(".csv.tmp")
-    fieldnames = ["district","fixture","projected","hash_d","hash_U","hash_suppC","hash_suppH",
-                  "growth","tag","strictify","lane_vec_H2","lane_vec_C3pI3","ab_embedded","content_hash","fixture_code"]
-    with open(tmp, "w", newline="\n", encoding="utf-8") as f:
-        w = csv.DictWriter(f, fieldnames=fieldnames, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
-        w.writeheader()
-        for r in picked:
-            w.writerow({k: r.get(k,"") for k in fieldnames})
-    os.replace(tmp, csv_path)
-
-    # manifest
-    manifest = {
-        "written_at_utc": datetime.utcnow().replace(microsecond=0).isoformat()+"Z",
-        "rows": len(picked),
-        "districts": sorted({ r["district"] for r in picked }),
-        "fixture_codes_seen": sorted({ r.get("fixture_code","") for r in picked if r.get("fixture_code") }),
-        "unknown_fixtures": sum(1 for r in picked if not r.get("fixture_code")),
-        "signature": sig_hash,
-        "missing_fixture_label": missing_fixture,
-        "vector_parse_issues": vector_parse_issues,
-        "source_certs": [ {"district": r["district"], "fixture": r["fixture"], "content_hash": r["content_hash"]} for r in picked ],
-    }
-    man_tmp = man_path.with_suffix(".json.tmp")
-    with open(man_tmp, "w", encoding="utf-8") as mf:
-        mf.write(json.dumps(manifest, indent=2, sort_keys=True))
-    os.replace(man_tmp, man_path)
-
-    st.success(f"B2 gallery built → {csv_path.as_posix()} ({len(picked)} rows)")
-    st.caption(f"manifest: {man_path.as_posix()}")
-
-
-# ============================== B2 Gallery Compiler (final) ==============================
-import os, json, re, csv, hashlib
-from pathlib import Path
-from datetime import datetime
-
-REPORTS_DIR = Path("logs") / "reports"
-CERTS_ROOTS = [Path("logs") / "certs"]   # add more roots if you keep certs elsewhere
-REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-
-# -------- helpers (pure) --------
-_G_RE = re.compile(r"^g(\d+)$", re.IGNORECASE)
-
-def _canon_policy(label_or_canon: str) -> str:
-    t = (label_or_canon or "").lower()
-    if "strict" in t: return "strict"
-    if "projected" in t and "file" in t: return "projected:file"
-    return "projected:auto"
-
-def _g_index(fixture: str):
-    if not fixture: return (9999, fixture or "")
-    m = _G_RE.match(fixture.strip())
-    if not m: return (9999, fixture)
-    try: return (int(m.group(1)), fixture.upper())
-    except: return (9999, fixture)
-
-def _parse_ts_z(ts: str):
-    try: return datetime.fromisoformat((ts or "").replace("Z", "+00:00"))
-    except: return datetime.min
-
-def _selection_rank(cert: dict) -> tuple:
-    pol = _canon_policy((cert.get("policy") or {}).get("canon") or (cert.get("policy") or {}).get("label_raw",""))
-    ab_fresh = bool((cert.get("ab_embed") or {}).get("fresh", False))
-    if ab_fresh and pol in {"projected:auto","projected:file"}:
-        pri = 3
-    elif pol in {"projected:auto","projected:file"}:
-        pri = 2
-    elif pol == "strict":
-        pri = 1
-    else:
-        pri = 0
-    return (pri, _parse_ts_z(cert.get("written_at_utc","")))
-
-def _scan_cert_paths(roots: list[Path]) -> list[Path]:
-    out = []
-    for root in roots:
-        if root.exists():
-            out.extend(root.rglob("overlap__*.json"))
-    return out
-
-def _load_json(p: Path):
-    try:
-        return json.loads(p.read_text(encoding="utf-8"))
-    except Exception:
-        return None
-
-def _row_from_cert(cert: dict) -> dict | None:
-    ident   = (cert.get("identity") or {})
-    policy  = (cert.get("policy") or {})
-    inputs  = (cert.get("inputs") or {})
-    hashes  = (inputs.get("hashes") or {})
-    diag    = (cert.get("diagnostics") or {})
-    gallery = (cert.get("gallery") or {})
-    ab      = (cert.get("ab_embed") or {})
-    if not ident.get("district_id") or not ident.get("fixture_label"):
-        return None  # skip ambiguous rows
-
-    pol = _canon_policy(policy.get("canon") or policy.get("label_raw",""))
-    proj_hash = policy.get("projector_hash","") if pol == "projected:file" else ""
-
-    # lane vectors → JSON strings (stable)
-    def _json_vec(v):
-        try:
-            if isinstance(v, list): vv = [int(x) for x in v]
-            else: vv = v
-            s = json.dumps(vv, separators=(",",":"))
-            json.loads(s)  # sanity
-            return s
-        except Exception:
-            return json.dumps([])
-
-    return {
-        "district":    ident.get("district_id",""),
-        "fixture":     ident.get("fixture_label",""),
-        "projected":   pol,
-        "hash_d":      proj_hash,
-        "hash_U":      hashes.get("U_hash","") or "",
-        "hash_suppC":  hashes.get("C_hash","") or "",
-        "hash_suppH":  hashes.get("H_hash","") or "",
-        "growth":      (cert.get("growth") or {}).get("growth_bumps", 0),
-        "tag":         gallery.get("tag",""),
-        "strictify":   gallery.get("strictify","tbd"),
-        "lane_vec_H2": _json_vec(diag.get("lane_vec_H2@d3", [])),
-        "lane_vec_C3pI3": _json_vec(diag.get("lane_vec_C3+I3", [])),
-        "ab_embedded": bool(ab.get("fresh", False)),
-        "content_hash": (cert.get("hashes") or {}).get("content_hash",""),
-    }
-
-def _witness_gallery(line: dict):
-    try:
-        p = Path("logs") / "witnesses.jsonl"
-        p.parent.mkdir(parents=True, exist_ok=True)
-        with open(p, "a", encoding="utf-8") as f:
-            f.write(json.dumps(line, separators=(",",":")) + "\n")
-    except Exception:
-        pass
-
-# -------- builder (callable) --------
-def build_b2_gallery(*, debounce: bool = True) -> tuple[Path, Path, dict]:
-    cert_paths = _scan_cert_paths(CERTS_ROOTS)
-
-    groups: dict[tuple[str,str], list[tuple[dict,Path]]] = {}
-    skipped_no_fixture = []
-    loaded = 0
-
-    for p in cert_paths:
-        cert = _load_json(p)
-        if cert is None:
-            continue
-        loaded += 1
-        ident = (cert.get("identity") or {})
-        district = ident.get("district_id","")
-        fixture  = (ident.get("fixture_label","") or "").strip()
-        if not district or not fixture:
-            skipped_no_fixture.append(p.name)
-            continue
-        groups.setdefault((district, fixture), []).append((cert, p))
-
-    # Pick best per group
-    picked_rows = []
-    for (district, fixture), items in groups.items():
-        # sort desc by priority, then by timestamp
-        items_sorted = sorted(items, key=lambda cp: _selection_rank(cp[0]), reverse=True)
-        best_cert = items_sorted[0][0]
-        row = _row_from_cert(best_cert)
-        if row:
-            picked_rows.append(row)
-
-    # Sort rows by (district, g_index/fixture)
-    picked_rows.sort(key=lambda r: (r["district"], _g_index(r["fixture"])))
-
-    # Debounce hash (on (district, fixture, content_hash))
-    key_set = sorted(f"{r['district']}|{r['fixture']}|{r['content_hash']}" for r in picked_rows)
-    build_hash = hashlib.sha256(("\n".join(key_set)).encode("utf-8")).hexdigest()
-    state_path = REPORTS_DIR / "b2_gallery.state.json"
-    previous_hash = ""
-    if debounce and state_path.exists():
-        try:
-            previous_hash = json.loads(state_path.read_text(encoding="utf-8")).get("last_gallery_build_hash","")
-        except Exception:
-            previous_hash = ""
-
-    # Prepare outputs
-    csv_path = REPORTS_DIR / "b2_gallery.csv"
-    tmp_path = REPORTS_DIR / "b2_gallery.csv.tmp"
-    validation_path = REPORTS_DIR / "b2_gallery.validation.json"
-
-    # If unchanged and debounce on → short-circuit
-    if debounce and picked_rows and build_hash == previous_hash:
-        receipt = {
-            "rows_written": 0,
-            "skipped_no_fixture_label": skipped_no_fixture,
-            "vector_parse_issues": 0,  # vectors already normalized to JSON
-            "missing_hash_counts": {
-                "C_hash": sum(1 for r in picked_rows if not r["hash_suppC"]),
-                "H_hash": sum(1 for r in picked_rows if not r["hash_suppH"]),
-                "U_hash": sum(1 for r in picked_rows if not r["hash_U"]),
-            },
-            "last_gallery_build_hash": build_hash,
-            "certs_scanned": len(cert_paths),
-            "certs_loaded": loaded,
-            "debounced": True,
-        }
-        validation_path.write_text(json.dumps(receipt, indent=2, sort_keys=True), encoding="utf-8")
-        _witness_gallery({
-            "ts": datetime.utcnow().replace(microsecond=0).isoformat()+"Z",
-            "outcome": "B2_DEBOUNCED",
-            "rows": len(picked_rows),
-            "hash": build_hash,
-        })
-        return csv_path, validation_path, receipt
-
-    # Write CSV atomically
-    header = [
-        "district","fixture","projected","hash_d","hash_U","hash_suppC","hash_suppH",
-        "growth","tag","strictify","lane_vec_H2","lane_vec_C3pI3","ab_embedded","content_hash"
-    ]
-    with open(tmp_path, "w", encoding="utf-8", newline="") as f:
-        w = csv.DictWriter(f, fieldnames=header, quoting=csv.QUOTE_MINIMAL, lineterminator="\n")
-        w.writeheader()
-        for r in picked_rows:
-            w.writerow(r)
-        f.write("\n")  # trailing newline for clean diffs
-    os.replace(tmp_path, csv_path)
-
-    # Validation receipt
-    receipt = {
-        "rows_written": len(picked_rows),
-        "skipped_no_fixture_label": skipped_no_fixture,
-        "vector_parse_issues": 0,
-        "missing_hash_counts": {
-            "C_hash": sum(1 for r in picked_rows if not r["hash_suppC"]),
-            "H_hash": sum(1 for r in picked_rows if not r["hash_suppH"]),
-            "U_hash": sum(1 for r in picked_rows if not r["hash_U"]),
-        },
-        "last_gallery_build_hash": build_hash,
-        "certs_scanned": len(cert_paths),
-        "certs_loaded": loaded,
-        "debounced": False,
-    }
-    validation_path.write_text(json.dumps(receipt, indent=2, sort_keys=True), encoding="utf-8")
-    state_path.write_text(json.dumps({"last_gallery_build_hash": build_hash}, indent=2, sort_keys=True), encoding="utf-8")
-
-    _witness_gallery({
-        "ts": datetime.utcnow().replace(microsecond=0).isoformat()+"Z",
-        "outcome": "B2_BUILT",
-        "rows": len(picked_rows),
-        "hash": build_hash,
-        "csv": csv_path.as_posix()
-    })
-    return csv_path, validation_path, receipt
-
-# -------- lightweight UI wrapper (safe to call anywhere) --------
-def render_b2_gallery_controls():
-    with st.container():
-        st.markdown("### B2 — Lane exploration gallery (CSV)")
-        col1, col2 = st.columns([1,3])
-        with col1:
-            if st.button("Build Gallery CSV", key="btn_b2_build"):
-                csvp, valp, rec = build_b2_gallery(debounce=False)
-                st.success(f"Built → `{csvp.as_posix()}` · rows={rec['rows_written']}")
-                with st.expander("Validation receipt"):
-                    st.json(rec)
-        with col2:
-            if (REPORTS_DIR / "b2_gallery.csv").exists():
-                st.caption(f"Latest: `{(REPORTS_DIR / 'b2_gallery.csv').as_posix()}`")
-            else:
-                st.caption("No gallery built yet.")
-
-# ============================== /B2 Gallery Compiler (final) ==============================
 
 
 # ───────────────────────── Snapshot & Flush — self-contained ─────────────────────────
