@@ -140,26 +140,22 @@ def projector_hash_of(P_blocks: list[list[int]], *, mode: str = "blocks") -> str
 
 
 # ---- helper for recomputing diag lanes if the snapshot lacks them
-def _ab_diag_vectors(rc, H_used, cmap_obj):
-    def _xor(A,B):
-        if not A: return [r[:] for r in (B or [])]
-        if not B: return [r[:] for r in (A or [])]
-        r,c = len(A), len(A[0])
-        return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
-    def _bottom_row(M): return M[-1] if (M and len(M)) else []
+def _ab_lane_vectors_bottom(H2, d3, C3, lm):
+    """Lane vectors as bottom-row probes (matches your earlier UI semantics)."""
+    try:
+        H2d3  = mul(H2, d3) if _ab_shape_ok(H2, d3) else []
+        C3pI3 = _ab_xor(C3, _ab_eye(len(C3))) if (C3 and C3[0]) else []
+    except Exception:
+        H2d3, C3pI3 = [], []
+    def _bottom(M): 
+        try: return M[-1] if (M and len(M)) else []
+        except Exception: return []
+    bH, bC = _bottom(H2d3), _bottom(C3pI3)
+    idx = [j for j,m in enumerate(lm or []) if m]
+    vH = [int(bH[j]) & 1 for j in idx] if (bH and idx and max(idx) < len(bH)) else []
+    vC = [int(bC[j]) & 1 for j in idx] if (bC and idx and max(idx) < len(bC)) else []
+    return vH, vC
 
-    d3 = rc.get("d3") or []
-    lm = list(rc.get("lane_mask_k3") or [])
-    H2 = (H_used.blocks.__root__.get("2") or []) if H_used else []
-    C3 = (cmap_obj.blocks.__root__.get("3") or []) if cmap_obj else []
-    I3 = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
-
-    H2d3  = mul(H2, d3) if (H2 and d3 and H2[0] and d3[0] and len(H2[0]) == len(d3)) else []
-    C3pI3 = _xor(C3, I3) if (C3 and C3[0]) else []
-
-    idx = [j for j,m in enumerate(lm) if m]
-    hv = [_bottom_row(H2d3)[j]  for j in idx] if (H2d3 and idx) else []
-    cv = [_bottom_row(C3pI3)[j] for j in idx] if (C3pI3 and idx) else []
     return hv, cv
 
 # ---------------- Fixture helpers (single source of truth) ----------------
@@ -2234,6 +2230,49 @@ def _ab_lane_mask_from_d3(d3):
     n2, n3 = len(d3), len(d3[0])
     return [1 if any(int(d3[i][j]) & 1 for i in range(n2)) else 0 for j in range(n3)]
 
+def _ab_obj_hash(obj):
+    """Hash an in-memory model/object deterministically (fallback when file hash is empty)."""
+    try:
+        # Try your canonical helper if present
+        if "_hash_json" in globals() and callable(globals()["_hash_json"]):
+            return _hash_json(obj)  # type: ignore[name-defined]
+    except Exception:
+        pass
+    # Canonicalize to plain dict
+    def _canon(o):
+        try:
+            if hasattr(o, "model_dump") and callable(o.model_dump):  # pydantic v2
+                return o.model_dump()
+        except Exception:
+            pass
+        try:
+            if hasattr(o, "dict") and callable(o.dict):              # pydantic v1
+                return o.dict()
+        except Exception:
+            pass
+        try:
+            if hasattr(o, "blocks"):                                 # your stream models
+                root = getattr(o.blocks, "__root__", None)
+                if root is not None:
+                    return {"blocks": root}
+        except Exception:
+            pass
+        return o
+    try:
+        blob = json.dumps(_canon(obj), separators=(",", ":"), sort_keys=True, ensure_ascii=False)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    except Exception:
+        return ""
+
+def _ab_current_objs():
+    """Best-available in-memory objects for B, C, H, U (used for fallback hashing)."""
+    ss = st.session_state
+    B = globals().get("boundaries", None)
+    C = globals().get("cmap", None)
+    H = ss.get("overlap_H", None)
+    U = globals().get("shapes", None) or ss.get("shapes_obj", None)
+    return B, C, H, U
+
 def _ab_force_refresh_ssot():
     """Reload mats from files (preferred) → update inputs_hashes/_inputs_block/run_ctx (AUTO)."""
     ss = st.session_state
@@ -2244,6 +2283,7 @@ def _ab_force_refresh_ssot():
     bC = _ab_read_blocks(paths["C"])
     bH = _ab_read_blocks(paths["H"])
 
+    # Raw matrices
     d3 = (bB.get("3")
           or (getattr(globals().get("boundaries"), "blocks", None).__root__.get("3")
               if getattr(globals().get("boundaries"), "blocks", None) else [])
@@ -2256,6 +2296,72 @@ def _ab_force_refresh_ssot():
           or (getattr(ss.get("overlap_H"), "blocks", None).__root__.get("2")
               if getattr(ss.get("overlap_H"), "blocks", None) else [])
           or [])
+
+    # Dims + lane-mask (single-source from d3)
+    n2 = len(d3); n3 = len(d3[0]) if (d3 and d3[0]) else 0
+    lm = _ab_lane_mask_from_d3(d3)
+
+    # File-byte hashes (primary)
+    hB_file = _ab_file_hash(paths["B"])
+    hC_file = _ab_file_hash(paths["C"])
+    hH_file = _ab_file_hash(paths["H"])
+    hU_file = _ab_file_hash(paths["U"])
+
+    # Object-hash fallbacks (when file paths are absent or unreadable)
+    B_obj, C_obj, H_obj, U_obj = _ab_current_objs()
+    hB_obj = _ab_obj_hash(B_obj) if not hB_file else ""
+    hC_obj = _ab_obj_hash(C_obj) if not hC_file else ""
+    hH_obj = _ab_obj_hash(H_obj) if not hH_file else ""
+    hU_obj = _ab_obj_hash(U_obj) if not hU_file else ""
+
+    ih = {
+        "boundaries_hash": hB_file or hB_obj,
+        "C_hash":          hC_file or hC_obj,
+        "H_hash":          hH_file or hH_obj,
+        "U_hash":          hU_file or hU_obj,
+        "shapes_hash":     hU_file or hU_obj,  # mirror U for shapes carrier
+    }
+
+    # Publish SSOT
+    ss["_inputs_block"] = {
+        "filenames": {
+            "boundaries": paths["B"],
+            "C":          paths["C"],
+            "H":          paths["H"],
+            "U":          paths["U"],
+        },
+        "dims": {"n2": n2, "n3": n3},
+        "hashes": ih,
+        "lane_mask_k3": lm,
+    }
+    ss["inputs_hashes"] = ih
+
+    # Keep memory objects in sync (helpful for other panes)
+    try:
+        if "io" in globals():
+            globals()["boundaries"] = io.parse_boundaries({"blocks": {"3": d3}})
+            globals()["cmap"]       = io.parse_cmap({"blocks": {"3": C3}})
+            ss["overlap_H"]         = io.parse_cmap({"blocks": {"2": H2}})
+    except Exception:
+        pass
+
+    # AUTO run_ctx (Π := diag(lm))
+    ss["run_ctx"] = {
+        "policy_tag": "projected(columns@k=3,auto)",
+        "mode": "projected(auto)",
+        "d3": d3, "n3": n3, "lane_mask_k3": lm,
+        "P_active": _ab_diag_from_mask(lm),
+        "projector_filename": "",
+        "projector_hash": "",
+        "projector_consistent_with_d": True,
+        "source": {"3": "auto"},
+        "errors": [],
+        "_inputs_sig": [ih["boundaries_hash"], ih["C_hash"], ih["H_hash"], ih["U_hash"], ih["shapes_hash"]],
+    }
+
+    st.info(f"SSOT refreshed • n₂={n2} n₃={n3}")
+    return H2, C3, d3, lm
+
 
     # Dims + lane-mask (single-source from d3)
     n2 = len(d3); n3 = len(d3[0]) if (d3 and d3[0]) else 0
