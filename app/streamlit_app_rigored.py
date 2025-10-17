@@ -113,6 +113,29 @@ DISTRICT_MAP: dict[str, str] = {
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
 
+# ---- helper for recomputing diag lanes if the snapshot lacks them
+def _ab_diag_vectors(rc, H_used, cmap_obj):
+    def _xor(A,B):
+        if not A: return [r[:] for r in (B or [])]
+        if not B: return [r[:] for r in (A or [])]
+        r,c = len(A), len(A[0])
+        return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
+    def _bottom_row(M): return M[-1] if (M and len(M)) else []
+
+    d3 = rc.get("d3") or []
+    lm = list(rc.get("lane_mask_k3") or [])
+    H2 = (H_used.blocks.__root__.get("2") or []) if H_used else []
+    C3 = (cmap_obj.blocks.__root__.get("3") or []) if cmap_obj else []
+    I3 = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
+
+    H2d3  = mul(H2, d3) if (H2 and d3 and H2[0] and d3[0] and len(H2[0]) == len(d3)) else []
+    C3pI3 = _xor(C3, I3) if (C3 and C3[0]) else []
+
+    idx = [j for j,m in enumerate(lm) if m]
+    hv = [_bottom_row(H2d3)[j]  for j in idx] if (H2d3 and idx) else []
+    cv = [_bottom_row(C3pI3)[j] for j in idx] if (C3pI3 and idx) else []
+    return hv, cv
+
 # ---------------- Fixture helpers (single source of truth) ----------------
 
 def match_fixture_from_snapshot(snap: dict) -> dict:
@@ -2030,6 +2053,27 @@ with safe_expander("A/B compare (strict vs active projected)", expanded=False):
 
             label_proj = _policy_tag_now(rc)
             pair_tag   = f"strict__VS__{label_proj}"
+            snap = st.session_state.get("ab_pin", {}).get("payload") or st.session_state.get("ab_compare") or {}
+
+            # prefer snapshot vectors (they are computed at compare time)
+            lane_vec_H2 = ((snap.get("projected") or {}).get("lane_vec_H2d3") or
+                           (snap.get("strict")    or {}).get("lane_vec_H2d3") or [])
+            lane_vec_CI = ((snap.get("projected") or {}).get("lane_vec_C3plusI3") or
+                           (snap.get("strict")    or {}).get("lane_vec_C3plusI3") or [])
+            
+            # fallback recompute if blank
+            if not lane_vec_H2 or not lane_vec_CI:
+                hv, cv = _ab_diag_vectors(
+                    st.session_state.get("run_ctx") or {},
+                    st.session_state.get("overlap_H"),
+                    cmap  # your cmap object in scope
+                )
+                if not lane_vec_H2: lane_vec_H2 = hv
+                if not lane_vec_CI: lane_vec_CI = cv
+            
+            st.write(f"lane_vec_H2@d3: {lane_vec_H2}")
+            st.write(f"lane_vec_C3+I3: {lane_vec_CI}")
+
 
             # Full A/B snapshot (for UI) — note: we store the *projected* policy tag & FILE hash if applicable
             ab_payload = {
