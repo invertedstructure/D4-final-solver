@@ -3353,28 +3353,32 @@ st.session_state["run_ctx"] = _rc
 
 
 
-# ============================ Reports: Perturbation & Fence (resilient) ============================
+# ===================== Reports: Perturbation Sanity & Fence Stress (final) =====================
 from pathlib import Path
-import json as _json
-import hashlib as _hash
-import io as _io
-import csv as _csv
+import os, json as _json, hashlib as _hash, io as _io, csv as _csv
 import streamlit as st
 from datetime import datetime as _dt
 
-# ---- tiny shared helpers (safe; no-ops if you already defined stricter ones) ----
+# ---- fallbacks for globals (used elsewhere in app) ----
+if "SCHEMA_VERSION" not in globals(): SCHEMA_VERSION = "1.1.0"
+if "FIELD" not in globals():           FIELD          = "GF(2)"
+if "APP_VERSION" not in globals():     APP_VERSION    = "v0.1-core"
+if "GUARD_ENUM" not in globals():      GUARD_ENUM     = ["grid","wiggle","echo","fence","ker_guard","none","error"]
+
+# ---- tiny shared helpers (safe; idempotent) ----
 def _utc_iso_z() -> str:
     try:
         return _dt.utcnow().replace(microsecond=0).isoformat() + "Z"
     except Exception:
         return _dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
+def _deep_intify(o):
+    if isinstance(o, bool):  return 1 if o else 0
+    if isinstance(o, list):  return [_deep_intify(x) for x in o]
+    if isinstance(o, dict):  return {k: _deep_intify(v) for k, v in o.items()}
+    return o
+
 def _hash_json(obj) -> str:
-    def _deep_intify(o):
-        if isinstance(o, bool): return 1 if o else 0
-        if isinstance(o, list): return [_deep_intify(x) for x in o]
-        if isinstance(o, dict): return {k: _deep_intify(v) for k, v in o.items()}
-        return o
     canon = _deep_intify(_json.loads(_json.dumps(obj, separators=(",", ":"), sort_keys=True)))
     return _hash.sha256(_json.dumps(canon, separators=(",", ":"), sort_keys=True).encode("ascii")).hexdigest()
 
@@ -3404,10 +3408,8 @@ def _safe_rc_from_session() -> dict:
 def _require_fresh_rc_or_session() -> dict:
     rc_try = None
     if "require_fresh_run_ctx" in globals() and callable(globals().get("require_fresh_run_ctx")):
-        try:
-            rc_try = require_fresh_run_ctx()
-        except Exception:
-            rc_try = None
+        try: rc_try = require_fresh_run_ctx()
+        except Exception: rc_try = None
     return rc_try or _safe_rc_from_session()
 
 def _inputs_block_from_session_SAFE(strict_dims: tuple[int,int] | None = None) -> dict:
@@ -3426,27 +3428,21 @@ def _backfill_inputs_hashes_from_cert_or_state() -> dict:
     """Populate st.session_state['inputs_hashes'] from best available source."""
     ss = st.session_state
     keys = ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")
-
     def _complete(h): return h and all(h.get(k) for k in keys)
 
-    # a) already present
     ih = ss.get("inputs_hashes") or {}
-    if _complete(ih):
-        return ih
+    if _complete(ih): return ih
 
-    # b) _inputs_block.hashes
     ib = ss.get("_inputs_block") or {}
     hobj = (ib.get("hashes") or {})
     if _complete(hobj):
         ss["inputs_hashes"] = hobj; return hobj
 
-    # c) run_ctx direct (some apps mirror here)
     rc = ss.get("run_ctx") or {}
     cand = {k: rc.get(k, "") for k in keys}
     if _complete(cand):
         ss["inputs_hashes"] = cand; return cand
 
-    # d) in-memory cert payload
     cert = ss.get("cert_payload") or {}
     hcert = ((cert.get("inputs") or {}).get("hashes") or {})
     if _complete(hcert):
@@ -3456,7 +3452,6 @@ def _backfill_inputs_hashes_from_cert_or_state() -> dict:
         ss["_inputs_block"] = {"hashes": hcert, "dims": {"n2": n2, "n3": n3}, "lane_mask_k3": rc.get("lane_mask_k3", [])}
         return hcert
 
-    # e) latest cert file on disk
     try:
         root = Path("logs") / "certs"
         if root.exists():
@@ -3476,11 +3471,11 @@ def _backfill_inputs_hashes_from_cert_or_state() -> dict:
     except Exception:
         pass
 
-    # f) last chance: leave partial (guard will still warn)
     ss["inputs_hashes"] = ih
     return ih
 
 def _policy_block_from_run_ctx(rc: dict) -> dict:
+    """No recompute; copies projector hash/path as-is (freezer stamped canonical blocks-hash)."""
     mode = str(rc.get("mode", "strict"))
     if mode == "strict":
         return {"policy_tag":"strict","projector_mode":"strict","projector_filename":"","projector_hash":""}
@@ -3491,7 +3486,7 @@ def _policy_block_from_run_ctx(rc: dict) -> dict:
             "projector_filename": rc.get("projector_filename","") or "",
             "projector_hash": rc.get("projector_hash","") or ""}
 
-# shape + algebra helpers (use your strict ones if present)
+# ---- strict math helpers (no fallbacks) ----
 def _validate_shapes_or_raise(H2, d3, C3):
     rH, cH = (len(H2), len(H2[0]) if (H2 and H2[0]) else 0)
     rD, cD = (len(d3), len(d3[0]) if (d3 and d3[0]) else 0)
@@ -3527,7 +3522,7 @@ def _lane_mask_from_d3_matrix(d3):
 
 def _first_tripped_guard(strict_out: dict) -> str:
     if "first_tripped_guard" in globals() and callable(globals()["first_tripped_guard"]):
-        try: 
+        try:
             g = first_tripped_guard(strict_out)
             return g if g in GUARD_ENUM else "error"
         except Exception:
@@ -3560,7 +3555,7 @@ def _sig_tag_eq(B0, C0, H0, P_active=None):
         tag_p, eq_p = None, None
     return lm, tag_s, bool(eq_s), tag_p, (None if eq_p is None else bool(eq_p))
 
-# 1) Little helper used earlier
+# 1) publish staged SSOT if needed (copy-only)
 def _publish_ssot_if_pending():
     ih_live = st.session_state.get("inputs_hashes") or {}
     if all(ih_live.get(k) for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")):
@@ -3582,8 +3577,10 @@ def _publish_ssot_if_pending():
             "lane_mask_k3": (st.session_state.get("run_ctx") or {}).get("lane_mask_k3", []),
         }
 
-# 2) Top banner / preflight
-with st.expander("Reports: Perturbation Sanity & Fence Stress"):
+# 2) UI (container to avoid nested expander issues)
+with st.container():
+    st.markdown("### Reports: Perturbation Sanity & Fence Stress")
+
     REPORTS_DIR = Path(st.session_state.get("REPORTS_DIR", "reports")); REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
     # Friendly preflight
@@ -3591,25 +3588,27 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
         ok_pj, pj_tag = _projector_status()
     except Exception:
         ok_pj, pj_tag = True, "OK"
+
     try:
         h_tag = "OK" if all((st.session_state.get("inputs_hashes") or {}).get(k) for k in
                             ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")) else "MISSING"
     except Exception:
         h_tag = "MISSING"
+
     st.caption(f"Evidence preflight → Π: {pj_tag} · hashes: {h_tag}")
 
-    # SSOT freshness nudge (non-blocking)
+    # Stale warning (once)
     if "reports_warn_stale_once" in globals():
         try: reports_warn_stale_once()
         except Exception: pass
 
-    # Context objects
+    # Context objects (no recompute; read SSOT)
     H_used = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
     B0, C0, H0 = boundaries, cmap, H_used
     d3_base = (B0.blocks.__root__.get("3") or [])
     n2 = len(d3_base); n3 = len(d3_base[0]) if (d3_base and d3_base[0]) else 0
 
-    # UI
+    # Controls
     colA, colB = st.columns([2,2])
     with colA:
         max_flips = st.number_input("Perturbation: max flips", min_value=1, max_value=500, value=24, step=1, key="ps_max")
@@ -3618,7 +3617,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
         run_fence       = st.checkbox("Include Fence stress run (perturb U)", value=True, key="fence_on")
         enable_witness  = st.checkbox("Write witness on mismatches", value=True, key="ps_witness_on")
 
-    disabled = False
+    # Disable button only if FILE Π explicitly invalid
     try:
         disabled = file_validation_failed()
     except Exception:
@@ -3633,7 +3632,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
             try: _ensure_inputs_hashes()
             except Exception: pass
 
-        # Guard: require hashes (but show specific miss list if any)
+        # Guard: require hashes
         keys = ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")
         ih_now = st.session_state.get("inputs_hashes") or {}
         missing = [k for k in keys if not ih_now.get(k)]
@@ -3641,20 +3640,19 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
             st.error(f"INPUT_HASHES_MISSING: wire SSOT from Cert/Overlap; backfill disabled (missing: {', '.join(missing)})")
             st.stop()
 
-        # A/B/Π context for projected vs strict
+        # A/B/Π context
         rc = _require_fresh_rc_or_session()
         mode_now = str(rc.get("mode", ""))
         P_active = rc.get("P_active") if mode_now.startswith("projected") else None
 
-        # ───────────────────────── Baseline (no mutation) ─────────────────────────
+        # ───────────────────── Baseline ─────────────────────
         lm0, tag_s0, eq_s0, tag_p0, eq_p0 = _sig_tag_eq(B0, C0, H0, P_active)
 
-        # lanes-only domain from SSOT lane mask
+        # flip domain = lanes-only
         inputs_ps_tmp = _inputs_block_from_session_SAFE(strict_dims=(n2, n3))
         lane_mask = [int(x) & 1 for x in inputs_ps_tmp.get("lane_mask_k3", [])]
         allowed_cols_set = {j for j, b in enumerate(lane_mask) if b == 1}
 
-        # deterministic flip targets
         import hashlib as _hashlib
         def _flip_targets_lanes_only(n2_, n3_, budget, seed_str):
             h = int(_hashlib.sha256(seed_str.encode("utf-8")).hexdigest(), 16)
@@ -3665,7 +3663,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 i = (i + 1 + (h % 3)) % (n2_ or 1)
                 j = (j + 2 + ((h >> 5) % 5)) % (n3_ or 1)
 
-        # ─────────────── Perturbation: flips + CSV + JSON ───────────────
+        # ─────────────── Perturbation run ───────────────
         rows, ps_results = [], []
         matches = mismatches = total_flips = in_domain_flips = 0
 
@@ -3724,12 +3722,9 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 try:
                     cert_like = st.session_state.get("cert_payload")
                     if cert_like:
-                        append_witness_row(
-                            cert_like,
-                            reason="grammar-drift",
-                            residual_tag_val=(tag_sK or "none"),
-                            note=f"flip#{k} at (r={r}, c={c}) guard:{guard} expected:{expected_guard}",
-                        )
+                        append_witness_row(cert_like, reason="grammar-drift",
+                                           residual_tag_val=(tag_sK or "none"),
+                                           note=f"flip#{k} at (r={r}, c={c}) guard:{guard} expected:{expected_guard}")
                         witness_written = True
                 except Exception:
                     witness_written = False
@@ -3785,7 +3780,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
             "schema_version": SCHEMA_VERSION, "written_at_utc": _utc_iso_z(), "app_version": APP_VERSION, "field": FIELD,
             "identity": {
                 "run_id": (rc_ps.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
-                "district_id": rc_ps.get("district_id","D3"),
+                "district_id": rc_ps.get("district_id",""),
                 "fixture_nonce": rc_ps.get("fixture_nonce",""),
             },
             "policy": policy_ps, "inputs": inputs_ps,
@@ -3816,18 +3811,15 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
 
         # ───────────────────── Fence stress (U-only) ─────────────────────
         if run_fence:
-            # ensure hashes still present
             _publish_ssot_if_pending()
             _backfill_inputs_hashes_from_cert_or_state()
 
-            keys = ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")
             ih_now = st.session_state.get("inputs_hashes") or {}
-            missing = [k for k in keys if not ih_now.get(k)]
+            missing = [k for k in _hash_fields if not ih_now.get(k)]
             if missing:
                 st.error(f"INPUT_HASHES_MISSING: wire SSOT from Cert/Overlap; backfill disabled (missing: {', '.join(missing)})")
                 st.stop()
 
-            # carrier hooks
             HAS_U_HOOKS = ("get_carrier_mask" in globals() and "set_carrier_mask" in globals()
                            and callable(globals()["get_carrier_mask"]) and callable(globals()["set_carrier_mask"]))
             if not HAS_U_HOOKS:
@@ -3896,7 +3888,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                                                          "size_before": int(_count1(U_mask_base)), "size_after": int(_count1(U_plus))}},
                                              separators=(",", ":"))])
 
-                # Build fence JSON
+                # Build fence JSON (empty-safe identity)
                 rc_fs = _require_fresh_rc_or_session()
                 if "normalize_projector_into_run_ctx" in globals():
                     try: normalize_projector_into_run_ctx()
@@ -3904,7 +3896,6 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 policy_fs = _policy_block_from_run_ctx(rc_fs)
                 inputs_fs = _inputs_block_from_session_SAFE(strict_dims=(n2, n3))
 
-                _hash_fields = ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")
                 hobj_fs = inputs_fs.get("hashes") or {k: inputs_fs.get(k, "") for k in _hash_fields}
                 if not all(hobj_fs.get(k, "") for k in _hash_fields):
                     missing = [k for k in _hash_fields if not hobj_fs.get(k, "")]
@@ -3932,7 +3923,8 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 fence_json = {
                     "schema_version": SCHEMA_VERSION, "written_at_utc": _utc_iso_z(), "app_version": APP_VERSION, "field": FIELD,
                     "identity": {"run_id": (rc_fs.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
-                                 "district_id": rc_fs.get("district_id","D3"), "fixture_nonce": rc_fs.get("fixture_nonce","")},
+                                 "district_id": rc_fs.get("district_id",""),
+                                 "fixture_nonce": rc_fs.get("fixture_nonce","")},
                     "mode": "U", "fallback_note": "",
                     "policy": policy_fs, "inputs": inputs_fs,
                     "exemplar": {"fixture_id": rc_fs.get("fixture_nonce",""), "lane_mask_k3": inputs_fs.get("lane_mask_k3", []),
@@ -3950,7 +3942,8 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 st.download_button("Download fence_stress.json", mem, file_name=basename, key=f"dl_fs_json_{h8}")
                 st.info(f"wrote JSON ✓ · hash: {h12} · saved as {basename}")
                 st.info(f"U-mode · baseline [k2,k3]=[{int(k2_base)},{int(k3_base)}] → shrink [{int(k2_s)},{int(k3_s)}] · U⁺ [{int(k2_p)},{int(k3_p)}]")
-# ============================ /Reports: Perturbation & Fence ============================
+# ===================== /Reports: Perturbation Sanity & Fence Stress (final) =====================
+
 
 
 
