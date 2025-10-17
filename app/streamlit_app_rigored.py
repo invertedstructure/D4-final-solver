@@ -2160,168 +2160,7 @@ with safe_expander("A/B compare (strict vs active projected)", expanded=False):
         st.caption(f"A/B pin: {'present' if pin else '—'}\n\nfresh: {'🟢 yes' if fresh else '⚠️ no'}")
 # ==========================================================================================
 
-# =====================================================================================================
-# ====================== A/B Sanity Probe (shapes + sparsity) ======================
-with safe_expander("A/B sanity probe", expanded=False):
-    try:
-        rc   = st.session_state.get("run_ctx") or {}
-        d3   = rc.get("d3") or (boundaries.blocks.__root__.get("3") or [])
-        lm   = list(rc.get("lane_mask_k3") or [])
-        Hobj = st.session_state.get("overlap_H") or _load_h_local()
-        H2   = (Hobj.blocks.__root__.get("2") or []) if Hobj else []
-        C3   = (cmap.blocks.__root__.get("3") or [])
-        I3   = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
-        Pact = rc.get("P_active") or []
 
-        def _xor(A,B):
-            if not A: return [r[:] for r in (B or [])]
-            if not B: return [r[:] for r in (A or [])]
-            r,c = len(A), len(A[0])
-            return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
-
-        def _shape_ok(A,B): return bool(A and B and A[0] and B and (len(A[0]) == len(B)))
-        def _nz_cols(M):
-            if not M: return []
-            r, c = len(M), len(M[0])
-            return [j for j in range(c) if any(M[i][j] & 1 for i in range(r))]
-
-        R3s = _xor(mul(H2, d3), _xor(C3, I3)) if (_shape_ok(H2, d3) and C3 and C3[0] and len(C3)==len(C3[0])) else []
-        R3p = mul(R3s, Pact) if (R3s and Pact) else []
-
-        # What if projected(auto) used diag(lanes)?
-        Pdiag = [[1 if (i==j and (lm[j] if j < len(lm) else 0)) else 0
-                  for j in range(len(C3) if C3 else 0)]
-                 for i in range(len(C3) if C3 else 0)]
-        R3p_diag = mul(R3s, Pdiag) if (R3s and Pdiag and Pdiag[0]) else []
-
-        st.write({
-            "shapes": {
-                "H2": [len(H2), len(H2[0]) if H2 else 0],
-                "d3": [len(d3), len(d3[0]) if d3 else 0],
-                "C3": [len(C3), len(C3[0]) if C3 else 0],
-                "P_active": [len(Pact), len(Pact[0]) if Pact else 0],
-            },
-            "R3_strict_nz_cols": _nz_cols(R3s),
-            "R3_projected_nz_cols": _nz_cols(R3p),
-            "R3_projected_diagMask_nz_cols": _nz_cols(R3p_diag),
-            "eq": {
-                "strict": (not R3s) or (len(_nz_cols(R3s))==0),
-                "projected_active": (not R3p) or (len(_nz_cols(R3p))==0),
-                "projected_diagMask": (not R3p_diag) or (len(_nz_cols(R3p_diag))==0),
-            }
-        })
-    except Exception as e:
-        st.error(f"Probe failed: {e}")
-
-
-# ===================== A/B Diagnostics (compact strip) =====================
-with st.expander("A/B diagnostics", expanded=False):
-    ss = st.session_state
-    rc = ss.get("run_ctx") or {}
-    ib = ss.get("_inputs_block") or {}
-    out = ss.get("overlap_out") or {}
-    ab_pin = ss.get("ab_pin") or {}
-    mode_now = str(rc.get("mode",""))
-    k3_eq_proj = bool(((out.get("3") or {}).get("eq", False)))
-    k3_eq_strict = False  # recompute quick strict for clarity
-
-    # Use the exact H from Overlap for strict recompute
-    try:
-        H_used = ss.get("overlap_H") or io.parse_cmap({"blocks": {}})
-    except Exception:
-        H_used = io.parse_cmap({"blocks": {}})
-    d3   = rc.get("d3") or []
-    lanes = list(rc.get("lane_mask_k3") or [])
-
-    # tiny recompute (matches A/B helper)
-    def _shape_ok(A,B): return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
-    def _xor(A,B):
-        if not A: return [r[:] for r in (B or [])]
-        if not B: return [r[:] for r in (A or [])]
-        r,c = len(A), len(A[0])
-        return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
-    def _is_zero(M): return (not M) or all(all((x & 1) == 0 for x in row) for row in M)
-    try:
-        H2 = (H_used.blocks.__root__.get("2") or [])
-        C3 = (cmap.blocks.__root__.get("3") or [])
-        I3 = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
-        if _shape_ok(H2, d3) and C3 and C3[0] and (len(C3)==len(C3[0])):
-            R3s = _xor(mul(H2,d3), _xor(C3,I3))
-            k3_eq_strict = _is_zero(R3s)
-    except Exception:
-        k3_eq_strict = False
-
-    # lane-bottom vectors (helpful for expected-outcomes)
-    def _bottom_row(M): return M[-1] if (M and len(M)) else []
-    def _mask(vec, mask):
-        idx = [j for j,m in enumerate(mask or []) if m]
-        return [vec[j] for j in idx] if (vec and idx) else []
-    try:
-        H2d3 = mul(H2, d3) if _shape_ok(H2,d3) else []
-        C3pI3 = _xor(C3, I3) if (C3 and C3[0]) else []
-        lane_vec_H2d3  = _mask(_bottom_row(H2d3), lanes)
-        lane_vec_C3I3  = _mask(_bottom_row(C3pI3), lanes)
-    except Exception:
-        lane_vec_H2d3, lane_vec_C3I3 = [], []
-
-    # freshness reason (same logic your A/B uses)
-    def _inputs_sig_frozen():
-        try:
-            if "ssot_frozen_sig_from_ib" in globals() and callable(globals()["ssot_frozen_sig_from_ib"]):
-                s = ssot_frozen_sig_from_ib()
-                if s: return list(s)
-        except Exception:
-            pass
-        return [
-            str((ib.get("hashes") or {}).get("boundaries_hash", ib.get("boundaries_hash",""))),
-            str((ib.get("hashes") or {}).get("C_hash",          ib.get("C_hash",""))),
-            str((ib.get("hashes") or {}).get("H_hash",          ib.get("H_hash",""))),
-            str((ib.get("hashes") or {}).get("U_hash",          ib.get("U_hash",""))),
-            str((ib.get("hashes") or {}).get("shapes_hash",     ib.get("shapes_hash",""))),
-        ]
-    def _policy_tag_now(rc):
-        lbl = (rc or {}).get("policy_tag")
-        if lbl: return str(lbl)
-        try: return str(policy_label_from_cfg(cfg_active))
-        except Exception: pass
-        m = str((rc or {}).get("mode",""))
-        if m=="strict": return "strict"
-        if m=="projected(file)": return "projected(columns@k=3,file)"
-        if m=="projected(auto)": return "projected(columns@k=3,auto)"
-        return "projected(columns@k=3,auto)"
-    def _fresh_reason(ab_payload, rc):
-        if not ab_payload: return False, "NO_PIN"
-        if list(ab_payload.get("inputs_sig") or []) != _inputs_sig_frozen():
-            return False, "AB_STALE_INPUTS_SIG"
-        pol_now = _policy_tag_now(rc)
-        ab_pol  = str(ab_payload.get("policy_tag") or (ab_payload.get("projected") or {}).get("policy_tag",""))
-        if ab_pol != pol_now:
-            return False, "AB_STALE_POLICY"
-        if str((rc or {}).get("mode",""))=="projected(file)":
-            pj_now = str((rc or {}).get("projector_hash","") or "")
-            pj_ab  = str((ab_payload.get("projected") or {}).get("projector_hash","") or "")
-            if pj_ab != pj_now:
-                return False, "AB_STALE_PROJECTOR_HASH"
-        return True, ""
-    fresh, reason = _fresh_reason((ab_pin.get("payload") or {}), rc)
-
-    c1,c2,c3,c4 = st.columns(4)
-    with c1:
-        st.write(f"Mode: `{mode_now}`")
-        st.write(f"n3={int(rc.get('n3') or 0)} lanes={lanes}")
-    with c2:
-        st.write(f"k3 strict: {'✅' if k3_eq_strict else '❌'}")
-        st.write(f"k3 proj:   {'✅' if k3_eq_proj else '❌'}")
-    with c3:
-        st.write(f"lane_vec_H2@d3: {lane_vec_H2d3}")
-        st.write(f"lane_vec_C3+I3: {lane_vec_C3I3}")
-    with c4:
-        if ab_pin.get("state")=="pinned":
-            st.write("A/B pin: **present**")
-            st.write("fresh: " + ("🟢 yes" if fresh else f"🟠 no ({reason})"))
-        else:
-            st.write("A/B pin: —")
-# ========================================================================
 
 
 
@@ -5024,59 +4863,63 @@ def freeze_auto_projector_to_file(*, filename: str, overwrite: bool=False) -> di
 
     return {"path": pj_path.as_posix(), "projector_hash": pj_hash, "lane_mask_k3": lm[:], "n3": n3}
 
-# ---------------------------- Freezer Expander ----------------------------
+
+
+# =================== Projector Freezer (AUTO → FILE), gated by A/B projected ===================
 with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
     ss = st.session_state
     rc = dict(ss.get("run_ctx") or {})
     di = ss.get("_district_info") or {}
     district_id = di.get("district_id","UNKNOWN")
 
-    # Freshness (warn only)
+    # Pull projected eq from ab_compare payload (preferred) or pinned snapshot
+    def _proj_green_from_ab() -> bool:
+        snap = ss.get("ab_compare") or (ss.get("ab_pin") or {}).get("payload") or {}
+        proj_out = ((snap.get("projected") or {}).get("out") or {})
+        try:
+            return bool((proj_out.get("3") or {}).get("eq", False))
+        except Exception:
+            return False
+
+    # Freshness warning only (does not gate)
     is_stale = False
     try:
         if "ssot_is_stale" in globals() and callable(globals()["ssot_is_stale"]):
             is_stale = ssot_is_stale()  # type: ignore[name-defined]
     except Exception:
         pass
-    allow_stale = st.toggle("Allow writing with stale SSOT", value=False, key=_safe_key("freezer_allow_stale"))
+    allow_stale = st.toggle("Allow writing with stale SSOT", value=False, key="freezer_allow_stale_toggle")
     if is_stale and not allow_stale:
         st.warning("STALE_RUN_CTX: Inputs changed; click Run Overlap to refresh before freezing.")
 
-    # Eligibility (AUTO + sane + k3 green)
-    k3_green = bool((((ss.get("overlap_out") or {}).get("3") or {}).get("eq", False)))
+    # Eligibility: must be AUTO, sane mask, and projected k=3 is GREEN per A/B
     mode_now = str(rc.get("mode",""))
     n3       = int(rc.get("n3") or 0)
     lm       = list(rc.get("lane_mask_k3") or [])
-    elig     = (mode_now == "projected(auto)" and n3 > 0 and len(lm) == n3 and k3_green)
+    k3_green = _proj_green_from_ab()
+
+    elig = (mode_now == "projected(auto)" and n3 > 0 and len(lm) == n3 and k3_green)
 
     st.caption("Freeze current AUTO Π → file, switch to projected(file), re-run Overlap, and arm cert write.")
 
-    name         = st.text_input("Filename", value=f"projector_{district_id or 'UNKNOWN'}.json", key=_safe_key("pj_freeze_name"))
-    overwrite_ok = st.checkbox("Overwrite if exists", value=False, key=_safe_key("pj_freeze_overwrite"))
+    name = st.text_input(
+        "Filename",
+        value=f"projector_{district_id or 'UNKNOWN'}.json",
+        key="pj_freeze_name_final"
+    )
+    overwrite_ok = st.checkbox("Overwrite if exists", value=False, key="pj_freeze_overwrite_final")
 
-    # If current FILE Π is invalid, we still allow freezing from AUTO (that’s the fix).
-    fm_bad = False
-    try:
-        fm_bad = bool(ss.get("file_pi_valid") is False and mode_now == "projected(file)")
-    except Exception:
-        pass
-
+    # We do NOT gate on any FILE validation here — freezing from AUTO is the escape hatch.
     disabled = not elig
-    tip = ("Disabled: need projected(auto), valid n3/mask, and k=3 green."
-           if not elig else None)
-    if fm_bad and mode_now == "projected(file)":
-        st.info("Current FILE Π is invalid — switch/run AUTO first, then freeze from AUTO.")
+    tip = None if elig else "Enabled when A/B projected is ✅ in AUTO (and lanes/n3 are sane)."
 
-    if st.button("Freeze Π → FILE & re-run",
-                 key=_safe_key("btn_freeze_auto_to_file"),
-                 disabled=disabled,
-                 help=(tip or "Freeze AUTO to FILE and re-run")):
+    if st.button("Freeze Π → FILE & re-run", key="btn_freeze_final", disabled=disabled, help=(tip or "Freeze AUTO to FILE and re-run")):
         try:
-            info = freeze_auto_projector_to_file(filename=name, overwrite=overwrite_ok)
+            info = freeze_auto_projector_to_file(filename=name, overwrite=overwrite_ok)  # your helper
             st.success(f"Π saved → {Path(info['path']).name} · {info['projector_hash'][:12]}… and switched to FILE.")
         except Exception as e:
             st.error(f"Freeze failed: {e}")
-
+# ===============================================================================================
 
 
 
