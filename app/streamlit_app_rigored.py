@@ -2058,13 +2058,21 @@ with safe_expander("A/B compare (strict vs active projected)", expanded=False):
     rc   = dict(ss.get("run_ctx") or {})
     ib   = dict(ss.get("_inputs_block") or {})
 
-    # Header (freshness if a pin already exists)
+        # A/B header snippet (no magic write; no ternary)
     ab_pin = ss.get("ab_pin") or {}
+    rc     = ss.get("run_ctx") or {}
+    ib     = ss.get("_inputs_block") or {}
+    
     if ab_pin.get("state") == "pinned":
-        fresh, reason = _ab_is_fresh_payload(rc=rc, ib=ib, ab_payload=(ab_pin.get("payload") or {}))
-        (st.success("A/B: Pinned · Fresh (will embed)") if fresh else st.warning(f"A/B: Pinned · Stale ({reason})"))
+        ab_payload = ab_pin.get("payload") or {}
+        fresh, reason = _ab_is_fresh_payload(rc=rc, ib=ib, ab_payload=ab_payload)
+        if fresh:
+            st.success("A/B: Pinned · Fresh (will embed)")
+        else:
+            st.warning(f"A/B: Pinned · Stale ({reason})")
     else:
         st.caption("A/B: —")
+
 
     # Run compare (recompute both legs — do NOT trust overlap_out)
     if st.button("Run A/B compare", key="btn_ab_compare_main"):
