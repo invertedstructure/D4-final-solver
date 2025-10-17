@@ -4864,7 +4864,6 @@ def freeze_auto_projector_to_file(*, filename: str, overwrite: bool=False) -> di
     return {"path": pj_path.as_posix(), "projector_hash": pj_hash, "lane_mask_k3": lm[:], "n3": n3}
 
 
-
 # =================== Projector Freezer (AUTO → FILE), gated by A/B projected ===================
 with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
     ss = st.session_state
@@ -4897,29 +4896,84 @@ with st.expander("Projector Freezer (AUTO → FILE, no UI flip)"):
     n3       = int(rc.get("n3") or 0)
     lm       = list(rc.get("lane_mask_k3") or [])
     k3_green = _proj_green_from_ab()
+    elig     = (mode_now == "projected(auto)" and n3 > 0 and len(lm) == n3 and k3_green)
 
-    elig = (mode_now == "projected(auto)" and n3 > 0 and len(lm) == n3 and k3_green)
-
-    st.caption("Freeze current AUTO Π → file, switch to projected(file), re-run Overlap, and arm cert write.")
+    st.caption("Freeze current AUTO Π → file, switch engine to projected(file), re-run Overlap, and arm cert write.")
 
     name = st.text_input(
         "Filename",
         value=f"projector_{district_id or 'UNKNOWN'}.json",
-        key="pj_freeze_name_final"
+        key="pj_freeze_name_no_ui"
     )
-    overwrite_ok = st.checkbox("Overwrite if exists", value=False, key="pj_freeze_overwrite_final")
+    overwrite_ok = st.checkbox("Overwrite if exists", value=False, key="pj_freeze_overwrite_no_ui")
 
-    # We do NOT gate on any FILE validation here — freezing from AUTO is the escape hatch.
     disabled = not elig
     tip = None if elig else "Enabled when A/B projected is ✅ in AUTO (and lanes/n3 are sane)."
 
-    if st.button("Freeze Π → FILE & re-run", key="btn_freeze_final", disabled=disabled, help=(tip or "Freeze AUTO to FILE and re-run")):
+    if st.button("Freeze Π → FILE & re-run", key="btn_freeze_no_ui", disabled=disabled, help=(tip or "Freeze AUTO to FILE and re-run")):
         try:
-            info = freeze_auto_projector_to_file(filename=name, overwrite=overwrite_ok)  # your helper
-            st.success(f"Π saved → {Path(info['path']).name} · {info['projector_hash'][:12]}… and switched to FILE.")
+            # Build diagonal Π from current mask
+            n3_local = int(rc.get("n3") or 0)
+            lm_local = list(rc.get("lane_mask_k3") or [])
+            if n3_local <= 0 or len(lm_local) != n3_local:
+                raise RuntimeError("Context invalid (n3/mask mismatch). Run Overlap first.")
+
+            P_freeze = [[1 if (i == j and lm_local[j]) else 0 for j in range(n3_local)] for i in range(n3_local)]
+            # Your strict validator
+            validate_projector_file_strict(P_freeze, n3=n3_local, lane_mask=lm_local)  # noqa: F821
+
+            # Save projector atomically
+            pj_dir  = Path(ss.get("PROJECTORS_DIR", "projectors"))
+            pj_dir.mkdir(parents=True, exist_ok=True)
+            pj_path = pj_dir / name
+            if pj_path.exists() and not overwrite_ok:
+                raise RuntimeError("Projector file already exists. Enable 'Overwrite if exists' or change the filename.")
+
+            payload = {"schema_version": "1.0.0", "blocks": {"3": P_freeze}}
+            tmp = pj_path.with_suffix(pj_path.suffix + ".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(payload, f, ensure_ascii=False, indent=2)
+                f.flush(); os.fsync(f.fileno())
+            os.replace(tmp, pj_path)
+
+            pj_hash = hash_json(payload)  # your helper
+
+            # Switch ENGINE to FILE by editing cfg_active (NO widget key writes)
+            cfg_active.setdefault("source", {})["3"] = "file"
+            cfg_active.setdefault("projector_files", {})["3"] = pj_path.as_posix()
+            ss["ov_last_pj_path"] = pj_path.as_posix()
+
+            # Clear minimal overlap caches and run in FILE
+            for k in ("overlap_out","residual_tags","overlap_cfg","overlap_policy_label","overlap_policy_tag"):
+                ss.pop(k, None)
+
+            run_overlap()  # will pick up cfg_active in FILE
+
+            # Arm cert write now
+            ss["should_write_cert"] = True
+            ss.pop("_last_cert_write_key", None)
+
+            st.success(f"Π saved → {pj_path.name} · {pj_hash[:12]}… and switched engine to FILE. (UI left as-is)")
         except Exception as e:
             st.error(f"Freeze failed: {e}")
+
+    # --- Debugger: why disabled / current state ---
+    with st.expander("Freezer debugger"):
+        dbg = {
+            "mode_now": mode_now,
+            "A/B_projected_green": k3_green,
+            "n3": n3,
+            "len(lane_mask_k3)": len(lm),
+            "elig": elig,
+            "cfg_active.source.3": (cfg_active.get("source") or {}).get("3",""),
+            "cfg_active.pj_file.3": (cfg_active.get("projector_files") or {}).get("3",""),
+            "ov_policy_choice(widget)": (st.session_state.get("ov_policy_choice") if "ov_policy_choice" in st.session_state else None),
+            "ov_last_pj_path": st.session_state.get("ov_last_pj_path",""),
+        }
+        st.json(dbg)
 # ===============================================================================================
+
+
 
 
 
