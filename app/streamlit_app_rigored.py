@@ -2046,15 +2046,26 @@ with _ab_ctx:
     rc = ss.get("run_ctx") or {}
     ib = ss.get("_inputs_block") or {}
 
-    # header: pin/freshness
+    # A/B header snippet (no magic write; no ternary)
     ab_pin = ss.get("ab_pin") or {}
+    rc     = ss.get("run_ctx") or {}
+    ib     = ss.get("_inputs_block") or {}
+    
     if ab_pin.get("state") == "pinned":
         ab_payload = ab_pin.get("payload") or {}
-        # unified freshness (embed_sig vs current embed_sig)           ★
-        fresh = (ab_payload.get("embed_sig","") == _ab_embed_sig())   # ★
-        st.success("A/B: Pinned · Fresh (will embed)") if fresh else st.warning("A/B: Pinned · Stale (sig changed)")
+        # unified freshness (embed_sig vs current embed_sig)
+        try:
+            fresh = (ab_payload.get("embed_sig", "") == _ab_embed_sig())
+        except Exception:
+            fresh = False
+    
+        if fresh:
+            st.success("A/B: Pinned · Fresh (will embed)")
+        else:
+            st.warning("A/B: Pinned · Stale (different inputs/policy)")
     else:
         st.caption("A/B: —")
+
 
     if st.button("Run A/B compare", key="btn_ab_compare_final"):
         try:
