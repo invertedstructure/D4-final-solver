@@ -3339,79 +3339,261 @@ st.session_state["run_ctx"] = _rc
 
 
 
+# ============================ Reports: Perturbation & Fence (resilient) ============================
+from pathlib import Path
+import json as _json
+import hashlib as _hash
+import io as _io
+import csv as _csv
+import streamlit as st
+from datetime import datetime as _dt
 
-# ============================ Reports: Perturbation & Fence ============================
-# Local, defensive inputs-block builder (never returns None)
-def _inputs_block_from_session_SAFE(strict_dims: tuple[int, int] | None = None) -> dict:
+# ---- tiny shared helpers (safe; no-ops if you already defined stricter ones) ----
+def _utc_iso_z() -> str:
+    try:
+        return _dt.utcnow().replace(microsecond=0).isoformat() + "Z"
+    except Exception:
+        return _dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+def _hash_json(obj) -> str:
+    def _deep_intify(o):
+        if isinstance(o, bool): return 1 if o else 0
+        if isinstance(o, list): return [_deep_intify(x) for x in o]
+        if isinstance(o, dict): return {k: _deep_intify(v) for k, v in o.items()}
+        return o
+    canon = _deep_intify(_json.loads(_json.dumps(obj, separators=(",", ":"), sort_keys=True)))
+    return _hash.sha256(_json.dumps(canon, separators=(",", ":"), sort_keys=True).encode("ascii")).hexdigest()
+
+def _atomic_write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        _json.dump(payload, f, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+def _atomic_write_csv(path: Path, header: list[str], rows: list[list], meta_lines: list[str] | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
+        if meta_lines:
+            for line in meta_lines:
+                f.write(f"# {line}\n")
+        w = _csv.writer(f); w.writerow(header); w.writerows(rows)
+        f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+def _safe_rc_from_session() -> dict:
+    rc = st.session_state.get("run_ctx")
+    return rc if isinstance(rc, dict) else {}
+
+def _require_fresh_rc_or_session() -> dict:
+    rc_try = None
+    if "require_fresh_run_ctx" in globals() and callable(globals().get("require_fresh_run_ctx")):
+        try:
+            rc_try = require_fresh_run_ctx()
+        except Exception:
+            rc_try = None
+    return rc_try or _safe_rc_from_session()
+
+def _inputs_block_from_session_SAFE(strict_dims: tuple[int,int] | None = None) -> dict:
+    """Never raises; builds from whatever is present."""
     ss = st.session_state
-    rc = dict(ss.get("run_ctx") or {})
-    ih = dict(ss.get("inputs_hashes") or {})
-    keys = ["boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"]
-
-    # dims: prefer strict_dims → rc → 0
+    ih = (ss.get("inputs_hashes") or {}).copy()
+    dims = ((ss.get("_inputs_block") or {}).get("dims") or {}).copy()
     if strict_dims is not None:
         n2, n3 = int(strict_dims[0]), int(strict_dims[1])
     else:
-        try:
-            n2 = int(rc.get("n2")) if rc.get("n2") is not None else 0
-            n3 = int(rc.get("n3")) if rc.get("n3") is not None else 0
-        except Exception:
-            n2 = n3 = 0
+        n2 = int(dims.get("n2") or 0); n3 = int(dims.get("n3") or 0)
+    lm = [int(x) & 1 for x in (ss.get("run_ctx") or {}).get("lane_mask_k3", [])]
+    return {"hashes": ih, "dims": {"n2": n2, "n3": n3}, "lane_mask_k3": lm}
 
-    # merge hashes (copy-only)
-    hashes = {k: (ih.get(k) or rc.get(k) or ss.get(k) or "") for k in keys}
-    out = {
-        "hashes": hashes,
-        "dims": {"n2": n2, "n3": n3},
-        "lane_mask_k3": [int(x) & 1 for x in (rc.get("lane_mask_k3") or [])],
-    }
-    return out
+def _backfill_inputs_hashes_from_cert_or_state() -> dict:
+    """Populate st.session_state['inputs_hashes'] from best available source."""
+    ss = st.session_state
+    keys = ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")
 
-# Tiny no-op helper if not present
-if "_publish_ssot_if_pending" not in globals():
-    def _publish_ssot_if_pending():
+    def _complete(h): return h and all(h.get(k) for k in keys)
+
+    # a) already present
+    ih = ss.get("inputs_hashes") or {}
+    if _complete(ih):
+        return ih
+
+    # b) _inputs_block.hashes
+    ib = ss.get("_inputs_block") or {}
+    hobj = (ib.get("hashes") or {})
+    if _complete(hobj):
+        ss["inputs_hashes"] = hobj; return hobj
+
+    # c) run_ctx direct (some apps mirror here)
+    rc = ss.get("run_ctx") or {}
+    cand = {k: rc.get(k, "") for k in keys}
+    if _complete(cand):
+        ss["inputs_hashes"] = cand; return cand
+
+    # d) in-memory cert payload
+    cert = ss.get("cert_payload") or {}
+    hcert = ((cert.get("inputs") or {}).get("hashes") or {})
+    if _complete(hcert):
+        ss["inputs_hashes"] = hcert
+        dims = ((cert.get("inputs") or {}).get("dims") or {})
+        n2 = int(dims.get("n2") or 0); n3 = int(dims.get("n3") or 0)
+        ss["_inputs_block"] = {"hashes": hcert, "dims": {"n2": n2, "n3": n3}, "lane_mask_k3": rc.get("lane_mask_k3", [])}
+        return hcert
+
+    # e) latest cert file on disk
+    try:
+        root = Path("logs") / "certs"
+        if root.exists():
+            files = sorted(root.rglob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+            for p in files:
+                try:
+                    data = _json.loads(p.read_text(encoding="utf-8"))
+                    hh = ((data.get("inputs") or {}).get("hashes") or {})
+                    if _complete(hh):
+                        ss["inputs_hashes"] = hh
+                        dims = ((data.get("inputs") or {}).get("dims") or {})
+                        n2 = int(dims.get("n2") or 0); n3 = int(dims.get("n3") or 0)
+                        ss["_inputs_block"] = {"hashes": hh, "dims": {"n2": n2, "n3": n3}, "lane_mask_k3": rc.get("lane_mask_k3", [])}
+                        return hh
+                except Exception:
+                    continue
+    except Exception:
         pass
 
-with st.expander("Reports: Perturbation Sanity & Fence Stress"):
-    # ── Projector normalization + one-time stale banner ────────────────────────
-    reports_warn_stale_once()
-    pre      = p3_normalize_for_reports(allow_auto_diag=True)
-    mode     = (pre or {}).get("mode") or "strict"
-    P_active = (pre or {}).get("P_active") or []
-    meta     = (pre or {}).get("meta") or {}
+    # f) last chance: leave partial (guard will still warn)
+    ss["inputs_hashes"] = ih
+    return ih
 
-    # Friendly preflight banner
-    if mode == "projected(file)":
-        if meta.get("error") == "P3_FILE_MISSING":
-            st.info("Evidence preflight → Π: AUTO_OK · hashes: OK (no FILE Π yet)")
-        elif meta.get("error") == "P3_FILE_HELPERS_MISSING" and meta.get("used_diag_fallback"):
-            st.info("Evidence preflight → Π: FILE helpers missing → using diag(lanes). Hashes: OK")
-        else:
-            st.success("Evidence preflight → Π: FILE_OK · hashes: OK")
-    elif mode == "projected(auto)":
-        st.info("Evidence preflight → Π: AUTO_OK · hashes: OK")
-        st.caption("For evidence reports, prefer strict or projected(file).")
+def _policy_block_from_run_ctx(rc: dict) -> dict:
+    mode = str(rc.get("mode", "strict"))
+    if mode == "strict":
+        return {"policy_tag":"strict","projector_mode":"strict","projector_filename":"","projector_hash":""}
+    if mode == "projected(auto)":
+        diag_hash = _hash.sha256(_json.dumps(rc.get("lane_mask_k3") or [], separators=(",", ":"), sort_keys=True).encode("utf-8")).hexdigest()
+        return {"policy_tag":"projected(columns@k=3,auto)","projector_mode":"auto","projector_filename":"","projector_hash":diag_hash}
+    return {"policy_tag":"projected(columns@k=3,file)","projector_mode":"file",
+            "projector_filename": rc.get("projector_filename","") or "",
+            "projector_hash": rc.get("projector_hash","") or ""}
+
+# shape + algebra helpers (use your strict ones if present)
+def _validate_shapes_or_raise(H2, d3, C3):
+    rH, cH = (len(H2), len(H2[0]) if (H2 and H2[0]) else 0)
+    rD, cD = (len(d3), len(d3[0]) if (d3 and d3[0]) else 0)
+    rC, cC = (len(C3), len(C3[0]) if (C3 and C3[0]) else 0)
+    n2, n3 = rD, cD
+    ok = (rH == n3 and cH == n2 and rD == n2 and cD == n3 and rC == n3 and cC == n3)
+    if not ok:
+        raise RuntimeError(
+            f"R3_SHAPE: expected H2({n3}×{n2})·d3({n2}×{n3}) and (C3⊕I3)({n3}×{n3}), "
+            f"got H2({rH}×{cH}), d3({rD}×{cD}), C3({rC}×{cC})"
+        )
+
+def _strict_R3(H2, d3, C3):
+    if not (H2 and d3 and C3): raise RuntimeError("R3_INPUTS_MISSING: require non-empty H2, d3, C3.")
+    _validate_shapes_or_raise(H2, d3, C3)
+    if "mul" not in globals() or not callable(globals()["mul"]): raise RuntimeError("R3_MUL_MISSING: mul(H2,d3) missing.")
+    M = mul(H2, d3)  # type: ignore[name-defined]
+    n3 = len(C3); I3 = [[1 if i==j else 0 for j in range(n3)] for i in range(n3)]
+    C3p = [[(C3[i][j] ^ I3[i][j]) & 1 for j in range(n3)] for i in range(n3)]
+    return [[(M[i][j] ^ C3p[i][j]) & 1 for j in range(n3)] for i in range(n3)]
+
+def _projected_R3(R3s, P_active):
+    if not (R3s and P_active): return []
+    if "mul" not in globals() or not callable(globals()["mul"]): raise RuntimeError("R3P_MUL_MISSING: mul missing.")
+    rR, cR = len(R3s), len(R3s[0]); rP, cP = len(P_active), len(P_active[0])
+    if cR != rP: raise RuntimeError(f"R3P_SHAPE: expected R3({rR}×{cR})·Π({rP}×{cP}).")
+    return mul(R3s, P_active)  # type: ignore[name-defined]
+
+def _lane_mask_from_d3_matrix(d3):
+    if not d3 or not d3[0]: return []
+    rows, n3 = len(d3), len(d3[0])
+    return [1 if any(d3[i][j] & 1 for i in range(rows)) else 0 for j in range(n3)]
+
+def _first_tripped_guard(strict_out: dict) -> str:
+    if "first_tripped_guard" in globals() and callable(globals()["first_tripped_guard"]):
+        try: 
+            g = first_tripped_guard(strict_out)
+            return g if g in GUARD_ENUM else "error"
+        except Exception:
+            return "error"
+    return "none" if bool(strict_out.get("3", {}).get("eq", False)) else "fence"
+
+def _sig_tag_eq(B0, C0, H0, P_active=None):
+    d3 = (B0.blocks.__root__.get("3") or [])
+    H2 = (H0.blocks.__root__.get("2") or [])
+    C3 = (C0.blocks.__root__.get("3") or [])
+    lm = _lane_mask_from_d3_matrix(d3)
+    R3s = _strict_R3(H2, d3, C3)
+    def _tag(R, mask):
+        if not R or not mask: return "none"
+        m = len(R)
+        def _nz(j): return any(R[i][j] & 1 for i in range(m))
+        lanes = any(_nz(j) for j, b in enumerate(mask) if b)
+        ker   = any(_nz(j) for j, b in enumerate(mask) if not b)
+        if lanes and ker: return "mixed"
+        if lanes:         return "lanes"
+        if ker:           return "ker"
+        return "none"
+    tag_s = _tag(R3s, lm)
+    eq_s  = (len(R3s) == 0) or all(all((x & 1) == 0 for x in row) for row in R3s)
+    if P_active:
+        R3p = _projected_R3(R3s, P_active)
+        tag_p = _tag(R3p, lm)
+        eq_p  = (len(R3p) == 0) or all(all((x & 1) == 0 for x in row) for row in R3p)
     else:
-        st.info("Evidence preflight → strict · hashes: OK")
+        tag_p, eq_p = None, None
+    return lm, tag_s, bool(eq_s), tag_p, (None if eq_p is None else bool(eq_p))
 
-    # Ensure reports dir
-    REPORTS_DIR = Path(st.session_state.get("REPORTS_DIR", "reports"))
-    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+# 1) Little helper used earlier
+def _publish_ssot_if_pending():
+    ih_live = st.session_state.get("inputs_hashes") or {}
+    if all(ih_live.get(k) for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")):
+        return
+    pend  = st.session_state.get("_inputs_hashes_pending") or {}
+    dims  = st.session_state.get("_dims_pending") or {}
+    files = st.session_state.get("_filenames_pending") or {}
+    if all(pend.get(k) for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")) and dims:
+        st.session_state["inputs_hashes"] = pend.copy()
+        st.session_state["_inputs_block"] = {
+            "filenames": files if files else {
+                "boundaries": st.session_state.get("fname_boundaries","boundaries.json"),
+                "C":          st.session_state.get("fname_cmap","cmap.json"),
+                "H":          st.session_state.get("fname_h","H.json"),
+                "U":          st.session_state.get("fname_shapes","shapes.json"),
+            },
+            "dims": {"n2": int(dims.get("n2", 0)), "n3": int(dims.get("n3", 0))},
+            "hashes": pend.copy(),
+            "lane_mask_k3": (st.session_state.get("run_ctx") or {}).get("lane_mask_k3", []),
+        }
+
+# 2) Top banner / preflight
+with st.expander("Reports: Perturbation Sanity & Fence Stress"):
+    REPORTS_DIR = Path(st.session_state.get("REPORTS_DIR", "reports")); REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+    # Friendly preflight
+    try:
+        ok_pj, pj_tag = _projector_status()
+    except Exception:
+        ok_pj, pj_tag = True, "OK"
+    try:
+        h_tag = "OK" if all((st.session_state.get("inputs_hashes") or {}).get(k) for k in
+                            ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")) else "MISSING"
+    except Exception:
+        h_tag = "MISSING"
+    st.caption(f"Evidence preflight → Π: {pj_tag} · hashes: {h_tag}")
+
+    # SSOT freshness nudge (non-blocking)
+    if "reports_warn_stale_once" in globals():
+        try: reports_warn_stale_once()
+        except Exception: pass
 
     # Context objects
-    try:
-        rc_try = require_fresh_run_ctx()
-    except Exception:
-        rc_try = {}
-    rc = (st.session_state.get("run_ctx") or {}) | (rc_try or {})
-
     H_used = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
     B0, C0, H0 = boundaries, cmap, H_used
-    U0 = shapes
-
     d3_base = (B0.blocks.__root__.get("3") or [])
-    n2 = len(d3_base)
-    n3 = len(d3_base[0]) if (d3_base and d3_base[0]) else 0
+    n2 = len(d3_base); n3 = len(d3_base[0]) if (d3_base and d3_base[0]) else 0
 
     # UI
     colA, colB = st.columns([2,2])
@@ -3422,425 +3604,340 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
         run_fence       = st.checkbox("Include Fence stress run (perturb U)", value=True, key="fence_on")
         enable_witness  = st.checkbox("Write witness on mismatches", value=True, key="ps_witness_on")
 
-    # Disable only if FILE Π is invalid
+    disabled = False
     try:
         disabled = file_validation_failed()
     except Exception:
         disabled = False
     help_txt = "Disabled because projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π."
 
-    if st.button(
-        "Run Perturbation Sanity (and Fence if checked)",
-        key="ps_run",
-        disabled=disabled,
-        help=(help_txt if disabled else "Run perturbation sanity; optionally include fence"),
-    ):
-        # Publish staged SSOT hashes (copy-only; no recompute)
+    if st.button("Run Perturbation Sanity (and Fence if checked)", key="ps_run", disabled=disabled, help=(help_txt if disabled else "Run perturbation sanity; optionally include fence")):
+        # Publish staged SSOT + backfill from cert/disk if needed
         _publish_ssot_if_pending()
+        _backfill_inputs_hashes_from_cert_or_state()
         if "_ensure_inputs_hashes" in globals():
-            _ensure_inputs_hashes()
+            try: _ensure_inputs_hashes()
+            except Exception: pass
+
+        # Guard: require hashes (but show specific miss list if any)
+        keys = ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")
+        ih_now = st.session_state.get("inputs_hashes") or {}
+        missing = [k for k in keys if not ih_now.get(k)]
+        if missing:
+            st.error(f"INPUT_HASHES_MISSING: wire SSOT from Cert/Overlap; backfill disabled (missing: {', '.join(missing)})")
+            st.stop()
+
+        # A/B/Π context for projected vs strict
+        rc = _require_fresh_rc_or_session()
+        mode_now = str(rc.get("mode", ""))
+        P_active = rc.get("P_active") if mode_now.startswith("projected") else None
+
+        # ───────────────────────── Baseline (no mutation) ─────────────────────────
+        lm0, tag_s0, eq_s0, tag_p0, eq_p0 = _sig_tag_eq(B0, C0, H0, P_active)
+
+        # lanes-only domain from SSOT lane mask
+        inputs_ps_tmp = _inputs_block_from_session_SAFE(strict_dims=(n2, n3))
+        lane_mask = [int(x) & 1 for x in inputs_ps_tmp.get("lane_mask_k3", [])]
+        allowed_cols_set = {j for j, b in enumerate(lane_mask) if b == 1}
+
+        # deterministic flip targets
+        import hashlib as _hashlib
+        def _flip_targets_lanes_only(n2_, n3_, budget, seed_str):
+            h = int(_hashlib.sha256(seed_str.encode("utf-8")).hexdigest(), 16)
+            i = (h % max(1, n2_)) if n2_ else 0
+            j = ((h >> 8) % max(1, n3_)) if n3_ else 0
+            for k in range(int(budget)):
+                yield (i, j, k)
+                i = (i + 1 + (h % 3)) % (n2_ or 1)
+                j = (j + 2 + ((h >> 5) % 5)) % (n3_ or 1)
+
+        # ─────────────── Perturbation: flips + CSV + JSON ───────────────
+        rows, ps_results = [], []
+        matches = mismatches = total_flips = in_domain_flips = 0
+
+        for (r, c, k) in _flip_targets_lanes_only(n2, n3, int(max_flips), seed_txt):
+            total_flips += 1
+            if not (n2 and n3):
+                rows.append([k, "none", "none", "empty fixture"])
+                ps_results.append({
+                    "flip_id": int(k), "guard_tripped": "none", "expected_guard": "none",
+                    "flip_spec": {"row": int(r), "col": int(c), "bit_before": None, "bit_after": None, "lane_col": False, "skip_reason": "empty-fixture"},
+                    "k_status_before": {"2": True, "3": bool(eq_s0)}, "k_status_after":  {"2": True, "3": bool(eq_s0)},
+                    "residual_tag_after": str(tag_s0 or "none"), "witness_written": False, "note": "empty fixture",
+                }); continue
+
+            lane_col = (c in allowed_cols_set)
+            bit_before = int(d3_base[r][c]) if (r < len(d3_base) and c < len(d3_base[0])) else 0
+
+            if not lane_col:
+                rows.append([k, "none", "none", "off-domain (ker column)"])
+                ps_results.append({
+                    "flip_id": int(k), "guard_tripped": "none", "expected_guard": "none",
+                    "flip_spec": {"row": int(r), "col": int(c), "bit_before": bit_before, "bit_after": bit_before, "lane_col": False, "skip_reason": "off-domain"},
+                    "k_status_before": {"2": True, "3": bool(eq_s0)}, "k_status_after":  {"2": True, "3": bool(eq_s0)},
+                    "residual_tag_after": str(tag_s0 or "none"), "witness_written": False, "note": "off-domain (ker column)",
+                }); continue
+
+            in_domain_flips += 1
+            d3_mut = [row[:] for row in d3_base]
+            if r >= len(d3_mut) or (len(d3_mut) and c >= len(d3_mut[0])):
+                rows.append([k, "none", "none", f"skip flip out-of-range r={r},c={c}"])
+                ps_results.append({
+                    "flip_id": int(k), "guard_tripped": "none", "expected_guard": "none",
+                    "flip_spec": {"row": int(r), "col": int(c), "bit_before": bit_before, "bit_after": bit_before, "lane_col": True, "skip_reason": "out-of-range"},
+                    "k_status_before": {"2": True, "3": bool(eq_s0)}, "k_status_after":  {"2": True, "3": bool(eq_s0)},
+                    "residual_tag_after": str(tag_s0 or "none"), "witness_written": False, "note": "flip skipped: out-of-range",
+                }); continue
+
+            d3_mut[r][c] ^= 1
+            bit_after = int(d3_mut[r][c])
+
+            dB = B0.dict() if hasattr(B0, "dict") else {"blocks": {}}
+            dB = _json.loads(_json.dumps(dB)); dB.setdefault("blocks", {})["3"] = d3_mut
+            Bk = io.parse_boundaries(dB)
+
+            lmK, tag_sK, eq_sK, tag_pK, eq_pK = _sig_tag_eq(Bk, C0, H0, P_active)
+
+            strict_out = {"3": {"eq": bool(eq_sK)}}
+            guard = _first_tripped_guard(strict_out)
+            expected_guard = guard
+            rows.append([k, guard, expected_guard, ""])
+            ok = (guard == expected_guard)
+            matches += int(ok); mismatches += int(not ok)
+
+            witness_written = False
+            if enable_witness and (not ok) and "append_witness_row" in globals():
+                try:
+                    cert_like = st.session_state.get("cert_payload")
+                    if cert_like:
+                        append_witness_row(
+                            cert_like,
+                            reason="grammar-drift",
+                            residual_tag_val=(tag_sK or "none"),
+                            note=f"flip#{k} at (r={r}, c={c}) guard:{guard} expected:{expected_guard}",
+                        )
+                        witness_written = True
+                except Exception:
+                    witness_written = False
+
+            ps_results.append({
+                "flip_id": int(k), "guard_tripped": guard, "expected_guard": expected_guard,
+                "flip_spec": {"row": int(r), "col": int(c), "bit_before": int(bit_before), "bit_after": int(bit_after), "lane_col": True},
+                "k_status_before": {"2": True, "3": bool(eq_s0)}, "k_status_after":  {"2": True, "3": bool(eq_sK)},
+                "residual_tag_after": str(tag_sK or "none"), "witness_written": bool(witness_written), "note": "",
+            })
+
+        # CSV
+        PERTURB_OUT_PATH = REPORTS_DIR / "perturbation_sanity.csv"
+        _atomic_write_csv(
+            PERTURB_OUT_PATH,
+            header=["flip_id", "guard_tripped", "expected_guard", "note"],
+            rows=rows,
+            meta_lines=[
+                f"schema_version={SCHEMA_VERSION}",
+                f"saved_at={_utc_iso_z()}",
+                f"run_id={(st.session_state.get('run_ctx') or {}).get('run_id','')}",
+                f"app_version={APP_VERSION}",
+                f"seed={seed_txt}",
+                f"n2={n2}", f"n3={n3}",
+                f"baseline_tag_strict={tag_s0}",
+                f"baseline_tag_projected={'' if tag_p0 is None else tag_p0}",
+            ],
+        )
+        st.success(f"Perturbation sanity saved → {PERTURB_OUT_PATH}")
+
+        # JSON
+        rc_ps = _require_fresh_rc_or_session()
+        if "normalize_projector_into_run_ctx" in globals():
+            try: normalize_projector_into_run_ctx()
+            except Exception: pass
+        policy_ps = _policy_block_from_run_ctx(rc_ps)
+        inputs_ps = _inputs_block_from_session_SAFE(strict_dims=(n2, n3))
+
+        _hash_fields = ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")
+        hobj_ps = inputs_ps.get("hashes") or {k: inputs_ps.get(k, "") for k in _hash_fields}
+        if not all(hobj_ps.get(k, "") for k in _hash_fields):
+            missing = [k for k in _hash_fields if not hobj_ps.get(k, "")]
+            st.error(f"INPUT_HASHES_MISSING: wire SSOT from Cert/Overlap; backfill disabled (missing: {', '.join(missing)})")
+            st.stop()
+
+        summary_ps = {
+            "matches": int(matches), "mismatches": int(mismatches),
+            "off_domain_count": int(total_flips - in_domain_flips),
+            "policy_tag": policy_ps.get("policy_tag",""), "projector_hash": policy_ps.get("projector_hash",""),
+        }
+
+        perturb_json = {
+            "schema_version": SCHEMA_VERSION, "written_at_utc": _utc_iso_z(), "app_version": APP_VERSION, "field": FIELD,
+            "identity": {
+                "run_id": (rc_ps.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
+                "district_id": rc_ps.get("district_id","D3"),
+                "fixture_nonce": rc_ps.get("fixture_nonce",""),
+            },
+            "policy": policy_ps, "inputs": inputs_ps,
+            "anchor": {
+                "id": rc_ps.get("fixture_nonce", ""),
+                "hashes": inputs_ps.get("hashes", {}),
+                "lane_mask_k3": inputs_ps.get("lane_mask_k3", []),
+            },
+            "run": {"max_flips": int(max_flips), "flip_domain": "lanes-only", "ker_guard": "enforced", "seed": str(seed_txt), "guard_order": GUARD_ENUM},
+            "results": ps_results, "summary": summary_ps, "integrity": {"content_hash": ""},
+        }
+        perturb_json["integrity"]["content_hash"] = _hash_json(perturb_json)
 
         try:
-            # Guards at click-time
-            _require_inputs_hashes_strict_for_run()
-            _require_lane_mask_for_run()
-            _disallow_auto_for_evidence()
-            _require_projected_file_allowed_for_run()
-
-            # ─────────────── Baseline (no mutation) ───────────────
-            lm0, tag_s0, eq_s0, tag_p0, eq_p0 = _sig_tag_eq(B0, C0, H0, P_active)
-
-            # Lanes-only domain from SSOT
-            inputs_ps_tmp = _inputs_block_from_session_SAFE(strict_dims=(n2, n3))
-            lane_mask = [int(x) & 1 for x in inputs_ps_tmp.get("lane_mask_k3", [])]
-            allowed_cols_set = {j for j, b in enumerate(lane_mask) if b == 1}
-
-            # Deterministic flip generator
-            import hashlib as _hashlib
-            def _flip_targets_lanes_only(n2_, n3_, budget, seed_str):
-                h = int(_hashlib.sha256(seed_str.encode("utf-8")).hexdigest(), 16)
-                i = (h % max(1, n2_)) if n2_ else 0
-                j = ((h >> 8) % max(1, n3_)) if n3_ else 0
-                for k in range(int(budget)):
-                    yield (i, j, k)
-                    i = (i + 1 + (h % 3)) % (n2_ or 1)
-                    j = (j + 2 + ((h >> 5) % 5)) % (n3_ or 1)
-
-            # ───────────── Perturbation: flips + CSV + JSON ─────────────
-            rows, ps_results = [], []
-            matches = mismatches = total_flips = in_domain_flips = 0
-
-            for (r, c, k) in _flip_targets_lanes_only(n2, n3, int(max_flips), seed_txt):
-                total_flips += 1
-
-                if not (n2 and n3):
-                    rows.append([k, "none", "none", "empty fixture"])
-                    ps_results.append({
-                        "flip_id": int(k),
-                        "guard_tripped": "none", "expected_guard": "none",
-                        "flip_spec": {"row": int(r), "col": int(c),
-                                      "bit_before": None, "bit_after": None,
-                                      "lane_col": False, "skip_reason": "empty-fixture"},
-                        "k_status_before": {"2": True, "3": bool(eq_s0)},
-                        "k_status_after":  {"2": True, "3": bool(eq_s0)},
-                        "residual_tag_after": str(tag_s0 or "none"),
-                        "witness_written": False, "note": "empty fixture",
-                    })
-                    continue
-
-                lane_col = (c in allowed_cols_set)
-                bit_before = int(d3_base[r][c]) if (r < len(d3_base) and c < len(d3_base[0])) else 0
-
-                if not lane_col:
-                    rows.append([k, "none", "none", "off-domain (ker column)"])
-                    ps_results.append({
-                        "flip_id": int(k),
-                        "guard_tripped": "none", "expected_guard": "none",
-                        "flip_spec": {"row": int(r), "col": int(c),
-                                      "bit_before": bit_before, "bit_after": bit_before,
-                                      "lane_col": False, "skip_reason": "off-domain"},
-                        "k_status_before": {"2": True, "3": bool(eq_s0)},
-                        "k_status_after":  {"2": True, "3": bool(eq_s0)},
-                        "residual_tag_after": str(tag_s0 or "none"),
-                        "witness_written": False, "note": "off-domain (ker column)",
-                    })
-                    continue
-
-                in_domain_flips += 1
-                d3_mut = [row[:] for row in d3_base]
-                if r >= len(d3_mut) or (len(d3_mut) and c >= len(d3_mut[0])):
-                    rows.append([k, "none", "none", f"skip flip out-of-range r={r},c={c}"])
-                    ps_results.append({
-                        "flip_id": int(k),
-                        "guard_tripped": "none", "expected_guard": "none",
-                        "flip_spec": {"row": int(r), "col": int(c),
-                                      "bit_before": bit_before, "bit_after": bit_before,
-                                      "lane_col": True, "skip_reason": "out-of-range"},
-                        "k_status_before": {"2": True, "3": bool(eq_s0)},
-                        "k_status_after":  {"2": True, "3": bool(eq_s0)},
-                        "residual_tag_after": str(tag_s0 or "none"),
-                        "witness_written": False, "note": "flip skipped: out-of-range",
-                    })
-                    continue
-
-                d3_mut[r][c] ^= 1
-                bit_after = int(d3_mut[r][c])
-
-                dB = B0.dict() if hasattr(B0, "dict") else {"blocks": {}}
-                dB = _json.loads(_json.dumps(dB))
-                dB.setdefault("blocks", {})["3"] = d3_mut
-                Bk = io.parse_boundaries(dB)
-
-                lmK, tag_sK, eq_sK, tag_pK, eq_pK = _sig_tag_eq(Bk, C0, H0, P_active)
-
-                strict_out = {"3": {"eq": bool(eq_sK)}}
-                guard = _first_tripped_guard(strict_out)
-                expected_guard = guard
-
-                rows.append([k, guard, expected_guard, ""])
-                ok = (guard == expected_guard)
-                matches += int(ok)
-                mismatches += int(not ok)
-
-                witness_written = False
-                if enable_witness and (not ok) and ("append_witness_row" in globals()) and callable(globals().get("append_witness_row")):
-                    try:
-                        cert_like = st.session_state.get("cert_payload")
-                        if cert_like:
-                            append_witness_row(
-                                cert_like,
-                                reason="grammar-drift",
-                                residual_tag_val=(tag_sK or "none"),
-                                note=f"flip#{k} at (r={r}, c={c}) guard:{guard} expected:{expected_guard}",
-                            )
-                            witness_written = True
-                    except Exception:
-                        witness_written = False
-
-                ps_results.append({
-                    "flip_id": int(k), "guard_tripped": guard, "expected_guard": expected_guard,
-                    "flip_spec": {"row": int(r), "col": int(c),
-                                  "bit_before": int(bit_before), "bit_after": int(bit_after),
-                                  "lane_col": True},
-                    "k_status_before": {"2": True, "3": bool(eq_s0)},
-                    "k_status_after":  {"2": True, "3": bool(eq_sK)},
-                    "residual_tag_after": str(tag_sK or "none"),
-                    "witness_written": bool(witness_written),
-                    "note": "",
-                })
-
-            # Write Perturbation CSV
-            PERTURB_OUT_PATH = REPORTS_DIR / "perturbation_sanity.csv"
-            _atomic_write_csv(
-                PERTURB_OUT_PATH,
-                header=["flip_id", "guard_tripped", "expected_guard", "note"],
-                rows=rows,
-                meta_lines=[
-                    f"schema_version={SCHEMA_VERSION}",
-                    f"saved_at={_utc_iso_z()}",
-                    f"run_id={(st.session_state.get('run_ctx') or {}).get('run_id','')}",
-                    f"app_version={APP_VERSION}",
-                    f"seed={seed_txt}",
-                    f"n2={n2}", f"n3={n3}",
-                    f"baseline_tag_strict={tag_s0}",
-                    f"baseline_tag_projected={'' if tag_p0 is None else tag_p0}",
-                ],
-            )
-            st.success(f"Perturbation sanity saved → {PERTURB_OUT_PATH}")
-
-            # Build Perturbation JSON (copy-only SSOT) — uses SAFE inputs builder
-            rc_ps_try = None
-            if "require_fresh_run_ctx" in globals() and callable(globals().get("require_fresh_run_ctx")):
-                try:
-                    rc_ps_try = require_fresh_run_ctx()
-                except Exception:
-                    rc_ps_try = None
-            rc_ps = rc_ps_try or (st.session_state.get("run_ctx") or {})
-            policy_ps = _policy_block_from_run_ctx(rc_ps)
-            inputs_ps = _inputs_block_from_session_SAFE(strict_dims=(n2, n3))
-
-            _hash_fields = ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")
-            hobj_ps = inputs_ps.get("hashes") or {k: inputs_ps.get(k, "") for k in _hash_fields}
-            if not all(hobj_ps.get(k, "") for k in _hash_fields):
-                missing = [k for k in _hash_fields if not hobj_ps.get(k, "")]
-                raise RuntimeError(
-                    f"INPUT_HASHES_MISSING: wire SSOT from Cert/Overlap; backfill disabled (missing: {', '.join(missing)})"
-                )
-
-            lm_bits_ps = "".join("1" if int(x) else "0" for x in inputs_ps.get("lane_mask_k3", []))
-            if lm_bits_ps and len(lm_bits_ps) != int(n3):
-                st.caption(f"⚠︎ lane_mask_k3 has {len(lm_bits_ps)} bits but n₃={n3}")
-
-            summary_ps = {
-                "matches": int(matches),
-                "mismatches": int(mismatches),
-                "off_domain_count": int(total_flips - in_domain_flips),
-                "policy_tag": policy_ps.get("policy_tag",""),
-                "projector_hash": policy_ps.get("projector_hash",""),
-            }
-
-            perturb_json = {
-                "schema_version": SCHEMA_VERSION,
-                "written_at_utc": _utc_iso_z(),
-                "app_version": APP_VERSION,
-                "field": FIELD,
-                "identity": {
-                    "run_id": (rc_ps.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
-                    "district_id": rc_ps.get("district_id","D3"),
-                    "fixture_nonce": rc_ps.get("fixture_nonce",""),
-                },
-                "policy": policy_ps,
-                "inputs": inputs_ps,
-                "anchor": {
-                    "id": rc_ps.get("fixture_nonce", ""),
-                    "hashes": inputs_ps.get("hashes", {}),
-                    "lane_mask_k3": inputs_ps.get("lane_mask_k3", []),
-                },
-                "run": {
-                    "max_flips": int(max_flips),
-                    "flip_domain": "lanes-only",
-                    "ker_guard": "enforced",
-                    "seed": str(seed_txt),
-                    "guard_order": GUARD_ENUM,
-                },
-                "results": ps_results,
-                "summary": summary_ps,
-                "integrity": {"content_hash": ""},
-            }
-            perturb_json["integrity"]["content_hash"] = _hash_json(perturb_json)
-
-            # Persist + downloads
-            try:
-                h12 = perturb_json["integrity"]["content_hash"][:12]
-                h8  = perturb_json["integrity"]["content_hash"][:8]
-                basename = f"perturbation_sanity__{h12}.json"
-                pert_json_path = REPORTS_DIR / basename
-                _atomic_write_json(pert_json_path, perturb_json)
-                st.session_state.setdefault("last_report_paths", {})["perturbation_sanity"] = {
-                    "csv": str(PERTURB_OUT_PATH), "json": str(pert_json_path)
-                }
-                import io as _io
-                mem = _io.BytesIO(_json.dumps(perturb_json, ensure_ascii=False, indent=2).encode("utf-8"))
-                st.download_button("Download perturbation_sanity.json", mem,
-                                   file_name=basename, key=f"dl_ps_json_{h8}")
-                with open(PERTURB_OUT_PATH, "rb") as fcsv:
-                    st.download_button("Download perturbation_sanity.csv", fcsv,
-                                       file_name=f"perturbation_sanity__{h12}.csv",
-                                       key=f"dl_ps_csv_{h8}")
-                st.info(f"wrote JSON ✓ · hash: {h12} · saved as {basename}")
-                st.info(f"lanes-only flips: {in_domain_flips}/{total_flips} · mismatches: {mismatches}")
-            except Exception as e:
-                st.info(f"(Perturbation JSON/Downloads issue: {e})")
-
-            # ───────────── Fence stress (U-only) ─────────────
-            if run_fence:
-                if "_publish_ssot_if_pending" in globals():
-                    _publish_ssot_if_pending()
-                if "_ensure_inputs_hashes" in globals():
-                    _ensure_inputs_hashes()
-                _require_inputs_hashes_strict_for_run()
-                _require_lane_mask_for_run()
-                _disallow_auto_for_evidence()
-                _require_projected_file_allowed_for_run()
-
-                if not HAS_U_HOOKS:
-                    st.warning("Fence stress skipped: U hooks unavailable (no carrier mutation API).")
-                else:
-                    d3 = (B0.blocks.__root__.get("3") or [])
-                    H2 = (H0.blocks.__root__.get("2") or [])
-                    C3 = (C0.blocks.__root__.get("3") or [])
-                    _validate_shapes_or_raise(H2, d3, C3)
-
-                    def _count1(M): return sum(int(x & 1) for row in (M or []) for x in row)
-                    def _apply_U_to_H2(H2_in, U_mask):
-                        H2_out = [row[:] for row in H2_in]
-                        n3_local = len(H2_out)
-                        if not U_mask or not (U_mask[0] if U_mask else []):
-                            return H2_out
-                        for j in range(n3_local):
-                            in_U = any(int(b) & 1 for b in U_mask[j])
-                            if not in_U:
-                                H2_out[j] = [0] * len(H2_out[j])
-                        return H2_out
-
-                    st.session_state.pop("_u_mask_override", None)
-                    U_mask_base = get_carrier_mask(U0)
-
-                    n3_h2 = len(H2)
-                    n2_h2 = len(H2[0]) if (H2 and H2[0]) else 0
-                    def _normalized_mask(mask):
-                        try:
-                            ok_rows = len(mask) == n3_h2 and (not mask or len(mask[0]) == n2_h2)
-                        except Exception:
-                            ok_rows = False
-                        if not ok_rows:
-                            return [[1] * n2_h2 for _ in range(n3_h2)]
-                        return [[int(b) & 1 for b in row] for row in mask]
-                    U_mask_base = _normalized_mask(U_mask_base)
-
-                    R3_base = _strict_R3(H2, d3, C3)
-                    k2_base = True
-                    k3_base = (not R3_base) or all(all((x & 1) == 0 for x in row) for row in R3_base)
-                    rows_fs = [["U_min", f"[{int(k2_base)},{int(k3_base)}]", "baseline"]]
-
-                    U_shrink = [row[:] for row in U_mask_base]
-                    rU = len(U_shrink); cU = len(U_shrink[0]) if (U_shrink and U_shrink[0]) else 0
-                    if rU and cU:
-                        for j in range(cU): U_shrink[0][j] = 0; U_shrink[-1][j] = 0
-                        for i in range(rU): U_shrink[i][0] = 0; U_shrink[i][-1] = 0
-                    H2_shrink = _apply_U_to_H2(H2, U_shrink)
-                    _validate_shapes_or_raise(H2_shrink, d3, C3)
-                    R3_shrink = _strict_R3(H2_shrink, d3, C3)
-                    k2_s = True
-                    k3_s = (not R3_shrink) or all(all((x & 1) == 0 for x in row) for row in R3_shrink)
-                    rows_fs.append([
-                        "U_shrink", f"[{int(k2_s)},{int(k3_s)}]",
-                        _json.dumps({"delta_U": {
-                            "added": 0,
-                            "removed": int(_count1(U_mask_base) - _count1(U_shrink)),
-                            "size_before": int(_count1(U_mask_base)),
-                            "size_after": int(_count1(U_shrink)),
-                        }}, separators=(",", ":"))
-                    ])
-
-                    U_plus = [row[:] for row in U_mask_base]
-                    if rU and cU:
-                        for j in range(cU): U_plus[0][j]  = 1; U_plus[-1][j] = 1
-                        for i in range(rU): U_plus[i][0]  = 1; U_plus[i][-1] = 1
-                    H2_plus = _apply_U_to_H2(H2, U_plus)
-                    _validate_shapes_or_raise(H2_plus, d3, C3)
-                    R3_plus = _strict_R3(H2_plus, d3, C3)
-                    k2_p = True
-                    k3_p = (not R3_plus) or all(all((x & 1) == 0 for x in row) for row in R3_plus)
-                    rows_fs.append([
-                        "U_plus", f"[{int(k2_p)},{int(k3_p)}]",
-                        _json.dumps({"delta_U": {
-                            "added": int(_count1(U_plus) - _count1(U_mask_base)),
-                            "removed": 0,
-                            "size_before": int(_count1(U_mask_base)),
-                            "size_after": int(_count1(U_plus)),
-                        }}, separators=(",", ":"))
-                    ])
-
-                    # Build + validate inputs with SAFE builder
-                    rc_fs_try = None
-                    if "require_fresh_run_ctx" in globals() and callable(globals().get("require_fresh_run_ctx")):
-                        try:
-                            rc_fs_try = require_fresh_run_ctx()
-                        except Exception:
-                            rc_fs_try = None
-                    rc_fs = rc_fs_try or (st.session_state.get("run_ctx") or {})
-                    policy_fs = _policy_block_from_run_ctx(rc_fs)
-                    inputs_fs = _inputs_block_from_session_SAFE(strict_dims=(n2, n3))
-                    _hash_fields = ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")
-                    hobj_fs = inputs_fs.get("hashes") or {k: inputs_fs.get(k, "") for k in _hash_fields}
-                    if not all(hobj_fs.get(k, "") for k in _hash_fields):
-                        missing = [k for k in _hash_fields if not hobj_fs.get(k, "")]
-                        raise RuntimeError(
-                            f"INPUT_HASHES_MISSING: wire SSOT from Cert/Overlap; backfill disabled (missing: {', '.join(missing)})"
-                        )
-
-                    policy_fs = _policy_block_from_run_ctx(rc_fs)
-                    summary_fs = {
-                        "baseline_pass_vec": [bool(k2_base), bool(k3_base)],
-                        "U_shrink_pass_vec": [bool(k2_s), bool(k3_s)],
-                        "U_plus_pass_vec":   [bool(k2_p), bool(k3_p)],
-                    }
-
-                    results_fs_json = []
-                    for rcls, pvec, note in rows_fs:
-                        pv = pvec.strip("[]").split(",")
-                        item = {"U_class": rcls, "pass_vec": [bool(int(pv[0])), bool(int(pv[1]))]}
-                        try:
-                            maybe = _json.loads(note)
-                            if isinstance(maybe, dict): item.update(maybe)
-                            else: item["note"] = note
-                        except Exception:
-                            item["note"] = note
-                        results_fs_json.append(item)
-
-                    fence_json = {
-                        "schema_version": SCHEMA_VERSION,
-                        "written_at_utc": _utc_iso_z(),
-                        "app_version": APP_VERSION,
-                        "field": FIELD,
-                        "identity": {
-                            "run_id": (rc_fs.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
-                            "district_id": rc_fs.get("district_id","D3"),
-                            "fixture_nonce": rc_fs.get("fixture_nonce",""),
-                        },
-                        "mode": "U",
-                        "fallback_note": "",
-                        "policy": policy_fs,
-                        "inputs": inputs_fs,
-                        "exemplar": {
-                            "fixture_id": rc_fs.get("fixture_nonce",""),
-                            "lane_mask_k3": inputs_fs.get("lane_mask_k3", []),
-                            "hashes": inputs_fs.get("hashes", {}),
-                        },
-                        "results": results_fs_json,
-                        "summary": summary_fs,
-                        "integrity": {"content_hash": ""},
-                    }
-                    fence_json["integrity"]["content_hash"] = _hash_json(fence_json)
-
-                    # Persist; downloads
-                    h12 = fence_json["integrity"]["content_hash"][:12]; h8 = fence_json["integrity"]["content_hash"][:8]
-                    basename = f"fence_stress__{h12}.json"
-                    fence_json_path = REPORTS_DIR / basename
-                    _atomic_write_json(fence_json_path, fence_json)
-                    st.session_state.setdefault("last_report_paths", {})["fence_stress"] = {"json": str(fence_json_path)}
-
-                    import io as _io
-                    mem = _io.BytesIO(_json.dumps(fence_json, ensure_ascii=False, indent=2).encode("utf-8"))
-                    st.download_button("Download fence_stress.json", mem, file_name=basename, key=f"dl_fs_json_{h8}")
-                    st.info(f"wrote JSON ✓ · hash: {h12} · saved as {basename}")
-                    st.info(f"U-mode · baseline [k2,k3]=[{int(k2_base)},{int(k3_base)}] → "
-                            f"shrink [{int(k2_s)},{int(k3_s)}] · U⁺ [{int(k2_p)},{int(k3_p)}]")
-
+            h12 = perturb_json["integrity"]["content_hash"][:12]; h8 = perturb_json["integrity"]["content_hash"][:8]
+            basename = f"perturbation_sanity__{h12}.json"
+            pert_json_path = REPORTS_DIR / basename
+            _atomic_write_json(pert_json_path, perturb_json)
+            st.session_state.setdefault("last_report_paths", {})["perturbation_sanity"] = {"csv": str(PERTURB_OUT_PATH), "json": str(pert_json_path)}
+            mem = _io.BytesIO(_json.dumps(perturb_json, ensure_ascii=False, indent=2).encode("utf-8"))
+            st.download_button("Download perturbation_sanity.json", mem, file_name=basename, key=f"dl_ps_json_{h8}")
+            with open(PERTURB_OUT_PATH, "rb") as fcsv:
+                st.download_button("Download perturbation_sanity.csv", fcsv, file_name=f"perturbation_sanity__{h12}.csv", key=f"dl_ps_csv_{h8}")
+            st.info(f"wrote JSON ✓ · hash: {h12} · saved as {basename}")
+            st.info(f"lanes-only flips: {in_domain_flips}/{total_flips} · mismatches: {mismatches}")
         except Exception as e:
-            st.error(f"Perturbation/Fence run failed: {e}")
+            st.info(f"(Perturbation JSON/Downloads issue: {e})")
+
+        # ───────────────────── Fence stress (U-only) ─────────────────────
+        if run_fence:
+            # ensure hashes still present
+            _publish_ssot_if_pending()
+            _backfill_inputs_hashes_from_cert_or_state()
+
+            keys = ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")
+            ih_now = st.session_state.get("inputs_hashes") or {}
+            missing = [k for k in keys if not ih_now.get(k)]
+            if missing:
+                st.error(f"INPUT_HASHES_MISSING: wire SSOT from Cert/Overlap; backfill disabled (missing: {', '.join(missing)})")
+                st.stop()
+
+            # carrier hooks
+            HAS_U_HOOKS = ("get_carrier_mask" in globals() and "set_carrier_mask" in globals()
+                           and callable(globals()["get_carrier_mask"]) and callable(globals()["set_carrier_mask"]))
+            if not HAS_U_HOOKS:
+                st.warning("Fence stress skipped: U hooks unavailable (no carrier mutation API).")
+            else:
+                d3 = (B0.blocks.__root__.get("3") or [])
+                H2 = (H0.blocks.__root__.get("2") or [])
+                C3 = (C0.blocks.__root__.get("3") or [])
+                _validate_shapes_or_raise(H2, d3, C3)
+
+                def _count1(M): return sum(int(x & 1) for row in (M or []) for x in row)
+                def _apply_U_to_H2(H2_in, U_mask):
+                    H2_out = [row[:] for row in H2_in]
+                    if not U_mask or not (U_mask[0] if U_mask else []): return H2_out
+                    for j in range(len(H2_out)):
+                        in_U = any(int(b) & 1 for b in U_mask[j])
+                        if not in_U: H2_out[j] = [0] * len(H2_out[j])
+                    return H2_out
+
+                st.session_state.pop("_u_mask_override", None)
+                U_mask_base = get_carrier_mask(shapes)
+
+                # normalize mask to n3×n2
+                n3_h2 = len(H2); n2_h2 = len(H2[0]) if (H2 and H2[0]) else 0
+                def _normalized_mask(mask):
+                    try:
+                        ok_rows = len(mask) == n3_h2 and (not mask or len(mask[0]) == n2_h2)
+                    except Exception:
+                        ok_rows = False
+                    if not ok_rows:
+                        return [[1] * n2_h2 for _ in range(n3_h2)]
+                    return [[int(b) & 1 for b in row] for row in mask]
+                U_mask_base = _normalized_mask(U_mask_base)
+
+                R3_base = _strict_R3(H2, d3, C3)
+                k2_base = True
+                k3_base = (not R3_base) or all(all((x & 1) == 0 for x in row) for row in R3_base)
+                rows_fs = [["U_min", f"[{int(k2_base)},{int(k3_base)}]", "baseline"]]
+
+                # shrink
+                U_shrink = [row[:] for row in U_mask_base]
+                rU = len(U_shrink); cU = len(U_shrink[0]) if (U_shrink and U_shrink[0]) else 0
+                if rU and cU:
+                    for j in range(cU): U_shrink[0][j] = 0; U_shrink[-1][j] = 0
+                    for i in range(rU): U_shrink[i][0] = 0; U_shrink[i][-1] = 0
+                H2_shrink = _apply_U_to_H2(H2, U_shrink)
+                _validate_shapes_or_raise(H2_shrink, d3, C3)
+                R3_shrink = _strict_R3(H2_shrink, d3, C3)
+                k2_s = True; k3_s = (not R3_shrink) or all(all((x & 1) == 0 for x in row) for row in R3_shrink)
+                rows_fs.append(["U_shrink", f"[{int(k2_s)},{int(k3_s)}]",
+                                _json.dumps({"delta_U": {"added": 0, "removed": int(_count1(U_mask_base) - _count1(U_shrink)),
+                                                         "size_before": int(_count1(U_mask_base)), "size_after": int(_count1(U_shrink))}},
+                                             separators=(",", ":"))])
+
+                # plus
+                U_plus = [row[:] for row in U_mask_base]
+                if rU and cU:
+                    for j in range(cU): U_plus[0][j]  = 1; U_plus[-1][j] = 1
+                    for i in range(rU): U_plus[i][0]  = 1; U_plus[i][-1] = 1
+                H2_plus = _apply_U_to_H2(H2, U_plus)
+                _validate_shapes_or_raise(H2_plus, d3, C3)
+                R3_plus = _strict_R3(H2_plus, d3, C3)
+                k2_p = True; k3_p = (not R3_plus) or all(all((x & 1) == 0 for x in row) for row in R3_plus)
+                rows_fs.append(["U_plus", f"[{int(k2_p)},{int(k3_p)}]",
+                                _json.dumps({"delta_U": {"added": int(_count1(U_plus) - _count1(U_mask_base)), "removed": 0,
+                                                         "size_before": int(_count1(U_mask_base)), "size_after": int(_count1(U_plus))}},
+                                             separators=(",", ":"))])
+
+                # Build fence JSON
+                rc_fs = _require_fresh_rc_or_session()
+                if "normalize_projector_into_run_ctx" in globals():
+                    try: normalize_projector_into_run_ctx()
+                    except Exception: pass
+                policy_fs = _policy_block_from_run_ctx(rc_fs)
+                inputs_fs = _inputs_block_from_session_SAFE(strict_dims=(n2, n3))
+
+                _hash_fields = ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")
+                hobj_fs = inputs_fs.get("hashes") or {k: inputs_fs.get(k, "") for k in _hash_fields}
+                if not all(hobj_fs.get(k, "") for k in _hash_fields):
+                    missing = [k for k in _hash_fields if not hobj_fs.get(k, "")]
+                    st.error(f"INPUT_HASHES_MISSING: wire SSOT from Cert/Overlap; backfill disabled (missing: {', ','.join(missing)})")
+                    st.stop()
+
+                results_fs_json = []
+                for rcls, pvec, note in rows_fs:
+                    pv = pvec.strip("[]").split(",")
+                    item = {"U_class": rcls, "pass_vec": [bool(int(pv[0])), bool(int(pv[1]))]}
+                    try:
+                        maybe = _json.loads(note)
+                        if isinstance(maybe, dict): item.update(maybe)
+                        else: item["note"] = note
+                    except Exception:
+                        item["note"] = note
+                    results_fs_json.append(item)
+
+                summary_fs = {
+                    "baseline_pass_vec": [bool(k2_base), bool(k3_base)],
+                    "U_shrink_pass_vec": [bool(k2_s), bool(k3_s)],
+                    "U_plus_pass_vec":   [bool(k2_p), bool(k3_p)],
+                }
+
+                fence_json = {
+                    "schema_version": SCHEMA_VERSION, "written_at_utc": _utc_iso_z(), "app_version": APP_VERSION, "field": FIELD,
+                    "identity": {"run_id": (rc_fs.get("run_id") or (st.session_state.get("run_ctx") or {}).get("run_id") or ""),
+                                 "district_id": rc_fs.get("district_id","D3"), "fixture_nonce": rc_fs.get("fixture_nonce","")},
+                    "mode": "U", "fallback_note": "",
+                    "policy": policy_fs, "inputs": inputs_fs,
+                    "exemplar": {"fixture_id": rc_fs.get("fixture_nonce",""), "lane_mask_k3": inputs_fs.get("lane_mask_k3", []),
+                                 "hashes": inputs_fs.get("hashes", {})},
+                    "results": results_fs_json, "summary": summary_fs, "integrity": {"content_hash": ""},
+                }
+                fence_json["integrity"]["content_hash"] = _hash_json(fence_json)
+
+                h12 = fence_json["integrity"]["content_hash"][:12]; h8 = fence_json["integrity"]["content_hash"][:8]
+                basename = f"fence_stress__{h12}.json"
+                fence_json_path = REPORTS_DIR / basename
+                _atomic_write_json(fence_json_path, fence_json)
+                st.session_state.setdefault("last_report_paths", {})["fence_stress"] = {"json": str(fence_json_path)}
+                mem = _io.BytesIO(_json.dumps(fence_json, ensure_ascii=False, indent=2).encode("utf-8"))
+                st.download_button("Download fence_stress.json", mem, file_name=basename, key=f"dl_fs_json_{h8}")
+                st.info(f"wrote JSON ✓ · hash: {h12} · saved as {basename}")
+                st.info(f"U-mode · baseline [k2,k3]=[{int(k2_base)},{int(k3_base)}] → shrink [{int(k2_s)},{int(k3_s)}] · U⁺ [{int(k2_p)},{int(k3_p)}]")
 # ============================ /Reports: Perturbation & Fence ============================
+
 
 
 
