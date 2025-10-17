@@ -3894,7 +3894,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 hobj_fs = inputs_fs.get("hashes") or {k: inputs_fs.get(k, "") for k in _hash_fields}
                 if not all(hobj_fs.get(k, "") for k in _hash_fields):
                     missing = [k for k in _hash_fields if not hobj_fs.get(k, "")]
-                    st.error(f"INPUT_HASHES_MISSING: wire SSOT from Cert/Overlap; backfill disabled (missing: {', ','.join(missing)})")
+                    st.error(f"INPUT_HASHES_MISSING: wire SSOT from Cert/Overlap; backfill disabled (missing: {', '.join(missing)})")
                     st.stop()
 
                 results_fs_json = []
