@@ -3589,10 +3589,13 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
             st.success(f"Perturbation sanity saved → {PERTURB_OUT_PATH}")
 
             # Build Perturbation JSON (copy-only SSOT) — uses SAFE inputs builder
-            try:
-                rc_ps = require_fresh_run_ctx()
-            except Exception:
-                rc_ps = st.session_state.get("run_ctx") or {}
+            rc_ps_try = None
+            if "require_fresh_run_ctx" in globals() and callable(globals().get("require_fresh_run_ctx")):
+                try:
+                    rc_ps_try = require_fresh_run_ctx()
+                except Exception:
+                    rc_ps_try = None
+            rc_ps = rc_ps_try or (st.session_state.get("run_ctx") or {})
             policy_ps = _policy_block_from_run_ctx(rc_ps)
             inputs_ps = _inputs_block_from_session_SAFE(strict_dims=(n2, n3))
 
@@ -3760,10 +3763,14 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     ])
 
                     # Build + validate inputs with SAFE builder
-                    try:
-                        rc_fs = require_fresh_run_ctx()
-                    except Exception:
-                        rc_fs = st.session_state.get("run_ctx") or {}
+                    rc_fs_try = None
+                    if "require_fresh_run_ctx" in globals() and callable(globals().get("require_fresh_run_ctx")):
+                        try:
+                            rc_fs_try = require_fresh_run_ctx()
+                        except Exception:
+                            rc_fs_try = None
+                    rc_fs = rc_fs_try or (st.session_state.get("run_ctx") or {})
+                    policy_fs = _policy_block_from_run_ctx(rc_fs)
                     inputs_fs = _inputs_block_from_session_SAFE(strict_dims=(n2, n3))
                     _hash_fields = ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")
                     hobj_fs = inputs_fs.get("hashes") or {k: inputs_fs.get(k, "") for k in _hash_fields}
