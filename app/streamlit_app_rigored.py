@@ -1583,7 +1583,16 @@ def run_overlap():
     st.session_state["write_armed"]     = True
     st.session_state["armed_by"]        = "overlap_run"
 # -------------------------------- end run_overlap --------------------------------
+# ---- Single canonical button (minimal) ----
+_key_run = _mkkey("core", "run_overlap") if "_mkkey" in globals() else "btn_run_overlap"
 
+if st.button("Run Overlap", key=_key_run):
+    try:
+        with st.spinner("Running Overlap…"):
+            run_overlap()
+        st.success("Overlap completed.")
+    except Exception as e:
+        st.exception(e)
 
 # ---- inputs completeness (define before using in debugger) ----
 _h = (st.session_state.get("_inputs_block") or {}).get("hashes") or {}
