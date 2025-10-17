@@ -3339,22 +3339,48 @@ st.session_state["run_ctx"] = _rc
 
 
 
+
 # ============================ Reports: Perturbation & Fence ============================
+# Local, defensive inputs-block builder (never returns None)
+def _inputs_block_from_session_SAFE(strict_dims: tuple[int, int] | None = None) -> dict:
+    ss = st.session_state
+    rc = dict(ss.get("run_ctx") or {})
+    ih = dict(ss.get("inputs_hashes") or {})
+    keys = ["boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"]
+
+    # dims: prefer strict_dims → rc → 0
+    if strict_dims is not None:
+        n2, n3 = int(strict_dims[0]), int(strict_dims[1])
+    else:
+        try:
+            n2 = int(rc.get("n2")) if rc.get("n2") is not None else 0
+            n3 = int(rc.get("n3")) if rc.get("n3") is not None else 0
+        except Exception:
+            n2 = n3 = 0
+
+    # merge hashes (copy-only)
+    hashes = {k: (ih.get(k) or rc.get(k) or ss.get(k) or "") for k in keys}
+    out = {
+        "hashes": hashes,
+        "dims": {"n2": n2, "n3": n3},
+        "lane_mask_k3": [int(x) & 1 for x in (rc.get("lane_mask_k3") or [])],
+    }
+    return out
+
 # Tiny no-op helper if not present
 if "_publish_ssot_if_pending" not in globals():
     def _publish_ssot_if_pending():
         pass
 
 with st.expander("Reports: Perturbation Sanity & Fence Stress"):
-    # ── Single source of truth for projector + one-time stale warning ─────────
+    # ── Projector normalization + one-time stale banner ────────────────────────
     reports_warn_stale_once()
-    pre      = p3_normalize_for_reports(allow_auto_diag=True)  # unified normalizer
+    pre      = p3_normalize_for_reports(allow_auto_diag=True)
     mode     = (pre or {}).get("mode") or "strict"
     P_active = (pre or {}).get("P_active") or []
     meta     = (pre or {}).get("meta") or {}
-    cfg_used = (pre or {}).get("cfg")  or {}
 
-    # Friendly banner (no hard-fail)
+    # Friendly preflight banner
     if mode == "projected(file)":
         if meta.get("error") == "P3_FILE_MISSING":
             st.info("Evidence preflight → Π: AUTO_OK · hashes: OK (no FILE Π yet)")
@@ -3368,19 +3394,20 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
     else:
         st.info("Evidence preflight → strict · hashes: OK")
 
-    # Ensure reports dir exists
+    # Ensure reports dir
     REPORTS_DIR = Path(st.session_state.get("REPORTS_DIR", "reports"))
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Inputs / policy context (safe defaults)
+    # Context objects
     try:
         rc_try = require_fresh_run_ctx()
     except Exception:
         rc_try = {}
     rc = (st.session_state.get("run_ctx") or {}) | (rc_try or {})
+
     H_used = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
     B0, C0, H0 = boundaries, cmap, H_used
-    U0 = shapes  # carrier for Fence
+    U0 = shapes
 
     d3_base = (B0.blocks.__root__.get("3") or [])
     n2 = len(d3_base)
@@ -3395,8 +3422,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
         run_fence       = st.checkbox("Include Fence stress run (perturb U)", value=True, key="fence_on")
         enable_witness  = st.checkbox("Write witness on mismatches", value=True, key="ps_witness_on")
 
-    # Disable only if FILE mode is clearly invalid
-    disabled = False
+    # Disable only if FILE Π is invalid
     try:
         disabled = file_validation_failed()
     except Exception:
@@ -3409,27 +3435,27 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
         disabled=disabled,
         help=(help_txt if disabled else "Run perturbation sanity; optionally include fence"),
     ):
-        # 0) Publish staged SSOT hashes (copy-only; no recompute)
+        # Publish staged SSOT hashes (copy-only; no recompute)
         _publish_ssot_if_pending()
         if "_ensure_inputs_hashes" in globals():
             _ensure_inputs_hashes()
 
         try:
-            # 1) Evidence guards (CLICK-TIME)
+            # Guards at click-time
             _require_inputs_hashes_strict_for_run()
             _require_lane_mask_for_run()
             _disallow_auto_for_evidence()
             _require_projected_file_allowed_for_run()
 
-            # ───────────────────────── Baseline (no mutation) ─────────────────────────
+            # ─────────────── Baseline (no mutation) ───────────────
             lm0, tag_s0, eq_s0, tag_p0, eq_p0 = _sig_tag_eq(B0, C0, H0, P_active)
 
-            # lanes-only domain from SSOT lane mask
-            inputs_ps_tmp = _inputs_block_from_session(strict_dims=(n2, n3))
+            # Lanes-only domain from SSOT
+            inputs_ps_tmp = _inputs_block_from_session_SAFE(strict_dims=(n2, n3))
             lane_mask = [int(x) & 1 for x in inputs_ps_tmp.get("lane_mask_k3", [])]
             allowed_cols_set = {j for j, b in enumerate(lane_mask) if b == 1}
 
-            # Deterministic flip generator (lanes-only)
+            # Deterministic flip generator
             import hashlib as _hashlib
             def _flip_targets_lanes_only(n2_, n3_, budget, seed_str):
                 h = int(_hashlib.sha256(seed_str.encode("utf-8")).hexdigest(), 16)
@@ -3440,7 +3466,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     i = (i + 1 + (h % 3)) % (n2_ or 1)
                     j = (j + 2 + ((h >> 5) % 5)) % (n3_ or 1)
 
-            # ───────────────── Perturbation: flips + CSV + JSON ─────────────────
+            # ───────────── Perturbation: flips + CSV + JSON ─────────────
             rows, ps_results = [], []
             matches = mismatches = total_flips = in_domain_flips = 0
 
@@ -3507,19 +3533,17 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
 
                 lmK, tag_sK, eq_sK, tag_pK, eq_pK = _sig_tag_eq(Bk, C0, H0, P_active)
 
-                # Guard enum (single source)
                 strict_out = {"3": {"eq": bool(eq_sK)}}
                 guard = _first_tripped_guard(strict_out)
-                expected_guard = guard  # lanes-only spec
+                expected_guard = guard
 
                 rows.append([k, guard, expected_guard, ""])
                 ok = (guard == expected_guard)
                 matches += int(ok)
                 mismatches += int(not ok)
 
-                # Optional witness on mismatch
                 witness_written = False
-                if enable_witness and (not ok) and "append_witness_row" in globals():
+                if enable_witness and (not ok) and ("append_witness_row" in globals()) and callable(globals().get("append_witness_row")):
                     try:
                         cert_like = st.session_state.get("cert_payload")
                         if cert_like:
@@ -3564,13 +3588,13 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
             )
             st.success(f"Perturbation sanity saved → {PERTURB_OUT_PATH}")
 
-            # Build Perturbation JSON (copy-only SSOT)
+            # Build Perturbation JSON (copy-only SSOT) — uses SAFE inputs builder
             try:
                 rc_ps = require_fresh_run_ctx()
             except Exception:
                 rc_ps = st.session_state.get("run_ctx") or {}
             policy_ps = _policy_block_from_run_ctx(rc_ps)
-            inputs_ps = _inputs_block_from_session(strict_dims=(n2, n3))
+            inputs_ps = _inputs_block_from_session_SAFE(strict_dims=(n2, n3))
 
             _hash_fields = ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")
             hobj_ps = inputs_ps.get("hashes") or {k: inputs_ps.get(k, "") for k in _hash_fields}
@@ -3622,7 +3646,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
             }
             perturb_json["integrity"]["content_hash"] = _hash_json(perturb_json)
 
-            # Persist + downloads + badges
+            # Persist + downloads
             try:
                 h12 = perturb_json["integrity"]["content_hash"][:12]
                 h8  = perturb_json["integrity"]["content_hash"][:8]
@@ -3645,9 +3669,8 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
             except Exception as e:
                 st.info(f"(Perturbation JSON/Downloads issue: {e})")
 
-            # ───────────────────── Fence stress (baseline + U-variants; U-only) ─────────────────────
+            # ───────────── Fence stress (U-only) ─────────────
             if run_fence:
-                # publish again (idempotent) + guards
                 if "_publish_ssot_if_pending" in globals():
                     _publish_ssot_if_pending()
                 if "_ensure_inputs_hashes" in globals():
@@ -3660,15 +3683,11 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 if not HAS_U_HOOKS:
                     st.warning("Fence stress skipped: U hooks unavailable (no carrier mutation API).")
                 else:
-                    # Pull fixture blocks
                     d3 = (B0.blocks.__root__.get("3") or [])
                     H2 = (H0.blocks.__root__.get("2") or [])
                     C3 = (C0.blocks.__root__.get("3") or [])
-
-                    # Strict preflight — fail fast, no partial writes
                     _validate_shapes_or_raise(H2, d3, C3)
 
-                    # Helpers
                     def _count1(M): return sum(int(x & 1) for row in (M or []) for x in row)
                     def _apply_U_to_H2(H2_in, U_mask):
                         H2_out = [row[:] for row in H2_in]
@@ -3681,11 +3700,9 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                                 H2_out[j] = [0] * len(H2_out[j])
                         return H2_out
 
-                    # Base mask (fallback hooks provide all-ones if none)
-                    st.session_state.pop("_u_mask_override", None)  # clear stale overrides
+                    st.session_state.pop("_u_mask_override", None)
                     U_mask_base = get_carrier_mask(U0)
 
-                    # Normalize mask shape to n3×n2 if needed
                     n3_h2 = len(H2)
                     n2_h2 = len(H2[0]) if (H2 and H2[0]) else 0
                     def _normalized_mask(mask):
@@ -3698,13 +3715,11 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                         return [[int(b) & 1 for b in row] for row in mask]
                     U_mask_base = _normalized_mask(U_mask_base)
 
-                    # Baseline (no change)
                     R3_base = _strict_R3(H2, d3, C3)
                     k2_base = True
                     k3_base = (not R3_base) or all(all((x & 1) == 0 for x in row) for row in R3_base)
                     rows_fs = [["U_min", f"[{int(k2_base)},{int(k3_base)}]", "baseline"]]
 
-                    # U_shrink: chop 1-cell border off U
                     U_shrink = [row[:] for row in U_mask_base]
                     rU = len(U_shrink); cU = len(U_shrink[0]) if (U_shrink and U_shrink[0]) else 0
                     if rU and cU:
@@ -3725,7 +3740,6 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                         }}, separators=(",", ":"))
                     ])
 
-                    # U_plus: add 1-cell border to U
                     U_plus = [row[:] for row in U_mask_base]
                     if rU and cU:
                         for j in range(cU): U_plus[0][j]  = 1; U_plus[-1][j] = 1
@@ -3745,12 +3759,12 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                         }}, separators=(",", ":"))
                     ])
 
-                    # Build + validate inputs (must have SSOT hashes)
+                    # Build + validate inputs with SAFE builder
                     try:
                         rc_fs = require_fresh_run_ctx()
                     except Exception:
                         rc_fs = st.session_state.get("run_ctx") or {}
-                    inputs_fs = _inputs_block_from_session(strict_dims=(n2, n3))
+                    inputs_fs = _inputs_block_from_session_SAFE(strict_dims=(n2, n3))
                     _hash_fields = ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")
                     hobj_fs = inputs_fs.get("hashes") or {k: inputs_fs.get(k, "") for k in _hash_fields}
                     if not all(hobj_fs.get(k, "") for k in _hash_fields):
@@ -3803,7 +3817,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     }
                     fence_json["integrity"]["content_hash"] = _hash_json(fence_json)
 
-                    # Persist; badge
+                    # Persist; downloads
                     h12 = fence_json["integrity"]["content_hash"][:12]; h8 = fence_json["integrity"]["content_hash"][:8]
                     basename = f"fence_stress__{h12}.json"
                     fence_json_path = REPORTS_DIR / basename
@@ -3820,7 +3834,6 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
         except Exception as e:
             st.error(f"Perturbation/Fence run failed: {e}")
 # ============================ /Reports: Perturbation & Fence ============================
-
 
 
 
