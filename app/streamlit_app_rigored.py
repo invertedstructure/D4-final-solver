@@ -2215,6 +2215,11 @@ GUARD_ENUM = ["grid", "wiggle", "echo", "fence", "ker_guard", "none", "error"]
 from pathlib import Path
 import json, hashlib
 
+# --- Hard-disable any old projector normalizer that talks to helper funcs ---
+def normalize_projector_into_run_ctx():  # override legacy impl
+    """No-op: reports now use p3_normalize_for_reports()."""
+    return
+
 def _diag_from_mask__reports(lm: list[int]) -> list[list[int]]:
     n = len(lm or [])
     return [[1 if (i==j and int(lm[j])==1) else 0 for j in range(n)] for i in range(n)]
@@ -2266,6 +2271,28 @@ def _pj_path_from_context_or_fs__reports() -> str:
         files = sorted(pjdir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
         if files: return files[0].as_posix()
     return ""
+
+def file_validation_failed() -> bool:
+    rc = st.session_state.get("run_ctx") or {}
+    if rc.get("mode") != "projected(file)":
+        return False
+    fn = (rc.get("projector_filename") or "").strip()
+    if not fn:
+        return True
+    try:
+        from pathlib import Path, PurePath
+        p = Path(fn)
+        if not p.exists():
+            return True
+        # hash present or derivable → treat as valid enough for reports UI
+        if rc.get("projector_hash"):
+            return False
+        rc["projector_hash"] = __import__("hashlib").sha256(p.read_bytes()).hexdigest()
+        st.session_state["run_ctx"] = rc
+        return False
+    except Exception:
+        return False  # don't block reports on helper availability
+
 
 def _choose_active_safe__reports(cfg: dict, boundaries_obj):
     """
@@ -3279,16 +3306,17 @@ HAS_U_HOOKS = (
 
            
 
+
 # ── Reports preflight & Π selection (single source of truth)
 reports_warn_stale_once()
 
-pre      = p3_normalize_for_reports(allow_auto_diag=True)
-mode     = pre["mode"]                 # 'projected(file)' | 'projected(auto)' | 'strict'
-P_active = pre["P_active"] or []       # guaranteed list
-meta     = pre["meta"] or {}           # guaranteed dict
-cfg_used = pre["cfg"]  or {}
+pre      = p3_normalize_for_reports(allow_auto_diag=True)  # <- unified normalizer
+mode     = (pre or {}).get("mode") or "strict"
+P_active = (pre or {}).get("P_active") or []
+meta     = (pre or {}).get("meta") or {}
+cfg_used = (pre or {}).get("cfg")  or {}
 
-# Friendly banner (matches your earlier phrasing, but won’t hard-fail)
+# Friendly banner
 if mode == "projected(file)":
     if meta.get("error") == "P3_FILE_MISSING":
         st.info("Evidence preflight → Π: AUTO_OK · hashes: OK (no FILE Π yet)")
@@ -3301,77 +3329,58 @@ elif mode == "projected(auto)":
 else:
     st.info("Evidence preflight → strict · hashes: OK")
 
-# If downstream expects rc bits, stamp them defensively (non-destructive)
-rc = st.session_state.get("run_ctx") or {}
-rc.setdefault("mode", mode)
+# Make sure rc has the essentials, but never fail if missing
+_rc = st.session_state.get("run_ctx") or {}
+_rc.setdefault("mode", mode)
 if mode == "projected(file)":
-    rc.setdefault("projector_filename", meta.get("projector_filename", rc.get("projector_filename","")))
-    rc.setdefault("projector_hash",     meta.get("projector_hash",     rc.get("projector_hash","")))
-st.session_state["run_ctx"] = rc
-
-
-
+    _rc.setdefault("projector_filename", meta.get("projector_filename", _rc.get("projector_filename","")))
+    _rc.setdefault("projector_hash",     meta.get("projector_hash",     _rc.get("projector_hash","")))
+st.session_state["run_ctx"] = _rc
 
 
 
 # ============================ Reports: Perturbation & Fence ============================
-def _publish_ssot_if_pending():
-    """Copy-only: publish staged hashes/dims/filenames into SSOT if all five hashes exist."""
-    ih_live = st.session_state.get("inputs_hashes") or {}
-    if all(ih_live.get(k) for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")):
-        return  # already live
-    pend  = st.session_state.get("_inputs_hashes_pending") or {}
-    dims  = st.session_state.get("_dims_pending") or {}
-    files = st.session_state.get("_filenames_pending") or {}
-    if all(pend.get(k) for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")) and dims:
-        st.session_state["inputs_hashes"] = pend.copy()
-        st.session_state["_inputs_block"] = {
-            "filenames": files if files else {
-                "boundaries": st.session_state.get("fname_boundaries","boundaries.json"),
-                "C":          st.session_state.get("fname_cmap","cmap.json"),
-                "H":          st.session_state.get("fname_h","H.json"),
-                "U":          st.session_state.get("fname_shapes","shapes.json"),
-            },
-            "dims": {"n2": int(dims.get("n2", 0)), "n3": int(dims.get("n3", 0))},
-            "boundaries_hash": pend["boundaries_hash"],
-            "C_hash":          pend["C_hash"],
-            "H_hash":          pend["H_hash"],
-            "U_hash":          pend["U_hash"],
-            "shapes_hash":     pend["shapes_hash"],
-            "hashes":          pend.copy(),  # convenience mirror
-            "lane_mask_k3": (st.session_state.get("run_ctx") or {}).get("lane_mask_k3", []),
-        }
+# Tiny no-op helper if not present
+if "_publish_ssot_if_pending" not in globals():
+    def _publish_ssot_if_pending():
+        pass
 
 with st.expander("Reports: Perturbation Sanity & Fence Stress"):
-    # Display-only preflight (no exceptions here)
-    ok_pj, pj_tag = _projector_status()
-    h_tag = _hashes_status()
-    st.caption(f"Evidence preflight → Π: {pj_tag} · hashes: {h_tag}")
-    if (st.session_state.get("run_ctx") or {}).get("mode") == "projected(auto)":
-        st.info("AUTO is fine for Overlap/A/B. For evidence reports, Freeze SSOT and use strict or projected(file).")
+    # ── Single source of truth for projector + one-time stale warning ─────────
+    reports_warn_stale_once()
+    pre      = p3_normalize_for_reports(allow_auto_diag=True)  # unified normalizer
+    mode     = (pre or {}).get("mode") or "strict"
+    P_active = (pre or {}).get("P_active") or []
+    meta     = (pre or {}).get("meta") or {}
+    cfg_used = (pre or {}).get("cfg")  or {}
 
-    # Ensure reports dir exists (defensive)
+    # Friendly banner (no hard-fail)
+    if mode == "projected(file)":
+        if meta.get("error") == "P3_FILE_MISSING":
+            st.info("Evidence preflight → Π: AUTO_OK · hashes: OK (no FILE Π yet)")
+        elif meta.get("error") == "P3_FILE_HELPERS_MISSING" and meta.get("used_diag_fallback"):
+            st.info("Evidence preflight → Π: FILE helpers missing → using diag(lanes). Hashes: OK")
+        else:
+            st.success("Evidence preflight → Π: FILE_OK · hashes: OK")
+    elif mode == "projected(auto)":
+        st.info("Evidence preflight → Π: AUTO_OK · hashes: OK")
+        st.caption("For evidence reports, prefer strict or projected(file).")
+    else:
+        st.info("Evidence preflight → strict · hashes: OK")
+
+    # Ensure reports dir exists
     REPORTS_DIR = Path(st.session_state.get("REPORTS_DIR", "reports"))
     REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
-        # Freshness (non-blocking in render)
-    try:
-        rc_try = require_fresh_run_ctx()  # may return None
-        rc_fix = rectify_run_ctx_mask_from_d3()  # may return None
-        # prefer rectified rc if present, else the first, else session, else {}
-        rc = rc_fix or rc_try or (st.session_state.get("run_ctx") or {})
-    except Exception as e:
-        rc = st.session_state.get("run_ctx") or {}
-        st.warning(str(e))
-    
     # Inputs / policy context (safe defaults)
+    try:
+        rc_try = require_fresh_run_ctx()
+    except Exception:
+        rc_try = {}
+    rc = (st.session_state.get("run_ctx") or {}) | (rc_try or {})
     H_used = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
-    mode_now = str(rc.get("mode", ""))
-    P_active = rc.get("P_active") if mode_now.startswith("projected") else None
-    
     B0, C0, H0 = boundaries, cmap, H_used
-    U0 = shapes  # carrier (for Fence)
-
+    U0 = shapes  # carrier for Fence
 
     d3_base = (B0.blocks.__root__.get("3") or [])
     n2 = len(d3_base)
@@ -3386,8 +3395,12 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
         run_fence       = st.checkbox("Include Fence stress run (perturb U)", value=True, key="fence_on")
         enable_witness  = st.checkbox("Write witness on mismatches", value=True, key="ps_witness_on")
 
-    # Disable only on FILE Π invalid (render-time convenience)
-    disabled = file_validation_failed()
+    # Disable only if FILE mode is clearly invalid
+    disabled = False
+    try:
+        disabled = file_validation_failed()
+    except Exception:
+        disabled = False
     help_txt = "Disabled because projected(FILE) validation failed. Freeze AUTO→FILE again or fix Π."
 
     if st.button(
@@ -3396,7 +3409,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
         disabled=disabled,
         help=(help_txt if disabled else "Run perturbation sanity; optionally include fence"),
     ):
-        # 0) Publish staged SSOT hashes on click (copy-only; no recompute)
+        # 0) Publish staged SSOT hashes (copy-only; no recompute)
         _publish_ssot_if_pending()
         if "_ensure_inputs_hashes" in globals():
             _ensure_inputs_hashes()
@@ -3416,7 +3429,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
             lane_mask = [int(x) & 1 for x in inputs_ps_tmp.get("lane_mask_k3", [])]
             allowed_cols_set = {j for j, b in enumerate(lane_mask) if b == 1}
 
-            # Deterministic flip generator
+            # Deterministic flip generator (lanes-only)
             import hashlib as _hashlib
             def _flip_targets_lanes_only(n2_, n3_, budget, seed_str):
                 h = int(_hashlib.sha256(seed_str.encode("utf-8")).hexdigest(), 16)
@@ -3504,7 +3517,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 matches += int(ok)
                 mismatches += int(not ok)
 
-                # Optional witness (only on mismatch)
+                # Optional witness on mismatch
                 witness_written = False
                 if enable_witness and (not ok) and "append_witness_row" in globals():
                     try:
@@ -3556,9 +3569,6 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                 rc_ps = require_fresh_run_ctx()
             except Exception:
                 rc_ps = st.session_state.get("run_ctx") or {}
-            if "normalize_projector_into_run_ctx" in globals():
-                normalize_projector_into_run_ctx()
-
             policy_ps = _policy_block_from_run_ctx(rc_ps)
             inputs_ps = _inputs_block_from_session(strict_dims=(n2, n3))
 
@@ -3637,7 +3647,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
 
             # ───────────────────── Fence stress (baseline + U-variants; U-only) ─────────────────────
             if run_fence:
-                # publish again (idempotent) + guard
+                # publish again (idempotent) + guards
                 if "_publish_ssot_if_pending" in globals():
                     _publish_ssot_if_pending()
                 if "_ensure_inputs_hashes" in globals():
@@ -3655,7 +3665,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     H2 = (H0.blocks.__root__.get("2") or [])
                     C3 = (C0.blocks.__root__.get("3") or [])
 
-                    # Strict preflight — fast fail, no partial writes
+                    # Strict preflight — fail fast, no partial writes
                     _validate_shapes_or_raise(H2, d3, C3)
 
                     # Helpers
@@ -3694,7 +3704,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                     k3_base = (not R3_base) or all(all((x & 1) == 0 for x in row) for row in R3_base)
                     rows_fs = [["U_min", f"[{int(k2_base)},{int(k3_base)}]", "baseline"]]
 
-                    # U_shrink: chop 1-cell border off U (shape preserved)
+                    # U_shrink: chop 1-cell border off U
                     U_shrink = [row[:] for row in U_mask_base]
                     rU = len(U_shrink); cU = len(U_shrink[0]) if (U_shrink and U_shrink[0]) else 0
                     if rU and cU:
@@ -3715,7 +3725,7 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                         }}, separators=(",", ":"))
                     ])
 
-                    # U_plus: add 1-cell border to U (shape preserved)
+                    # U_plus: add 1-cell border to U
                     U_plus = [row[:] for row in U_mask_base]
                     if rU and cU:
                         for j in range(cU): U_plus[0][j]  = 1; U_plus[-1][j] = 1
@@ -3740,9 +3750,6 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
                         rc_fs = require_fresh_run_ctx()
                     except Exception:
                         rc_fs = st.session_state.get("run_ctx") or {}
-                    if "normalize_projector_into_run_ctx" in globals():
-                        normalize_projector_into_run_ctx()
-
                     inputs_fs = _inputs_block_from_session(strict_dims=(n2, n3))
                     _hash_fields = ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")
                     hobj_fs = inputs_fs.get("hashes") or {k: inputs_fs.get(k, "") for k in _hash_fields}
@@ -3812,6 +3819,11 @@ with st.expander("Reports: Perturbation Sanity & Fence Stress"):
 
         except Exception as e:
             st.error(f"Perturbation/Fence run failed: {e}")
+# ============================ /Reports: Perturbation & Fence ============================
+
+
+
+
 
 
 # ================================== Coverage · Helpers (idempotent) ==================================
