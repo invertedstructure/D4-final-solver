@@ -1915,6 +1915,61 @@ else:
             st.info("Notes:")
             for w in _warn: st.write(f"- {w}")
 
+# ---------- A/B canonical helpers (drop-in) ----------
+
+from pathlib import Path
+import json as _json
+
+def _ab_frozen_inputs_sig_list() -> list[str]:
+    """Canonical 5-hash signature, frozen if your freezer provides it."""
+    try:
+        if "ssot_frozen_sig_from_ib" in globals() and callable(globals()["ssot_frozen_sig_from_ib"]):
+            sig = ssot_frozen_sig_from_ib()
+            if sig: return list(sig)
+    except Exception:
+        pass
+    ib = st.session_state.get("_inputs_block") or {}
+    h  = (ib.get("hashes") or {})
+    return [
+        str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
+        str(h.get("C_hash",          ib.get("C_hash",""))),
+        str(h.get("H_hash",          ib.get("H_hash",""))),
+        str(h.get("U_hash",          ib.get("U_hash",""))),
+        str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
+    ]
+
+def _ab_embed_sig() -> str:
+    """One-line canonical embed sig for A/B pins and embed consumer."""
+    return "|".join(_ab_frozen_inputs_sig_list())
+
+def _ab_load_h_latest():
+    """
+    Always try to read H from the *current* file path used by SSOT,
+    then fall back to any freezer/local helpers, then session.
+    """
+    ss = st.session_state
+    # 1) _inputs_block.filenames.H (preferred)
+    fn = ((ss.get("_inputs_block") or {}).get("filenames") or {}).get("H") or ""
+    # 2) explicit filename in session (older UIs used fname_h)
+    if not fn:
+        fn = ss.get("fname_h", "") or ""
+    try:
+        if fn and Path(fn).exists():
+            data = _json.loads(Path(fn).read_text(encoding="utf-8"))
+            return io.parse_cmap(data)
+    except Exception:
+        pass
+    # 3) your app’s loader, if present
+    try:
+        if "_load_h_local" in globals() and callable(globals()["_load_h_local"]):
+            return _load_h_local()
+    except Exception:
+        pass
+    # 4) last resort – session snapshot
+    return ss.get("overlap_H") or io.parse_cmap({"blocks": {}})
+
+
+
 
 
 # ====================== A/B Compare (strict vs ACTIVE projected) — stale-safe ======================
@@ -1940,17 +1995,6 @@ def _ab_diag_from_mask(lm: list[int]) -> list[list[int]]:
     n = len(lm or [])
     return [[1 if (i==j and int(lm[j])==1) else 0 for j in range(n)] for i in range(n)]
 
-def _ab_inputs_sig_from_ib(ib: dict | None) -> list[str]:
-    ib = ib or {}
-    h  = (ib.get("hashes") or {})
-    return [
-        str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
-        str(h.get("C_hash",          ib.get("C_hash",""))),
-        str(h.get("H_hash",          ib.get("H_hash",""))),
-        str(h.get("U_hash",          ib.get("U_hash",""))),
-        str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
-    ]
-
 def _ab_lane_bottoms(*, H_obj, cmap_obj, d3, lane_mask):
     def _bottom_row(M): return M[-1] if (M and len(M)) else []
     H2 = (H_obj.blocks.__root__.get("2") or []) if H_obj else []
@@ -1972,75 +2016,21 @@ def _ab_policy_tag(rc: dict) -> str:
     except Exception:
         return str(rc.get("policy_tag") or "strict")
 
-def _ab_inputs_sig_frozen() -> list[str]:
-    try:
-        sig = ssot_frozen_sig_from_ib()
-        if sig: return list(sig)
-    except Exception:
-        pass
-    return _ab_inputs_sig_from_ib(st.session_state.get("_inputs_block") or {})
-
-def _ab_is_fresh_payload(*, rc: dict, ib: dict, ab_payload: dict) -> tuple[bool,str]:
-    try:
-        cur_sig = _ab_inputs_sig_frozen()
-        if list(ab_payload.get("inputs_sig") or []) != cur_sig:
-            return (False, "inputs_sig changed")
-    except Exception:
-        return (False, "inputs_sig check failed")
-    pol_now = _ab_policy_tag(rc)
-    pol_ab  = ab_payload.get("policy_tag") or (ab_payload.get("projected") or {}).get("policy_tag")
-    if (pol_now or "").lower() != (pol_ab or "").lower():
-        return (False, "policy changed")
-    if str(rc.get("mode","")) == "projected(file)":
-        pj_ab = (ab_payload.get("projected") or {}).get("projector_hash","")
-        if pj_ab != (rc.get("projector_hash","") or ""):
-            return (False, "projector hash changed")
-    return (True, "ok")
-
-def _ab_pin_for_cert(strict_out: dict, proj_out: dict):
-    ss = st.session_state
-    rc = ss.get("run_ctx") or {}
-    payload = {
-        "pair_tag": f"strict__VS__{_ab_policy_tag(rc)}",
-        "inputs_sig": _ab_inputs_sig_frozen(),
-        "policy_tag": _ab_policy_tag(rc),
-        "strict":    {"out": dict(strict_out or {})},
-        "projected": {"out": dict(proj_out   or {}), "policy_tag": _ab_policy_tag(rc),
-                      "projector_hash": (rc.get("projector_hash","") if str(rc.get("mode",""))=="projected(file)" else "")},
-    }
-    ss["ab_pin"] = {"state": "pinned", "payload": payload, "consumed": False}
-    ss["_ab_ticket_pending"] = int(ss.get("_ab_ticket_pending", 0)) + 1
-    ss["write_armed"] = True
-    ss["armed_by"]    = "ab_compare"
-
-def _load_h_local_safe():
-    try:
-        if "f_H" in st.session_state and st.session_state["f_H"] is not None:
-            return io.parse_cmap(read_json_file(st.session_state["f_H"]))
-    except Exception:
-        pass
-    return st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
-
 def _ab_ensure_fresh_ssot():
-    """If stale, try to publish a fresh SSOT; never hard-fail."""
     try:
         stale = False
         if "ssot_is_stale_v2" in globals() and callable(globals()["ssot_is_stale_v2"]):
             stale = bool(ssot_is_stale_v2())
         elif "ssot_is_stale" in globals() and callable(globals()["ssot_is_stale"]):
             stale = bool(ssot_is_stale())
-        if stale:
-            H_local = st.session_state.get("overlap_H") or _load_h_local_safe()
+        if stale and "ssot_publish_block" in globals():
+            H_local = _ab_load_h_latest()                 # ★ use latest H
             d3 = (boundaries.blocks.__root__.get("3") or [])
             n3 = len(d3[0]) if (d3 and d3[0]) else 0
-            if "ssot_publish_block" in globals() and callable(globals()["ssot_publish_block"]):
-                info = ssot_publish_block(
-                    boundaries_obj=boundaries, cmap_obj=cmap, H_obj=H_local,
-                    shapes_obj=shapes, n3=n3,
-                    projector_filename=(st.session_state.get("run_ctx") or {}).get("projector_filename",""),
-                )
-                st.caption(f"SSOT refreshed (A/B): {list(info.get('before',[]))} → {list(info.get('after',[]))}")
-        # mirror hashes into inputs_hashes if needed
+            info = ssot_publish_block(boundaries_obj=boundaries, cmap_obj=cmap, H_obj=H_local,
+                                      shapes_obj=shapes, n3=n3,
+                                      projector_filename=(st.session_state.get("run_ctx") or {}).get("projector_filename",""))
+            st.caption(f"SSOT refreshed (A/B): {list(info.get('before',[]))} → {list(info.get('after',[]))}")
         if "_ensure_inputs_hashes" in globals():
             try: _ensure_inputs_hashes()
             except Exception: pass
@@ -2060,71 +2050,55 @@ with _ab_ctx:
     ab_pin = ss.get("ab_pin") or {}
     if ab_pin.get("state") == "pinned":
         ab_payload = ab_pin.get("payload") or {}
-        fresh, reason = _ab_is_fresh_payload(rc=rc, ib=ib, ab_payload=ab_payload)
-        if fresh:
-            st.success("A/B: Pinned · Fresh (will embed)")
-        else:
-            st.warning(f"A/B: Pinned · Stale ({reason})")
+        # unified freshness (embed_sig vs current embed_sig)           ★
+        fresh = (ab_payload.get("embed_sig","") == _ab_embed_sig())   # ★
+        st.success("A/B: Pinned · Fresh (will embed)") if fresh else st.warning("A/B: Pinned · Stale (sig changed)")
     else:
         st.caption("A/B: —")
 
-    # main button
     if st.button("Run A/B compare", key="btn_ab_compare_final"):
         try:
-            # try to refresh SSOT proactively; do NOT block
             _ab_ensure_fresh_ssot()
 
-            # tolerate different require_fresh_run_ctx signatures
-            rc_ok = None
+            # tolerant fresh run_ctx
             try:
-                rc_ok = require_fresh_run_ctx(stop_on_error=False)  # newer
+                rc_ok = require_fresh_run_ctx(stop_on_error=False)
             except TypeError:
-                try: rc_ok = require_fresh_run_ctx()                # older
-                except Exception: rc_ok = None
+                rc_ok = require_fresh_run_ctx() if "require_fresh_run_ctx" in globals() else None
             except Exception:
                 rc_ok = None
+            rc = dict(rc_ok or ss.get("run_ctx") or {})
 
-            if not rc_ok:
-                # still warn, but continue (we just refreshed SSOT anyway)
-                if "warn_stale_once" in globals(): 
-                    try: warn_stale_once()
-                    except Exception: pass
-                rc_ok = ss.get("run_ctx") or {}
-
-            # rectify lane mask from d3 if helper exists
+            # rectify lane mask if available
             try:
-                fixed = rectify_run_ctx_mask_from_d3(stop_on_error=False)
-                rc = dict(fixed or rc_ok or {})
+                rc = dict(rectify_run_ctx_mask_from_d3(stop_on_error=False) or rc)
             except TypeError:
-                rc = dict(rectify_run_ctx_mask_from_d3() or rc_ok or {})
+                rc = dict(rectify_run_ctx_mask_from_d3() or rc)
             except Exception:
-                rc = dict(rc_ok or {})
+                pass
 
             if not str(rc.get("mode","")).startswith("projected"):
                 st.warning("Active policy is strict — run Overlap in projected(auto/file) first to compare.")
                 st.stop()
 
-            # context (fresh)
             d3 = rc.get("d3") or (boundaries.blocks.__root__.get("3") or [])
             n3 = len(d3[0]) if (d3 and d3[0]) else 0
             lm = list(rc.get("lane_mask_k3") or ([1]*n3))
             P  = rc.get("P_active")
             if not (P and P[0] and len(P)==n3 and len(P[0])==n3):
-                P = _ab_diag_from_mask(lm)  # AUTO or file fallback
+                P = _ab_diag_from_mask(lm)
 
-            H_used = ss.get("overlap_H") or _load_h_local_safe()
+            H_used = _ab_load_h_latest()            # ★ always latest H
             H2 = (H_used.blocks.__root__.get("2") or []) if H_used else []
             C3 = (cmap.blocks.__root__.get("3") or [])
             I3 = _ab_eye(len(C3)) if C3 else []
 
-            # strict & projected residuals
             R3s = _ab_xor(mul(H2, d3), _ab_xor(C3, I3)) if (_ab_shape_ok(H2,d3) and C3 and C3[0] and len(C3)==len(C3[0])) else []
             R3p = mul(R3s, P) if (R3s and P and len(R3s[0])==len(P)) else []
 
             out_strict = {"2": {"eq": True}, "3": {"eq": _ab_is_zero(R3s), "n_k": n3}}
             out_proj   = {"2": {"eq": True}, "3": {"eq": _ab_is_zero(R3p), "n_k": n3}}
 
-            # diagnostics (lanes slice)
             lane_vec_H2d3, lane_vec_C3I = _ab_lane_bottoms(H_obj=H_used, cmap_obj=cmap, d3=d3, lane_mask=lm)
 
             label_proj = _ab_policy_tag(rc); pair_tag = f"strict__VS__{label_proj}"
@@ -2138,19 +2112,30 @@ with _ab_ctx:
             }
             ss["ab_compare"] = snap
 
-            _ab_pin_for_cert(out_strict, out_proj)
+            # ---- PIN for cert/embed with unified frozen sig ----      ★
+            pin_payload = {
+                "pair_tag":       pair_tag,
+                "policy_tag":     label_proj,
+                "strict":         {"out": out_strict},
+                "projected":      {"out": out_proj, "policy_tag": label_proj,
+                                   "projector_hash": rc.get("projector_hash","") if str(rc.get("mode",""))=="projected(file)" else ""},
+                "embed_sig":      _ab_embed_sig(),                        # ★ one-line frozen sig
+            }
+            ss["ab_pin"] = {"state": "pinned", "payload": pin_payload, "consumed": False}
+            ss["_ab_ticket_pending"] = int(ss.get("_ab_ticket_pending", 0)) + 1
+            ss["write_armed"] = True; ss["armed_by"] = "ab_compare"       # unchanged
 
             s_ok = bool(out_strict.get("3",{}).get("eq", False))
             p_ok = bool(out_proj.get("3",{}).get("eq", False))
             st.success(f"A/B updated → strict={'✅' if s_ok else '❌'} · projected={'✅' if p_ok else '❌'} · {pair_tag}")
 
             if st.checkbox("Show A/B snapshot payload", value=False, key="ab_show_payload_final"):
-                st.json({**snap, "inputs_sig": _ab_inputs_sig_frozen()})
+                st.json({**snap, "embed_sig": pin_payload["embed_sig"]})
 
         except Exception as e:
             st.error(f"A/B compare failed: {e}")
 
-    # diagnostics pane (from latest snapshot)
+    # diagnostics pane
     snap = st.session_state.get("ab_compare") or {}
     if snap:
         rc_now = dict(st.session_state.get("run_ctx") or {})
@@ -2167,15 +2152,8 @@ with _ab_ctx:
             f"lane_vec_H2@d3: {lvH}\n\nlane_vec_C3+I3: {lvCI}"
         )
         pin = st.session_state.get("ab_pin") or {}
-        if pin.get("state") == "pinned":
-            fresh, _ = _ab_is_fresh_payload(rc=rc_now, ib=(st.session_state.get('_inputs_block') or {}), ab_payload=(pin.get("payload") or {}))
-            st.caption(f"A/B pin: present\n\nfresh: {'🟢 yes' if fresh else '⚠️ no'}")
-        else:
-            st.caption("A/B pin: —")
+        st.caption(f"A/B pin: {'present' if pin else '—'}\n\nfresh: {'🟢 yes' if (pin.get('payload',{}).get('embed_sig','') == _ab_embed_sig()) else '⚠️ no'}")
 # ==============================================================================================
-
-
-
 
 
 
@@ -7593,14 +7571,25 @@ with safe_expander("Cert & provenance", expanded=True):
         })
         st.caption("Inputs incomplete — write disabled (you can still view A/B + gallery).")
 
-    # 2) stale SSOT — allow A/B ticket to override (non-blocking)
+        # 2) stale SSOT — allow A/B ticket to override (non-blocking)
     if write_enabled and stale and not allow_stale:
-        # re-evaluate ticket freshness here
+        # re-evaluate ticket freshness here (embed_sig-based)
+        ab_pin                 = ss.get("ab_pin") or {}
         is_ab_pinned           = (ab_pin.get("state") == "pinned")
+        payload                = ab_pin.get("payload") or {}
+        current_embed_sig      = _ab_embed_sig()  # ← from the helpers I gave you
+        ab_sig_ok              = bool(is_ab_pinned and (payload.get("embed_sig","") == current_embed_sig))
+    
         ab_ticket_pending      = ss.get("_ab_ticket_pending")
         last_ab_ticket_written = ss.get("_last_ab_ticket_written")
-        ticket_required        = bool(is_ab_pinned and (ab_ticket_pending is not None) and (ab_ticket_pending != last_ab_ticket_written))
-
+    
+        # one-shot override only if the pin is fresh (sig match) AND ticket advanced
+        ticket_required = bool(
+            ab_sig_ok and
+            (ab_ticket_pending is not None) and
+            (ab_ticket_pending != last_ab_ticket_written)
+        )
+    
         if not ticket_required:
             write_enabled = False
             _append_witness({
@@ -7610,19 +7599,31 @@ with safe_expander("Cert & provenance", expanded=True):
                 "armed_by": ss.get("armed_by",""),
                 "key": {
                     "inputs": _sha256_hex(":".join(inputs_sig).encode())[:8],
-                    "pol": policy_canon, "pv": f"{int(pass_vec[0])}{int(pass_vec[1])}", "pj": _short(proj_hash)
+                    "pol": policy_canon,
+                    "pv": f"{int(pass_vec[0])}{int(pass_vec[1])}",
+                    "pj": _short(proj_hash),
                 },
                 "ab": ("PINNED" if is_ab_pinned else "NONE"),
-                "file_pi": {"mode": ("file" if policy_canon=="projected:file" else policy_canon), "valid": file_pi_valid, "reasons": file_pi_reasons[:3]}
+                "ab_sig_ok": bool(ab_sig_ok),
+                "ab_ticket": {
+                    "pending": ab_ticket_pending,
+                    "last_written": last_ab_ticket_written,
+                },
+                "file_pi": {
+                    "mode": ("file" if policy_canon=="projected:file" else policy_canon),
+                    "valid": file_pi_valid,
+                    "reasons": file_pi_reasons[:3],
+                },
             })
             st.warning("SSOT stale — write disabled. Run Overlap to refresh or enable the 'Allow writing with stale SSOT' toggle.")
             st.caption("Rendering continues so you can inspect A/B & gallery.")
         else:
-            st.info("SSOT is stale, but proceeding due to A/B one-shot ticket override.")
+            st.info("SSOT is stale, but proceeding due to A/B one-shot ticket override (fresh embed_sig).")
             if not write_armed:
                 ss["write_armed"] = True
                 ss["armed_by"] = ss.get("armed_by","") or "ab_pinned_catchup"
                 write_armed = True
+
 
     # 3) file Π validity (FILE mode only)
     if write_enabled and (policy_canon == "projected:file") and (not file_pi_valid):
@@ -7965,7 +7966,7 @@ with safe_expander("Cert & provenance", expanded=True):
 
     # mark A/B ticket as used to prevent duplicate embedded writes on reruns
     if is_ab_pinned and (ab_ticket_pending is not None):
-        ss["_last_ab_ticket_written"] = ab_ticket_pending
+        ss["_last_ab_ticket_written"] = ss.get("_ab_ticket_pending")
 
     # clear pin only if we actually embedded this write
     if ab_fresh and is_ab_pinned:
