@@ -4464,6 +4464,7 @@ def _safe_build_b2_gallery(debounce: bool = True):
 
 # ========================= Gallery · Append & Dedupe (cert-required, canonical schema) =========================
 from pathlib import Path
+from datetime import datetime, timezone
 import os, json
 
 LOGS_DIR = Path(globals().get("LOGS_DIR", "logs"))
@@ -4473,6 +4474,21 @@ GALLERY_JSONL.parent.mkdir(parents=True, exist_ok=True)
 # Canonical row schema (columns used by build_b2_gallery):
 # district, fixture, projected, hash_d, hash_U, hash_suppC, hash_suppH,
 # growth, tag, strictify, lane_vec_H2, lane_vec_C3pI3, ab_embedded, content_hash
+
+def _canon_policy_norm(s: str) -> str:
+    t = (s or "").lower()
+    if "strict" in t:
+        return "strict"
+    if "projected" in t and "file" in t:
+        return "projected:file"
+    # default any other projected form to auto
+    if "projected" in t:
+        return "projected:auto"
+    if "file" in t:
+        return "projected:file"
+    if "auto" in t:
+        return "projected:auto"
+    return "strict"
 
 def _as_json_vec(v) -> str:
     try:
@@ -4486,17 +4502,21 @@ def _gallery_row_from_cert(cert: dict) -> dict:
         return {}
 
     identity   = cert.get("identity") or {}
-    policy     = cert.get("policy") or {}
-    inputs     = cert.get("inputs") or {}
+    policy     = cert.get("policy")   or {}
+    inputs     = cert.get("inputs")   or {}
     inputs_h   = (inputs.get("hashes") or {})
     diags      = cert.get("diagnostics") or {}
-    gallery    = cert.get("gallery") or {}
+    gallery    = cert.get("gallery")  or {}
     ab_embed   = cert.get("ab_embed") or {}
-    hashes     = cert.get("hashes") or {}  # contains content_hash in your writer
+    hashes     = cert.get("hashes")   or {}  # contains content_hash in your writer
 
     district   = str(identity.get("district_id", "UNKNOWN"))
     fixture    = str(identity.get("fixture_label", "") or "")
-    projected  = str(policy.get("canon", policy.get("projector_mode", "strict")))  # e.g., "strict" | "projected:auto" | "projected:file"
+
+    # Normalize the policy to strict | projected:auto | projected:file
+    pol_raw    = policy.get("canon") or policy.get("projector_mode") or policy.get("label_raw") or "strict"
+    projected  = _canon_policy_norm(pol_raw)
+
     content_h  = str(hashes.get("content_hash", ""))
 
     # Hashes
@@ -4511,10 +4531,12 @@ def _gallery_row_from_cert(cert: dict) -> dict:
         growth = int(growth)
     except Exception:
         growth = 0
-    tag        = str(gallery.get("tag", ""))
-    strictify  = str(gallery.get("strictify", "tbd")).lower()
+
+    strictify  = str(gallery.get("strictify", "tbd")).strip().lower()
     if strictify not in ("tbd", "no", "yes"):
         strictify = "tbd"
+
+    tag        = str(gallery.get("tag", ""))
 
     # Diagnostics vectors → JSON strings
     lv_H2      = _as_json_vec(diags.get("lane_vec_H2@d3", []))
@@ -4537,16 +4559,13 @@ def _gallery_row_from_cert(cert: dict) -> dict:
         "lane_vec_C3pI3":  lv_C3pI3,
         "ab_embedded":     ab_emb,
         "content_hash":    content_h,
+        # not canonical, but nice in the tail view:
+        "written_at_utc":  str(cert.get("written_at_utc") or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")),
     }
-
-    # not part of canonical columns, but useful to display in the tail view:
-    row["written_at_utc"] = str(cert.get("written_at_utc", ""))
-
     return row
 
 def _atomic_append_jsonl(path: Path, row: dict) -> None:
     blob = (json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
-    # Write once to the final file (simple & reliable; your gallery isn’t a hot path)
     with open(path, "ab") as f:
         f.write(blob); f.flush(); os.fsync(f.fileno())
 
@@ -4569,6 +4588,23 @@ def _read_jsonl_tail(path: Path, N: int = 100) -> list[dict]:
         pass
     return out
 
+# Optional shim: call your B2 builder if it exists, treat "no changes" as normal.
+def _safe_build_b2_gallery(debounce: bool = True):
+    try:
+        # Will raise NameError if builder not defined yet
+        csvp, valp, rec = build_b2_gallery(debounce=debounce)  # noqa: F821
+        st.caption(f"B2 gallery: rows_written={rec.get('rows_written', 0)}")
+    except NameError:
+        # Builder not loaded in this run; keep quiet but informative
+        st.info("(B2 gallery builder not loaded yet)")
+    except RuntimeError as e:
+        if "no changes since last build" in str(e).lower():
+            st.caption("B2 gallery: unchanged")
+        else:
+            st.info(f"(B2 gallery build skipped: {e})")
+    except Exception as e:
+        st.info(f"(B2 gallery build skipped: {e})")
+
 # session caches for dedupe
 ss = st.session_state
 ss.setdefault("_gallery_seen_keys", set())
@@ -4578,7 +4614,12 @@ def _gallery_key(row: dict) -> tuple:
     # Deterministic dedupe: same cert for same fixture once per district
     return (row.get("district",""), row.get("fixture",""), row.get("content_hash",""))
 
-with safe_expander("Gallery (canonical)", expanded=False):
+# prefer safe_expander if present; fallback to st.expander
+_expander = globals().get("safe_expander", None)
+expander_ctx = (_expander("Gallery (canonical)", expanded=False)
+                if callable(_expander) else st.expander("Gallery (canonical)", expanded=False))
+
+with expander_ctx:
     cert = ss.get("cert_payload") or {}
     has_cert = bool(cert)
     if not has_cert:
@@ -4645,42 +4686,43 @@ with safe_expander("Gallery (canonical)", expanded=False):
                 _atomic_append_jsonl(GALLERY_JSONL, row)
                 ss["_gallery_seen_keys"].add(k)
                 st.success("Gallery row appended.")
-                # keep CSV in sync, if builder is present
-        try:
-            _safe_build_b2_gallery(debounce=True)
-        except NameError:
-            st.info("(B2 gallery builder not loaded yet)")
+                # Keep CSV in sync (quiet if unchanged/not loaded)
+                _safe_build_b2_gallery(debounce=True)
         except Exception as e:
-            st.info(f"(B2 gallery build skipped: {e})")        
-
+            st.error(f"Gallery append failed: {e}")
 
     # Tail view (compact)
     try:
         tail = _read_jsonl_tail(GALLERY_JSONL, N=8)
         if tail:
-            import pandas as pd
-            view = []
-            for r in tail:
-                view.append({
-                    "when":        r.get("written_at_utc",""),
-                    "district":    r.get("district",""),
-                    "fixture":     r.get("fixture",""),
-                    "proj":        r.get("projected",""),
-                    "d[:8]":       (r.get("hash_d","") or "")[:8],
-                    "U[:8]":       (r.get("hash_U","") or "")[:8],
-                    "C[:8]":       (r.get("hash_suppC","") or "")[:8],
-                    "H[:8]":       (r.get("hash_suppH","") or "")[:8],
-                    "ab":          bool(r.get("ab_embedded", False)),
-                    "tag":         r.get("tag",""),
-                    "strictify":   r.get("strictify",""),
-                    "content[:12]":(r.get("content_hash","") or "")[:12],
-                })
-            st.dataframe(pd.DataFrame(view), use_container_width=True, hide_index=True)
+            try:
+                import pandas as pd
+                view = []
+                for r in tail:
+                    view.append({
+                        "when":        r.get("written_at_utc",""),
+                        "district":    r.get("district",""),
+                        "fixture":     r.get("fixture",""),
+                        "proj":        r.get("projected",""),
+                        "d[:8]":       (r.get("hash_d","") or "")[:8],
+                        "U[:8]":       (r.get("hash_U","") or "")[:8],
+                        "C[:8]":       (r.get("hash_suppC","") or "")[:8],
+                        "H[:8]":       (r.get("hash_suppH","") or "")[:8],
+                        "ab":          bool(r.get("ab_embedded", False)),
+                        "tag":         r.get("tag",""),
+                        "strictify":   r.get("strictify",""),
+                        "content[:12]":(r.get("content_hash","") or "")[:12],
+                    })
+                st.dataframe(pd.DataFrame(view), use_container_width=True, hide_index=True)
+            except Exception:
+                # pandas not available — render a simple JSON tail
+                st.json(tail)
         else:
             st.caption("Gallery is empty.")
     except Exception as e:
         st.warning(f"Could not render gallery tail: {e}")
 # ======================= end Gallery (canonical) =======================
+
 
 
 
