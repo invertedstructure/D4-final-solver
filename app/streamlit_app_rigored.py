@@ -113,6 +113,76 @@ DISTRICT_MAP: dict[str, str] = {
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
 
+# ---------------- Fixture helpers (single source of truth) ----------------
+
+def match_fixture_from_snapshot(snap: dict) -> dict:
+    reg = _get_fixtures_cached() or {}
+    ordering = list(reg.get("ordering") or [])
+    fixtures = list(reg.get("fixtures") or [])
+
+    # Build ordered list: declared ordering first, then the rest
+    code_to_fixture = {fx.get("code"): fx for fx in fixtures}
+    ordered = [code_to_fixture[c] for c in ordering if c in code_to_fixture] + \
+              [fx for fx in fixtures if fx.get("code") not in ordering]
+
+    # Extract normalized fields we match on
+    district = str(((snap.get("identity") or {}).get("district_id") or "UNKNOWN"))
+    policy   = str(((snap.get("policy")   or {}).get("canon")       or "strict")).lower()
+    lanes    = [int(x) for x in ((snap.get("inputs") or {}).get("lane_mask_k3") or [])]
+    Hb       = [int(x) for x in ((snap.get("diagnostics") or {}).get("lane_vec_H2@d3") or [])]
+    Cb       = [int(x) for x in ((snap.get("diagnostics") or {}).get("lane_vec_C3+I3") or [])]
+    strict_eq3 = bool((((snap.get("checks") or {}).get("k") or {}).get("3") or {}).get("eq", False))
+
+    def _veq(a, b):
+        a = [int(x) for x in (a or [])]; b = [int(x) for x in (b or [])]
+        return len(a) == len(b) and a == b
+
+    for fx in ordered:
+        m = fx.get("match") or {}
+        if m.get("district") and str(m["district"]) != district:
+            continue
+        pol_any = [str(x).lower() for x in (m.get("policy_canon_any") or [])]
+        if pol_any and (policy not in pol_any):
+            continue
+        if "lanes" in m and not _veq(m["lanes"], lanes):
+            continue
+        if "H_bottom" in m and not _veq(m["H_bottom"], Hb):
+            continue
+        if "C3_plus_I3_bottom" in m and not _veq(m["C3_plus_I3_bottom"], Cb):
+            continue
+        if "strict_eq3" in m and bool(m["strict_eq3"]) != strict_eq3:
+            continue
+
+        return {
+            "fixture_code": fx.get("code",""),
+            "fixture_label": fx.get("label",""),
+            "tag": fx.get("tag",""),
+            "strictify": fx.get("strictify","tbd"),
+            "growth_bumps": int(fx.get("growth_bumps", 0)),
+        }
+
+    # Fallback (never block)
+    return {
+        "fixture_code":  "",
+        "fixture_label": f"{district} • lanes={lanes} • H={Hb} • C+I={Cb}",
+        "tag":           "novelty",
+        "strictify":     "tbd",
+        "growth_bumps":  int(((snap.get("growth") or {}).get("growth_bumps") or 0)),
+    }
+
+
+def apply_fixture_to_session(fx: dict) -> None:
+    ss = st.session_state
+    ss["fixture_label"]     = fx.get("fixture_label","")
+    ss["gallery_tag"]       = fx.get("tag","")
+    ss["gallery_strictify"] = fx.get("strictify","tbd")
+    ss["growth_bumps"]      = int(fx.get("growth_bumps", 0))
+
+    rc = dict(ss.get("run_ctx") or {})
+    rc["fixture_label"] = ss["fixture_label"]
+    rc["fixture_code"]  = fx.get("fixture_code","")
+    ss["run_ctx"] = rc
+
 # --- baseline imports (defensive) ---
 import os, json, time, uuid, shutil, tempfile, hashlib
 from datetime import datetime, timezone
@@ -1303,6 +1373,7 @@ def run_overlap():
         st.session_state["overlap_out"]          = {"3": {"eq": False, "n_k": n3_now}, "2": {"eq": True}}
         st.session_state["overlap_cfg"]          = cfg_active
         st.session_state["overlap_policy_label"] = pol_lbl
+        st.session_state["overlap_policy_tag"]   = pol_lbl
     
         # Freeze SSOT even on resolver error
         H_local = _load_h_local()
@@ -6436,39 +6507,45 @@ with safe_expander("Cert & provenance", expanded=True):
         else:
             ab_fresh = True
             ab_status = REASON.AB_EMBEDDED
-                # --- Auto-label on write (runs only if fixture_label isn't set yet) ---
+                    # --- Auto-label on write (runs only if fixture_label isn't set yet) ---
     try:
         if not st.session_state.get("fixture_label"):
             rc = st.session_state.get("run_ctx") or {}
             di = st.session_state.get("_district_info") or {}
             district_id = di.get("district_id", "UNKNOWN")
-            policy_canon = (_policy_tag_now(rc) if " _policy_tag_now" in globals() else str(rc.get("policy_tag","strict")))
     
-            # Use the same masked diagnostics you already compute for checks
+            # Prefer your canonical policy helper if present
+            if "_policy_tag_now_from_rc" in globals() and callable(globals()["_policy_tag_now_from_rc"]):
+                policy_canon = _policy_tag_now_from_rc(rc)
+            else:
+                policy_canon = str(rc.get("policy_tag","strict"))
+    
+            # Masked diagnostics on the lanes (shape-safe)
             lane_mask = list(rc.get("lane_mask_k3") or [])
-            # These two should already exist in this block; recompute cheaply if not
+    
             H_used = st.session_state.get("overlap_H") or _load_h_local()
             d3     = rc.get("d3") or []
             C3     = (cmap.blocks.__root__.get("3") or [])
             H2     = (H_used.blocks.__root__.get("2") or [])
             I3     = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
+    
             def _shape_ok(A,B): return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
             def _xor(A,B):
                 if not A: return [r[:] for r in (B or [])]
                 if not B: return [r[:] for r in (A or [])]
-                r,c = len(A), len(A[0])
-                return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
+                r,c = len(A), len(A[0]); return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
+    
             H2d3  = mul(H2, d3) if _shape_ok(H2, d3) else []
             C3pI3 = _xor(C3, I3) if (C3 and C3[0]) else []
-            bottom = (H2d3[-1] if (H2d3 and len(H2d3)) else [])
-            bottom_ci = (C3pI3[-1] if (C3pI3 and len(C3pI3)) else [])
-            idx = [j for j,m in enumerate(lane_mask or []) if m]
-            lane_vec_H2d3  = [bottom[j]    for j in idx] if (bottom and idx) else []
-            lane_vec_C3pI3 = [bottom_ci[j] for j in idx] if (bottom_ci and idx) else []
     
-            # strict eq3 from the currently staged Overlap result
+            bottom_H2d3  = (H2d3[-1]  if (H2d3  and len(H2d3))  else [])
+            bottom_C3pI3 = (C3pI3[-1] if (C3pI3 and len(C3pI3)) else [])
+            idx = [j for j,m in enumerate(lane_mask or []) if m]
+            lane_vec_H2d3  = [bottom_H2d3[j]  for j in idx] if (bottom_H2d3 and idx) else []
+            lane_vec_C3pI3 = [bottom_C3pI3[j] for j in idx] if (bottom_C3pI3 and idx) else []
+    
             out = st.session_state.get("overlap_out") or {}
-            strict_eq3 = bool(((out.get("3") or {}).get("eq", False)))
+            strict_eq3 = bool(((out.get("3") or {}).get("eq", False)))  # optional in registry
     
             snapshot_for_fixture = {
                 "identity": {"district_id": district_id},
@@ -6482,11 +6559,12 @@ with safe_expander("Cert & provenance", expanded=True):
                 "growth":   {"growth_bumps": int(st.session_state.get("growth_bumps", 0) or 0)},
             }
     
-            fx = match_fixture_from_snapshot(snapshot_for_fixture)  # registry-driven
-            apply_fixture_to_session(fx)  # stamps fixture_label/tag/strictify/growth into session + rc
+            fx = match_fixture_from_snapshot(snapshot_for_fixture)
+            apply_fixture_to_session(fx)
     except Exception:
         # Never block a cert write on labeling
         pass
+
 
 
     # ---------------- Identity (includes fixture fields) ----------------
