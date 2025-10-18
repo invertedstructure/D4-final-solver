@@ -2123,354 +2123,312 @@ def _abx_write_cert(payload: dict, prefix: str) -> Path:
 
 
 
+# ======================= SINGLE-BUTTON SOLVER (strict → auto → A/B) =======================
+import os, json as _json, hashlib as _hashlib
+from pathlib import Path
+from datetime import datetime, timezone
+import streamlit as st
 
-# ── UI------------------------------------------------------------------------------------#
-ss = st.session_state
-ss.setdefault("_abx_lock", False)
-
-_exp = globals().get("safe_expander", None)
-ctx = (_exp("A/B compare (strict vs active projected)", expanded=False)
-       if callable(_exp) else st.expander("A/B compare (strict vs active projected)", expanded=False))
-
-# scrub one legacy bad state (payload not a dict)
-_bad = ss.get("ab_pin")
-if isinstance(_bad, dict) and "payload" in _bad and not isinstance(_bad.get("payload"), dict):
-    _bad["payload"] = {}
-    ss["ab_pin"] = _bad
-
-with ctx:
-    # --- A/B pin freshness header (robust; no ternaries) ---
-    pin = st.session_state.get("ab_pin") or {}
-    payload = pin.get("payload") or {}
-    if not isinstance(payload, dict):
-        payload = {}
-        pin["payload"] = {}
-        st.session_state["ab_pin"] = pin
-
-    fresh = (pin.get("state") == "pinned" and payload.get("embed_sig", "") == _abx_embed_sig())
-    if pin.get("state") == "pinned":
-        if fresh:
-            st.success("A/B: Pinned · Fresh (will embed)")
-        else:
-            # Reason-codes optional; at minimum show stale
-            st.warning("A/B: Pinned · Stale")
-    else:
-        st.caption("A/B: —")
-
-    # --- Lane Policy selector (explicit Π control) ---
-    rc0 = dict(st.session_state.get("run_ctx") or {})
-    pol_options = ["manual","auto_d3","auto_cplusi","support","file"]
-    try:
-        idx0 = pol_options.index(str(rc0.get("lane_policy","manual")))
-    except Exception:
-        idx0 = 0
-    sel = st.radio("Lane policy (k=3)", pol_options, horizontal=True, key="lane_policy_sel", index=idx0)
-    changed = (sel != rc0.get("lane_policy","manual"))
-    rc0["lane_policy"] = sel
-
-    # Dims from frozen SSOT if available
-    ib0 = st.session_state.get("_inputs_block") or {}
-    dims0 = (ib0.get("dims") or {})
-    n2p = int(dims0.get("n2") or 0)
-    n3p = int(dims0.get("n3") or 0)
-
-    # Mask compute for non-FILE
-    derived_mask = list(rc0.get("lane_mask_k3") or ([] if n3p==0 else [1]+[0]*(max(n3p-1,0))))
-    support_mask = list(rc0.get("support_mask_k3") or [])
-    def _bits_ok(m): 
+# --- tiny shims (only if missing) ---
+if "abx_read_json_any" not in globals():
+    def abx_is_uploaded_file(x):
+        return hasattr(x, "getvalue") and hasattr(x, "name")
+    def abx_read_json_any(x, *, kind: str) -> tuple[dict, str, str]:
+        if not x: return {}, "", ""
         try:
-            return all(int(x) in (0,1) for x in (m or []))
+            if isinstance(x, (str, Path)):
+                p = Path(x)
+                if p.exists():
+                    return _json.loads(p.read_text(encoding="utf-8")), str(p), "file"
         except Exception:
-            return False
-
-    manual_mask = None
-    if sel == "manual":
-        if n3p > 0 and (len(derived_mask) != n3p or not _bits_ok(derived_mask)):
-            derived_mask = [1] + [0]*(n3p-1)
-        cols = st.columns(n3p if n3p>0 else 1)
-        out = []
-        for j in range(n3p):
-            with cols[j]:
-                out.append(1 if st.checkbox(f"col {j}", value=bool(derived_mask[j]), key=f"lane_manual_{j}") else 0)
-        manual_mask = out
-        rc0["lane_mask_k3"] = list(manual_mask or [])
-    elif sel == "auto_d3":
-        # compute from d3 if present now; else fallback mask, recomputed at freeze
-        d3p = (st.session_state.get("run_ctx") or {}).get("d3") or []
-        if not d3p:
-            rc0["lane_mask_k3"] = [1]+[0]*(max(n3p-1,0)) if n3p>0 else []
-        else:
-            mask = [1 if any(int(d3p[i][j]) & 1 for i in range(len(d3p))) else 0 for j in range(len(d3p[0]) if (d3p and d3p[0]) else 0)]
-            rc0["lane_mask_k3"] = mask
-    elif sel == "auto_cplusi":
-        # try preview from frozen C if available; final validation occurs on run
-        paths = (ib0.get("filenames") or {})
-        def _read_blocks(pth):
-            try: return _json.loads(Path(pth).read_text(encoding="utf-8")).get("blocks") or {}
-            except Exception: return {}
-        bC = _read_blocks(paths.get("C",""))
-        C3 = bC.get("3") or []
-        if C3 and len(C3)==len(C3[0]):
-            I3 = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))]
-            C3pI3 = [[(C3[i][j]^I3[i][j]) & 1 for j in range(len(C3))] for i in range(len(C3))]
-            bottom = C3pI3[-1] if C3pI3 else [0]*n3p
-            rc0["lane_mask_k3"] = [1 if int(b)==1 else 0 for b in bottom]
-        else:
-            rc0["lane_mask_k3"] = [1]+[0]*(max(n3p-1,0)) if n3p>0 else []
-    elif sel == "support":
-        if len(support_mask)==n3p and _bits_ok(support_mask):
-            rc0["lane_mask_k3"] = list(support_mask)
-        else:
-            rc0["lane_mask_k3"] = [0]*n3p
-    else:
-        # file: Π is authoritative; do not touch lane_mask_k3
-        pass
-      
-    # --- Preflight (uploads-first; persists uploads so preview matches what will run) ---
-    def _preflight_pick(kind: str, fallback_base: str):
-        # Use the same precedence as the runner: uploaded → fname_* → frozen → globals
-        src = _abx_pick_source(kind)
-        # abx_read_json_any will persist uploads to logs/_uploads and return that canonical path
-        j, p, _origin = abx_read_json_any(src, kind={"B":"boundaries","C":"cmap","H":"H","U":"shapes"}[kind])
-        blocks = (j.get("blocks") or {}) if isinstance(j, dict) else {}
-        return p or "", blocks
-    
-    pB_pf, bB_pf = _preflight_pick("B","boundaries.json")
-    pC_pf, bC_pf = _preflight_pick("C","cmap.json")
-    pH_pf, bH_pf = _preflight_pick("H","H.json")
-    pU_pf, bU_pf = _preflight_pick("U","shapes.json")
-    
-    # Derive matrices from *current* (uploads-first) sources
-    d3pf = bB_pf.get("3") or []
-    H2pf = bH_pf.get("2") or []
-    C3pf = bC_pf.get("3") or []
-    
-    # Recompute preview dims from current buffers (don’t rely on stale _inputs_block)
-    n2p = len(d3pf)
-    n3p = (len(d3pf[0]) if (d3pf and d3pf[0]) else 0)
-    
-    # If the manual chips were sized earlier off old n3, just show the current lanes; guards will reconcile on Run
-    mask_pf = list(rc0.get("lane_mask_k3") or [])
-    idx_pf = [j for j,x in enumerate(mask_pf) if int(x)==1]
-    
-    # Quick GF(2) helpers (local)
-    def _mul(A,B):
-        if not A or not B or not A[0] or not B[0] or len(A[0])!=len(B): return []
-        m,k = len(A), len(A[0]); n = len(B[0])
-        C = [[0]*n for _ in range(m)]
-        for i in range(m):
-            Ai = A[i]
-            for t in range(k):
-                if Ai[t] & 1:
-                    Bt = B[t]
-                    for j in range(n):
-                        C[i][j] ^= (Bt[j] & 1)
-        return C
-    
-    I3pf = [[1 if i==j else 0 for j in range(len(C3pf))] for i in range(len(C3pf))] if (C3pf and len(C3pf)==len(C3pf[0])) else []
-    C3pI_pf = [[(C3pf[i][j]^I3pf[i][j]) & 1 for j in range(len(C3pf))] for i in range(len(C3pf))] if (C3pf and I3pf) else []
-    H2d3_pf = _mul(H2pf, d3pf)
-    
-    bottom_H  = H2d3_pf[-1] if H2d3_pf else []
-    bottom_CI = C3pI_pf[-1] if C3pI_pf else []
-    
-    # Show *actual* sources you’ll run with if you click the button now
-    st.caption(
-        "Sources → "
-        f"B:{(Path(pB_pf).name if pB_pf else '(missing)')} · "
-        f"C:{(Path(pC_pf).name if pC_pf else '(missing)')} · "
-        f"H:{(Path(pH_pf).name if pH_pf else '(missing)')} · "
-        f"U:{(Path(pU_pf).name if pU_pf else '(missing)')}"
-    )
-    
-    st.markdown("**Preflight**")
-    st.caption(f"Dims: n₂×n₃ = {n2p}×{n3p} · Lane policy: {sel} · lanes={mask_pf} · idx={idx_pf}")
-    st.caption(f"Bottom rows — H2·d3: {bottom_H} · C3⊕I3: {bottom_CI}")
-    if sel == "file":
-        shortp = (rc0.get("projector_hash","") or "")[:8]
-        st.caption(f"Projector: FILE · hash={shortp or '(none)'}")
-    else:
-        st.caption("Projector: Π = diag(lanes)")
-    # --- /Preflight ---
-
-
-    
-
-    # Write-back + arm (policy changes or manual toggles)
-    if sel == "manual" or changed:
-        st.session_state["run_ctx"] = rc0
-        st.session_state["write_armed"] = True
-        st.session_state["armed_by"] = "policy_change"
-
-    # --- Controls
-    c1, c2, c3 = st.columns([1,1,1.2])
-    with c1:
-        run_btn = st.button("Freeze SSOT + A/B + write certs", key="btn_abx_run")
-    with c2:
-        also_overlap = st.checkbox("Also run Overlap laps", value=False, key="abx_overlap")
-    with c3:
-        dbg_on = st.checkbox("Show debugger", value=False, key="abx_dbg")
-
-    if run_btn:
-        if ss["_abx_lock"]:
-            st.info("A/B compare is already running…")
-        else:
-            ss["_abx_lock"] = True
+            pass
+        if abx_is_uploaded_file(x):
             try:
-                # 1) Resolve current fixtures to FILES (no globals), stamp filenames
-                pb = _abx_resolve_all_to_paths()
+                raw = x.getvalue()
+                text = raw.decode("utf-8")
+                j = _json.loads(text)
+            except Exception:
+                return {}, "", ""
+            uploads_dir = Path(st.session_state.get("LOGS_DIR", "logs")) / "_uploads"
+            uploads_dir.mkdir(parents=True, exist_ok=True)
+            h12  = _hashlib.sha256(raw).hexdigest()[:12]
+            base = Path(getattr(x, "name", f"{kind}.json")).name
+            outp = uploads_dir / f"{kind}__{h12}__{base}"
+            try: outp.write_text(text, encoding="utf-8")
+            except Exception: pass
+            return j, str(outp), "upload"
+        if isinstance(x, dict):
+            return x, "", "dict"
+        return {}, "", ""
 
-                # Probe sources + shapes early
-                st.caption(f"Sources → B:{Path(pb['B'][0]).name} · C:{Path(pb['C'][0]).name} · H:{Path(pb['H'][0]).name} · U:{Path(pb['U'][0]).name}")
-                d3 = pb["B"][1].get("3") or []; C3 = pb["C"][1].get("3") or []; H2 = pb["H"][1].get("2") or []
-                sD = (len(d3), (len(d3[0]) if (d3 and d3[0]) else 0))
-                sC = (len(C3), (len(C3[0]) if C3 else 0))
-                sH = (len(H2), (len(H2[0]) if (H2 and H2[0]) else 0))
-                st.caption(f"Shapes  → d3:{sD} · C3:{sC} · H2:{sH}")
+# --- constants/paths ---
+LOGS_DIR    = Path(globals().get("LOGS_DIR", "logs"))
+UPLOADS_DIR = LOGS_DIR / "_uploads"
+CERTS_DIR   = LOGS_DIR / "certs"
+for _p in (UPLOADS_DIR, CERTS_DIR): _p.mkdir(parents=True, exist_ok=True)
 
-                # 2) Publish frozen SSOT from those *exact* bytes
-                ib = _abx_publish_frozen_ssot(pb)
-                rc = dict(st.session_state.get("run_ctx") or {})
+# --- low-level helpers (prefix svr_ to avoid collisions) ---
+def _svr_hash_json(obj) -> str:
+    try:
+        blob = _json.dumps(obj, separators=(",", ":"), sort_keys=True)
+        return _hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    except Exception:
+        return ""
 
-                # 3) Guard: require non-empty + shape alignment
-                ok_shapes = True
-                reasons = []
-                n2, n3 = sD
-                if n3 == 0: ok_shapes, reasons = False, reasons + ["boundaries[3] empty"]
-                if sC[0] == 0 or sC[0] != sC[1]: ok_shapes, reasons = False, reasons + ["C3 not square or empty"]
-                if sH[0] == 0 or sH[1] != n2: ok_shapes, reasons = False, reasons + ["H2 shape mismatch with d3 rows"]
-                if not ok_shapes:
-                    st.error("INPUTS_INCOMPLETE → " + ", ".join(reasons))
-                    st.stop()
+def _svr_atomic_write_json(path: Path, payload: dict):
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        _json.dump(payload, f, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, path)
 
-                # 3b) Lane policy & mask guards
-                rc_lane = str(rc.get("lane_policy","manual"))
-                lane_mask = list(rc.get("lane_mask_k3") or [])
-                if rc_lane != "file":
-                    if len(lane_mask) != n3:
-                        st.error(f"MASK_LEN_MISMATCH: expected n₃={n3}, got {len(lane_mask)}")
-                        st.stop()
-                    try:
-                        bad_bits = any(int(x) not in (0,1) for x in lane_mask)
-                    except Exception:
-                        bad_bits = True
-                    if bad_bits:
-                        st.error("MASK_NON_BINARY: bits must be 0/1")
-                        st.stop()
-                    if sum(int(x) for x in lane_mask) == 0:
-                        st.error("ZERO_LANE_PROJECTOR: mask has no active lanes for k=3")
-                        st.stop()
-                if rc_lane == "auto_cplusi" and (sC[0] == 0 or sC[0] != sC[1]):
-                    st.error("AUTO_CPLUSI_REQUIRES_SQUARE_C3")
-                    st.stop()
+def _svr_mul(A,B):
+    if not A or not B or not A[0] or not B[0] or len(A[0])!=len(B): return []
+    m,k = len(A), len(A[0]); n = len(B[0])
+    C = [[0]*n for _ in range(m)]
+    for i in range(m):
+        Ai = A[i]
+        for t in range(k):
+            if int(Ai[t]) & 1:
+                Bt = B[t]
+                for j in range(n):
+                    C[i][j] ^= (int(Bt[j]) & 1)
+    return C
 
-                # 4) (optional) run overlap legs for the rest of the app
-                if also_overlap and "run_overlap" in globals() and callable(globals()["run_overlap"]):
-                    try: run_overlap(policy="strict")
-                    except Exception: pass
-                    try: run_overlap(policy="projected(auto)")
-                    except Exception: pass
+def _svr_xor(A,B):
+    if not A: return [row[:] for row in (B or [])]
+    if not B: return [row[:] for row in (A or [])]
+    r,c = len(A), len(A[0])
+    return [[(int(A[i][j]) ^ int(B[i][j])) & 1 for j in range(c)] for i in range(r)]
 
-                # 5) Recompute A/B strictly from raw blocks
-                out_s, out_p, lvH, lvCI = _abx_ab_from_blocks(pb["H"][1], pb["B"][1], pb["C"][1], rc)
+def _svr_eye(n): return [[1 if i==j else 0 for j in range(n)] for i in range(n)]
+def _svr_is_zero(M): return (not M) or all((int(x) & 1) == 0 for row in M for x in row)
 
-                # 6) Snapshot for diagnostics
-                label_proj = ('projected(columns@k=3,file)' if str(rc.get('mode',''))=='projected(file)' else 'projected(columns@k=3,auto)')
-                ss["ab_compare"] = {
-                    "pair_tag": f"strict__VS__{label_proj}",
-                    "inputs_sig": [*(_json.loads(_json.dumps(ib.get('hashes') or {})).get(k,"") for k in [])],  # harmless; you already surface inputs elsewhere
-                    "lane_mask_k3": list(ib.get("lane_mask_k3") or rc.get("lane_mask_k3") or []),
-                    "policy_tag": label_proj,
-                    "strict":   {"label":"strict","out":out_s,"lane_vec_H2d3":lvH,"lane_vec_C3plusI3":lvCI,
-                                 "pass_vec":[int(out_s["2"]["eq"]), int(out_s["3"]["eq"])]},
-                    "projected":{"label":label_proj,"policy_tag":label_proj,"out":out_p,
-                                 "lane_vec_H2d3":lvH[:],"lane_vec_C3plusI3":lvCI[:],
-                                 "pass_vec":[int(out_p["2"]["eq"]), int(out_p["3"]["eq"])],
-                                 "projector_filename": rc.get("projector_filename",""),
-                                 "projector_hash": rc.get("projector_hash","") if label_proj.endswith("(file)") else "",
-                                 "projector_consistent_with_d": rc.get("projector_consistent_with_d", None)},
-                    "sanity_probe": {"shapes":{"H2": sH, "d3": sD, "C3": sC}},
-                }
+def _svr_pick_source(kind: str):
+    """uploads → fname_* → frozen filenames → globals (first hit wins)."""
+    ss = st.session_state
+    ib_files = ((ss.get("_inputs_block") or {}).get("filenames") or {})
+    frozen_key = {"B":"boundaries","C":"C","H":"H","U":"U"}[kind]
+    precedence = {
+        "B": ["uploaded_boundaries","fname_boundaries","B_up","f_B","boundaries_file","boundaries_obj","boundaries"],
+        "C": ["uploaded_cmap","fname_cmap","C_up","f_C","cmap_file","cmap_obj","cmap"],
+        "H": ["uploaded_H","fname_h","H_up","f_H","h_file","H_obj","overlap_H"],
+        "U": ["uploaded_shapes","fname_shapes","U_up","f_U","shapes_file","shapes_obj","shapes"],
+    }[kind]
+    # session first
+    for k in precedence:
+        if k in ss and ss.get(k) is not None: return ss.get(k)
+    # previously frozen filenames
+    if ib_files.get(frozen_key): return ib_files.get(frozen_key)
+    # globals last
+    for k in precedence:
+        if k in globals() and globals().get(k) is not None: return globals().get(k)
+    return None
 
-                # 7) Pin for embed/ticket (embed_sig is lane-aware now)
-                _abx_pin_for_cert(out_s, out_p)
+def _svr_resolve_all_to_paths():
+    """Return dict kind→(path, blocks) and stamp fname_* in session."""
+    out = {}
+    for kind, base in (("B","boundaries.json"),("C","cmap.json"),("H","H.json"),("U","shapes.json")):
+        src = _svr_pick_source(kind)
+        j, p, _ = abx_read_json_any(src, kind={"B":"boundaries","C":"cmap","H":"H","U":"shapes"}[kind])
+        blocks = (j.get("blocks") or {}) if isinstance(j, dict) else {}
+        if not p:
+            # persist even dict/globals so we always get a concrete file
+            canon = _json.dumps({"blocks": blocks}, separators=(",", ":"), sort_keys=True)
+            h12 = _hashlib.sha256(canon.encode("utf-8")).hexdigest()[:12]
+            pth = UPLOADS_DIR / f"{kind}__{h12}__{base}"
+            _svr_atomic_write_json(pth, {"blocks": blocks})
+            p = str(pth)
+        out[kind] = (p, blocks)
+        # stamp fname_* for app coherence
+        key = {"B":"fname_boundaries","C":"fname_cmap","H":"fname_h","U":"fname_shapes"}[kind]
+        st.session_state[key] = p
+    return out
 
-                # 8) Write 3 certs (strict, projected(active), and A/B)
-                strict_cert = _abx_cert_common("strict", ib, rc); strict_cert["results"] = {"out": out_s}
-                p_cert      = _abx_cert_common(label_proj, ib, rc); p_cert["results"]  = {"out": out_p}
-                p_strict = _abx_write_cert(strict_cert, "cert_strict")
-                p_proj   = _abx_write_cert(p_cert,    "cert_projected")
+def _svr_freeze_ssot(pb):
+    """Freeze from exact blocks/files; do NOT invent lanes here."""
+    (pB,bB) = pb["B"]; (pC,bC) = pb["C"]; (pH,bH) = pb["H"]; (pU,bU) = pb["U"]
+    d3 = bB.get("3") or []
+    n2, n3 = len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)
+    hobj = {
+        "boundaries_hash": _svr_hash_json({"blocks": bB}),
+        "C_hash":          _svr_hash_json({"blocks": bC}),
+        "H_hash":          _svr_hash_json({"blocks": bH}),
+        "U_hash":          _svr_hash_json({"blocks": bU}),
+        "shapes_hash":     _svr_hash_json({"blocks": bU}),
+    }
+    if not all(hobj.values()):
+        missing = [k for k,v in hobj.items() if not v]
+        raise RuntimeError("INPUTS_INCOMPLETE: " + ", ".join(missing))
+    ib = {
+        "filenames": {"boundaries": pB, "C": pC, "H": pH, "U": pU},
+        "hashes": dict(hobj),
+        "dims": {"n2": n2, "n3": n3},
+    }
+    st.session_state["_inputs_block"] = ib
+    # normalize run_ctx
+    rc = dict(st.session_state.get("run_ctx") or {})
+    rc.update({"n2": n2, "n3": n3, "d3": d3, "policy_tag": "projected(columns@k=3,auto)"})
+    st.session_state["run_ctx"] = rc
+    return ib, rc
 
-                ab_payload = st.session_state.get("ab_pin", {}).get("payload", {})
-                ab_cert = {
-                    **_abx_cert_common("A/B", ib, rc),
-                    "ab_pair": {
-                        "pair_tag": ab_payload.get("pair_tag","strict__VS__"+label_proj),
-                        "embed_sig": ab_payload.get("embed_sig",""),
-                        "strict_cert":   {"path": str(p_strict), "hash": strict_cert["integrity"]["content_hash"]},
-                        "projected_cert":{"path": str(p_proj),   "hash": p_cert["integrity"]["content_hash"]},
-                    },
-                    "diagnostics": ss.get("ab_compare", {}).get("sanity_probe", {}),
-                }
-                p_ab = _abx_write_cert(ab_cert, "cert_ab")
+def _svr_inputs_sig(ib):
+    h = (ib.get("hashes") or {})
+    return [
+        str(h.get("boundaries_hash","")),
+        str(h.get("C_hash","")),
+        str(h.get("H_hash","")),
+        str(h.get("U_hash","")),
+        str(h.get("shapes_hash","")),
+    ]
 
-                # expose projected cert to gallery
-                st.session_state["cert_payload"] = p_cert
-                st.session_state.setdefault("last_report_paths", {})["ab_trio"] = {
-                    "strict": str(p_strict), "projected": str(p_proj), "ab": str(p_ab),
-                }
+def _svr_strict_from_blocks(bH,bB,bC):
+    H2 = bH.get("2") or []
+    d3 = bB.get("3") or []
+    C3 = bC.get("3") or []
+    I3 = _svr_eye(len(C3)) if (C3 and len(C3)==len(C3[0])) else []
+    R3s = _svr_xor(_svr_mul(H2, d3), _svr_xor(C3, I3)) if (H2 and d3 and C3 and len(C3)==len(C3[0])) else []
+    eq3 = _svr_is_zero(R3s)
+    # k2 not specified in seed; report True as placeholder (keeps the banner format stable)
+    return {"2":{"eq": True}, "3":{"eq": bool(eq3)}}
 
-                # --- tiny verdict banner (now with lanes) ---
-                s_ok = bool((out_s or {}).get("3", {}).get("eq", False))
-                p_ok = bool((out_p or {}).get("3", {}).get("eq", False))
-                s_tick = "✅" if s_ok else "❌"
-                p_tick = "✅" if p_ok else "❌"
-                proj_hash_short = str(rc.get("projector_hash", ""))[:8]
-                lanes_now = list(rc.get("lane_mask_k3") or [])
-                banner = (
-                    "**Compare:** "
-                    f"k3(strict) {s_tick} · "
-                    f"k3(projected) {p_tick} · "
-                    f"**pair** strict__VS__{label_proj} · "
-                    f"**n₃** {rc.get('n3', 0)} · "
-                    f"**P** {proj_hash_short} · "
-                    f"lanes={lanes_now}"
-                )
-                st.success(f"A/B updated → strict={s_tick} · projected={p_tick} · strict__VS__{label_proj}")
-                st.markdown(banner)
-                st.caption(f"certs written → strict: {p_strict.name} · projected: {p_proj.name} · ab: {p_ab.name}")
+def _svr_projected_auto_from_blocks(bH,bB,bC):
+    """AUTO := C⊕I bottom row. Requires square C3. Strict-only if not square."""
+    H2 = bH.get("2") or []
+    d3 = bB.get("3") or []
+    C3 = bC.get("3") or []
+    if not (C3 and len(C3)==len(C3[0])):
+        return {"na": True, "reason": "AUTO_REQUIRES_SQUARE_C3"}, [], {"2":{"eq": None}, "3":{"eq": None}}
+    I3 = _svr_eye(len(C3))
+    C3pI = _svr_xor(C3, I3)
+    bottom = C3pI[-1] if C3pI else []
+    lanes  = [1 if int(x)==1 else 0 for x in bottom]
+    if sum(lanes)==0:
+        return {"na": True, "reason": "ZERO_LANE_PROJECTOR"}, lanes, {"2":{"eq": None}, "3":{"eq": None}}
+    # Π = diag(lanes)
+    P = [[1 if (i==j and lanes[j]==1) else 0 for j in range(len(lanes))] for i in range(len(lanes))]
+    R3s = _svr_xor(_svr_mul(H2, d3), _svr_xor(C3, I3)) if (H2 and d3 and C3) else []
+    R3p = _svr_mul(R3s, P) if (R3s and P and len(R3s[0])==len(P)) else []
+    eq3 = _svr_is_zero(R3p)
+    return {"na": False, "policy": "auto_ci_bottom"}, lanes, {"2":{"eq": True}, "3":{"eq": bool(eq3)}}
 
-            except Exception as e:
-                st.error(f"A/B compare failed: {e}")
-            finally:
-                ss["_abx_lock"] = False
+def _svr_now_iso():
+    try: return datetime.now(timezone.utc).isoformat().replace("+00:00","Z")
+    except Exception: return ""
 
-    # ── debugger (frozen-on-disk view)
-    if dbg_on:
-        ib = ss.get("_inputs_block") or {}
-        rc = ss.get("run_ctx") or {}
-        paths = (ib.get("filenames") or {})
-        def _read_blocks(p):
-            try: return (_json.loads(Path(p).read_text(encoding="utf-8")).get("blocks") or {}) if p else {}
-            except Exception: return {}
-        bB = _read_blocks(paths.get("boundaries","")); bC = _read_blocks(paths.get("C","")); bH = _read_blocks(paths.get("H",""))
-        d3 = bB.get("3") or []; H2 = bH.get("2") or []; C3 = bC.get("3") or []
-        st.json({
-            "embed_sig_now": _abx_embed_sig(),
-            "rc": {"mode": rc.get("mode",""), "n3": rc.get("n3", None),
-                   "lane_policy": rc.get("lane_policy",""),
-                   "lane_mask_k3": rc.get("lane_mask_k3", []),
-                   "projector_hash": rc.get("projector_hash","")},
-            "derived": {"dims_from_B": [len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)],
-                        "lane_mask_from_B": [1 if any(int(d3[i][j]) & 1 for i in range(len(d3))) else 0 for j in range(len(d3[0]) if (d3 and d3[0]) else 0)]},
-            "shapes": {"H2": [len(H2), (len(H2[0]) if (H2 and H2[0]) else 0)],
-                       "d3": [len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)],
-                       "C3": [len(C3), (len(C3[0]) if (C3 and C3[0]) else 0)]},
-            "sources": {"B": Path(paths.get("boundaries","")).name or "(missing)",
-                        "C": Path(paths.get("C","")).name or "(missing)",
-                        "H": Path(paths.get("H","")).name or "(missing)",
-                        "U": Path(paths.get("U","")).name or "(missing)"},
-        })
+def _svr_cert_common(ib, rc, policy_tag: str) -> dict:
+    return {
+        "schema_version": globals().get("SCHEMA_VERSION", "1"),
+        "written_at_utc": _svr_now_iso(),
+        "app_version":    globals().get("APP_VERSION", "dev"),
+        "inputs":         dict(ib),
+        "policy":         {"policy_tag": policy_tag},
+        "integrity":      {"content_hash": ""},
+    }
+
+def _svr_write_cert(payload: dict, prefix: str) -> Path:
+    payload["integrity"]["content_hash"] = _svr_hash_json(payload)
+    h12 = payload["integrity"]["content_hash"][:12]
+    p = CERTS_DIR / f"{prefix}__{h12}.json"
+    _svr_atomic_write_json(p, payload)
+    return p
+
+def _svr_embed_sig(inputs_sig, policy_tag, lanes_or_reason):
+    blob = {"inputs": inputs_sig, "policy": policy_tag}
+    if isinstance(lanes_or_reason, list):
+        blob["lanes"] = list(lanes_or_reason)
+    else:
+        blob["projected_na_reason"] = str(lanes_or_reason)
+    return _hashlib.sha256(_json.dumps(blob, separators=(",", ":"), sort_keys=True).encode("ascii")).hexdigest()
+
+# --- UI: single expander with one button ---
+with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
+    # Preflight: resolve current sources (uploads-first), show what will freeze
+    try:
+        pf = _svr_resolve_all_to_paths()
+        pB,pC,pH,pU = Path(pf["B"][0]).name, Path(pf["C"][0]).name, Path(pf["H"][0]).name, Path(pf["U"][0]).name
+        st.caption(f"Sources → B:{pB} · C:{pC} · H:{pH} · U:{pU}")
+        d3pf = pf["B"][1].get("3") or []; C3pf = pf["C"][1].get("3") or []; H2pf = pf["H"][1].get("2") or []
+        n2p, n3p = len(d3pf), (len(d3pf[0]) if (d3pf and d3pf[0]) else 0)
+        I3pf = _svr_eye(len(C3pf)) if (C3pf and len(C3pf)==len(C3pf[0])) else []
+        C3pIpf = _svr_xor(C3pf, I3pf) if I3pf else []
+        bottom_H = (_svr_mul(H2pf, d3pf)[-1] if (H2pf and d3pf) else [])
+        bottom_CI = (C3pIpf[-1] if C3pIpf else [])
+        if n2p and n3p:
+            st.caption(f"Preflight — Dims n₂×n₃ = {n2p}×{n3p} · (H2·d3)_bottom={bottom_H} · (C3⊕I3)_bottom={bottom_CI}")
+        else:
+            st.info("Preflight: upload B/C/H/U to run.")
+    except Exception:
+        st.info("Preflight: unable to resolve sources yet.")
+
+    run_btn = st.button("Run solver (freeze → strict → projected(auto) → A/B → write certs)", key="btn_svr_run")
+    if run_btn:
+        try:
+            # 1) freeze SSOT
+            pb = _svr_resolve_all_to_paths()
+            ib, rc = _svr_freeze_ssot(pb)
+
+            # 2) strict lap
+            strict_out = _svr_strict_from_blocks(pb["H"][1], pb["B"][1], pb["C"][1])
+
+            # 3) projected(auto) lap (strict-only if C3 not square)
+            proj_meta, lanes, projected_out = _svr_projected_auto_from_blocks(pb["H"][1], pb["B"][1], pb["C"][1])
+
+            # 4) write certs
+            inputs_sig = _svr_inputs_sig(ib)
+
+            strict_cert = _svr_cert_common(ib, rc, "strict")
+            strict_cert["results"] = {"out": strict_out}
+            p_strict = _svr_write_cert(strict_cert, "cert_strict")
+
+            p_cert = _svr_cert_common(ib, rc, "projected(columns@k=3,auto)")
+            if proj_meta.get("na"):
+                p_cert["results"] = {"out": {"2":{"eq": None},"3":{"eq": None}}, "na_reason": proj_meta["reason"], "lanes": lanes}
+            else:
+                p_cert["results"] = {"out": projected_out, "lanes": lanes, "lane_policy": "C⊕I bottom row"}
+            p_proj = _svr_write_cert(p_cert, "cert_projected")
+
+            # 5) A/B cert (compare strict vs projected(auto))
+            ab_cert = _svr_cert_common(ib, rc, "A/B")
+            ab_cert["ab_pair"] = {
+                "pair_tag": "strict__VS__projected(columns@k=3,auto)",
+                "embed_sig": _svr_embed_sig(inputs_sig, "projected(columns@k=3,auto)", (lanes if not proj_meta.get("na") else proj_meta["reason"])),
+                "strict_cert":   {"path": str(p_strict), "hash": strict_cert["integrity"]["content_hash"]},
+                "projected_cert":{"path": str(p_proj),   "hash": p_cert["integrity"]["content_hash"]},
+            }
+            p_ab = _svr_write_cert(ab_cert, "cert_ab")
+
+            # 6) banner
+            s2 = "✅" if strict_out["2"]["eq"] is True else ("❌" if strict_out["2"]["eq"] is False else "N/A")
+            s3 = "✅" if strict_out["3"]["eq"] is True else ("❌" if strict_out["3"]["eq"] is False else "N/A")
+            if proj_meta.get("na"):
+                p2 = p3 = "N/A"
+                lanes_txt = "N/A"
+                reason = proj_meta["reason"]
+            else:
+                p2 = "✅" if projected_out["2"]["eq"] is True else ("❌" if projected_out["2"]["eq"] is False else "N/A")
+                p3 = "✅" if projected_out["3"]["eq"] is True else ("❌" if projected_out["3"]["eq"] is False else "N/A")
+                lanes_txt = str(lanes)
+                reason = ""
+            n3 = (ib.get("dims") or {}).get("n3", 0)
+            header = (
+                f"Strict: k2={s2} · k3={s3}  |  "
+                f"Projected(auto): k2={p2} · k3={p3}"
+                f"{'' if not reason else f' · N/A({reason})'}  |  "
+                f"A/B: strict vs projected(auto) · lanes={lanes_txt} · n₃={n3}"
+            )
+            st.success(header)
+            st.caption(f"certs → strict: {Path(p_strict).name} · projected: {Path(p_proj).name} · ab: {Path(p_ab).name}")
+
+            # 7) pin (lane-aware)
+            embed_sig = _svr_embed_sig(inputs_sig, "projected(columns@k=3,auto)", (lanes if not proj_meta.get("na") else proj_meta["reason"]))
+            st.session_state["ab_pin"] = {"state": "pinned", "payload": {"embed_sig": embed_sig}, "consumed": False}
+
+        except Exception as e:
+            st.error(f"Solver run failed: {e}")
+# =================== /SINGLE-BUTTON SOLVER (strict → auto → A/B) ===================
+
+
 
 
 
