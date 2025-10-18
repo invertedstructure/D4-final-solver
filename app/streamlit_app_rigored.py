@@ -126,6 +126,58 @@ DISTRICT_MAP: dict[str, str] = {
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
 
+# --- shim: uploads-first JSON reader/persister (only if missing) ---
+if "abx_read_json_any" not in globals():
+    from pathlib import Path
+    import json as _json, hashlib as _hashlib
+    import streamlit as st
+
+    def abx_is_uploaded_file(x):
+        # duck-type Streamlit's UploadedFile
+        return hasattr(x, "getvalue") and hasattr(x, "name")
+
+    def abx_read_json_any(x, *, kind: str) -> tuple[dict, str, str]:
+        """
+        Accepts a path string/Path, a Streamlit UploadedFile, or a plain dict.
+        Returns (json_obj, canonical_path, origin_tag) where origin_tag∈{"file","upload","dict",""}.
+        For uploads, saves a stable copy under logs/_uploads and returns that path.
+        """
+        if not x:
+            return {}, "", ""
+        # 1) path-like
+        try:
+            if isinstance(x, (str, Path)):
+                p = Path(x)
+                if p.exists():
+                    try:
+                        return _json.loads(p.read_text(encoding="utf-8")), str(p), "file"
+                    except Exception:
+                        return {}, "", ""
+        except Exception:
+            pass
+        # 2) UploadedFile
+        if abx_is_uploaded_file(x):
+            try:
+                raw  = x.getvalue()
+                text = raw.decode("utf-8")
+                j    = _json.loads(text)
+            except Exception:
+                return {}, "", ""
+            uploads_dir = Path(st.session_state.get("LOGS_DIR", "logs")) / "_uploads"
+            uploads_dir.mkdir(parents=True, exist_ok=True)
+            h12  = _hashlib.sha256(raw).hexdigest()[:12]
+            base = Path(getattr(x, "name", f"{kind}.json")).name
+            outp = uploads_dir / f"{kind}__{h12}__{base}"
+            try:
+                outp.write_text(text, encoding="utf-8")
+            except Exception:
+                pass
+            return j, str(outp), "upload"
+        # 3) already-parsed dict
+        if isinstance(x, dict):
+            return x, "", "dict"
+        return {}, "", ""
+# --- /shim ---
 
 
 
@@ -2173,6 +2225,7 @@ with ctx:
     else:
         # file: Π is authoritative; do not touch lane_mask_k3
         pass
+      
     # --- Preflight (uploads-first; persists uploads so preview matches what will run) ---
     def _preflight_pick(kind: str, fallback_base: str):
         # Use the same precedence as the runner: uploaded → fname_* → frozen → globals
@@ -2185,13 +2238,14 @@ with ctx:
     pB_pf, bB_pf = _preflight_pick("B","boundaries.json")
     pC_pf, bC_pf = _preflight_pick("C","cmap.json")
     pH_pf, bH_pf = _preflight_pick("H","H.json")
+    pU_pf, bU_pf = _preflight_pick("U","shapes.json")
     
     # Derive matrices from *current* (uploads-first) sources
     d3pf = bB_pf.get("3") or []
     H2pf = bH_pf.get("2") or []
     C3pf = bC_pf.get("3") or []
     
-    # Recompute preview dims (do not rely on stale _inputs_block here)
+    # Recompute preview dims from current buffers (don’t rely on stale _inputs_block)
     n2p = len(d3pf)
     n3p = (len(d3pf[0]) if (d3pf and d3pf[0]) else 0)
     
@@ -2226,7 +2280,7 @@ with ctx:
         f"B:{(Path(pB_pf).name if pB_pf else '(missing)')} · "
         f"C:{(Path(pC_pf).name if pC_pf else '(missing)')} · "
         f"H:{(Path(pH_pf).name if pH_pf else '(missing)')} · "
-        f"U:{(Path((st.session_state.get('fname_shapes') or ''))).name if st.session_state.get('fname_shapes') else '(missing)'}"
+        f"U:{(Path(pU_pf).name if pU_pf else '(missing)')}"
     )
     
     st.markdown("**Preflight**")
@@ -2237,6 +2291,8 @@ with ctx:
         st.caption(f"Projector: FILE · hash={shortp or '(none)'}")
     else:
         st.caption("Projector: Π = diag(lanes)")
+    # --- /Preflight ---
+
 
     
 
