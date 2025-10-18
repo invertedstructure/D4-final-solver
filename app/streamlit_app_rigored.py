@@ -2020,13 +2020,26 @@ with ctx:
             st.info("A/B compare is already running…")
         else:
             ss["_abx_lock"] = True
+                if run_btn:
+        if ss["_abx_lock"]:
+            st.info("A/B compare is already running…")
+        else:
+            ss["_abx_lock"] = True
             try:
                 # 1) Resolve current fixtures to FILES (no globals), stamp filenames
                 pb = _abx_resolve_all_to_paths()
 
                 # Probe sources + shapes early
-                st.caption(f"Sources → B:{Path(pb['B'][0]).name} · C:{Path(pb['C'][0]).name} · H:{Path(pb['H'][0]).name} · U:{Path(pb['U'][0]).name}")
-                d3 = pb["B"][1].get("3") or []; C3 = pb["C"][1].get("3") or []; H2 = pb["H"][1].get("2") or []
+                st.caption(
+                    f"Sources → "
+                    f"B:{Path(pb['B'][0]).name} · "
+                    f"C:{Path(pb['C'][0]).name} · "
+                    f"H:{Path(pb['H'][0]).name} · "
+                    f"U:{Path(pb['U'][0]).name}"
+                )
+                d3 = pb["B"][1].get("3") or []
+                C3 = pb["C"][1].get("3") or []
+                H2 = pb["H"][1].get("2") or []
                 sD = (len(d3), (len(d3[0]) if (d3 and d3[0]) else 0))
                 sC = (len(C3), (len(C3[0]) if C3 else 0))
                 sH = (len(H2), (len(H2[0]) if (H2 and H2[0]) else 0))
@@ -2037,70 +2050,87 @@ with ctx:
                 rc = dict(st.session_state.get("run_ctx") or {})
 
                 # 3) Guard: require non-empty + shape alignment before we do anything else
-                ok_shapes = True
-                reasons = []
+                ok_shapes, reasons = True, []
                 n2, n3 = sD
-                if n3 == 0: ok_shapes, reasons = False, reasons + ["boundaries[3] empty"]
-                if sC[0] == 0 or sC[0] != sC[1]: ok_shapes, reasons = False, reasons + ["C3 not square or empty"]
-                if sH[0] == 0 or sH[1] != n2: ok_shapes, reasons = False, reasons + ["H2 shape mismatch with d3 rows"]
+                if n3 == 0:
+                    ok_shapes, reasons = False, reasons + ["boundaries[3] empty"]
+                if sC[0] == 0 or sC[0] != sC[1]:
+                    ok_shapes, reasons = False, reasons + ["C3 not square or empty"]
+                if sH[0] == 0 or sH[1] != n2:
+                    ok_shapes, reasons = False, reasons + ["H2 shape mismatch with d3 rows"]
                 if not ok_shapes:
                     st.error("Fixtures incomplete → " + ", ".join(reasons))
                     st.stop()
 
                 # 4) (optional) run overlap legs for the rest of the app
                 if also_overlap and "run_overlap" in globals() and callable(globals()["run_overlap"]):
-                    try: run_overlap(policy="strict")
-                    except Exception: pass
-                    try: run_overlap(policy="projected(auto)")
-                    except Exception: pass
+                    try:
+                        run_overlap(policy="strict")
+                    except Exception:
+                        pass
+                    try:
+                        run_overlap(policy="projected(auto)")
+                    except Exception:
+                        pass
 
                 # 5) Recompute A/B strictly from raw blocks
                 out_s, out_p, lvH, lvCI = _abx_ab_from_blocks(pb["H"][1], pb["B"][1], pb["C"][1], rc)
 
                 # 6) Snapshot for diagnostics
-                label_proj = ('projected(columns@k=3,file)' if str(rc.get('mode',''))=='projected(file)' else 'projected(columns@k=3,auto)')
+                label_proj = ('projected(columns@k=3,file)'
+                              if str(rc.get('mode','')) == 'projected(file)'
+                              else 'projected(columns@k=3,auto)')
                 ss["ab_compare"] = {
                     "pair_tag": f"strict__VS__{label_proj}",
                     "inputs_sig": _abx_inputs_sig_list(ib),
                     "lane_mask_k3": list(ib.get("lane_mask_k3") or []),
                     "policy_tag": label_proj,
-                    "strict":   {"label":"strict","out":out_s,"lane_vec_H2d3":lvH,"lane_vec_C3plusI3":lvCI,
-                                 "pass_vec":[int(out_s["2"]["eq"]), int(out_s["3"]["eq"])]},
-                    "projected":{"label":label_proj,"policy_tag":label_proj,"out":out_p,
-                                 "lane_vec_H2d3":lvH[:],"lane_vec_C3plusI3":lvCI[:],
-                                 "pass_vec":[int(out_p["2"]["eq"]), int(out_p["3"]["eq"])],
-                                 "projector_filename": rc.get("projector_filename",""),
-                                 "projector_hash": rc.get("projector_hash","") if label_proj.endswith("(file)") else "",
-                                 "projector_consistent_with_d": rc.get("projector_consistent_with_d", None)},
-                    "sanity_probe": {"shapes":{
-                        "H2": sH, "d3": sD, "C3": sC
-                    }},
+                    "strict": {
+                        "label": "strict",
+                        "out": out_s,
+                        "lane_vec_H2d3": lvH,
+                        "lane_vec_C3plusI3": lvCI,
+                        "pass_vec": [int(out_s["2"]["eq"]), int(out_s["3"]["eq"])],
+                    },
+                    "projected": {
+                        "label": label_proj,
+                        "policy_tag": label_proj,
+                        "out": out_p,
+                        "lane_vec_H2d3": lvH[:],
+                        "lane_vec_C3plusI3": lvCI[:],
+                        "pass_vec": [int(out_p["2"]["eq"]), int(out_p["3"]["eq"])],
+                        "projector_filename": rc.get("projector_filename", ""),
+                        "projector_hash": rc.get("projector_hash", "") if label_proj.endswith("(file)") else "",
+                        "projector_consistent_with_d": rc.get("projector_consistent_with_d", None),
+                    },
+                    "sanity_probe": {"shapes": {"H2": sH, "d3": sD, "C3": sC}},
                 }
 
                 # 7) Pin for embed/ticket
                 _abx_pin_for_cert(out_s, out_p)
 
                 # 8) Write 3 certs (strict, projected(active), and A/B)
-                strict_cert = _abx_cert_common("strict", ib, rc); strict_cert["results"] = {"out": out_s}
-                p_cert      = _abx_cert_common(label_proj, ib, rc); p_cert["results"]  = {"out": out_p}
+                strict_cert = _abx_cert_common("strict", ib, rc)
+                strict_cert["results"] = {"out": out_s}
+                p_cert = _abx_cert_common(label_proj, ib, rc)
+                p_cert["results"] = {"out": out_p}
                 p_strict = _abx_write_cert(strict_cert, "cert_strict")
-                p_proj   = _abx_write_cert(p_cert,    "cert_projected")
+                p_proj = _abx_write_cert(p_cert, "cert_projected")
 
                 ab_payload = st.session_state.get("ab_pin", {}).get("payload", {})
                 ab_cert = {
                     **_abx_cert_common("A/B", ib, rc),
                     "ab_pair": {
-                        "pair_tag": ab_payload.get("pair_tag","strict__VS__"+label_proj),
-                        "embed_sig": ab_payload.get("embed_sig",""),
-                        "strict_cert":   {"path": str(p_strict), "hash": strict_cert["integrity"]["content_hash"]},
-                        "projected_cert":{"path": str(p_proj),   "hash": p_cert["integrity"]["content_hash"]},
+                        "pair_tag": ab_payload.get("pair_tag", "strict__VS__" + label_proj),
+                        "embed_sig": ab_payload.get("embed_sig", ""),
+                        "strict_cert": {"path": str(p_strict), "hash": strict_cert["integrity"]["content_hash"]},
+                        "projected_cert": {"path": str(p_proj), "hash": p_cert["integrity"]["content_hash"]},
                     },
                     "diagnostics": ss.get("ab_compare", {}).get("sanity_probe", {}),
                 }
                 p_ab = _abx_write_cert(ab_cert, "cert_ab")
 
                 # expose projected cert to gallery
-                                # expose projected cert to gallery
                 st.session_state["cert_payload"] = p_cert
                 st.session_state.setdefault("last_report_paths", {})["ab_trio"] = {
                     "strict": str(p_strict), "projected": str(p_proj), "ab": str(p_ab),
@@ -2125,35 +2155,54 @@ with ctx:
                 st.markdown(banner)
                 st.caption(f"certs written → strict: {p_strict.name} · projected: {p_proj.name} · ab: {p_ab.name}")
 
-
-                # ── debugger (frozen-on-disk view)
+                # optional: frozen-on-disk debugger (kept inside try)
                 if dbg_on:
-                    ib = ss.get("_inputs_block") or {}
-                    rc = ss.get("run_ctx") or {}
-                    paths = (ib.get("filenames") or {})
-                    def _read_blocks(p):
-                        try: return (_json.loads(Path(p).read_text(encoding="utf-8")).get("blocks") or {}) if p else {}
-                        except Exception: return {}
-                    bB = _read_blocks(paths.get("boundaries","")); bC = _read_blocks(paths.get("C","")); bH = _read_blocks(paths.get("H",""))
-                    d3 = bB.get("3") or []; H2 = bH.get("2") or []; C3 = bC.get("3") or []
+                    ib_dbg = ss.get("_inputs_block") or {}
+                    rc_dbg = ss.get("run_ctx") or {}
+                    paths = (ib_dbg.get("filenames") or {})
+                    def _read_blocks(pth):
+                        try:
+                            return (_json.loads(Path(pth).read_text(encoding="utf-8")).get("blocks") or {}) if pth else {}
+                        except Exception:
+                            return {}
+                    bB = _read_blocks(paths.get("boundaries", ""))
+                    bC = _read_blocks(paths.get("C", ""))
+                    bH = _read_blocks(paths.get("H", ""))
+                    d3d = bB.get("3") or []
+                    H2d = bH.get("2") or []
+                    C3d = bC.get("3") or []
                     st.json({
                         "embed_sig_now": _abx_embed_sig(),
-                        "inputs_sig_now": _abx_inputs_sig_list(ib),
-                        "rc": {"mode": rc.get("mode",""), "n3": rc.get("n3", None),
-                               "lane_mask_k3": rc.get("lane_mask_k3", []),
-                               "projector_hash": rc.get("projector_hash",""),
-                               "_inputs_sig": rc.get("_inputs_sig", [])},
-                        "derived": {"dims_from_B": [len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)],
-                                    "lane_mask_from_B": _abx_lane_mask_from_d3(d3)},
-                        "shapes": {"H2": [len(H2), (len(H2[0]) if (H2 and H2[0]) else 0)],
-                                   "d3": [len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)],
-                                   "C3": [len(C3), (len(C3[0]) if (C3 and C3[0]) else 0)]},
-                        "sources": {"B": Path(paths.get("boundaries","")).name or "(missing)",
-                                    "C": Path(paths.get("C","")).name or "(missing)",
-                                    "H": Path(paths.get("H","")).name or "(missing)",
-                                    "U": Path(paths.get("U","")).name or "(missing)"},
+                        "inputs_sig_now": _abx_inputs_sig_list(ib_dbg),
+                        "rc": {
+                            "mode": rc_dbg.get("mode", ""),
+                            "n3": rc_dbg.get("n3", None),
+                            "lane_mask_k3": rc_dbg.get("lane_mask_k3", []),
+                            "projector_hash": rc_dbg.get("projector_hash", ""),
+                            "_inputs_sig": rc_dbg.get("_inputs_sig", []),
+                        },
+                        "derived": {
+                            "dims_from_B": [len(d3d), (len(d3d[0]) if (d3d and d3d[0]) else 0)],
+                            "lane_mask_from_B": _abx_lane_mask_from_d3(d3d),
+                        },
+                        "shapes": {
+                            "H2": [len(H2d), (len(H2d[0]) if (H2d and H2d[0]) else 0)],
+                            "d3": [len(d3d), (len(d3d[0]) if (d3d and d3d[0]) else 0)],
+                            "C3": [len(C3d), (len(C3d[0]) if (C3d and C3d[0]) else 0)],
+                        },
+                        "sources": {
+                            "B": Path(paths.get("boundaries", "")).name or "(missing)",
+                            "C": Path(paths.get("C", "")).name or "(missing)",
+                            "H": Path(paths.get("H", "")).name or "(missing)",
+                            "U": Path(paths.get("U", "")).name or "(missing)",
+                        },
                     })
-            # ================== /A/B Orchestrator — freeze SSOT + write 3 certs ==================
+
+            except Exception as e:
+                st.error(f"A/B compare failed: {e}")
+            finally:
+                ss["_abx_lock"] = False
+
 
 
 
