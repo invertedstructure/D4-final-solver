@@ -2396,17 +2396,48 @@ def _abx_diag_from_mask(lm):
     n = len(lm or [])
     return [[1 if (i==j and int(lm[j])==1) else 0 for j in range(n)] for i in range(n)]
 
-# ── UploadedFile / path / model → persisted JSON (+ parsed blocks)
+# ── parse any source type → dict
+def _abx_json_from_src(src):
+    """
+    Accepts: str/Path, Streamlit UploadedFile (duck-typed), dict, or model with .blocks.
+    Returns (json_dict, label, ok_bool)
+    """
+    label = "(unknown)"
+    try:
+        # str/Path
+        if isinstance(src, (str, Path)):
+            p = Path(str(src))
+            label = p.name
+            return (_json.loads(p.read_text(encoding="utf-8")), label, True)
+        # Streamlit UploadedFile (duck type)
+        if hasattr(src, "getvalue") or hasattr(src, "read"):
+            try: label = getattr(src, "name", "(uploaded)")
+            except Exception: label = "(uploaded)"
+            try:
+                buf = src.getvalue() if hasattr(src, "getvalue") else src.read()
+            except Exception:
+                buf = b""
+            if isinstance(buf, str): buf = buf.encode("utf-8", "ignore")
+            return (_json.loads((buf or b"{}").decode("utf-8")), label, True)
+        # plain dict
+        if isinstance(src, dict):
+            return (src, label, True)
+        # model with .blocks.__root__
+        blocks = getattr(getattr(src, "blocks", None), "__root__", None)
+        if blocks is not None:
+            return ({"blocks": blocks}, label, True)
+    except Exception:
+        pass
+    return ({}, label, False)
+
 def _abx_parse_blocks_from_json(j, kind):
     blocks = (j.get("blocks") or {}) if isinstance(j, dict) else {}
-    # Re-parse to model if your io helpers exist (not strictly required for math)
+    # Optionally validate by parsing back into your models
     try:
         if kind in ("B",):
-            if "io" in globals() and hasattr(io, "parse_boundaries"):
-                _ = io.parse_boundaries({"blocks": blocks})
+            if "io" in globals() and hasattr(io, "parse_boundaries"): io.parse_boundaries({"blocks": blocks})
         if kind in ("C","H"):
-            if "io" in globals() and hasattr(io, "parse_cmap"):
-                _ = io.parse_cmap({"blocks": blocks})
+            if "io" in globals() and hasattr(io, "parse_cmap"): io.parse_cmap({"blocks": blocks})
     except Exception:
         pass
     return blocks
@@ -2414,22 +2445,22 @@ def _abx_parse_blocks_from_json(j, kind):
 def _abx_save_fixture(kind: str, source, fallback_basename: str) -> tuple[str, dict]:
     """
     Returns (path_str, blocks) for kind in {"B","C","H","U"}.
-    Accepts: str path | Streamlit UploadedFile | model object.
+    Accepts: str path | Streamlit UploadedFile | dict | model object.
+    Persists a canonical JSON file under logs/_uploads and returns its path.
     """
-    # 1) if str path, read and validate
-    if isinstance(source, str) and source:
+    # direct path: read & return
+    if isinstance(source, (str, Path)) and str(source):
         try:
-            p = Path(source)
+            p = Path(str(source))
             j = _json.loads(p.read_text(encoding="utf-8"))
             return str(p), _abx_parse_blocks_from_json(j, kind)
         except Exception:
-            pass  # fallthrough to persist-from-model
+            pass  # fallthrough
 
-    # 2) if UploadedFile, read -> persist
-    try:
-        from streamlit.runtime.uploaded_file_manager import UploadedFile  # type: ignore
-        if isinstance(source, UploadedFile):
-            raw = source.getvalue()
+    # UploadedFile or similar → read & persist
+    if hasattr(source, "getvalue") or hasattr(source, "read"):
+        try:
+            raw = source.getvalue() if hasattr(source, "getvalue") else source.read()
             j = _json.loads(raw.decode("utf-8") if isinstance(raw, (bytes,bytearray)) else str(raw))
             canon = _json.dumps(j, separators=(",", ":"), sort_keys=True)
             h = _hashlib.sha256(canon.encode("utf-8")).hexdigest()[:12]
@@ -2437,13 +2468,12 @@ def _abx_save_fixture(kind: str, source, fallback_basename: str) -> tuple[str, d
             out = UPLOADS_DIR / f"{kind}__{h}__{base}"
             _abx_atomic_write_json(out, j)
             return str(out), _abx_parse_blocks_from_json(j, kind)
-    except Exception:
-        pass
+        except Exception:
+            pass
 
-    # 3) model object → persist
+    # model/dict → persist
     j = _abx_canon_model(source)
     if not (isinstance(j, dict) and j):
-        # last resort: empty structure
         j = {"blocks": {}}
     canon = _json.dumps(j, separators=(",", ":"), sort_keys=True)
     h = _hashlib.sha256(canon.encode("utf-8")).hexdigest()[:12]
@@ -2451,7 +2481,6 @@ def _abx_save_fixture(kind: str, source, fallback_basename: str) -> tuple[str, d
     _abx_atomic_write_json(out, j)
     return str(out), _abx_parse_blocks_from_json(j, kind)
 
-# ── pick best source for each fixture from session/globals, then persist to path
 def _abx_pick_source(kind: str):
     ss = st.session_state
     probe_keys = {
@@ -2461,10 +2490,8 @@ def _abx_pick_source(kind: str):
         "U": ["fname_shapes","uploaded_shapes","U_up","f_U","shapes_file","shapes_obj","shapes"],
     }[kind]
     for k in probe_keys:
-        if k in ss and ss.get(k) is not None:
-            return ss.get(k)
-        if k in globals() and globals().get(k) is not None:
-            return globals().get(k)
+        if k in ss and ss.get(k) is not None: return ss.get(k)
+        if k in globals() and globals().get(k) is not None: return globals().get(k)
     return None
 
 def _abx_resolve_all_to_paths():
@@ -2479,7 +2506,7 @@ def _abx_resolve_all_to_paths():
     pH, bH = _abx_save_fixture("H", H_src, "H.json")
     pU, bU = _abx_save_fixture("U", U_src, "shapes.json")
 
-    # publish resolved filenames into session (so future laps reuse exact bytes)
+    # publish resolved filenames into session
     ss = st.session_state
     ss["fname_boundaries"] = pB
     ss["fname_cmap"]       = pC
@@ -2497,7 +2524,7 @@ def _abx_publish_frozen_ssot(paths_blocks):
     n2 = len(d3); n3 = len(d3[0]) if (d3 and d3[0]) else 0
     lm = _abx_lane_mask_from_d3(d3)
 
-    # hashes from the exact JSON payloads we just persisted
+    # hashes from these exact JSON payloads
     hobj = {
         "boundaries_hash": _abx_hash_json({"blocks": bB}),
         "C_hash":          _abx_hash_json({"blocks": bC}),
@@ -2518,7 +2545,8 @@ def _abx_publish_frozen_ssot(paths_blocks):
     ss = st.session_state
     ss["_inputs_block"] = block
     ss["inputs_hashes"] = dict(hobj)
-    # run_ctx minimal normalize (preserve mode if present)
+
+    # run_ctx normalize (preserve mode if present)
     rc = dict(ss.get("run_ctx") or {})
     rc["d3"] = d3; rc["n3"] = n3; rc["lane_mask_k3"] = lm
     if str(rc.get("mode","")) == "projected(auto)":
@@ -2528,7 +2556,7 @@ def _abx_publish_frozen_ssot(paths_blocks):
     st.caption(f"SSOT refreshed • n₂={n2} n₃={n3}")
     return block
 
-# ── policy tag helpers
+# ── policy tag + inputs_sig helpers
 def _abx_policy_tag(rc: dict | None) -> str:
     rc = rc or {}
     if rc.get("policy_tag"): return str(rc["policy_tag"])
@@ -2538,24 +2566,28 @@ def _abx_policy_tag(rc: dict | None) -> str:
     if "projected" in m: return "projected(columns@k=3,auto)"
     return "strict"
 
-def _abx_embed_sig():
-    ss = st.session_state
-    ib = ss.get("_inputs_block") or {}
-    h  = (ib.get("hashes") or {})
-    inputs = [
+def _abx_inputs_sig_list(ib: dict) -> list[str]:
+    h = (ib.get("hashes") or {})
+    # keep deterministic order
+    return [
         str(h.get("boundaries_hash","")),
         str(h.get("C_hash","")),
         str(h.get("H_hash","")),
         str(h.get("U_hash","")),
         str(h.get("shapes_hash","")),
     ]
+
+def _abx_embed_sig():
+    ss = st.session_state
+    ib = ss.get("_inputs_block") or {}
+    inputs = _abx_inputs_sig_list(ib)
     rc = ss.get("run_ctx") or {}
     pol = _abx_policy_tag(rc)
     pj  = rc.get("projector_hash","") if str(rc.get("mode","")) == "projected(file)" else ""
     blob = {"inputs": inputs, "policy": pol, "projector_hash": pj}
     return _hashlib.sha256(_json.dumps(blob, separators=(",", ":"), sort_keys=True).encode("ascii")).hexdigest()
 
-# ── compute strict + active projected from raw blocks (never trust old overlap_out)
+# ── compute strict + active projected from raw blocks
 def _abx_ab_from_blocks(bH, bB, bC, rc):
     H2 = bH.get("2") or []
     d3 = bB.get("3") or []
@@ -2585,10 +2617,9 @@ def _abx_pin_for_cert(out_s: dict, out_p: dict):
     pol = _abx_policy_tag(rc)
     pjh = rc.get("projector_hash","") if str(rc.get("mode","")) == "projected(file)" else ""
     ib  = ss.get("_inputs_block") or {}
-    h   = (ib.get("hashes") or {})
     payload = {
         "pair_tag":  f"strict__VS__{pol}",
-        "inputs_sig": [h.get("boundaries_hash",""), h.get("C_hash",""), h.get("H_hash",""), h.get("U_hash",""), h.get("shapes_hash","")],
+        "inputs_sig": _abx_inputs_sig_list(ib),
         "policy_tag": pol,
         "strict":    {"out": dict(out_s or {})},
         "projected": {"out": dict(out_p or {}), "policy_tag": pol, "projector_hash": pjh},
@@ -2642,24 +2673,22 @@ _exp = globals().get("safe_expander", None)
 ctx = (_exp("A/B compare (strict vs active projected)", expanded=False)
        if callable(_exp) else st.expander("A/B compare (strict vs active projected)", expanded=False))
 
+# scrub one legacy bad state (payload not a dict)
 _bad = ss.get("ab_pin")
 if isinstance(_bad, dict) and "payload" in _bad and not isinstance(_bad.get("payload"), dict):
     _bad["payload"] = {}
     ss["ab_pin"] = _bad
 
 with ctx:
-        # --- A/B pin freshness header (robust; no ternaries) ---
+    # --- A/B pin freshness header (robust; no ternaries) ---
     pin = st.session_state.get("ab_pin") or {}
     payload = pin.get("payload") or {}
-    
-    # optional: scrub legacy bad state once
     if not isinstance(payload, dict):
         payload = {}
         pin["payload"] = {}
         st.session_state["ab_pin"] = pin
-    
+
     fresh = (pin.get("state") == "pinned" and payload.get("embed_sig", "") == _abx_embed_sig())
-    
     if pin.get("state") == "pinned":
         if fresh:
             st.success("A/B: Pinned · Fresh (will embed)")
@@ -2685,25 +2714,44 @@ with ctx:
                 # 1) Resolve current fixtures to FILES (no globals), stamp filenames
                 pb = _abx_resolve_all_to_paths()
 
+                # Probe sources + shapes early
+                st.caption(f"Sources → B:{Path(pb['B'][0]).name} · C:{Path(pb['C'][0]).name} · H:{Path(pb['H'][0]).name} · U:{Path(pb['U'][0]).name}")
+                d3 = pb["B"][1].get("3") or []; C3 = pb["C"][1].get("3") or []; H2 = pb["H"][1].get("2") or []
+                sD = (len(d3), (len(d3[0]) if (d3 and d3[0]) else 0))
+                sC = (len(C3), (len(C3[0]) if C3 else 0))
+                sH = (len(H2), (len(H2[0]) if (H2 and H2[0]) else 0))
+                st.caption(f"Shapes  → d3:{sD} · C3:{sC} · H2:{sH}")
+
                 # 2) Publish frozen SSOT from those *exact* bytes
                 ib = _abx_publish_frozen_ssot(pb)
                 rc = dict(st.session_state.get("run_ctx") or {})
 
-                # 3) (optional) run overlap legs for the rest of the app
+                # 3) Guard: require non-empty + shape alignment before we do anything else
+                ok_shapes = True
+                reasons = []
+                n2, n3 = sD
+                if n3 == 0: ok_shapes, reasons = False, reasons + ["boundaries[3] empty"]
+                if sC[0] == 0 or sC[0] != sC[1]: ok_shapes, reasons = False, reasons + ["C3 not square or empty"]
+                if sH[0] == 0 or sH[1] != n2: ok_shapes, reasons = False, reasons + ["H2 shape mismatch with d3 rows"]
+                if not ok_shapes:
+                    st.error("Fixtures incomplete → " + ", ".join(reasons))
+                    st.stop()
+
+                # 4) (optional) run overlap legs for the rest of the app
                 if also_overlap and "run_overlap" in globals() and callable(globals()["run_overlap"]):
                     try: run_overlap(policy="strict")
                     except Exception: pass
                     try: run_overlap(policy="projected(auto)")
                     except Exception: pass
 
-                # 4) Recompute A/B strictly from raw blocks
+                # 5) Recompute A/B strictly from raw blocks
                 out_s, out_p, lvH, lvCI = _abx_ab_from_blocks(pb["H"][1], pb["B"][1], pb["C"][1], rc)
 
-                # 5) Snapshot for diagnostics
+                # 6) Snapshot for diagnostics
                 label_proj = _abx_policy_tag(rc)
                 ss["ab_compare"] = {
                     "pair_tag": f"strict__VS__{label_proj}",
-                    "inputs_sig": list((ib.get("hashes") or {}).values()),
+                    "inputs_sig": _abx_inputs_sig_list(ib),
                     "lane_mask_k3": list(ib.get("lane_mask_k3") or []),
                     "policy_tag": label_proj,
                     "strict":   {"label":"strict","out":out_s,"lane_vec_H2d3":lvH,"lane_vec_C3plusI3":lvCI,
@@ -2715,22 +2763,16 @@ with ctx:
                                  "projector_hash": rc.get("projector_hash","") if label_proj.endswith("(file)") else "",
                                  "projector_consistent_with_d": rc.get("projector_consistent_with_d", None)},
                     "sanity_probe": {"shapes":{
-                                        "H2": (len(pb["H"][1].get("2") or []), len((pb["H"][1].get("2") or [])[0]) if (pb["H"][1].get("2") or []) else 0),
-                                        "d3": (len(pb["B"][1].get("3") or []), len((pb["B"][1].get("3") or [])[0]) if (pb["B"][1].get("3") or []) else 0),
-                                        "C3": (len(pb["C"][1].get("3") or []), len((pb["C"][1].get("3") or [])[0]) if (pb["C"][1].get("3") or []) else 0),
-                                     }},
+                        "H2": sH, "d3": sD, "C3": sC
+                    }},
                 }
 
-                # 6) Pin for embed/ticket
+                # 7) Pin for embed/ticket
                 _abx_pin_for_cert(out_s, out_p)
 
-                # 7) Write 3 certs (strict, projected(active), and A/B)
-                strict_cert = _abx_cert_common("strict", ib, rc)
-                strict_cert["results"] = {"out": out_s}
-                p_cert = _abx_cert_common(label_proj, ib, rc)
-                p_cert["results"] = {"out": out_p}
-                # AB cert references both (by content hash & filenames) after we write them
-                # First write strict & projected to get their hashes
+                # 8) Write 3 certs (strict, projected(active), and A/B)
+                strict_cert = _abx_cert_common("strict", ib, rc); strict_cert["results"] = {"out": out_s}
+                p_cert      = _abx_cert_common(label_proj, ib, rc); p_cert["results"]  = {"out": out_p}
                 p_strict = _abx_write_cert(strict_cert, "cert_strict")
                 p_proj   = _abx_write_cert(p_cert,    "cert_projected")
 
@@ -2747,12 +2789,10 @@ with ctx:
                 }
                 p_ab = _abx_write_cert(ab_cert, "cert_ab")
 
-                # expose one cert (projected) as the in-memory "current cert" for gallery appenders
+                # expose projected cert to gallery
                 st.session_state["cert_payload"] = p_cert
                 st.session_state.setdefault("last_report_paths", {})["ab_trio"] = {
-                    "strict": str(p_strict),
-                    "projected": str(p_proj),
-                    "ab": str(p_ab),
+                    "strict": str(p_strict), "projected": str(p_proj), "ab": str(p_ab),
                 }
 
                 s_ok = bool(out_s["3"]["eq"]); p_ok = bool(out_p["3"]["eq"])
@@ -2788,22 +2828,19 @@ with ctx:
         fresh = (pin.get("state") == "pinned" and payload.get("embed_sig", "") == _abx_embed_sig())
         st.caption(f"A/B pin: {'present' if pin else '—'}\n\nfresh: {'🟢 yes' if fresh else '⚠️ no'}")
 
-
+    # ── debugger (frozen-on-disk view)
     if dbg_on:
         ib = ss.get("_inputs_block") or {}
         rc = ss.get("run_ctx") or {}
         paths = (ib.get("filenames") or {})
-        # derive shapes from frozen blocks on disk
         def _read_blocks(p):
-            try:
-                return (_json.loads(Path(p).read_text(encoding="utf-8")).get("blocks") or {}) if p else {}
-            except Exception:
-                return {}
+            try: return (_json.loads(Path(p).read_text(encoding="utf-8")).get("blocks") or {}) if p else {}
+            except Exception: return {}
         bB = _read_blocks(paths.get("boundaries","")); bC = _read_blocks(paths.get("C","")); bH = _read_blocks(paths.get("H",""))
         d3 = bB.get("3") or []; H2 = bH.get("2") or []; C3 = bC.get("3") or []
         st.json({
             "embed_sig_now": _abx_embed_sig(),
-            "inputs_sig_now": list((ib.get("hashes") or {}).values()),
+            "inputs_sig_now": _abx_inputs_sig_list(ib),
             "rc": {"mode": rc.get("mode",""), "n3": rc.get("n3", None),
                    "lane_mask_k3": rc.get("lane_mask_k3", []),
                    "projector_hash": rc.get("projector_hash",""),
@@ -2819,6 +2856,7 @@ with ctx:
                         "U": Path(paths.get("U","")).name or "(missing)"},
         })
 # ================== /A/B Orchestrator — freeze SSOT + write 3 certs ==================
+
 
 
 
