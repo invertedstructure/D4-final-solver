@@ -2126,34 +2126,34 @@ with ctx:
                 st.caption(f"certs written → strict: {p_strict.name} · projected: {p_proj.name} · ab: {p_ab.name}")
 
 
-    # ── debugger (frozen-on-disk view)
-    if dbg_on:
-        ib = ss.get("_inputs_block") or {}
-        rc = ss.get("run_ctx") or {}
-        paths = (ib.get("filenames") or {})
-        def _read_blocks(p):
-            try: return (_json.loads(Path(p).read_text(encoding="utf-8")).get("blocks") or {}) if p else {}
-            except Exception: return {}
-        bB = _read_blocks(paths.get("boundaries","")); bC = _read_blocks(paths.get("C","")); bH = _read_blocks(paths.get("H",""))
-        d3 = bB.get("3") or []; H2 = bH.get("2") or []; C3 = bC.get("3") or []
-        st.json({
-            "embed_sig_now": _abx_embed_sig(),
-            "inputs_sig_now": _abx_inputs_sig_list(ib),
-            "rc": {"mode": rc.get("mode",""), "n3": rc.get("n3", None),
-                   "lane_mask_k3": rc.get("lane_mask_k3", []),
-                   "projector_hash": rc.get("projector_hash",""),
-                   "_inputs_sig": rc.get("_inputs_sig", [])},
-            "derived": {"dims_from_B": [len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)],
-                        "lane_mask_from_B": _abx_lane_mask_from_d3(d3)},
-            "shapes": {"H2": [len(H2), (len(H2[0]) if (H2 and H2[0]) else 0)],
-                       "d3": [len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)],
-                       "C3": [len(C3), (len(C3[0]) if (C3 and C3[0]) else 0)]},
-            "sources": {"B": Path(paths.get("boundaries","")).name or "(missing)",
-                        "C": Path(paths.get("C","")).name or "(missing)",
-                        "H": Path(paths.get("H","")).name or "(missing)",
-                        "U": Path(paths.get("U","")).name or "(missing)"},
-        })
-# ================== /A/B Orchestrator — freeze SSOT + write 3 certs ==================
+                # ── debugger (frozen-on-disk view)
+                if dbg_on:
+                    ib = ss.get("_inputs_block") or {}
+                    rc = ss.get("run_ctx") or {}
+                    paths = (ib.get("filenames") or {})
+                    def _read_blocks(p):
+                        try: return (_json.loads(Path(p).read_text(encoding="utf-8")).get("blocks") or {}) if p else {}
+                        except Exception: return {}
+                    bB = _read_blocks(paths.get("boundaries","")); bC = _read_blocks(paths.get("C","")); bH = _read_blocks(paths.get("H",""))
+                    d3 = bB.get("3") or []; H2 = bH.get("2") or []; C3 = bC.get("3") or []
+                    st.json({
+                        "embed_sig_now": _abx_embed_sig(),
+                        "inputs_sig_now": _abx_inputs_sig_list(ib),
+                        "rc": {"mode": rc.get("mode",""), "n3": rc.get("n3", None),
+                               "lane_mask_k3": rc.get("lane_mask_k3", []),
+                               "projector_hash": rc.get("projector_hash",""),
+                               "_inputs_sig": rc.get("_inputs_sig", [])},
+                        "derived": {"dims_from_B": [len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)],
+                                    "lane_mask_from_B": _abx_lane_mask_from_d3(d3)},
+                        "shapes": {"H2": [len(H2), (len(H2[0]) if (H2 and H2[0]) else 0)],
+                                   "d3": [len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)],
+                                   "C3": [len(C3), (len(C3[0]) if (C3 and C3[0]) else 0)]},
+                        "sources": {"B": Path(paths.get("boundaries","")).name or "(missing)",
+                                    "C": Path(paths.get("C","")).name or "(missing)",
+                                    "H": Path(paths.get("H","")).name or "(missing)",
+                                    "U": Path(paths.get("U","")).name or "(missing)"},
+                    })
+            # ================== /A/B Orchestrator — freeze SSOT + write 3 certs ==================
 
 
 
