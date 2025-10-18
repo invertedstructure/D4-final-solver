@@ -2221,6 +2221,95 @@ def _pin_ab_for_cert(strict_out: dict, projected_out: dict):
     ss["write_armed"] = True
     ss["armed_by"]    = "ab_compare"
 
+# ===== ABX fixture helpers (module-scope, guarded) =====
+from pathlib import Path
+import json as _json, hashlib as _hashlib
+
+if "abx_is_uploaded_file" not in globals():
+    def abx_is_uploaded_file(x):
+        # duck-type Streamlit's UploadedFile
+        return hasattr(x, "getvalue") and hasattr(x, "name")
+
+if "abx_read_json_any" not in globals():
+    def abx_read_json_any(x, *, kind: str) -> tuple[dict, str, str]:
+        """
+        Accepts a path string/Path, a Streamlit UploadedFile, or a plain dict.
+        Returns (json_obj, canonical_path, origin_tag) where origin_tag∈{"file","upload","dict",""}.
+        For uploads, saves a stable copy under logs/_uploads and returns that path.
+        """
+        if not x:
+            return {}, "", ""
+        # 1) path-like
+        try:
+            if isinstance(x, (str, Path)):
+                p = Path(x)
+                if p.exists():
+                    try:
+                        return _json.loads(p.read_text(encoding="utf-8")), str(p), "file"
+                    except Exception:
+                        return {}, "", ""
+        except Exception:
+            pass
+        # 2) UploadedFile
+        if abx_is_uploaded_file(x):
+            try:
+                raw  = x.getvalue()
+                text = raw.decode("utf-8")
+                j    = _json.loads(text)
+            except Exception:
+                return {}, "", ""
+            uploads_dir = Path(st.session_state.get("LOGS_DIR", "logs")) / "_uploads"
+            uploads_dir.mkdir(parents=True, exist_ok=True)
+            h12  = _hashlib.sha256(raw).hexdigest()[:12]
+            base = Path(getattr(x, "name", f"{kind}.json")).name
+            outp = uploads_dir / f"{kind}__{h12}__{base}"
+            try:
+                outp.write_text(text, encoding="utf-8")
+            except Exception:
+                pass
+            return j, str(outp), "upload"
+        # 3) already-parsed dict
+        if isinstance(x, dict):
+            return x, "", "dict"
+        return {}, "", ""
+
+if "abx_blocks_view" not in globals():
+    def abx_blocks_view(obj):
+        """Return {'blocks': ...} for your model/dict, or empty structure."""
+        try:
+            if hasattr(obj, "blocks") and hasattr(obj.blocks, "__root__"):
+                return {"blocks": obj.blocks.__root__}
+        except Exception:
+            pass
+        return obj if (isinstance(obj, dict) and "blocks" in obj) else {"blocks": {}}
+
+if "abx_lane_mask_from_d3" not in globals():
+    def abx_lane_mask_from_d3(d):
+        return [1 if any(int(d[i][j]) & 1 for i in range(len(d))) else 0
+                for j in range(len(d[0]) if (d and d[0]) else 0)]
+
+if "abx_hash_json" not in globals():
+    def abx_hash_json(obj):
+        try:
+            blob = _json.dumps(obj, separators=(",", ":"), sort_keys=True)
+            return _hashlib.sha256(blob.encode("utf-8")).hexdigest()
+        except Exception:
+            return ""
+
+if "abx_diag_from_mask" not in globals():
+    def abx_diag_from_mask(lm_):
+        n = len(lm_ or [])
+        return [[1 if (i == j and int(lm_[j]) == 1) else 0 for j in range(n)] for i in range(n)]
+
+if "abx_policy_tag" not in globals():
+    def abx_policy_tag():
+        rc0 = st.session_state.get("run_ctx") or {}
+        m = str(rc0.get("mode", "strict")).lower()
+        if m == "strict": return "strict"
+        if "projected" in m and "file" in m: return "projected(columns@k=3,file)"
+        if "projected" in m: return "projected(columns@k=3,auto)"
+        return "strict"
+# ===== /helpers =====
 
 
 # =========================== A/B Compare — canonical, swap-safe (abx_) ===========================
@@ -2339,7 +2428,8 @@ def abx_embed_sig() -> str:
 
 
 # ─────────────────────────── REPLACE THIS: abx_publish_ssot_from_files ───────────────────────────
-# --- REPLACE your existing abx_publish_ssot_from_files with this version -----
+
+# ===== REPLACE your existing abx_publish_ssot_from_files with this =====
 def abx_publish_ssot_from_files():
     ss = st.session_state
     ib = dict(ss.get("_inputs_block") or {})
@@ -2349,21 +2439,20 @@ def abx_publish_ssot_from_files():
     prevB, prevC, prevH, prevU = prev.get("boundaries",""), prev.get("C",""), prev.get("H",""), prev.get("U","")
 
     # 1) resolve freshest sources for each fixture (path OR upload OR dict OR memory)
-    #    check common session keys you use across the app
     candB = [ss.get("fname_boundaries"), ss.get("B_file"), ss.get("uploaded_boundaries"), ss.get("boundaries_path"), prevB]
     candC = [ss.get("fname_cmap"),       ss.get("C_file"), ss.get("uploaded_cmap"),       ss.get("cmap_path"),       prevC]
     candH = [ss.get("fname_h"),          ss.get("H_file"), ss.get("H_up"),                ss.get("uploaded_H"),
              ss.get("f_H"),              ss.get("H_path"), prevH]
     candU = [ss.get("fname_shapes"),     ss.get("U_file"), ss.get("uploaded_shapes"),     ss.get("shapes_path"),     prevU]
 
-    JB, pB, oB = {}, "", ""
+    JB, pB, _ = {}, "", ""
     for v in candB:
-        JB, pB, oB = abx_read_json_any(v, kind="boundaries")
+        JB, pB, _ = abx_read_json_any(v, kind="boundaries")
         if JB: break
 
-    JC, pC, oC = {}, "", ""
+    JC, pC, _ = {}, "", ""
     for v in candC:
-        JC, pC, oC = abx_read_json_any(v, kind="C")
+        JC, pC, _ = abx_read_json_any(v, kind="C")
         if JC: break
 
     JH, pH, oH = {}, "", ""
@@ -2371,12 +2460,12 @@ def abx_publish_ssot_from_files():
         JH, pH, oH = abx_read_json_any(v, kind="H")
         if JH: break
 
-    JU, pU, oU = {}, "", ""
+    JU, pU, _ = {}, "", ""
     for v in candU:
-        JU, pU, oU = abx_read_json_any(v, kind="U")
+        JU, pU, _ = abx_read_json_any(v, kind="U")
         if JU: break
 
-    # 2) parse into your model objects when JSON is present; otherwise fall back to globals/session
+    # 2) parse into model objects when JSON is present; otherwise fall back to globals/session
     def _p_boundaries(j):
         try:
             return io.parse_boundaries(j) if j else (globals().get("boundaries") or None)
@@ -2412,16 +2501,7 @@ def abx_publish_ssot_from_files():
                 H = {"blocks": {}}  # very defensive
         H_origin = "session.overlap_H" if ss.get("overlap_H") else "empty"
 
-    # 3) normalize to blocks view (these helpers should already exist; add minimal fallbacks)
-    if "abx_blocks_view" not in globals():
-        def abx_blocks_view(obj):
-            try:
-                if hasattr(obj, "blocks") and hasattr(obj.blocks, "__root__"):
-                    return {"blocks": obj.blocks.__root__}
-            except Exception:
-                pass
-            return obj if (isinstance(obj, dict) and "blocks" in obj) else {"blocks": {}}
-
+    # 3) normalize to blocks view (use module-scope helpers)
     Bv = abx_blocks_view(B)["blocks"]
     Cv = abx_blocks_view(C)["blocks"]
     Hv = abx_blocks_view(H)["blocks"]
@@ -2431,19 +2511,9 @@ def abx_publish_ssot_from_files():
     d3 = Bv.get("3", []) or []
     n2 = len(d3)
     n3 = len(d3[0]) if (d3 and d3[0]) else 0
-    if "abx_lane_mask_from_d3" not in globals():
-        def abx_lane_mask_from_d3(d):
-            return [1 if any(int(d[i][j]) & 1 for i in range(len(d))) else 0 for j in range(len(d[0]) if (d and d[0]) else 0)]
     lm = abx_lane_mask_from_d3(d3)
 
     # 5) canonical hashes (always non-empty so gallery never misses)
-    if "abx_hash_json" not in globals():
-        def abx_hash_json(obj):
-            try:
-                blob = _json.dumps(obj, separators=(",", ":"), sort_keys=True)
-                return _hashlib.sha256(blob.encode("utf-8")).hexdigest()
-            except Exception:
-                return ""
     hB = abx_hash_json({"blocks": Bv})
     hC = abx_hash_json({"blocks": Cv})
     hH = abx_hash_json({"blocks": Hv})
@@ -2455,7 +2525,7 @@ def abx_publish_ssot_from_files():
     ib["filenames"] = {
         "boundaries": pB,
         "C":          pC,
-        "H":          pH,  # may be "", meaning we used overlap_H (see probe)
+        "H":          pH,  # may be "", meaning we used overlap_H (see sources echo)
         "U":          pU,
     }
     ib["hashes"] = {
@@ -2469,20 +2539,6 @@ def abx_publish_ssot_from_files():
     ss["inputs_hashes"] = ib["hashes"]
 
     # 7) refresh run_ctx (Π := diag(lm) for auto) + stamp input sig used
-    if "abx_diag_from_mask" not in globals():
-        def abx_diag_from_mask(lm_):
-            n = len(lm_ or [])
-            return [[1 if (i==j and int(lm_[j])==1) else 0 for j in range(n)] for i in range(n)]
-
-    if "abx_policy_tag" not in globals():
-        def abx_policy_tag():
-            rc0 = ss.get("run_ctx") or {}
-            m = str(rc0.get("mode","strict")).lower()
-            if m == "strict": return "strict"
-            if "projected" in m and "file" in m: return "projected(columns@k=3,file)"
-            if "projected" in m: return "projected(columns@k=3,auto)"
-            return "strict"
-
     rc = dict(ss.get("run_ctx") or {})
     rc.update({
         "d3": d3, "n3": n3, "lane_mask_k3": list(lm),
@@ -2512,6 +2568,7 @@ def abx_publish_ssot_from_files():
         "U": pU or "(global)",
     }
     return B, C, H, U, d3, lm, sources
+# ===== /replace =====
 
 
 
