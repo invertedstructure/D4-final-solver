@@ -2173,18 +2173,33 @@ with ctx:
     else:
         # file: Π is authoritative; do not touch lane_mask_k3
         pass
-
-    # Preflight (read-only preview from frozen files if present)
+    # --- Preflight (uploads-first; persists uploads so preview matches what will run) ---
+    def _preflight_pick(kind: str, fallback_base: str):
+        # Use the same precedence as the runner: uploaded → fname_* → frozen → globals
+        src = _abx_pick_source(kind)
+        # abx_read_json_any will persist uploads to logs/_uploads and return that canonical path
+        j, p, _origin = abx_read_json_any(src, kind={"B":"boundaries","C":"cmap","H":"H","U":"shapes"}[kind])
+        blocks = (j.get("blocks") or {}) if isinstance(j, dict) else {}
+        return p or "", blocks
+    
+    pB_pf, bB_pf = _preflight_pick("B","boundaries.json")
+    pC_pf, bC_pf = _preflight_pick("C","cmap.json")
+    pH_pf, bH_pf = _preflight_pick("H","H.json")
+    
+    # Derive matrices from *current* (uploads-first) sources
+    d3pf = bB_pf.get("3") or []
+    H2pf = bH_pf.get("2") or []
+    C3pf = bC_pf.get("3") or []
+    
+    # Recompute preview dims (do not rely on stale _inputs_block here)
+    n2p = len(d3pf)
+    n3p = (len(d3pf[0]) if (d3pf and d3pf[0]) else 0)
+    
+    # If the manual chips were sized earlier off old n3, just show the current lanes; guards will reconcile on Run
     mask_pf = list(rc0.get("lane_mask_k3") or [])
     idx_pf = [j for j,x in enumerate(mask_pf) if int(x)==1]
-    paths_pf = (ib0.get("filenames") or {})
-    def _read_blocks(pth):
-        try: return _json.loads(Path(pth).read_text(encoding="utf-8")).get("blocks") or {}
-        except Exception: return {}
-    bB = _read_blocks(paths_pf.get("boundaries",""))
-    bC = _read_blocks(paths_pf.get("C",""))
-    bH = _read_blocks(paths_pf.get("H",""))
-    d3pf = bB.get("3") or []; H2pf = bH.get("2") or []; C3pf = bC.get("3") or []
+    
+    # Quick GF(2) helpers (local)
     def _mul(A,B):
         if not A or not B or not A[0] or not B[0] or len(A[0])!=len(B): return []
         m,k = len(A), len(A[0]); n = len(B[0])
@@ -2197,12 +2212,23 @@ with ctx:
                     for j in range(n):
                         C[i][j] ^= (Bt[j] & 1)
         return C
-    H2d3_pf = _mul(H2pf, d3pf)
+    
     I3pf = [[1 if i==j else 0 for j in range(len(C3pf))] for i in range(len(C3pf))] if (C3pf and len(C3pf)==len(C3pf[0])) else []
     C3pI_pf = [[(C3pf[i][j]^I3pf[i][j]) & 1 for j in range(len(C3pf))] for i in range(len(C3pf))] if (C3pf and I3pf) else []
-    bottom_H = H2d3_pf[-1] if H2d3_pf else []
+    H2d3_pf = _mul(H2pf, d3pf)
+    
+    bottom_H  = H2d3_pf[-1] if H2d3_pf else []
     bottom_CI = C3pI_pf[-1] if C3pI_pf else []
-
+    
+    # Show *actual* sources you’ll run with if you click the button now
+    st.caption(
+        "Sources → "
+        f"B:{(Path(pB_pf).name if pB_pf else '(missing)')} · "
+        f"C:{(Path(pC_pf).name if pC_pf else '(missing)')} · "
+        f"H:{(Path(pH_pf).name if pH_pf else '(missing)')} · "
+        f"U:{(Path((st.session_state.get('fname_shapes') or ''))).name if st.session_state.get('fname_shapes') else '(missing)'}"
+    )
+    
     st.markdown("**Preflight**")
     st.caption(f"Dims: n₂×n₃ = {n2p}×{n3p} · Lane policy: {sel} · lanes={mask_pf} · idx={idx_pf}")
     st.caption(f"Bottom rows — H2·d3: {bottom_H} · C3⊕I3: {bottom_CI}")
@@ -2211,6 +2237,8 @@ with ctx:
         st.caption(f"Projector: FILE · hash={shortp or '(none)'}")
     else:
         st.caption("Projector: Π = diag(lanes)")
+
+    
 
     # Write-back + arm (policy changes or manual toggles)
     if sel == "manual" or changed:
