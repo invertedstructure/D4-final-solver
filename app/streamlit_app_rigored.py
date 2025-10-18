@@ -2643,13 +2643,16 @@ ctx = (_exp("A/B compare (strict vs active projected)", expanded=False)
        if callable(_exp) else st.expander("A/B compare (strict vs active projected)", expanded=False))
 
 with ctx:
-    # Pin freshness header
+    # Pin freshness header (robust to payload=None)
     pin = ss.get("ab_pin") or {}
-    fresh = bool(pin and pin.get("payload",{}).get("embed_sig","") == _abx_embed_sig())
+    payload = (pin.get("payload") or {}) if isinstance(pin, dict) else {}
+    fresh = bool(pin.get("state") == "pinned" and payload.get("embed_sig","") == _abx_embed_sig())
+    
     if pin.get("state") == "pinned":
         st.success("A/B: Pinned · Fresh (will embed)") if fresh else st.warning("A/B: Pinned · Stale (AB_STALE_INPUTS_SIG)")
     else:
         st.caption("A/B: —")
+
 
     c1, c2, c3 = st.columns([1,1,1.2])
     with c1:
@@ -2767,7 +2770,8 @@ with ctx:
             f"lane_vec_C3+I3: {lvCI}"
         )
         pin = ss.get("ab_pin") or {}
-        fresh = (pin.get("payload",{}).get("embed_sig","") == _abx_embed_sig()) if pin.get("state")=="pinned" else False
+        payload = (pin.get("payload") or {}) if isinstance(pin, dict) else {}
+        fresh = bool(pin.get("state") == "pinned" and payload.get("embed_sig","") == _abx_embed_sig())
         st.caption(f"A/B pin: {'present' if pin else '—'}\n\nfresh: {'🟢 yes' if fresh else '⚠️ no'}")
 
     if dbg_on:
