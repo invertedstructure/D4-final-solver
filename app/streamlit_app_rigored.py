@@ -2172,58 +2172,57 @@ def _pin_ab_for_cert(strict_out: dict, projected_out: dict):
 
 
 
-
-
-
-# =========================== A/B Compare — canonical, swap-safe ===========================
+# =========================== A/B Compare — canonical, swap-safe (abx_) ===========================
 import json as _json
 import hashlib as _hash
 from pathlib import Path
+import streamlit as st
 
-# ---- tiny compatibility shims (use your canon helpers if present) -----------------------
-def _ab2_inputs_sig() -> list[str]:
-    # Prefer frozen 5-tuple if your canonical helper exists
-    if "ssot_frozen_sig_from_ib" in globals():
+# ---------- tiny, isolated helpers (abx_*) ----------
+def abx_read_json(path_str: str) -> dict:
+    try:
+        if path_str and Path(path_str).exists():
+            return _json.loads(Path(path_str).read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+def abx_blocks_view(obj):
+    # normalize pydantic-ish models into {"blocks": {...}}
+    try:
+        root = getattr(getattr(obj, "blocks", None), "__root__", None)
+        if root is not None:
+            return {"blocks": root}
+    except Exception:
+        pass
+    if isinstance(obj, dict):
+        return {"blocks": obj.get("blocks", {})}
+    return {"blocks": {}}
+
+def abx_hash_json(obj) -> str:
+    # prefer your global _hash_json if available
+    if "_hash_json" in globals() and callable(globals()["_hash_json"]):
         try:
-            sig = ssot_frozen_sig_from_ib()
-            if sig and any(sig): return list(sig)
+            return _hash_json(obj)
         except Exception:
             pass
-    # Otherwise read from the frozen _inputs_block
-    ib = st.session_state.get("_inputs_block") or {}
-    h  = (ib.get("hashes") or {})
-    return [
-        str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
-        str(h.get("C_hash",          ib.get("C_hash",""))),
-        str(h.get("H_hash",          ib.get("H_hash",""))),
-        str(h.get("U_hash",          ib.get("U_hash",""))),
-        str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
-    ]
+    try:
+        blob = _json.dumps(obj, separators=(",", ":"), sort_keys=True)
+        return _hash.sha256(blob.encode("utf-8")).hexdigest()
+    except Exception:
+        return ""
 
-def _ab2_policy_tag() -> str:
-    # Use your existing label builder if available
-    if "policy_label_from_cfg" in globals() and "cfg_active" in globals():
-        try:
-            return str(policy_label_from_cfg(cfg_active))
-        except Exception:
-            pass
-    # Fallback from run_ctx.mode
-    rc = st.session_state.get("run_ctx") or {}
-    m  = str(rc.get("mode","strict")).lower()
-    if m == "strict": return "strict"
-    if "projected" in m and "file" in m: return "projected(columns@k=3,file)"
-    if "projected" in m:                 return "projected(columns@k=3,auto)"
-    return "strict"
+def abx_eye(n): return [[1 if i==j else 0 for j in range(n)] for i in range(n)]
+def abx_is_zero(M): return (not M) or all((x & 1) == 0 for row in M for x in row)
+def abx_shape_ok(A,B): 
+    try: return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
+    except Exception: return False
+def abx_diag_from_mask(lm):
+    n = len(lm or [])
+    return [[1 if (i==j and int(lm[j])==1) else 0 for j in range(n)] for i in range(n)]
 
-def _ab2_embed_sig() -> str:
-    rc = st.session_state.get("run_ctx") or {}
-    pol = _ab2_policy_tag()
-    pj  = rc.get("projector_hash","") if str(rc.get("mode","")) == "projected(file)" else ""
-    blob = {"inputs": _ab2_inputs_sig(), "policy": pol, "projector_hash": pj}
-    return _hash.sha256(_json.dumps(blob, separators=(",",":"), sort_keys=True).encode("ascii")).hexdigest()
-
-# prefer library GF(2) ops if present
-def _ab2_mul(A,B):
+def abx_mul(A,B):
+    # use your gf2 mul if provided
     if "mul" in globals() and callable(globals()["mul"]): return globals()["mul"](A,B)
     if not A or not B or not A[0] or not B[0]: return []
     m,kA = len(A), len(A[0]); kB,n = len(B), len(B[0])
@@ -2238,117 +2237,207 @@ def _ab2_mul(A,B):
                     C[i][j] ^= (Bk[j] & 1)
     return C
 
-def _ab2_xor(A,B):
+def abx_xor(A,B):
     if "add" in globals() and callable(globals()["add"]): return globals()["add"](A,B)
     if not A: return [r[:] for r in (B or [])]
     if not B: return [r[:] for r in (A or [])]
     r,c = len(A), len(A[0])
     return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
 
-def _ab2_eye(n): return [[1 if i==j else 0 for j in range(n)] for i in range(n)]
-def _ab2_is_zero(M): return (not M) or all((x & 1) == 0 for row in M for x in row)
-def _ab2_shape_ok(A,B): return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
-def _ab2_diag_from_mask(lm): 
-    n = len(lm or [])
-    return [[1 if (i==j and int(lm[j])==1) else 0 for j in range(n)] for i in range(n)]
-
-def _ab2_truth_mask_from_d3(d3):
+def abx_lane_mask_from_d3(d3):
     if not d3 or not d3[0]: return []
-    rows, cols = len(d3), len(d3[0])
-    return [1 if any(int(d3[i][j]) & 1 for i in range(rows)) else 0 for j in range(cols)]
+    n2, n3 = len(d3), len(d3[0])
+    return [1 if any(int(d3[i][j]) & 1 for i in range(n2)) else 0 for j in range(n3)]
 
-# ---- get current objects & publish SSOT so hashes never come back empty ----------------
-def _ab2_current_objs():
-    # boundaries/cmap/shapes are already parsed at top-level of your app
-    B = globals().get("boundaries")
-    C = globals().get("cmap")
-    U = globals().get("shapes")
-    # H preference: session upload > last overlap_H > empty cmap shell
-    H = st.session_state.get("overlap_H")
-    if H is None:
-        up = st.session_state.get("H_up") or st.session_state.get("f_H")
+def abx_policy_tag() -> str:
+    # prefer your labeler if wired
+    if "policy_label_from_cfg" in globals() and "cfg_active" in globals():
+        try: return str(policy_label_from_cfg(cfg_active))
+        except Exception: pass
+    rc = st.session_state.get("run_ctx") or {}
+    m  = str(rc.get("mode","strict")).lower()
+    if m == "strict": return "strict"
+    if "projected" in m and "file" in m: return "projected(columns@k=3,file)"
+    if "projected" in m: return "projected(columns@k=3,auto)"
+    return "strict"
+
+def abx_inputs_sig() -> list[str]:
+    # prefer a frozen 5-tuple if provided
+    if "ssot_frozen_sig_from_ib" in globals() and callable(globals()["ssot_frozen_sig_from_ib"]):
         try:
-            if up: H = io.parse_cmap(read_json_file(up))
+            sig = ssot_frozen_sig_from_ib()
+            if sig and any(sig): return list(sig)
         except Exception:
-            H = None
-    if H is None:
-        H = io.parse_cmap({"blocks": {}})
-    return B, C, H, U
+            pass
+    ib = st.session_state.get("_inputs_block") or {}
+    h  = (ib.get("hashes") or {})
+    return [
+        str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
+        str(h.get("C_hash",          ib.get("C_hash",""))),
+        str(h.get("H_hash",          ib.get("H_hash",""))),
+        str(h.get("U_hash",          ib.get("U_hash",""))),
+        str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
+    ]
 
-def _ab2_publish_ssot_and_ctx():
-    B, C, H, U = _ab2_current_objs()
-    # d3/n3 + lane mask from boundaries
+def abx_embed_sig() -> str:
+    rc = st.session_state.get("run_ctx") or {}
+    pol = abx_policy_tag()
+    pj  = rc.get("projector_hash","") if str(rc.get("mode","")) == "projected(file)" else ""
+    blob = {"inputs": abx_inputs_sig(), "policy": pol, "projector_hash": pj}
+    return _hash.sha256(_json.dumps(blob, separators=(",",":"), sort_keys=True).encode("ascii")).hexdigest()
+
+# ---------- load fixtures from *selected files*, publish SSOT + run_ctx ----------
+def abx_publish_ssot_from_files():
+    ss = st.session_state
+    ib = ss.get("_inputs_block") or {}
+    fns = (ib.get("filenames") or {}).copy()
+    # legacy keys support (upload widgets)
+    fns.setdefault("boundaries", ss.get("fname_boundaries", ""))
+    fns.setdefault("C",          ss.get("fname_cmap", ""))
+    fns.setdefault("H",          ss.get("fname_h", ""))
+    fns.setdefault("U",          ss.get("fname_shapes", ""))
+
+    # parse with your IO if available
+    def _p_boundaries(j): 
+        if "io" in globals() and hasattr(io, "parse_boundaries"):
+            try: return io.parse_boundaries(j)
+            except Exception: pass
+        return j
+    def _p_cmap(j):
+        if "io" in globals() and hasattr(io, "parse_cmap"):
+            try: return io.parse_cmap(j)
+            except Exception: pass
+        return j
+    def _p_shapes(j):
+        if "io" in globals() and hasattr(io, "parse_shapes"):
+            try: return io.parse_shapes(j)
+            except Exception: pass
+        return j
+
+    # B
+    B = None; srcB = ""
+    if fns.get("boundaries"):
+        B = _p_boundaries(abx_read_json(fns["boundaries"]))
+        srcB = fns["boundaries"]
+    if B is None and globals().get("boundaries") is not None:
+        B, srcB = globals()["boundaries"], "(global)"
+
+    # C
+    C = None; srcC = ""
+    if fns.get("C"):
+        C = _p_cmap(abx_read_json(fns["C"]))
+        srcC = fns["C"]
+    if C is None and globals().get("cmap") is not None:
+        C, srcC = globals()["cmap"], "(global)"
+
+    # H
+    H = None; srcH = ""
+    if fns.get("H"):
+        H = _p_cmap(abx_read_json(fns["H"]))
+        srcH = fns["H"]
+    if H is None and ss.get("overlap_H") is not None:
+        H, srcH = ss["overlap_H"], "(session.overlap_H)"
+    if H is None:
+        H, srcH = _p_cmap({"blocks": {}}), "(empty)"
+
+    # U / shapes
+    U = None; srcU = ""
+    if fns.get("U"):
+        U = _p_shapes(abx_read_json(fns["U"])); srcU = fns["U"]
+    if U is None and globals().get("shapes") is not None:
+        U, srcU = globals()["shapes"], "(global)"
+
+    # derive ground-truth dims from B
     try:
-        d3 = (B.blocks.__root__.get("3") or [])
+        d3 = (getattr(getattr(B, "blocks", None), "__root__", {}) or {}).get("3", [])
     except Exception:
         d3 = []
-    n3 = len(d3[0]) if (d3 and d3[0]) else 0
-    lm_truth = _ab2_truth_mask_from_d3(d3)
-    # publish canonical _inputs_block (keeps gallery hashes populated)
-    try:
-        ssot_publish_block(boundaries_obj=B, cmap_obj=C, H_obj=H, shapes_obj=U, n3=n3)
-    except Exception:
-        # tolerant fallback if your canonical publisher is renamed elsewhere
-        pass
-    # update run_ctx minimally (projected:auto gets Π := diag(lm))
-    rc = dict(st.session_state.get("run_ctx") or {})
-    rc["d3"] = d3; rc["n3"] = n3; rc["lane_mask_k3"] = list(lm_truth)
-    mode_now = rc.get("mode") or _ab2_policy_tag()
-    # standardize mode string (strict / projected(auto) / projected(file))
-    if mode_now == "strict" or mode_now == "projected(auto)" or mode_now == "projected(file)":
-        rc["mode"] = mode_now
-    else:
-        rc["mode"] = "projected(auto)" if "projected" in str(mode_now) else "strict"
-    if rc["mode"] == "projected(auto)":
-        rc["P_active"] = _ab2_diag_from_mask(lm_truth)
-    rc["policy_tag"] = _ab2_policy_tag()
-    # carry filenames if you stamped them earlier
-    ib = st.session_state.get("_inputs_block") or {}
-    rc["_inputs_sig"] = _ab2_inputs_sig()
-    st.session_state["run_ctx"] = rc
-    # ensure overlap_H matches what we’ll compute with
-    st.session_state["overlap_H"] = H
-    # UI breadcrumb
-    try:
-        n2 = len((H.blocks.__root__.get("2") or [])) if H else 0
-        st.caption(f"SSOT refreshed • n₂={n2} n₃={n3}")
-    except Exception:
-        st.caption(f"SSOT refreshed • n₃={n3}")
-    return B, C, H, U, d3, lm_truth
+    n2 = len(d3); n3 = len(d3[0]) if (d3 and d3[0]) else 0
+    lm = abx_lane_mask_from_d3(d3)
 
-# ---- recompute A/B from raw matrices (no trust in previous overlap_out) ---------------
-def _ab2_raw_mats(B, C, H, d3, lm):
-    H2 = (H.blocks.__root__.get("2") or []) if H else []
-    C3 = (C.blocks.__root__.get("3") or []) if C else []
-    I3 = _ab2_eye(len(C3)) if C3 else []
-    # strict residual
+    # content hashes from *blocks* view
+    hB = abx_hash_json(abx_blocks_view(B))
+    hC = abx_hash_json(abx_blocks_view(C))
+    hH = abx_hash_json(abx_blocks_view(H))
+    hU = abx_hash_json(abx_blocks_view(U))
+
+    # publish SSOT (_inputs_block + inputs_hashes)
+    ib["dims"] = {"n2": n2, "n3": n3}
+    ib["lane_mask_k3"] = list(lm)
+    ib.setdefault("filenames", {})
+    # keep existing filenames if already set; otherwise stamp the ones we used
+    ib["filenames"].setdefault("boundaries", srcB if srcB and srcB != "(global)" else "")
+    ib["filenames"].setdefault("C",          srcC if srcC and srcC != "(global)" else "")
+    ib["filenames"].setdefault("H",          srcH if srcH and srcH != "(session.overlap_H)" else "")
+    ib["filenames"].setdefault("U",          srcU if srcU and srcU != "(global)" else "")
+    ib["hashes"] = {
+        "boundaries_hash": hB,
+        "C_hash":          hC,
+        "H_hash":          hH,
+        "U_hash":          hU,
+        "shapes_hash":     hU,   # mirror U
+    }
+    ss["_inputs_block"] = ib
+    ss["inputs_hashes"] = ib["hashes"]
+
+    # refresh run_ctx and Π for auto
+    rc = dict(ss.get("run_ctx") or {})
+    rc.update({
+        "d3": d3, "n3": n3, "lane_mask_k3": list(lm),
+        "policy_tag": abx_policy_tag(),
+        "_inputs_sig": [hB, hC, hH, hU, hU],
+    })
+    # normalize mode string
+    m = str(rc.get("mode","")).lower()
+    if m not in ("strict", "projected(auto)", "projected(file)"):
+        rc["mode"] = "projected(auto)" if "projected" in m else "strict"
+    if rc["mode"] == "projected(auto)":
+        rc["P_active"] = abx_diag_from_mask(lm)
+    ss["run_ctx"] = rc
+
+    # keep H aligned with what we compute
+    ss["overlap_H"] = H
+
+    st.caption(f"SSOT refreshed • n₂={n2} n₃={n3}")
+    sources = {"B": srcB or "(global)", "C": srcC or "(global)", "H": srcH, "U": srcU or "(global)"}
+    return B, C, H, U, d3, lm, sources
+
+def abx_recompute_from_raw(B, C, H, d3, lm):
+    H2 = (getattr(getattr(H, "blocks", None), "__root__", {}) or {}).get("2", [])
+    C3 = (getattr(getattr(C, "blocks", None), "__root__", {}) or {}).get("3", [])
+    I3 = abx_eye(len(C3)) if C3 else []
+
     R3s = []
-    if _ab2_shape_ok(H2, d3) and C3 and C3[0] and (len(C3) == len(C3[0])):
+    if abx_shape_ok(H2, d3) and C3 and C3[0] and (len(C3) == len(C3[0])):
         try:
-            R3s = _ab2_xor(_ab2_mul(H2, d3), _ab2_xor(C3, I3))
+            R3s = abx_xor(abx_mul(H2, d3), abx_xor(C3, I3))
         except Exception:
             R3s = []
-    out_strict = {"2": {"eq": True}, "3": {"eq": _ab2_is_zero(R3s), "n_k": (len(d3[0]) if (d3 and d3[0]) else 0)}}
-    # projected leg
-    P = _ab2_diag_from_mask(lm)
-    R3p = _ab2_mul(R3s, P) if (R3s and P and len(R3s[0]) == len(P)) else []
-    out_proj = {"2": {"eq": True}, "3": {"eq": _ab2_is_zero(R3p), "n_k": (len(d3[0]) if (d3 and d3[0]) else 0)}}
-    # lane-bottom diagnostics (same semantics you’ve been using)
+
+    out_strict = {"2": {"eq": True}, "3": {"eq": abx_is_zero(R3s), "n_k": (len(d3[0]) if (d3 and d3[0]) else 0)}}
+
+    P = abx_diag_from_mask(lm)
+    R3p = abx_mul(R3s, P) if (R3s and P and len(R3s[0]) == len(P)) else []
+    out_proj = {"2": {"eq": True}, "3": {"eq": abx_is_zero(R3p), "n_k": (len(d3[0]) if (d3 and d3[0]) else 0)}}
+
+    # diagnostics vectors (lanes subset of bottom rows)
     def _bottom_row(M): return M[-1] if (M and len(M)) else []
     try:
-        H2d3  = _ab2_mul(H2, d3) if _ab2_shape_ok(H2, d3) else []
-        C3pI3 = _ab2_xor(C3, I3) if (C3 and C3[0]) else []
+        H2d3  = abx_mul(H2, d3) if abx_shape_ok(H2, d3) else []
+        C3pI3 = abx_xor(C3, I3) if (C3 and C3[0]) else []
     except Exception:
         H2d3, C3pI3 = [], []
     idx = [j for j,m in enumerate(lm or []) if m]
     bH, bC = _bottom_row(H2d3), _bottom_row(C3pI3)
     lane_vec_H2d3 = ([int(bH[j]) & 1 for j in idx] if (bH and idx) else [])
     lane_vec_C3I  = ([int(bC[j]) & 1 for j in idx] if (bC and idx) else [])
-    # debug nz-cols
+
+    # nz cols for sanity
     def _nz_cols(M):
         if not M: return []
         r,c = len(M), len(M[0])
         return [j for j in range(c) if any(M[i][j] & 1 for i in range(r))]
+
     debug = {
         "shapes": {
             "H2": (len(H2), len(H2[0]) if H2 else 0),
@@ -2361,84 +2450,90 @@ def _ab2_raw_mats(B, C, H, d3, lm):
     }
     return out_strict, out_proj, lane_vec_H2d3, lane_vec_C3I, debug
 
-# ---- pin for cert writer (adds embed_sig + ticket) ------------------------------------
-def _ab2_pin_for_cert(out_strict: dict, out_proj: dict):
+def abx_pin_for_cert(out_s: dict, out_p: dict):
     ss = st.session_state
-    rc = ss.get("run_ctx") or {}
-    pol = _ab2_policy_tag()
+    pol = abx_policy_tag()
+    rc  = ss.get("run_ctx") or {}
     pjh = rc.get("projector_hash","") if str(rc.get("mode","")) == "projected(file)" else ""
     payload = {
         "pair_tag":  f"strict__VS__{pol}",
-        "inputs_sig": _ab2_inputs_sig(),
+        "inputs_sig": abx_inputs_sig(),
         "policy_tag": pol,
-        "strict":    {"out": dict(out_strict or {})},
-        "projected": {"out": dict(out_proj   or {}), "policy_tag": pol, "projector_hash": pjh},
-        "embed_sig": _ab2_embed_sig(),
+        "strict":    {"out": dict(out_s or {})},
+        "projected": {"out": dict(out_p or {}), "policy_tag": pol, "projector_hash": pjh},
+        "embed_sig": abx_embed_sig(),
     }
     ss["ab_pin"] = {"state": "pinned", "payload": payload, "consumed": False}
     ss["_ab_ticket_pending"] = int(ss.get("_ab_ticket_pending", 0)) + 1
     ss["write_armed"] = True
     ss["armed_by"]    = ss.get("armed_by","") or "ab_compare"
 
-# ------------------------------ UI ------------------------------------------------------
+# ---------- UI ----------
 ss = st.session_state
-ss.setdefault("_ab2_lock", False)
+ss.setdefault("_abx_lock", False)
 _exp = globals().get("safe_expander", None)
 _ctx = (_exp("A/B compare (strict vs active projected)", expanded=False)
         if callable(_exp) else st.expander("A/B compare (strict vs active projected)", expanded=False))
 
 with _ctx:
-    # Header: pin freshness
+    # header: pin freshness (avoid inline ternary to prevent _repr_html_ issues)
     pin = ss.get("ab_pin") or {}
     if pin.get("state") == "pinned":
-        fresh = (pin.get("payload",{}).get("embed_sig","") == _ab2_embed_sig())
-        st.success("A/B: Pinned · Fresh (will embed)") if fresh else st.warning("A/B: Pinned · Stale (AB_STALE_INPUTS_SIG)")
+        fresh = (pin.get("payload",{}).get("embed_sig","") == abx_embed_sig())
+        if fresh:
+            st.success("A/B: Pinned · Fresh (will embed)")
+        else:
+            st.warning("A/B: Pinned · Stale (AB_STALE_INPUTS_SIG)")
     else:
         st.caption("A/B: —")
 
     c1, c2 = st.columns([1,1])
     with c1:
-        run_btn = st.button("Refresh SSOT + Run A/B", key="btn_ab2_run")
+        run_btn = st.button("Refresh SSOT + Run A/B", key="btn_abx_run")
     with c2:
-        dbg_on = st.checkbox("Show debugger", value=False, key="ab2_dbg")
+        dbg_on  = st.checkbox("Show debugger", value=False, key="abx_dbg")
 
     if run_btn:
-        if ss["_ab2_lock"]:
+        if ss["_abx_lock"]:
             st.info("A/B compare is already running…")
         else:
-            ss["_ab2_lock"] = True
+            ss["_abx_lock"] = True
             try:
-                # 1) refresh SSOT from current fixtures (also stamps hashes so gallery never misses U/C/H)
-                B, C, H, U, d3, lm = _ab2_publish_ssot_and_ctx()
-                # 2) recompute A and B from raw matrices
-                out_s, out_p, lvH, lvCI, dbg = _ab2_raw_mats(B, C, H, d3, lm)
-                # 3) snapshot (for diagnostics) + pin for cert/gallery embed
-                label_proj = _ab2_policy_tag()
+                # 1) load from current files and stamp SSOT
+                B, C, H, U, d3, lm, sources = abx_publish_ssot_from_files()
+                # 2) recompute strict vs projected from raw mats
+                out_s, out_p, lvH, lvCI, dbg = abx_recompute_from_raw(B, C, H, d3, lm)
+                # 3) snapshot + pin
+                label_proj = abx_policy_tag()
                 ss["ab_compare"] = {
                     "pair_tag": f"strict__VS__{label_proj}",
-                    "inputs_sig": _ab2_inputs_sig(),
+                    "inputs_sig": abx_inputs_sig(),
                     "lane_mask_k3": list(lm),
                     "policy_tag": label_proj,
                     "strict":   {"label": "strict", "out": out_s, "lane_vec_H2d3": lvH, "lane_vec_C3plusI3": lvCI,
-                                 "pass_vec": [int(out_s.get("2",{}).get("eq", False)), int(out_s.get("3",{}).get("eq", False))]},
+                                 "pass_vec": [int(out_s.get("2",{}).get("eq", False)),
+                                              int(out_s.get("3",{}).get("eq", False))]},
                     "projected":{"label": label_proj, "policy_tag": label_proj, "out": out_p,
                                  "lane_vec_H2d3": lvH[:], "lane_vec_C3plusI3": lvCI[:],
-                                 "pass_vec": [int(out_p.get("2",{}).get("eq", False)), int(out_p.get("3",{}).get("eq", False))],
+                                 "pass_vec": [int(out_p.get("2",{}).get("eq", False)),
+                                              int(out_p.get("3",{}).get("eq", False))],
                                  "projector_filename": (ss.get("run_ctx") or {}).get("projector_filename",""),
-                                 "projector_hash": (ss.get("run_ctx") or {}).get("projector_hash","") if label_proj.endswith("file)") else "",
+                                 "projector_hash": (ss.get("run_ctx") or {}).get("projector_hash","")
+                                                    if label_proj.endswith("file)") else "",
                                  "projector_consistent_with_d": (ss.get("run_ctx") or {}).get("projector_consistent_with_d", None)},
                     "sanity_probe": dbg,
+                    "sources": sources,
                 }
-                _ab2_pin_for_cert(out_s, out_p)
+                abx_pin_for_cert(out_s, out_p)
                 s_ok = bool(out_s.get("3",{}).get("eq", False))
                 p_ok = bool(out_p.get("3",{}).get("eq", False))
                 st.success(f"A/B updated → strict={'✅' if s_ok else '❌'} · projected={'✅' if p_ok else '❌'} · strict__VS__{label_proj}")
             except Exception as e:
                 st.error(f"A/B compare failed: {e}")
             finally:
-                ss["_ab2_lock"] = False
+                ss["_abx_lock"] = False
 
-    # Diagnostics view (latest snapshot)
+    # diagnostics (latest snapshot)
     snap = ss.get("ab_compare") or {}
     if snap:
         rc_now = dict(ss.get("run_ctx") or {})
@@ -2458,27 +2553,35 @@ with _ctx:
             f"lane_vec_C3+I3: {lvCI}"
         )
         pin = ss.get("ab_pin") or {}
-        fresh = (pin.get("payload",{}).get("embed_sig","") == _ab2_embed_sig()) if pin.get("state")=="pinned" else False
+        fresh = (pin.get("payload",{}).get("embed_sig","") == abx_embed_sig()) if pin.get("state")=="pinned" else False
         st.caption(f"A/B pin: {'present' if pin else '—'}\n\nfresh: {'🟢 yes' if fresh else '⚠️ no'}")
 
-    # Minimal debugger (toggle)
+    # debugger (toggle)
     if dbg_on:
         rc = ss.get("run_ctx") or {}
         ib = ss.get("_inputs_block") or {}
         d3 = rc.get("d3") or []
-        n2 = len(d3)
-        n3 = len(d3[0]) if (d3 and d3[0]) else 0
-        lm_from_B = _ab2_truth_mask_from_d3(d3)
+        n2 = len(d3); n3 = len(d3[0]) if (d3 and d3[0]) else 0
+        lm_from_B = abx_lane_mask_from_d3(d3)
+        H2 = (getattr(getattr(ss.get("overlap_H"), "blocks", None), "__root__", {}) or {}).get("2", [])
+        C3 = (getattr(getattr(globals().get("cmap"), "blocks", None), "__root__", {}) or {}).get("3", [])
         st.json({
-            "embed_sig_now": _ab2_embed_sig(),
-            "inputs_sig_now": _ab2_inputs_sig(),
+            "embed_sig_now": abx_embed_sig(),
+            "inputs_sig_now": abx_inputs_sig(),
             "rc": {"mode": rc.get("mode",""), "n3": rc.get("n3", None),
                    "lane_mask_k3": rc.get("lane_mask_k3", []),
                    "projector_hash": rc.get("projector_hash",""),
                    "_inputs_sig": rc.get("_inputs_sig", [])},
             "derived": {"dims_from_B": [n2, n3], "lane_mask_from_B": lm_from_B},
+            "shapes": {"H2": [len(H2), len(H2[0]) if H2 else 0],
+                       "d3": [n2, n3],
+                       "C3": [len(C3), len(C3[0]) if C3 else 0]},
+            "sources": snap.get("sources", {}),  # set after each run
         })
-# ========================= /A/B Compare — canonical, swap-safe ==========================
+# ========================= /A/B Compare — canonical, swap-safe (abx_) ==========================
+
+
+
 
 
 
