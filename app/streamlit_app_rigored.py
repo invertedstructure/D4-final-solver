@@ -2648,16 +2648,25 @@ if isinstance(_bad, dict) and "payload" in _bad and not isinstance(_bad.get("pay
     ss["ab_pin"] = _bad
 
 with ctx:
-    # Pin freshness header (robust to payload=None)
-    pin = ss.get("ab_pin") or {}
-    payload = (pin.get("payload") or {}) if isinstance(pin, dict) else {}
-    fresh = bool(pin.get("state") == "pinned" and payload.get("embed_sig","") == _abx_embed_sig())
+        # --- A/B pin freshness header (robust; no ternaries) ---
+    pin = st.session_state.get("ab_pin") or {}
+    payload = pin.get("payload") or {}
+    
+    # optional: scrub legacy bad state once
+    if not isinstance(payload, dict):
+        payload = {}
+        pin["payload"] = {}
+        st.session_state["ab_pin"] = pin
+    
+    fresh = (pin.get("state") == "pinned" and payload.get("embed_sig", "") == _abx_embed_sig())
     
     if pin.get("state") == "pinned":
-        st.success("A/B: Pinned · Fresh (will embed)") if fresh else st.warning("A/B: Pinned · Stale (AB_STALE_INPUTS_SIG)")
+        if fresh:
+            st.success("A/B: Pinned · Fresh (will embed)")
+        else:
+            st.warning("A/B: Pinned · Stale (AB_STALE_INPUTS_SIG)")
     else:
         st.caption("A/B: —")
-
 
     c1, c2, c3 = st.columns([1,1,1.2])
     with c1:
@@ -2774,10 +2783,11 @@ with ctx:
             f"lane_vec_H2@d3: {lvH}\n\n"
             f"lane_vec_C3+I3: {lvCI}"
         )
-        pin = ss.get("ab_pin") or {}
-        payload = (pin.get("payload") or {}) if isinstance(pin, dict) else {}
-        fresh = bool(pin.get("state") == "pinned" and payload.get("embed_sig","") == _abx_embed_sig())
+        pin = st.session_state.get("ab_pin") or {}
+        payload = pin.get("payload") or {}
+        fresh = (pin.get("state") == "pinned" and payload.get("embed_sig", "") == _abx_embed_sig())
         st.caption(f"A/B pin: {'present' if pin else '—'}\n\nfresh: {'🟢 yes' if fresh else '⚠️ no'}")
+
 
     if dbg_on:
         ib = ss.get("_inputs_block") or {}
