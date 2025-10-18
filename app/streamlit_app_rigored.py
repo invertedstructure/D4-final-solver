@@ -2100,33 +2100,31 @@ with ctx:
                 p_ab = _abx_write_cert(ab_cert, "cert_ab")
 
                 # expose projected cert to gallery
+                                # expose projected cert to gallery
                 st.session_state["cert_payload"] = p_cert
                 st.session_state.setdefault("last_report_paths", {})["ab_trio"] = {
                     "strict": str(p_strict), "projected": str(p_proj), "ab": str(p_ab),
                 }
 
-                s_ok = bool(out_s["3"]["eq"]); p_ok = bool(out_p["3"]["eq"])
-                st.success(f"A/B updated → strict={'✅' if s_ok else '❌'} · projected={'✅' if p_ok else '❌'} · strict__VS__{label_proj}")
-st.markdown(f"**Compare:** k3(strict) {'✅' if s_ok else '❌'} · k3(projected) {'✅' if p_ok else '❌'} · **pair** strict__VS__{label_proj} · **n₃** {rc.get('n3',0)} · **P** {str(rc.get('projector_hash',''))[:8]}")
-st.caption(f"certs written → strict: {p_strict.name} · projected: {p_proj.name} · ab: {p_ab.name}")
-        lm_now   = list(snap.get("lane_mask_k3") or [])
-        s_eq = bool(((snap.get("strict") or {}).get("out") or {}).get("3",{}).get("eq", False))
-        p_eq = bool(((snap.get("projected") or {}).get("out") or {}).get("3",{}).get("eq", False))
-        lvH  = (snap.get("strict") or {}).get("lane_vec_H2d3", [])
-        lvCI = (snap.get("strict") or {}).get("lane_vec_C3plusI3", [])
-        st.markdown("**A/B diagnostics**")
-        st.caption(
-            f"Mode: {mode_now}\n\n"
-            f"n3={len(lm_now)} lanes={lm_now}\n\n"
-            f"k3 strict: {'✅' if s_eq else '❌'}\n\n"
-            f"k3 proj: {'✅' if p_eq else '❌'}\n\n"
-            f"lane_vec_H2@d3: {lvH}\n\n"
-            f"lane_vec_C3+I3: {lvCI}"
-        )
-        pin = st.session_state.get("ab_pin") or {}
-        payload = pin.get("payload") or {}
-        fresh = (pin.get("state") == "pinned" and payload.get("embed_sig", "") == _abx_embed_sig())
-        st.caption(f"A/B pin: {'present' if pin else '—'}\n\nfresh: {'🟢 yes' if fresh else '⚠️ no'}")
+                # --- tiny verdict banner (safe, inside try:) ---
+                s_ok = bool((out_s or {}).get("3", {}).get("eq", False))
+                p_ok = bool((out_p or {}).get("3", {}).get("eq", False))
+                s_tick = "✅" if s_ok else "❌"
+                p_tick = "✅" if p_ok else "❌"
+                proj_hash_short = str(rc.get("projector_hash", ""))[:8]
+                banner = (
+                    "**Compare:** "
+                    f"k3(strict) {s_tick} · "
+                    f"k3(projected) {p_tick} · "
+                    f"**pair** strict__VS__{label_proj} · "
+                    f"**n₃** {rc.get('n3', 0)} · "
+                    f"**P** {proj_hash_short}"
+                )
+
+                st.success(f"A/B updated → strict={s_tick} · projected={p_tick} · strict__VS__{label_proj}")
+                st.markdown(banner)
+                st.caption(f"certs written → strict: {p_strict.name} · projected: {p_proj.name} · ab: {p_ab.name}")
+
 
     # ── debugger (frozen-on-disk view)
     if dbg_on:
