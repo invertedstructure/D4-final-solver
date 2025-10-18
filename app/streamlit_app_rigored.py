@@ -2310,30 +2310,6 @@ if "abx_policy_tag" not in globals():
         if "projected" in m: return "projected(columns@k=3,auto)"
         return "strict"
 # ===== /helpers =====
-def _abx_force_globals_from_frozen():
-    """Hydrate globals/session models from the frozen filenames so Overlap sees the same bytes."""
-    ib = st.session_state.get("_inputs_block") or {}
-    fn = (ib.get("filenames") or {})
-    def _read(p): 
-        try: return _json.loads(Path(p).read_text(encoding="utf-8"))
-        except Exception: return {"blocks": {}}
-    jB = _read(fn.get("boundaries",""))
-    jC = _read(fn.get("C",""))
-    jH = _read(fn.get("H",""))
-    jU = _read(fn.get("U",""))
-
-    # Re-parse via your io helpers if available
-    try:
-        if "io" in globals() and hasattr(io, "parse_boundaries"): globals()["boundaries"] = io.parse_boundaries(jB)
-    except Exception: pass
-    try:
-        if "io" in globals() and hasattr(io, "parse_cmap"): 
-            globals()["cmap"] = io.parse_cmap(jC)
-            st.session_state["overlap_H"] = io.parse_cmap(jH)
-    except Exception: pass
-    try:
-        if "io" in globals() and hasattr(io, "parse_shapes"): globals()["shapes"] = io.parse_shapes(jU)  # if you have it
-    except Exception: pass
 
 
 # ===================== A/B Orchestrator — freeze SSOT + write 3 certs =====================
@@ -2507,90 +2483,30 @@ def _abx_save_fixture(kind: str, source, fallback_basename: str) -> tuple[str, d
 
 def _abx_pick_source(kind: str):
     ss = st.session_state
-    # 0) if we already froze once, allow using those exact filenames
-    ib_files = ((ss.get("_inputs_block") or {}).get("filenames") or {})
-    ib_key = {"B":"boundaries","C":"C","H":"H","U":"U"}[kind]
-
-    # 1) hard precedence list (newest first)
-    precedence_keys = {
-        "B": ["uploaded_boundaries","fname_boundaries","B_up","f_B","boundaries_file","boundaries_obj","boundaries"],
-        "C": ["uploaded_cmap","fname_cmap","C_up","f_C","cmap_file","cmap_obj","cmap"],
-        "H": ["uploaded_H","fname_h","H_up","f_H","h_file","H_obj","overlap_H"],
-        "U": ["uploaded_shapes","fname_shapes","U_up","f_U","shapes_file","shapes_obj","shapes"],
+    probe_keys = {
+        "B": ["fname_boundaries","uploaded_boundaries","B_up","f_B","boundaries_file","boundaries_obj","boundaries"],
+        "C": ["fname_cmap","uploaded_cmap","C_up","f_C","cmap_file","cmap_obj","cmap"],
+        "H": ["fname_h","uploaded_H","H_up","f_H","h_file","H_obj","overlap_H"],
+        "U": ["fname_shapes","uploaded_shapes","U_up","f_U","shapes_file","shapes_obj","shapes"],
     }[kind]
-
-    # 2) uploaded → fname_* → frozen filenames → objects/globals
-    #    (uploaded first so a fresh selection wins; if none, reuse the last frozen filenames)
-    candidates = []
-    for k in precedence_keys:
-        if k in ss and ss.get(k) is not None:
-            candidates.append(ss.get(k))
-    for k in precedence_keys:
-        if k in globals() and globals().get(k) is not None:
-            candidates.append(globals().get(k))
-    if ib_files.get(ib_key):
-        candidates.append(ib_files[ib_key])
-
-    # 3) return the first non-None candidate; else None
-    for c in candidates:
-        if c is not None:
-            return c
+    for k in probe_keys:
+        if k in ss and ss.get(k) is not None: return ss.get(k)
+        if k in globals() and globals().get(k) is not None: return globals().get(k)
     return None
 
 def _abx_resolve_all_to_paths():
-    def _resolve_one(kind, fallback_name, want_keys=("3",)):  # for H we’ll pass want_keys=("2",)
-        # Build ordered candidates (uploaded → fname_* → frozen → objects/globals)
-        src = _abx_pick_source(kind)
+    # B/C/H/U → (path, blocks)
+    B_src = _abx_pick_source("B")
+    C_src = _abx_pick_source("C")
+    H_src = _abx_pick_source("H")
+    U_src = _abx_pick_source("U")
 
-        # Try the picked source first; if it’s an UploadedFile or a path/model we’ll persist it
-        tried = []
-        if src is not None:
-            tried.append(src)
+    pB, bB = _abx_save_fixture("B", B_src, "boundaries.json")
+    pC, bC = _abx_save_fixture("C", C_src, "cmap.json")
+    pH, bH = _abx_save_fixture("H", H_src, "H.json")
+    pU, bU = _abx_save_fixture("U", U_src, "shapes.json")
 
-        # Also try frozen filename explicitly as a backup
-        ib_files = ((st.session_state.get("_inputs_block") or {}).get("filenames") or {})
-        ib_map = {"B":"boundaries","C":"C","H":"H","U":"U"}
-        frozen = ib_files.get(ib_map[kind])
-        if frozen and frozen not in tried:
-            tried.append(frozen)
-
-        # Fallbacks from session/globals in the same precedence as _abx_pick_source
-        precedence = {
-            "B": ["uploaded_boundaries","fname_boundaries","B_up","f_B","boundaries_file","boundaries_obj","boundaries"],
-            "C": ["uploaded_cmap","fname_cmap","C_up","f_C","cmap_file","cmap_obj","cmap"],
-            "H": ["uploaded_H","fname_h","H_up","f_H","h_file","H_obj","overlap_H"],
-            "U": ["uploaded_shapes","fname_shapes","U_up","f_U","shapes_file","shapes_obj","shapes"],
-        }[kind]
-        for k in precedence:
-            v = st.session_state.get(k, None)
-            if v is not None and v not in tried:
-                tried.append(v)
-        for k in precedence:
-            v = globals().get(k, None)
-            if v is not None and v not in tried:
-                tried.append(v)
-
-        # Try in order, prefer non-empty blocks (presence of required keys)
-        picked_path, picked_blocks = None, {}
-        for cand in tried:
-            p, b = _abx_save_fixture(kind, cand, fallback_name)
-            # accept if any of the desired keys is present and non-empty
-            ok = any((isinstance(b.get(k), list) and (len(b.get(k) or []) > 0)) for k in want_keys)
-            if ok:
-                picked_path, picked_blocks = p, b
-                break
-            # keep last attempted, even if empty, so we still persist something
-            picked_path, picked_blocks = p, b
-
-        return picked_path, picked_blocks
-
-    # Resolve all four kinds
-    pB, bB = _resolve_one("B", "boundaries.json", want_keys=("3",))
-    pC, bC = _resolve_one("C", "cmap.json",       want_keys=("3",))
-    pH, bH = _resolve_one("H", "H.json",          want_keys=("2",))
-    pU, bU = _resolve_one("U", "shapes.json",     want_keys=("blocks",))  # anything non-empty
-
-    # publish resolved filenames into session (so future laps reuse exact bytes)
+    # publish resolved filenames into session
     ss = st.session_state
     ss["fname_boundaries"] = pB
     ss["fname_cmap"]       = pC
@@ -2598,8 +2514,6 @@ def _abx_resolve_all_to_paths():
     ss["fname_shapes"]     = pU
 
     return {"B": (pB, bB), "C": (pC, bC), "H": (pH, bH), "U": (pU, bU)}
-
-
 
 # ── freeze SSOT from those exact files
 def _abx_publish_frozen_ssot(paths_blocks):
@@ -2823,17 +2737,12 @@ with ctx:
                     st.error("Fixtures incomplete → " + ", ".join(reasons))
                     st.stop()
 
-                # 3) (optional) run overlap legs in perfect sync with the frozen files
+                # 4) (optional) run overlap legs for the rest of the app
                 if also_overlap and "run_overlap" in globals() and callable(globals()["run_overlap"]):
-                    _abx_force_globals_from_frozen()   # <— hydrate globals from the exact frozen bytes
                     try: run_overlap(policy="strict")
                     except Exception: pass
                     try: run_overlap(policy="projected(auto)")
                     except Exception: pass
-                    # Re-freeze in case Overlap mutated run_ctx/_inputs_block
-                    ib = _abx_publish_frozen_ssot(pb)
-                    rc = dict(st.session_state.get("run_ctx") or {})
-
 
                 # 5) Recompute A/B strictly from raw blocks
                 out_s, out_p, lvH, lvCI = _abx_ab_from_blocks(pb["H"][1], pb["B"][1], pb["C"][1], rc)
@@ -2947,11 +2856,6 @@ with ctx:
                         "U": Path(paths.get("U","")).name or "(missing)"},
         })
 # ================== /A/B Orchestrator — freeze SSOT + write 3 certs ==================
-
-
-
-
-
 
 
 
