@@ -125,6 +125,33 @@ DISTRICT_MAP: dict[str, str] = {
     "28f8db2a822cb765e841a35c2850a745c667f4228e782d0cfdbcb710fd4fecb9": "D3",
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
+# --- tolerant JSON → blocks extractor ----------------------------------------
+def _svr_as_blocks(j: dict, kind: str) -> dict:
+    """
+    Accept both {"blocks": {...}} and degree-keyed {"3": [...], "2": [...]} JSON.
+    Returns a dict like {"3": [...], "2": [...]} or {} if nothing usable.
+    """
+    if not isinstance(j, dict):
+        return {}
+
+    # Preferred: explicit "blocks" container
+    blk = j.get("blocks")
+    if isinstance(blk, dict) and any(k in blk for k in ("3","2","1","0")):
+        return blk
+
+    # Fallback: promote degree keys at top-level
+    deg_keys = {k: v for k, v in j.items() if str(k) in ("0","1","2","3")}
+    if deg_keys:
+        # normalize ordering and types
+        out = {}
+        for k in ("3","2","1","0"):
+            if k in deg_keys:
+                out[k] = deg_keys[k]
+        return out
+
+    # Shapes/support files may not carry blocks; that's fine for U.
+    return {}
+# -----------------------------------------------------------------------------
 
 # --- shim: uploads-first JSON reader/persister (only if missing) ---
 if "abx_read_json_any" not in globals():
@@ -2238,8 +2265,12 @@ def _svr_resolve_all_to_paths():
     for kind, base in (("B","boundaries.json"),("C","cmap.json"),("H","H.json"),("U","shapes.json")):
         src = _svr_pick_source(kind)
         j, p, _ = abx_read_json_any(src, kind={"B":"boundaries","C":"cmap","H":"H","U":"shapes"}[kind])
-        blocks = (j.get("blocks") or {}) if isinstance(j, dict) else {}
+
+        # ⬇️ NEW: tolerate both schemas
+        blocks = _svr_as_blocks(j, kind)
+
         raw[kind] = {"p": p, "blocks": blocks, "base": base}
+
     # validate non-empty required slices BEFORE persisting
     reasons = []
     bB = raw["B"]["blocks"]; bC = raw["C"]["blocks"]; bH = raw["H"]["blocks"]; bU = raw["U"]["blocks"]
@@ -2265,6 +2296,7 @@ def _svr_resolve_all_to_paths():
         out[kind] = (p, blocks)
         st.session_state[{"B":"fname_boundaries","C":"fname_cmap","H":"fname_h","U":"fname_shapes"}[kind]] = p
     return out
+
 
 # --- freeze SSOT (no lanes invented here) ---
 def _svr_freeze_ssot(pb):
