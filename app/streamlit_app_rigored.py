@@ -1804,26 +1804,77 @@ def _abx_pick_source(kind: str):
         if k in globals() and globals().get(k) is not None: return globals().get(k)
     return None
 
+# --- robust: resolve B/C/H/U → concrete files, prefer non-empty; then stamp fname_* ---
 def _abx_resolve_all_to_paths():
-    # B/C/H/U → (path, blocks)
-    B_src = _abx_pick_source("B")
-    C_src = _abx_pick_source("C")
-    H_src = _abx_pick_source("H")
-    U_src = _abx_pick_source("U")
-
-    pB, bB = _abx_save_fixture("B", B_src, "boundaries.json")
-    pC, bC = _abx_save_fixture("C", C_src, "cmap.json")
-    pH, bH = _abx_save_fixture("H", H_src, "H.json")
-    pU, bU = _abx_save_fixture("U", U_src, "shapes.json")
-
-    # publish resolved filenames into session
     ss = st.session_state
-    ss["fname_boundaries"] = pB
-    ss["fname_cmap"]       = pC
-    ss["fname_h"]          = pH
-    ss["fname_shapes"]     = pU
+
+    def _resolve_one(kind: str, fallback_basename: str, want_keys=("3",)):
+        """
+        kind ∈ {"B","C","H","U"}
+        want_keys = which block keys must be non-empty to accept a candidate
+          - B: ("3",)  C: ("3",)  H: ("2",)  U: ("blocks",)
+        """
+        # 0) collect candidates in precedence order
+        ib = ss.get("_inputs_block") or {}
+        frozen = (ib.get("filenames") or {})
+        froz_map = {"B": "boundaries", "C": "C", "H": "H", "U": "U"}
+
+        # Session/global keys we’ve seen in the wild
+        key_order = {
+            "B": ["uploaded_boundaries", "boundaries_up", "B_up", "uploaded_B",
+                  "fname_boundaries", "f_B", "boundaries_file", "boundaries_obj", "boundaries"],
+            "C": ["uploaded_cmap", "cmap_up", "C_up", "uploaded_C",
+                  "fname_cmap", "f_C", "cmap_file", "cmap_obj", "cmap"],
+            "H": ["uploaded_H", "h_up", "H_up", "uploaded_h",
+                  "fname_h", "f_H", "h_file", "H_obj", "overlap_H"],
+            "U": ["uploaded_shapes", "shapes_up", "U_up", "uploaded_U",
+                  "fname_shapes", "f_U", "shapes_file", "shapes_obj", "shapes"],
+        }[kind]
+
+        candidates = []
+
+        def _push(x):
+            if x not in (None, "", False) and x not in candidates:
+                candidates.append(x)
+
+        # newest UI upload handles first (session), then declared filenames, then globals, then frozen
+        for k in key_order:
+            if k in ss:
+                _push(ss.get(k))
+        for k in key_order:
+            if k in globals():
+                _push(globals().get(k))
+        _push(frozen.get(froz_map[kind]))
+
+        # 1) try candidates in order; persist each via _abx_save_fixture; prefer non-empty
+        picked_path, picked_blocks = "", {}
+        for cand in candidates or [None]:
+            p, b = _abx_save_fixture(kind, cand, fallback_basename)
+
+            # accept if desired keys present and non-empty
+            ok = False
+            if want_keys == ("blocks",):
+                ok = bool((b.get("2") or []) or (b.get("3") or []) or (b.get("0") or []) or (b.get("1") or []))
+            else:
+                ok = any(isinstance(b.get(k), list) and len(b.get(k) or []) > 0 for k in want_keys)
+
+            picked_path, picked_blocks = p, b
+            if ok:
+                break  # take the first solid candidate
+
+        # 2) stamp session filename so future laps reuse these exact bytes
+        stamp_key = {"B": "fname_boundaries", "C": "fname_cmap", "H": "fname_h", "U": "fname_shapes"}[kind]
+        ss[stamp_key] = picked_path
+        return picked_path, picked_blocks
+
+    # Resolve all four
+    pB, bB = _resolve_one("B", "boundaries.json", want_keys=("3",))
+    pC, bC = _resolve_one("C", "cmap.json",       want_keys=("3",))
+    pH, bH = _resolve_one("H", "H.json",          want_keys=("2",))
+    pU, bU = _resolve_one("U", "shapes.json",     want_keys=("blocks",))
 
     return {"B": (pB, bB), "C": (pC, bC), "H": (pH, bH), "U": (pU, bU)}
+
 
 # ── freeze SSOT from those exact files
 def _abx_publish_frozen_ssot(paths_blocks):
