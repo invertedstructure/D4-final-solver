@@ -2015,12 +2015,8 @@ with ctx:
     with c3:
         dbg_on = st.checkbox("Show debugger", value=False, key="abx_dbg")
 
+   
     if run_btn:
-        if ss["_abx_lock"]:
-            st.info("A/B compare is already running…")
-        else:
-            ss["_abx_lock"] = True
-                if run_btn:
         if ss["_abx_lock"]:
             st.info("A/B compare is already running…")
         else:
