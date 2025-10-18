@@ -1913,6 +1913,57 @@ else:
         if _warn:
             st.info("Notes:")
             for w in _warn: st.write(f"- {w}")
+# --- add this helper near your AB helpers (top-level once) -------------------
+from pathlib import Path
+import json as _json, hashlib as _hashlib
+
+def abx_is_uploaded_file(x):
+    # duck-type Streamlit's UploadedFile
+    return hasattr(x, "getvalue") and hasattr(x, "name")
+
+def abx_read_json_any(x, *, kind: str) -> tuple[dict, str, str]:
+    """
+    Accepts a path string/Path, a Streamlit UploadedFile, or a plain dict.
+    Returns (json_obj, canonical_path, origin_tag).
+      origin_tag ∈ {"file","upload","dict",""}
+    For uploads, writes a stable copy under logs/_uploads and returns that path.
+    """
+    if not x:
+        return {}, "", ""
+    # 1) path-like
+    try:
+        if isinstance(x, (str, Path)):
+            p = Path(x)
+            if p.exists():
+                try:
+                    return _json.loads(p.read_text(encoding="utf-8")), str(p), "file"
+                except Exception:
+                    return {}, "", ""
+    except Exception:
+        pass
+    # 2) UploadedFile
+    if abx_is_uploaded_file(x):
+        try:
+            raw  = x.getvalue()
+            text = raw.decode("utf-8")
+            j    = _json.loads(text)
+        except Exception:
+            return {}, "", ""
+        uploads_dir = Path(st.session_state.get("LOGS_DIR", "logs")) / "_uploads"
+        uploads_dir.mkdir(parents=True, exist_ok=True)
+        h12  = _hashlib.sha256(raw).hexdigest()[:12]
+        base = Path(getattr(x, "name", f"{kind}.json")).name
+        outp = uploads_dir / f"{kind}__{h12}__{base}"
+        try:
+            outp.write_text(text, encoding="utf-8")
+        except Exception:
+            # even if persisting fails, still return the parsed JSON
+            pass
+        return j, str(outp), "upload"
+    # 3) already-parsed dict
+    if isinstance(x, dict):
+        return x, "", "dict"
+    return {}, "", ""
 
 # ---------- A/B canonical helpers (drop-in) ----------
 
@@ -2288,106 +2339,123 @@ def abx_embed_sig() -> str:
 
 
 # ─────────────────────────── REPLACE THIS: abx_publish_ssot_from_files ───────────────────────────
+# --- REPLACE your existing abx_publish_ssot_from_files with this version -----
 def abx_publish_ssot_from_files():
     ss = st.session_state
     ib = dict(ss.get("_inputs_block") or {})
 
-    # --- helper: first existing path from a list of session keys + prior SSOT filename
-    def _pick_file(kind: str, fallback_prev: str) -> tuple[str, str]:
-        # map kind -> candidate session keys most UIs use
-        key_map = {
-            "boundaries": ["fname_boundaries", "B_file", "uploaded_boundaries", "boundaries_path"],
-            "C":          ["fname_cmap", "C_file", "uploaded_cmap", "cmap_path"],
-            "H":          ["fname_h", "H_file", "H_up", "uploaded_H", "f_H", "H_path"],
-            "U":          ["fname_shapes", "U_file", "uploaded_shapes", "shapes_path"],
-        }
-        for k in key_map.get(kind, []):
-            p = ss.get(k) or ""
-            if p and Path(p).exists():
-                return p, "file"
-        if fallback_prev and Path(fallback_prev).exists():
-            return fallback_prev, "file"
-        return "", ""  # unresolved here (let parser fallbacks handle object/session/global)
+    # previous filenames (so we can reuse them if no new selection exists)
+    prev = (ib.get("filenames") or {})
+    prevB, prevC, prevH, prevU = prev.get("boundaries",""), prev.get("C",""), prev.get("H",""), prev.get("U","")
 
-    prev_fns = (ib.get("filenames") or {})
-    # 1) resolve preferred file for each fixture (winner-takes-all)
-    pB, srcB = _pick_file("boundaries", prev_fns.get("boundaries", ""))
-    pC, srcC = _pick_file("C",          prev_fns.get("C",          ""))
-    pH, srcH = _pick_file("H",          prev_fns.get("H",          ""))
-    pU, srcU = _pick_file("U",          prev_fns.get("U",          ""))
+    # 1) resolve freshest sources for each fixture (path OR upload OR dict OR memory)
+    #    check common session keys you use across the app
+    candB = [ss.get("fname_boundaries"), ss.get("B_file"), ss.get("uploaded_boundaries"), ss.get("boundaries_path"), prevB]
+    candC = [ss.get("fname_cmap"),       ss.get("C_file"), ss.get("uploaded_cmap"),       ss.get("cmap_path"),       prevC]
+    candH = [ss.get("fname_h"),          ss.get("H_file"), ss.get("H_up"),                ss.get("uploaded_H"),
+             ss.get("f_H"),              ss.get("H_path"), prevH]
+    candU = [ss.get("fname_shapes"),     ss.get("U_file"), ss.get("uploaded_shapes"),     ss.get("shapes_path"),     prevU]
 
-    # 2) load raw JSON (files if resolved)
-    JB = abx_read_json(pB) if pB else {}
-    JC = abx_read_json(pC) if pC else {}
-    JH = abx_read_json(pH) if pH else {}
-    JU = abx_read_json(pU) if pU else {}
+    JB, pB, oB = {}, "", ""
+    for v in candB:
+        JB, pB, oB = abx_read_json_any(v, kind="boundaries")
+        if JB: break
 
-    # 3) parse using your IO; tolerate plain dicts
+    JC, pC, oC = {}, "", ""
+    for v in candC:
+        JC, pC, oC = abx_read_json_any(v, kind="C")
+        if JC: break
+
+    JH, pH, oH = {}, "", ""
+    for v in candH:
+        JH, pH, oH = abx_read_json_any(v, kind="H")
+        if JH: break
+
+    JU, pU, oU = {}, "", ""
+    for v in candU:
+        JU, pU, oU = abx_read_json_any(v, kind="U")
+        if JU: break
+
+    # 2) parse into your model objects when JSON is present; otherwise fall back to globals/session
     def _p_boundaries(j):
         try:
-            if "io" in globals() and hasattr(io, "parse_boundaries"):
-                return io.parse_boundaries(j)
+            return io.parse_boundaries(j) if j else (globals().get("boundaries") or None)
         except Exception:
-            pass
-        return j
+            return globals().get("boundaries") or None
 
     def _p_cmap(j):
         try:
-            if "io" in globals() and hasattr(io, "parse_cmap"):
-                return io.parse_cmap(j)
+            return io.parse_cmap(j) if j else (globals().get("cmap") or None)
         except Exception:
-            pass
-        return j
+            return globals().get("cmap") or None
 
     def _p_shapes(j):
         try:
-            if "io" in globals() and hasattr(io, "parse_shapes"):
-                return io.parse_shapes(j)
+            return io.parse_shapes(j) if j else (globals().get("shapes") or None)
         except Exception:
-            pass
-        return j
+            return globals().get("shapes") or None
 
-    B = _p_boundaries(JB) if JB else (globals().get("boundaries") or None)
-    C = _p_cmap(JC)       if JC else (globals().get("cmap")       or None)
+    B = _p_boundaries(JB)
+    C = _p_cmap(JC)
+    U = _p_shapes(JU)
 
-    # H: file if provided, else current overlap_H if it has content, else empty cmap shell
+    # H: prefer uploaded/file; else use current overlap_H if present; else empty shell
     if JH:
         H = _p_cmap(JH)
-        H_origin = "file"
+        H_origin = ("upload" if oH == "upload" else "file")
     else:
         H = ss.get("overlap_H")
-        # ensure H is a valid cmap-like object; if not, mint an empty shell
         if not H:
-            H = _p_cmap({"blocks": {}})
+            try:
+                H = io.parse_cmap({"blocks": {}})
+            except Exception:
+                H = {"blocks": {}}  # very defensive
         H_origin = "session.overlap_H" if ss.get("overlap_H") else "empty"
 
-    U = _p_shapes(JU)     if JU else (globals().get("shapes")     or None)
+    # 3) normalize to blocks view (these helpers should already exist; add minimal fallbacks)
+    if "abx_blocks_view" not in globals():
+        def abx_blocks_view(obj):
+            try:
+                if hasattr(obj, "blocks") and hasattr(obj.blocks, "__root__"):
+                    return {"blocks": obj.blocks.__root__}
+            except Exception:
+                pass
+            return obj if (isinstance(obj, dict) and "blocks" in obj) else {"blocks": {}}
 
-    # 4) normalize to blocks view
     Bv = abx_blocks_view(B)["blocks"]
     Cv = abx_blocks_view(C)["blocks"]
     Hv = abx_blocks_view(H)["blocks"]
     Uv = abx_blocks_view(U)["blocks"]
 
-    # 5) matrices + dims + lane mask from boundaries
+    # 4) matrices + dims + lane mask from boundaries
     d3 = Bv.get("3", []) or []
     n2 = len(d3)
     n3 = len(d3[0]) if (d3 and d3[0]) else 0
+    if "abx_lane_mask_from_d3" not in globals():
+        def abx_lane_mask_from_d3(d):
+            return [1 if any(int(d[i][j]) & 1 for i in range(len(d))) else 0 for j in range(len(d[0]) if (d and d[0]) else 0)]
     lm = abx_lane_mask_from_d3(d3)
 
-    # 6) canonical hashes (non-empty so gallery always populates)
+    # 5) canonical hashes (always non-empty so gallery never misses)
+    if "abx_hash_json" not in globals():
+        def abx_hash_json(obj):
+            try:
+                blob = _json.dumps(obj, separators=(",", ":"), sort_keys=True)
+                return _hashlib.sha256(blob.encode("utf-8")).hexdigest()
+            except Exception:
+                return ""
     hB = abx_hash_json({"blocks": Bv})
     hC = abx_hash_json({"blocks": Cv})
     hH = abx_hash_json({"blocks": Hv})
     hU = abx_hash_json({"blocks": Uv})
 
-    # 7) publish SSOT (ALWAYS overwrite filenames with winners)
+    # 6) publish SSOT (ALWAYS overwrite filenames with the resolved winners)
     ib["dims"] = {"n2": n2, "n3": n3}
     ib["lane_mask_k3"] = list(lm)
     ib["filenames"] = {
         "boundaries": pB,
         "C":          pC,
-        "H":          pH,  # if blank, we’ll reflect origin as session.overlap_H in the probe
+        "H":          pH,  # may be "", meaning we used overlap_H (see probe)
         "U":          pU,
     }
     ib["hashes"] = {
@@ -2400,7 +2468,21 @@ def abx_publish_ssot_from_files():
     ss["_inputs_block"] = ib
     ss["inputs_hashes"] = ib["hashes"]
 
-    # 8) refresh run_ctx (Π := diag(lm) for auto) + stamp the exact inputs_sig used
+    # 7) refresh run_ctx (Π := diag(lm) for auto) + stamp input sig used
+    if "abx_diag_from_mask" not in globals():
+        def abx_diag_from_mask(lm_):
+            n = len(lm_ or [])
+            return [[1 if (i==j and int(lm_[j])==1) else 0 for j in range(n)] for i in range(n)]
+
+    if "abx_policy_tag" not in globals():
+        def abx_policy_tag():
+            rc0 = ss.get("run_ctx") or {}
+            m = str(rc0.get("mode","strict")).lower()
+            if m == "strict": return "strict"
+            if "projected" in m and "file" in m: return "projected(columns@k=3,file)"
+            if "projected" in m: return "projected(columns@k=3,auto)"
+            return "strict"
+
     rc = dict(ss.get("run_ctx") or {})
     rc.update({
         "d3": d3, "n3": n3, "lane_mask_k3": list(lm),
@@ -2417,8 +2499,12 @@ def abx_publish_ssot_from_files():
     # keep overlap_H aligned with the object we’ll compute with
     ss["overlap_H"] = H
 
-    # breadcrumbs + sources echo (so you can sanity check)
-    st.caption(f"SSOT refreshed • n₂={len(Hv.get('2', []) or [])} n₃={n3}")
+    # breadcrumbs + sources echo
+    try:
+        st.caption(f"SSOT refreshed • n₂={len(Hv.get('2', []) or [])} n₃={n3}")
+    except Exception:
+        st.caption(f"SSOT refreshed • n₃={n3}")
+
     sources = {
         "B": pB or "(global)",
         "C": pC or "(global)",
@@ -2426,7 +2512,7 @@ def abx_publish_ssot_from_files():
         "U": pU or "(global)",
     }
     return B, C, H, U, d3, lm, sources
-# ─────────────────────────────────────────────────────────────────────────────────────────
+
 
 
 # ─────────────────────────── REPLACE THIS: abx_recompute_from_raw ───────────────────────────
