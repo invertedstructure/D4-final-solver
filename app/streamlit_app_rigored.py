@@ -47,6 +47,19 @@ from uuid import uuid4
 
 # Page config early so Streamlit is happy
 st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
+# ---- Lane policy defaults (SSOT keys for Π selection) ----
+try:
+    _ss = st.session_state
+    _rc = dict(_ss.get("run_ctx") or {})
+    _rc.setdefault("lane_policy", "manual")         # "manual" | "auto_d3" | "auto_cplusi" | "support" | "file"
+    _rc.setdefault("lane_mask_k3", [])              # sized to n3 later
+    _rc.setdefault("projector_filename", "")
+    _rc.setdefault("projector_hash", "")
+    _rc.setdefault("projector_bytes", b"")
+    _ss["run_ctx"] = _rc
+    _ss.setdefault("write_armed", False)
+except Exception:
+    pass
 
 
 # ────────────────────────────── PACKAGE LOADER ──────────────────────────────
@@ -1937,16 +1950,46 @@ def _abx_inputs_sig_list(ib: dict) -> list[str]:
         str(h.get("U_hash","")),
         str(h.get("shapes_hash","")),
     ]
+import json as _json, hashlib as _hashlib
 
-def _abx_embed_sig():
+def _abx_embed_sig() -> str:
+    """
+    Canonical lane-aware signature so a pin is only 'Fresh' when Π matches.
+    Includes:
+      - inputs_sig (5-hash tuple from the frozen SSOT)
+      - policy_tag  (strict | projected(columns@k=3,auto|file))
+      - projector_hash (FILE only)
+      - lane_policy + lane_mask_k3 (non-FILE projected)
+    """
     ss = st.session_state
     ib = ss.get("_inputs_block") or {}
-    inputs = _abx_inputs_sig_list(ib)
+    # 5-hash in deterministic order
+    try:
+        h = (ib.get("hashes") or {})
+        inputs_sig = [
+            str(h.get("boundaries_hash","")),
+            str(h.get("C_hash","")),
+            str(h.get("H_hash","")),
+            str(h.get("U_hash","")),
+            str(h.get("shapes_hash","")),
+        ]
+    except Exception:
+        inputs_sig = []
+
     rc = ss.get("run_ctx") or {}
-    pol = _abx_policy_tag(rc)
-    pj  = rc.get("projector_hash","") if str(rc.get("mode","")) == "projected(file)" else ""
-    blob = {"inputs": inputs, "policy": pol, "projector_hash": pj}
-    return _hashlib.sha256(_json.dumps(blob, separators=(",", ":"), sort_keys=True).encode("ascii")).hexdigest()
+    policy_tag = str(rc.get("policy_tag","") or rc.get("mode","strict"))
+    payload = {"inputs_sig": inputs_sig, "policy_tag": policy_tag}
+
+    if "projected" in policy_tag and "file" in policy_tag:
+        payload["projector_hash"] = str(rc.get("projector_hash",""))
+    elif "projected" in policy_tag:
+        payload["lane_policy"]  = str(rc.get("lane_policy","manual"))
+        payload["lane_mask_k3"] = list(rc.get("lane_mask_k3") or [])
+
+    blob = _json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return _hashlib.sha256(blob).hexdigest()
+
+
 
 # ── compute strict + active projected from raw blocks
 def _abx_ab_from_blocks(bH, bB, bC, rc):
@@ -2026,7 +2069,10 @@ def _abx_write_cert(payload: dict, prefix: str) -> Path:
     _abx_atomic_write_json(path, payload)
     return path
 
-# ── UI
+
+
+
+# ── UI------------------------------------------------------------------------------------#
 ss = st.session_state
 ss.setdefault("_abx_lock", False)
 
@@ -2054,10 +2100,125 @@ with ctx:
         if fresh:
             st.success("A/B: Pinned · Fresh (will embed)")
         else:
-            st.warning("A/B: Pinned · Stale (AB_STALE_INPUTS_SIG)")
+            # Reason-codes optional; at minimum show stale
+            st.warning("A/B: Pinned · Stale")
     else:
         st.caption("A/B: —")
 
+    # --- Lane Policy selector (explicit Π control) ---
+    rc0 = dict(st.session_state.get("run_ctx") or {})
+    pol_options = ["manual","auto_d3","auto_cplusi","support","file"]
+    try:
+        idx0 = pol_options.index(str(rc0.get("lane_policy","manual")))
+    except Exception:
+        idx0 = 0
+    sel = st.radio("Lane policy (k=3)", pol_options, horizontal=True, key="lane_policy_sel", index=idx0)
+    changed = (sel != rc0.get("lane_policy","manual"))
+    rc0["lane_policy"] = sel
+
+    # Dims from frozen SSOT if available
+    ib0 = st.session_state.get("_inputs_block") or {}
+    dims0 = (ib0.get("dims") or {})
+    n2p = int(dims0.get("n2") or 0)
+    n3p = int(dims0.get("n3") or 0)
+
+    # Mask compute for non-FILE
+    derived_mask = list(rc0.get("lane_mask_k3") or ([] if n3p==0 else [1]+[0]*(max(n3p-1,0))))
+    support_mask = list(rc0.get("support_mask_k3") or [])
+    def _bits_ok(m): 
+        try:
+            return all(int(x) in (0,1) for x in (m or []))
+        except Exception:
+            return False
+
+    manual_mask = None
+    if sel == "manual":
+        if n3p > 0 and (len(derived_mask) != n3p or not _bits_ok(derived_mask)):
+            derived_mask = [1] + [0]*(n3p-1)
+        cols = st.columns(n3p if n3p>0 else 1)
+        out = []
+        for j in range(n3p):
+            with cols[j]:
+                out.append(1 if st.checkbox(f"col {j}", value=bool(derived_mask[j]), key=f"lane_manual_{j}") else 0)
+        manual_mask = out
+        rc0["lane_mask_k3"] = list(manual_mask or [])
+    elif sel == "auto_d3":
+        # compute from d3 if present now; else fallback mask, recomputed at freeze
+        d3p = (st.session_state.get("run_ctx") or {}).get("d3") or []
+        if not d3p:
+            rc0["lane_mask_k3"] = [1]+[0]*(max(n3p-1,0)) if n3p>0 else []
+        else:
+            mask = [1 if any(int(d3p[i][j]) & 1 for i in range(len(d3p))) else 0 for j in range(len(d3p[0]) if (d3p and d3p[0]) else 0)]
+            rc0["lane_mask_k3"] = mask
+    elif sel == "auto_cplusi":
+        # try preview from frozen C if available; final validation occurs on run
+        paths = (ib0.get("filenames") or {})
+        def _read_blocks(pth):
+            try: return _json.loads(Path(pth).read_text(encoding="utf-8")).get("blocks") or {}
+            except Exception: return {}
+        bC = _read_blocks(paths.get("C",""))
+        C3 = bC.get("3") or []
+        if C3 and len(C3)==len(C3[0]):
+            I3 = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))]
+            C3pI3 = [[(C3[i][j]^I3[i][j]) & 1 for j in range(len(C3))] for i in range(len(C3))]
+            bottom = C3pI3[-1] if C3pI3 else [0]*n3p
+            rc0["lane_mask_k3"] = [1 if int(b)==1 else 0 for b in bottom]
+        else:
+            rc0["lane_mask_k3"] = [1]+[0]*(max(n3p-1,0)) if n3p>0 else []
+    elif sel == "support":
+        if len(support_mask)==n3p and _bits_ok(support_mask):
+            rc0["lane_mask_k3"] = list(support_mask)
+        else:
+            rc0["lane_mask_k3"] = [0]*n3p
+    else:
+        # file: Π is authoritative; do not touch lane_mask_k3
+        pass
+
+    # Preflight (read-only preview from frozen files if present)
+    mask_pf = list(rc0.get("lane_mask_k3") or [])
+    idx_pf = [j for j,x in enumerate(mask_pf) if int(x)==1]
+    paths_pf = (ib0.get("filenames") or {})
+    def _read_blocks(pth):
+        try: return _json.loads(Path(pth).read_text(encoding="utf-8")).get("blocks") or {}
+        except Exception: return {}
+    bB = _read_blocks(paths_pf.get("boundaries",""))
+    bC = _read_blocks(paths_pf.get("C",""))
+    bH = _read_blocks(paths_pf.get("H",""))
+    d3pf = bB.get("3") or []; H2pf = bH.get("2") or []; C3pf = bC.get("3") or []
+    def _mul(A,B):
+        if not A or not B or not A[0] or not B[0] or len(A[0])!=len(B): return []
+        m,k = len(A), len(A[0]); n = len(B[0])
+        C = [[0]*n for _ in range(m)]
+        for i in range(m):
+            Ai = A[i]
+            for t in range(k):
+                if Ai[t] & 1:
+                    Bt = B[t]
+                    for j in range(n):
+                        C[i][j] ^= (Bt[j] & 1)
+        return C
+    H2d3_pf = _mul(H2pf, d3pf)
+    I3pf = [[1 if i==j else 0 for j in range(len(C3pf))] for i in range(len(C3pf))] if (C3pf and len(C3pf)==len(C3pf[0])) else []
+    C3pI_pf = [[(C3pf[i][j]^I3pf[i][j]) & 1 for j in range(len(C3pf))] for i in range(len(C3pf))] if (C3pf and I3pf) else []
+    bottom_H = H2d3_pf[-1] if H2d3_pf else []
+    bottom_CI = C3pI_pf[-1] if C3pI_pf else []
+
+    st.markdown("**Preflight**")
+    st.caption(f"Dims: n₂×n₃ = {n2p}×{n3p} · Lane policy: {sel} · lanes={mask_pf} · idx={idx_pf}")
+    st.caption(f"Bottom rows — H2·d3: {bottom_H} · C3⊕I3: {bottom_CI}")
+    if sel == "file":
+        shortp = (rc0.get("projector_hash","") or "")[:8]
+        st.caption(f"Projector: FILE · hash={shortp or '(none)'}")
+    else:
+        st.caption("Projector: Π = diag(lanes)")
+
+    # Write-back + arm (policy changes or manual toggles)
+    if sel == "manual" or changed:
+        st.session_state["run_ctx"] = rc0
+        st.session_state["write_armed"] = True
+        st.session_state["armed_by"] = "policy_change"
+
+    # --- Controls
     c1, c2, c3 = st.columns([1,1,1.2])
     with c1:
         run_btn = st.button("Freeze SSOT + A/B + write certs", key="btn_abx_run")
@@ -2066,7 +2227,6 @@ with ctx:
     with c3:
         dbg_on = st.checkbox("Show debugger", value=False, key="abx_dbg")
 
-   
     if run_btn:
         if ss["_abx_lock"]:
             st.info("A/B compare is already running…")
@@ -2077,16 +2237,8 @@ with ctx:
                 pb = _abx_resolve_all_to_paths()
 
                 # Probe sources + shapes early
-                st.caption(
-                    f"Sources → "
-                    f"B:{Path(pb['B'][0]).name} · "
-                    f"C:{Path(pb['C'][0]).name} · "
-                    f"H:{Path(pb['H'][0]).name} · "
-                    f"U:{Path(pb['U'][0]).name}"
-                )
-                d3 = pb["B"][1].get("3") or []
-                C3 = pb["C"][1].get("3") or []
-                H2 = pb["H"][1].get("2") or []
+                st.caption(f"Sources → B:{Path(pb['B'][0]).name} · C:{Path(pb['C'][0]).name} · H:{Path(pb['H'][0]).name} · U:{Path(pb['U'][0]).name}")
+                d3 = pb["B"][1].get("3") or []; C3 = pb["C"][1].get("3") or []; H2 = pb["H"][1].get("2") or []
                 sD = (len(d3), (len(d3[0]) if (d3 and d3[0]) else 0))
                 sC = (len(C3), (len(C3[0]) if C3 else 0))
                 sH = (len(H2), (len(H2[0]) if (H2 and H2[0]) else 0))
@@ -2096,82 +2248,83 @@ with ctx:
                 ib = _abx_publish_frozen_ssot(pb)
                 rc = dict(st.session_state.get("run_ctx") or {})
 
-                # 3) Guard: require non-empty + shape alignment before we do anything else
-                ok_shapes, reasons = True, []
+                # 3) Guard: require non-empty + shape alignment
+                ok_shapes = True
+                reasons = []
                 n2, n3 = sD
-                if n3 == 0:
-                    ok_shapes, reasons = False, reasons + ["boundaries[3] empty"]
-                if sC[0] == 0 or sC[0] != sC[1]:
-                    ok_shapes, reasons = False, reasons + ["C3 not square or empty"]
-                if sH[0] == 0 or sH[1] != n2:
-                    ok_shapes, reasons = False, reasons + ["H2 shape mismatch with d3 rows"]
+                if n3 == 0: ok_shapes, reasons = False, reasons + ["boundaries[3] empty"]
+                if sC[0] == 0 or sC[0] != sC[1]: ok_shapes, reasons = False, reasons + ["C3 not square or empty"]
+                if sH[0] == 0 or sH[1] != n2: ok_shapes, reasons = False, reasons + ["H2 shape mismatch with d3 rows"]
                 if not ok_shapes:
-                    st.error("Fixtures incomplete → " + ", ".join(reasons))
+                    st.error("INPUTS_INCOMPLETE → " + ", ".join(reasons))
+                    st.stop()
+
+                # 3b) Lane policy & mask guards
+                rc_lane = str(rc.get("lane_policy","manual"))
+                lane_mask = list(rc.get("lane_mask_k3") or [])
+                if rc_lane != "file":
+                    if len(lane_mask) != n3:
+                        st.error(f"MASK_LEN_MISMATCH: expected n₃={n3}, got {len(lane_mask)}")
+                        st.stop()
+                    try:
+                        bad_bits = any(int(x) not in (0,1) for x in lane_mask)
+                    except Exception:
+                        bad_bits = True
+                    if bad_bits:
+                        st.error("MASK_NON_BINARY: bits must be 0/1")
+                        st.stop()
+                    if sum(int(x) for x in lane_mask) == 0:
+                        st.error("ZERO_LANE_PROJECTOR: mask has no active lanes for k=3")
+                        st.stop()
+                if rc_lane == "auto_cplusi" and (sC[0] == 0 or sC[0] != sC[1]):
+                    st.error("AUTO_CPLUSI_REQUIRES_SQUARE_C3")
                     st.stop()
 
                 # 4) (optional) run overlap legs for the rest of the app
                 if also_overlap and "run_overlap" in globals() and callable(globals()["run_overlap"]):
-                    try:
-                        run_overlap(policy="strict")
-                    except Exception:
-                        pass
-                    try:
-                        run_overlap(policy="projected(auto)")
-                    except Exception:
-                        pass
+                    try: run_overlap(policy="strict")
+                    except Exception: pass
+                    try: run_overlap(policy="projected(auto)")
+                    except Exception: pass
 
                 # 5) Recompute A/B strictly from raw blocks
                 out_s, out_p, lvH, lvCI = _abx_ab_from_blocks(pb["H"][1], pb["B"][1], pb["C"][1], rc)
 
                 # 6) Snapshot for diagnostics
-                label_proj = ('projected(columns@k=3,file)'
-                              if str(rc.get('mode','')) == 'projected(file)'
-                              else 'projected(columns@k=3,auto)')
+                label_proj = ('projected(columns@k=3,file)' if str(rc.get('mode',''))=='projected(file)' else 'projected(columns@k=3,auto)')
                 ss["ab_compare"] = {
                     "pair_tag": f"strict__VS__{label_proj}",
-                    "inputs_sig": _abx_inputs_sig_list(ib),
-                    "lane_mask_k3": list(ib.get("lane_mask_k3") or []),
+                    "inputs_sig": [*(_json.loads(_json.dumps(ib.get('hashes') or {})).get(k,"") for k in [])],  # harmless; you already surface inputs elsewhere
+                    "lane_mask_k3": list(ib.get("lane_mask_k3") or rc.get("lane_mask_k3") or []),
                     "policy_tag": label_proj,
-                    "strict": {
-                        "label": "strict",
-                        "out": out_s,
-                        "lane_vec_H2d3": lvH,
-                        "lane_vec_C3plusI3": lvCI,
-                        "pass_vec": [int(out_s["2"]["eq"]), int(out_s["3"]["eq"])],
-                    },
-                    "projected": {
-                        "label": label_proj,
-                        "policy_tag": label_proj,
-                        "out": out_p,
-                        "lane_vec_H2d3": lvH[:],
-                        "lane_vec_C3plusI3": lvCI[:],
-                        "pass_vec": [int(out_p["2"]["eq"]), int(out_p["3"]["eq"])],
-                        "projector_filename": rc.get("projector_filename", ""),
-                        "projector_hash": rc.get("projector_hash", "") if label_proj.endswith("(file)") else "",
-                        "projector_consistent_with_d": rc.get("projector_consistent_with_d", None),
-                    },
-                    "sanity_probe": {"shapes": {"H2": sH, "d3": sD, "C3": sC}},
+                    "strict":   {"label":"strict","out":out_s,"lane_vec_H2d3":lvH,"lane_vec_C3plusI3":lvCI,
+                                 "pass_vec":[int(out_s["2"]["eq"]), int(out_s["3"]["eq"])]},
+                    "projected":{"label":label_proj,"policy_tag":label_proj,"out":out_p,
+                                 "lane_vec_H2d3":lvH[:],"lane_vec_C3plusI3":lvCI[:],
+                                 "pass_vec":[int(out_p["2"]["eq"]), int(out_p["3"]["eq"])],
+                                 "projector_filename": rc.get("projector_filename",""),
+                                 "projector_hash": rc.get("projector_hash","") if label_proj.endswith("(file)") else "",
+                                 "projector_consistent_with_d": rc.get("projector_consistent_with_d", None)},
+                    "sanity_probe": {"shapes":{"H2": sH, "d3": sD, "C3": sC}},
                 }
 
-                # 7) Pin for embed/ticket
+                # 7) Pin for embed/ticket (embed_sig is lane-aware now)
                 _abx_pin_for_cert(out_s, out_p)
 
                 # 8) Write 3 certs (strict, projected(active), and A/B)
-                strict_cert = _abx_cert_common("strict", ib, rc)
-                strict_cert["results"] = {"out": out_s}
-                p_cert = _abx_cert_common(label_proj, ib, rc)
-                p_cert["results"] = {"out": out_p}
+                strict_cert = _abx_cert_common("strict", ib, rc); strict_cert["results"] = {"out": out_s}
+                p_cert      = _abx_cert_common(label_proj, ib, rc); p_cert["results"]  = {"out": out_p}
                 p_strict = _abx_write_cert(strict_cert, "cert_strict")
-                p_proj = _abx_write_cert(p_cert, "cert_projected")
+                p_proj   = _abx_write_cert(p_cert,    "cert_projected")
 
                 ab_payload = st.session_state.get("ab_pin", {}).get("payload", {})
                 ab_cert = {
                     **_abx_cert_common("A/B", ib, rc),
                     "ab_pair": {
-                        "pair_tag": ab_payload.get("pair_tag", "strict__VS__" + label_proj),
-                        "embed_sig": ab_payload.get("embed_sig", ""),
-                        "strict_cert": {"path": str(p_strict), "hash": strict_cert["integrity"]["content_hash"]},
-                        "projected_cert": {"path": str(p_proj), "hash": p_cert["integrity"]["content_hash"]},
+                        "pair_tag": ab_payload.get("pair_tag","strict__VS__"+label_proj),
+                        "embed_sig": ab_payload.get("embed_sig",""),
+                        "strict_cert":   {"path": str(p_strict), "hash": strict_cert["integrity"]["content_hash"]},
+                        "projected_cert":{"path": str(p_proj),   "hash": p_cert["integrity"]["content_hash"]},
                     },
                     "diagnostics": ss.get("ab_compare", {}).get("sanity_probe", {}),
                 }
@@ -2183,74 +2336,57 @@ with ctx:
                     "strict": str(p_strict), "projected": str(p_proj), "ab": str(p_ab),
                 }
 
-                # --- tiny verdict banner (safe, inside try:) ---
+                # --- tiny verdict banner (now with lanes) ---
                 s_ok = bool((out_s or {}).get("3", {}).get("eq", False))
                 p_ok = bool((out_p or {}).get("3", {}).get("eq", False))
                 s_tick = "✅" if s_ok else "❌"
                 p_tick = "✅" if p_ok else "❌"
                 proj_hash_short = str(rc.get("projector_hash", ""))[:8]
+                lanes_now = list(rc.get("lane_mask_k3") or [])
                 banner = (
                     "**Compare:** "
                     f"k3(strict) {s_tick} · "
                     f"k3(projected) {p_tick} · "
                     f"**pair** strict__VS__{label_proj} · "
                     f"**n₃** {rc.get('n3', 0)} · "
-                    f"**P** {proj_hash_short}"
+                    f"**P** {proj_hash_short} · "
+                    f"lanes={lanes_now}"
                 )
-
                 st.success(f"A/B updated → strict={s_tick} · projected={p_tick} · strict__VS__{label_proj}")
                 st.markdown(banner)
                 st.caption(f"certs written → strict: {p_strict.name} · projected: {p_proj.name} · ab: {p_ab.name}")
-
-                # optional: frozen-on-disk debugger (kept inside try)
-                if dbg_on:
-                    ib_dbg = ss.get("_inputs_block") or {}
-                    rc_dbg = ss.get("run_ctx") or {}
-                    paths = (ib_dbg.get("filenames") or {})
-                    def _read_blocks(pth):
-                        try:
-                            return (_json.loads(Path(pth).read_text(encoding="utf-8")).get("blocks") or {}) if pth else {}
-                        except Exception:
-                            return {}
-                    bB = _read_blocks(paths.get("boundaries", ""))
-                    bC = _read_blocks(paths.get("C", ""))
-                    bH = _read_blocks(paths.get("H", ""))
-                    d3d = bB.get("3") or []
-                    H2d = bH.get("2") or []
-                    C3d = bC.get("3") or []
-                    st.json({
-                        "embed_sig_now": _abx_embed_sig(),
-                        "inputs_sig_now": _abx_inputs_sig_list(ib_dbg),
-                        "rc": {
-                            "mode": rc_dbg.get("mode", ""),
-                            "n3": rc_dbg.get("n3", None),
-                            "lane_mask_k3": rc_dbg.get("lane_mask_k3", []),
-                            "projector_hash": rc_dbg.get("projector_hash", ""),
-                            "_inputs_sig": rc_dbg.get("_inputs_sig", []),
-                        },
-                        "derived": {
-                            "dims_from_B": [len(d3d), (len(d3d[0]) if (d3d and d3d[0]) else 0)],
-                            "lane_mask_from_B": _abx_lane_mask_from_d3(d3d),
-                        },
-                        "shapes": {
-                            "H2": [len(H2d), (len(H2d[0]) if (H2d and H2d[0]) else 0)],
-                            "d3": [len(d3d), (len(d3d[0]) if (d3d and d3d[0]) else 0)],
-                            "C3": [len(C3d), (len(C3d[0]) if (C3d and C3d[0]) else 0)],
-                        },
-                        "sources": {
-                            "B": Path(paths.get("boundaries", "")).name or "(missing)",
-                            "C": Path(paths.get("C", "")).name or "(missing)",
-                            "H": Path(paths.get("H", "")).name or "(missing)",
-                            "U": Path(paths.get("U", "")).name or "(missing)",
-                        },
-                    })
 
             except Exception as e:
                 st.error(f"A/B compare failed: {e}")
             finally:
                 ss["_abx_lock"] = False
 
-
+    # ── debugger (frozen-on-disk view)
+    if dbg_on:
+        ib = ss.get("_inputs_block") or {}
+        rc = ss.get("run_ctx") or {}
+        paths = (ib.get("filenames") or {})
+        def _read_blocks(p):
+            try: return (_json.loads(Path(p).read_text(encoding="utf-8")).get("blocks") or {}) if p else {}
+            except Exception: return {}
+        bB = _read_blocks(paths.get("boundaries","")); bC = _read_blocks(paths.get("C","")); bH = _read_blocks(paths.get("H",""))
+        d3 = bB.get("3") or []; H2 = bH.get("2") or []; C3 = bC.get("3") or []
+        st.json({
+            "embed_sig_now": _abx_embed_sig(),
+            "rc": {"mode": rc.get("mode",""), "n3": rc.get("n3", None),
+                   "lane_policy": rc.get("lane_policy",""),
+                   "lane_mask_k3": rc.get("lane_mask_k3", []),
+                   "projector_hash": rc.get("projector_hash","")},
+            "derived": {"dims_from_B": [len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)],
+                        "lane_mask_from_B": [1 if any(int(d3[i][j]) & 1 for i in range(len(d3))) else 0 for j in range(len(d3[0]) if (d3 and d3[0]) else 0)]},
+            "shapes": {"H2": [len(H2), (len(H2[0]) if (H2 and H2[0]) else 0)],
+                       "d3": [len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)],
+                       "C3": [len(C3), (len(C3[0]) if (C3 and C3[0]) else 0)]},
+            "sources": {"B": Path(paths.get("boundaries","")).name or "(missing)",
+                        "C": Path(paths.get("C","")).name or "(missing)",
+                        "H": Path(paths.get("H","")).name or "(missing)",
+                        "U": Path(paths.get("U","")).name or "(missing)"},
+        })
 
 
 
