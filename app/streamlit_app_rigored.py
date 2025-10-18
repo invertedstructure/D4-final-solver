@@ -2286,31 +2286,43 @@ def abx_embed_sig() -> str:
     blob = {"inputs": abx_inputs_sig(), "policy": pol, "projector_hash": pj}
     return _hash.sha256(_json.dumps(blob, separators=(",",":"), sort_keys=True).encode("ascii")).hexdigest()
 
-# ── REPLACE the existing abx_publish_ssot_from_files() with this version ──
+
+# ─────────────────────────── REPLACE THIS: abx_publish_ssot_from_files ───────────────────────────
 def abx_publish_ssot_from_files():
     ss = st.session_state
     ib = dict(ss.get("_inputs_block") or {})
 
-    # 1) winner-take-all filenames: prefer current pickers, else previous, else ""
-    prev = (ib.get("filenames") or {})
-    cur = {
-        "boundaries": ss.get("fname_boundaries") or "",
-        "C":          ss.get("fname_cmap")       or "",
-        "H":          ss.get("fname_h")          or "",
-        "U":          ss.get("fname_shapes")     or "",
-    }
-    fns = {
-        k: (cur[k] or prev.get(k, "") or "")
-        for k in ("boundaries", "C", "H", "U")
-    }
+    # --- helper: first existing path from a list of session keys + prior SSOT filename
+    def _pick_file(kind: str, fallback_prev: str) -> tuple[str, str]:
+        # map kind -> candidate session keys most UIs use
+        key_map = {
+            "boundaries": ["fname_boundaries", "B_file", "uploaded_boundaries", "boundaries_path"],
+            "C":          ["fname_cmap", "C_file", "uploaded_cmap", "cmap_path"],
+            "H":          ["fname_h", "H_file", "H_up", "uploaded_H", "f_H", "H_path"],
+            "U":          ["fname_shapes", "U_file", "uploaded_shapes", "shapes_path"],
+        }
+        for k in key_map.get(kind, []):
+            p = ss.get(k) or ""
+            if p and Path(p).exists():
+                return p, "file"
+        if fallback_prev and Path(fallback_prev).exists():
+            return fallback_prev, "file"
+        return "", ""  # unresolved here (let parser fallbacks handle object/session/global)
 
-    # 2) load raw json (from selected files)
-    JB = abx_read_json(fns["boundaries"])
-    JC = abx_read_json(fns["C"])
-    JH = abx_read_json(fns["H"])
-    JU = abx_read_json(fns["U"])
+    prev_fns = (ib.get("filenames") or {})
+    # 1) resolve preferred file for each fixture (winner-takes-all)
+    pB, srcB = _pick_file("boundaries", prev_fns.get("boundaries", ""))
+    pC, srcC = _pick_file("C",          prev_fns.get("C",          ""))
+    pH, srcH = _pick_file("H",          prev_fns.get("H",          ""))
+    pU, srcU = _pick_file("U",          prev_fns.get("U",          ""))
 
-    # 3) parse via your IO (tolerant)
+    # 2) load raw JSON (files if resolved)
+    JB = abx_read_json(pB) if pB else {}
+    JC = abx_read_json(pC) if pC else {}
+    JH = abx_read_json(pH) if pH else {}
+    JU = abx_read_json(pU) if pU else {}
+
+    # 3) parse using your IO; tolerate plain dicts
     def _p_boundaries(j):
         try:
             if "io" in globals() and hasattr(io, "parse_boundaries"):
@@ -2318,6 +2330,7 @@ def abx_publish_ssot_from_files():
         except Exception:
             pass
         return j
+
     def _p_cmap(j):
         try:
             if "io" in globals() and hasattr(io, "parse_cmap"):
@@ -2325,6 +2338,7 @@ def abx_publish_ssot_from_files():
         except Exception:
             pass
         return j
+
     def _p_shapes(j):
         try:
             if "io" in globals() and hasattr(io, "parse_shapes"):
@@ -2335,46 +2349,58 @@ def abx_publish_ssot_from_files():
 
     B = _p_boundaries(JB) if JB else (globals().get("boundaries") or None)
     C = _p_cmap(JC)       if JC else (globals().get("cmap")       or None)
-    H = _p_cmap(JH)       if JH else (ss.get("overlap_H")         or _p_cmap({"blocks": {}}))
+
+    # H: file if provided, else current overlap_H if it has content, else empty cmap shell
+    if JH:
+        H = _p_cmap(JH)
+        H_origin = "file"
+    else:
+        H = ss.get("overlap_H")
+        # ensure H is a valid cmap-like object; if not, mint an empty shell
+        if not H:
+            H = _p_cmap({"blocks": {}})
+        H_origin = "session.overlap_H" if ss.get("overlap_H") else "empty"
+
     U = _p_shapes(JU)     if JU else (globals().get("shapes")     or None)
 
-    # 4) normalize to blocks and read matrices
+    # 4) normalize to blocks view
     Bv = abx_blocks_view(B)["blocks"]
     Cv = abx_blocks_view(C)["blocks"]
     Hv = abx_blocks_view(H)["blocks"]
     Uv = abx_blocks_view(U)["blocks"]
 
+    # 5) matrices + dims + lane mask from boundaries
     d3 = Bv.get("3", []) or []
     n2 = len(d3)
     n3 = len(d3[0]) if (d3 and d3[0]) else 0
     lm = abx_lane_mask_from_d3(d3)
 
-    # 5) compute hashes from unified blocks view
+    # 6) canonical hashes (non-empty so gallery always populates)
     hB = abx_hash_json({"blocks": Bv})
     hC = abx_hash_json({"blocks": Cv})
     hH = abx_hash_json({"blocks": Hv})
     hU = abx_hash_json({"blocks": Uv})
 
-    # 6) publish SSOT (OVERWRITE filenames with the winners)
+    # 7) publish SSOT (ALWAYS overwrite filenames with winners)
     ib["dims"] = {"n2": n2, "n3": n3}
     ib["lane_mask_k3"] = list(lm)
     ib["filenames"] = {
-        "boundaries": fns["boundaries"],
-        "C":          fns["C"],
-        "H":          fns["H"],
-        "U":          fns["U"],
+        "boundaries": pB,
+        "C":          pC,
+        "H":          pH,  # if blank, we’ll reflect origin as session.overlap_H in the probe
+        "U":          pU,
     }
     ib["hashes"] = {
         "boundaries_hash": hB,
         "C_hash":          hC,
         "H_hash":          hH,
         "U_hash":          hU,
-        "shapes_hash":     hU,  # mirror U
+        "shapes_hash":     hU,
     }
     ss["_inputs_block"] = ib
     ss["inputs_hashes"] = ib["hashes"]
 
-    # 7) refresh run_ctx and Π for auto; stamp the exact inputs_sig we just computed
+    # 8) refresh run_ctx (Π := diag(lm) for auto) + stamp the exact inputs_sig used
     rc = dict(ss.get("run_ctx") or {})
     rc.update({
         "d3": d3, "n3": n3, "lane_mask_k3": list(lm),
@@ -2388,19 +2414,22 @@ def abx_publish_ssot_from_files():
         rc["P_active"] = abx_diag_from_mask(lm)
     ss["run_ctx"] = rc
 
-    # keep overlap_H aligned with the file we just loaded
+    # keep overlap_H aligned with the object we’ll compute with
     ss["overlap_H"] = H
 
-    st.caption(f"SSOT refreshed • n₂={n2} n₃={n3}")
+    # breadcrumbs + sources echo (so you can sanity check)
+    st.caption(f"SSOT refreshed • n₂={len(Hv.get('2', []) or [])} n₃={n3}")
     sources = {
-        "B": fns["boundaries"] or "(global)",
-        "C": fns["C"]          or "(global)",
-        "H": fns["H"]          or "(session.overlap_H)",
-        "U": fns["U"]          or "(global)",
+        "B": pB or "(global)",
+        "C": pC or "(global)",
+        "H": (pH or f"({H_origin})"),
+        "U": pU or "(global)",
     }
     return B, C, H, U, d3, lm, sources
+# ─────────────────────────────────────────────────────────────────────────────────────────
 
-# ── REPLACE the existing abx_recompute_from_raw() with this version ──
+
+# ─────────────────────────── REPLACE THIS: abx_recompute_from_raw ───────────────────────────
 def abx_recompute_from_raw(B, C, H, d3, lm):
     Hv = abx_blocks_view(H)["blocks"]
     Cv = abx_blocks_view(C)["blocks"]
@@ -2418,7 +2447,7 @@ def abx_recompute_from_raw(B, C, H, d3, lm):
             R3s = []
     out_strict = {"2": {"eq": True}, "3": {"eq": abx_is_zero(R3s), "n_k": (len(d3[0]) if (d3 and d3[0]) else 0)}}
 
-    # projected leg (Π=diag(lm))
+    # projected leg (Π = diag(lm) in AUTO)
     P = abx_diag_from_mask(lm)
     R3p = abx_mul(R3s, P) if (R3s and P and len(R3s[0]) == len(P)) else []
     out_proj = {"2": {"eq": True}, "3": {"eq": abx_is_zero(R3p), "n_k": (len(d3[0]) if (d3 and d3[0]) else 0)}}
@@ -2451,6 +2480,9 @@ def abx_recompute_from_raw(B, C, H, d3, lm):
         "R3_projected_nz_cols": _nz_cols(R3p),
     }
     return out_strict, out_proj, lane_vec_H2d3, lane_vec_C3I, debug
+# ─────────────────────────────────────────────────────────────────────────────────────────
+
+   
 
 
 
