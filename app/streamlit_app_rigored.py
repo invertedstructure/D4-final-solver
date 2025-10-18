@@ -2286,158 +2286,160 @@ def abx_embed_sig() -> str:
     blob = {"inputs": abx_inputs_sig(), "policy": pol, "projector_hash": pj}
     return _hash.sha256(_json.dumps(blob, separators=(",",":"), sort_keys=True).encode("ascii")).hexdigest()
 
-# ---------- load fixtures from *selected files*, publish SSOT + run_ctx ----------
+# ── REPLACE the existing abx_publish_ssot_from_files() with this version ──
 def abx_publish_ssot_from_files():
     ss = st.session_state
-    ib = ss.get("_inputs_block") or {}
-    fns = (ib.get("filenames") or {}).copy()
-    # legacy keys support (upload widgets)
-    fns.setdefault("boundaries", ss.get("fname_boundaries", ""))
-    fns.setdefault("C",          ss.get("fname_cmap", ""))
-    fns.setdefault("H",          ss.get("fname_h", ""))
-    fns.setdefault("U",          ss.get("fname_shapes", ""))
+    ib = dict(ss.get("_inputs_block") or {})
 
-    # parse with your IO if available
-    def _p_boundaries(j): 
-        if "io" in globals() and hasattr(io, "parse_boundaries"):
-            try: return io.parse_boundaries(j)
-            except Exception: pass
+    # 1) winner-take-all filenames: prefer current pickers, else previous, else ""
+    prev = (ib.get("filenames") or {})
+    cur = {
+        "boundaries": ss.get("fname_boundaries") or "",
+        "C":          ss.get("fname_cmap")       or "",
+        "H":          ss.get("fname_h")          or "",
+        "U":          ss.get("fname_shapes")     or "",
+    }
+    fns = {
+        k: (cur[k] or prev.get(k, "") or "")
+        for k in ("boundaries", "C", "H", "U")
+    }
+
+    # 2) load raw json (from selected files)
+    JB = abx_read_json(fns["boundaries"])
+    JC = abx_read_json(fns["C"])
+    JH = abx_read_json(fns["H"])
+    JU = abx_read_json(fns["U"])
+
+    # 3) parse via your IO (tolerant)
+    def _p_boundaries(j):
+        try:
+            if "io" in globals() and hasattr(io, "parse_boundaries"):
+                return io.parse_boundaries(j)
+        except Exception:
+            pass
         return j
     def _p_cmap(j):
-        if "io" in globals() and hasattr(io, "parse_cmap"):
-            try: return io.parse_cmap(j)
-            except Exception: pass
+        try:
+            if "io" in globals() and hasattr(io, "parse_cmap"):
+                return io.parse_cmap(j)
+        except Exception:
+            pass
         return j
     def _p_shapes(j):
-        if "io" in globals() and hasattr(io, "parse_shapes"):
-            try: return io.parse_shapes(j)
-            except Exception: pass
+        try:
+            if "io" in globals() and hasattr(io, "parse_shapes"):
+                return io.parse_shapes(j)
+        except Exception:
+            pass
         return j
 
-    # B
-    B = None; srcB = ""
-    if fns.get("boundaries"):
-        B = _p_boundaries(abx_read_json(fns["boundaries"]))
-        srcB = fns["boundaries"]
-    if B is None and globals().get("boundaries") is not None:
-        B, srcB = globals()["boundaries"], "(global)"
+    B = _p_boundaries(JB) if JB else (globals().get("boundaries") or None)
+    C = _p_cmap(JC)       if JC else (globals().get("cmap")       or None)
+    H = _p_cmap(JH)       if JH else (ss.get("overlap_H")         or _p_cmap({"blocks": {}}))
+    U = _p_shapes(JU)     if JU else (globals().get("shapes")     or None)
 
-    # C
-    C = None; srcC = ""
-    if fns.get("C"):
-        C = _p_cmap(abx_read_json(fns["C"]))
-        srcC = fns["C"]
-    if C is None and globals().get("cmap") is not None:
-        C, srcC = globals()["cmap"], "(global)"
+    # 4) normalize to blocks and read matrices
+    Bv = abx_blocks_view(B)["blocks"]
+    Cv = abx_blocks_view(C)["blocks"]
+    Hv = abx_blocks_view(H)["blocks"]
+    Uv = abx_blocks_view(U)["blocks"]
 
-    # H
-    H = None; srcH = ""
-    if fns.get("H"):
-        H = _p_cmap(abx_read_json(fns["H"]))
-        srcH = fns["H"]
-    if H is None and ss.get("overlap_H") is not None:
-        H, srcH = ss["overlap_H"], "(session.overlap_H)"
-    if H is None:
-        H, srcH = _p_cmap({"blocks": {}}), "(empty)"
-
-    # U / shapes
-    U = None; srcU = ""
-    if fns.get("U"):
-        U = _p_shapes(abx_read_json(fns["U"])); srcU = fns["U"]
-    if U is None and globals().get("shapes") is not None:
-        U, srcU = globals()["shapes"], "(global)"
-
-    # derive ground-truth dims from B
-    try:
-        d3 = (getattr(getattr(B, "blocks", None), "__root__", {}) or {}).get("3", [])
-    except Exception:
-        d3 = []
-    n2 = len(d3); n3 = len(d3[0]) if (d3 and d3[0]) else 0
+    d3 = Bv.get("3", []) or []
+    n2 = len(d3)
+    n3 = len(d3[0]) if (d3 and d3[0]) else 0
     lm = abx_lane_mask_from_d3(d3)
 
-    # content hashes from *blocks* view
-    hB = abx_hash_json(abx_blocks_view(B))
-    hC = abx_hash_json(abx_blocks_view(C))
-    hH = abx_hash_json(abx_blocks_view(H))
-    hU = abx_hash_json(abx_blocks_view(U))
+    # 5) compute hashes from unified blocks view
+    hB = abx_hash_json({"blocks": Bv})
+    hC = abx_hash_json({"blocks": Cv})
+    hH = abx_hash_json({"blocks": Hv})
+    hU = abx_hash_json({"blocks": Uv})
 
-    # publish SSOT (_inputs_block + inputs_hashes)
+    # 6) publish SSOT (OVERWRITE filenames with the winners)
     ib["dims"] = {"n2": n2, "n3": n3}
     ib["lane_mask_k3"] = list(lm)
-    ib.setdefault("filenames", {})
-    # keep existing filenames if already set; otherwise stamp the ones we used
-    ib["filenames"].setdefault("boundaries", srcB if srcB and srcB != "(global)" else "")
-    ib["filenames"].setdefault("C",          srcC if srcC and srcC != "(global)" else "")
-    ib["filenames"].setdefault("H",          srcH if srcH and srcH != "(session.overlap_H)" else "")
-    ib["filenames"].setdefault("U",          srcU if srcU and srcU != "(global)" else "")
+    ib["filenames"] = {
+        "boundaries": fns["boundaries"],
+        "C":          fns["C"],
+        "H":          fns["H"],
+        "U":          fns["U"],
+    }
     ib["hashes"] = {
         "boundaries_hash": hB,
         "C_hash":          hC,
         "H_hash":          hH,
         "U_hash":          hU,
-        "shapes_hash":     hU,   # mirror U
+        "shapes_hash":     hU,  # mirror U
     }
     ss["_inputs_block"] = ib
     ss["inputs_hashes"] = ib["hashes"]
 
-    # refresh run_ctx and Π for auto
+    # 7) refresh run_ctx and Π for auto; stamp the exact inputs_sig we just computed
     rc = dict(ss.get("run_ctx") or {})
     rc.update({
         "d3": d3, "n3": n3, "lane_mask_k3": list(lm),
         "policy_tag": abx_policy_tag(),
         "_inputs_sig": [hB, hC, hH, hU, hU],
     })
-    # normalize mode string
-    m = str(rc.get("mode","")).lower()
+    m = str(rc.get("mode", "")).lower()
     if m not in ("strict", "projected(auto)", "projected(file)"):
         rc["mode"] = "projected(auto)" if "projected" in m else "strict"
     if rc["mode"] == "projected(auto)":
         rc["P_active"] = abx_diag_from_mask(lm)
     ss["run_ctx"] = rc
 
-    # keep H aligned with what we compute
+    # keep overlap_H aligned with the file we just loaded
     ss["overlap_H"] = H
 
     st.caption(f"SSOT refreshed • n₂={n2} n₃={n3}")
-    sources = {"B": srcB or "(global)", "C": srcC or "(global)", "H": srcH, "U": srcU or "(global)"}
+    sources = {
+        "B": fns["boundaries"] or "(global)",
+        "C": fns["C"]          or "(global)",
+        "H": fns["H"]          or "(session.overlap_H)",
+        "U": fns["U"]          or "(global)",
+    }
     return B, C, H, U, d3, lm, sources
 
+# ── REPLACE the existing abx_recompute_from_raw() with this version ──
 def abx_recompute_from_raw(B, C, H, d3, lm):
-    H2 = (getattr(getattr(H, "blocks", None), "__root__", {}) or {}).get("2", [])
-    C3 = (getattr(getattr(C, "blocks", None), "__root__", {}) or {}).get("3", [])
+    Hv = abx_blocks_view(H)["blocks"]
+    Cv = abx_blocks_view(C)["blocks"]
+
+    H2 = Hv.get("2", []) or []
+    C3 = Cv.get("3", []) or []
     I3 = abx_eye(len(C3)) if C3 else []
 
+    # strict residual
     R3s = []
     if abx_shape_ok(H2, d3) and C3 and C3[0] and (len(C3) == len(C3[0])):
         try:
             R3s = abx_xor(abx_mul(H2, d3), abx_xor(C3, I3))
         except Exception:
             R3s = []
-
     out_strict = {"2": {"eq": True}, "3": {"eq": abx_is_zero(R3s), "n_k": (len(d3[0]) if (d3 and d3[0]) else 0)}}
 
+    # projected leg (Π=diag(lm))
     P = abx_diag_from_mask(lm)
     R3p = abx_mul(R3s, P) if (R3s and P and len(R3s[0]) == len(P)) else []
     out_proj = {"2": {"eq": True}, "3": {"eq": abx_is_zero(R3p), "n_k": (len(d3[0]) if (d3 and d3[0]) else 0)}}
 
-    # diagnostics vectors (lanes subset of bottom rows)
+    # lane-bottom diagnostics
     def _bottom_row(M): return M[-1] if (M and len(M)) else []
     try:
         H2d3  = abx_mul(H2, d3) if abx_shape_ok(H2, d3) else []
         C3pI3 = abx_xor(C3, I3) if (C3 and C3[0]) else []
     except Exception:
         H2d3, C3pI3 = [], []
-    idx = [j for j,m in enumerate(lm or []) if m]
+    idx = [j for j, m in enumerate(lm or []) if m]
     bH, bC = _bottom_row(H2d3), _bottom_row(C3pI3)
     lane_vec_H2d3 = ([int(bH[j]) & 1 for j in idx] if (bH and idx) else [])
     lane_vec_C3I  = ([int(bC[j]) & 1 for j in idx] if (bC and idx) else [])
 
-    # nz cols for sanity
+    # debug nz cols
     def _nz_cols(M):
         if not M: return []
-        r,c = len(M), len(M[0])
+        r, c = len(M), len(M[0])
         return [j for j in range(c) if any(M[i][j] & 1 for i in range(r))]
-
     debug = {
         "shapes": {
             "H2": (len(H2), len(H2[0]) if H2 else 0),
@@ -2449,6 +2451,8 @@ def abx_recompute_from_raw(B, C, H, d3, lm):
         "R3_projected_nz_cols": _nz_cols(R3p),
     }
     return out_strict, out_proj, lane_vec_H2d3, lane_vec_C3I, debug
+
+
 
 def abx_pin_for_cert(out_s: dict, out_p: dict):
     ss = st.session_state
