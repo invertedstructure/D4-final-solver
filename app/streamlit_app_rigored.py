@@ -2642,6 +2642,11 @@ _exp = globals().get("safe_expander", None)
 ctx = (_exp("A/B compare (strict vs active projected)", expanded=False)
        if callable(_exp) else st.expander("A/B compare (strict vs active projected)", expanded=False))
 
+_bad = ss.get("ab_pin")
+if isinstance(_bad, dict) and "payload" in _bad and not isinstance(_bad.get("payload"), dict):
+    _bad["payload"] = {}
+    ss["ab_pin"] = _bad
+
 with ctx:
     # Pin freshness header (robust to payload=None)
     pin = ss.get("ab_pin") or {}
