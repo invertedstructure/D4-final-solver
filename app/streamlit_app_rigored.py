@@ -2360,23 +2360,34 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
     # Preflight (read-only)
     try:
         pf = _svr_resolve_all_to_paths()
-        pB,pC,pH,pU = Path(pf["B"][0]).name, Path(pf["C"][0]).name, Path(pf["H"][0]).name, Path(pf["U"][0]).name
+        pB, pC, pH, pU = Path(pf["B"][0]).name, Path(pf["C"][0]).name, Path(pf["H"][0]).name, Path(pf["U"][0]).name
         st.caption(f"Sources → B:{pB} · C:{pC} · H:{pH} · U:{pU}")
-        d3pf = pf["B"][1].get("3") or []; C3pf = pf["C"][1].get("3") or []; H2pf = pf["H"][1].get("2") or []
+
+        d3pf = pf["B"][1].get("3") or []
+        C3pf = pf["C"][1].get("3") or []
+        H2pf = pf["H"][1].get("2") or []
         n2p, n3p = len(d3pf), (len(d3pf[0]) if (d3pf and d3pf[0]) else 0)
+
         if n2p and n3p:
-            I3pf = _svr_eye(len(C3pf)) if (C3pf and len(C3pf)==len(C3pf[0])) else []
+            I3pf = _svr_eye(len(C3pf)) if (C3pf and len(C3pf) == len(C3pf[0])) else []
             C3pIpf = _svr_xor(C3pf, I3pf) if I3pf else []
-            bottom_H = (_svr_mul(H2pf, d3pf)[-1] if (H2pf and d3pf) else [])
-            bottom_C  = (C3pf[-1] if C3pf else [])
+            bottom_H = (_svr_mul(H2pf, d3pf)[-1] if (H2pf and d3pf and _svr_mul(H2pf, d3pf)) else [])
+            bottom_C = (C3pf[-1] if C3pf else [])
             bottom_CI = (C3pIpf[-1] if C3pIpf else [])
-            st.caption(f"Preflight — n₂×n₃ = {n2p}×{n3p} · (H2·d3)_bottom={bottom_H} · C3_bottom={bottom_C} · (C3⊕I3)_bottom={bottom_CI}")
+            st.caption(
+                f"Preflight — n₂×n₃ = {n2p}×{n3p} · (H2·d3)_bottom={bottom_H} · "
+                f"C3_bottom={bottom_C} · (C3⊕I3)_bottom={bottom_CI}"
+            )
         else:
             st.info("Preflight: upload B/C/H/U to run.")
     except Exception:
         st.info("Preflight: unable to resolve sources yet.")
 
-    run_btn = st.button("Run solver (freeze → strict → projected(auto) → A/B → write certs)", key="btn_svr_run")
+    run_btn = st.button(
+        "Run solver (freeze → strict → projected(auto) → A/B → write certs)",
+        key="btn_svr_run"
+    )
+
     if run_btn:
         try:
             # 1) freeze SSOT (uploads-first)
@@ -2387,7 +2398,9 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
             strict_out = _svr_strict_from_blocks(pb["H"][1], pb["B"][1], pb["C"][1])
 
             # 3) projected(auto) lap
-            proj_meta, lanes, projected_out = _svr_projected_auto_from_blocks(pb["H"][1], pb["B"][1], pb["C"][1])
+            proj_meta, lanes, projected_out = _svr_projected_auto_from_blocks(
+                pb["H"][1], pb["B"][1], pb["C"][1]
+            )
 
             # 4) write certs
             inputs_sig = _svr_inputs_sig(ib)
@@ -2399,17 +2412,27 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
             p_cert = _svr_cert_common(ib, rc, "projected(columns@k=3,auto)")
             if proj_meta.get("na"):
                 p_cert["results"] = {
-                    "out": {"2":{"eq": None},"3":{"eq": None}},
+                    "out": {"2": {"eq": None}, "3": {"eq": None}},
                     "na_reason": proj_meta["reason"],
                     "lanes": lanes,
                     "lane_policy": "C bottom row",
                 }
             else:
-                p_cert["results"] = {"out": projected_out, "lanes": lanes, "lane_policy": "C bottom row"}
+                p_cert["results"] = {
+                    "out": projected_out,
+                    "lanes": lanes,
+                    "lane_policy": "C bottom row",
+                }
             p_proj = _svr_write_cert(p_cert, "cert_projected")
 
-            # 5) A/B cert (strict vs projected(auto)) — use unified embed sig
-            embed_sig = _embed_sig_unified()
+            # 5) A/B cert (strict vs projected(auto)) — embed sig built inline
+            policy_tag_now = "projected(columns@k=3,auto)"
+            embed_sig = _svr_embed_sig(
+                inputs_sig,
+                policy_tag_now,
+                (lanes if not proj_meta.get("na") else proj_meta["reason"])
+            )
+
             ab_cert = _svr_cert_common(ib, rc, "A/B")
             ab_cert["ab_pair"] = {
                 "pair_tag": "strict__VS__projected(columns@k=3,auto)",
@@ -2423,49 +2446,51 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
             s2 = "✅" if strict_out["2"]["eq"] is True else ("❌" if strict_out["2"]["eq"] is False else "N/A")
             s3 = "✅" if strict_out["3"]["eq"] is True else ("❌" if strict_out["3"]["eq"] is False else "N/A")
             if proj_meta.get("na"):
-                p2 = p3 = "N/A"; lanes_txt = "N/A"; reason = proj_meta["reason"]
+                p2 = p3 = "N/A"
+                lanes_txt = "N/A"
+                reason = proj_meta["reason"]
             else:
                 p2 = "✅" if projected_out["2"]["eq"] is True else ("❌" if projected_out["2"]["eq"] is False else "N/A")
                 p3 = "✅" if projected_out["3"]["eq"] is True else ("❌" if projected_out["3"]["eq"] is False else "N/A")
-                lanes_txt = str(lanes); reason = ""
+                lanes_txt = str(lanes)
+                reason = ""
             n3 = (ib.get("dims") or {}).get("n3", 0)
+
             header = (
                 f"Strict: k2={s2} · k3={s3}  |  "
                 f"Projected(auto): k2={p2} · k3={p3}{'' if not reason else f' · N/A({reason})'}  |  "
                 f"A/B: strict vs projected(auto) · lanes={lanes_txt} · n₃={n3}"
             )
             st.success(header)
-            st.caption(f"certs → strict: {Path(p_strict).name} · projected: {Path(p_proj).name} · ab: {Path(p_ab).name}")
+            st.caption(
+                f"certs → strict: {Path(p_strict).name} · "
+                f"projected: {Path(p_proj).name} · ab: {Path(p_ab).name}"
+            )
 
             # 7) pin (lane-aware, unified; keeps all freshness checkers in sync)
-            policy_tag_now = "projected(columns@k=3,auto)"
-            
             payload = {
-                # embed signature (kept for the simple header that compares embed_sig directly)
-                "embed_sig": _svr_embed_sig(inputs_sig, policy_tag_now,
-                                            (lanes if not proj_meta.get("na") else proj_meta["reason"])),
-            
-                # canonical fields used by _ab_is_fresh_now(...)
+                # embed signature used by lightweight headers
+                "embed_sig": embed_sig,
+
+                # canonical freshness tuple used by _ab_is_fresh_now(...)
                 "inputs_sig": list(inputs_sig),
                 "policy_tag": policy_tag_now,
             }
-            
-            # add projected context for provenance
             if proj_meta.get("na"):
                 payload["projected"] = {"mode": "auto", "lanes": []}
                 payload["projected_na_reason"] = proj_meta["reason"]
             else:
                 payload["projected"] = {"mode": "auto", "lanes": list(lanes)}
-            
+
             st.session_state["ab_pin"] = {
                 "state": "pinned",
                 "payload": payload,
                 "consumed": False,
             }
-            
-            # (Optional) if you use the one-shot A/B ticket gate elsewhere, mark the write as handled
             st.session_state["_last_ab_ticket_written"] = st.session_state.get("_ab_ticket_pending")
 
+        except Exception as e:
+            st.error(f"Solver run failed: {e}")
 # === END PATCH: SINGLE-BUTTON SOLVER ===
 
 
