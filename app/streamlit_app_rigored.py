@@ -889,6 +889,10 @@ with st.sidebar:
     f_shapes   = st.file_uploader("Shapes (shapes.json)",            type=["json"], key="shapes")
     f_bound    = st.file_uploader("Boundaries (boundaries.json)",    type=["json"], key="bound")
     f_cmap     = st.file_uploader("CMap / Move (Cmap_*.json)",       type=["json"], key="cmap")
+        # immediately after those three lines:
+    st.session_state["uploaded_shapes"]     = f_shapes
+    st.session_state["uploaded_boundaries"] = f_bound
+    st.session_state["uploaded_cmap"]       = f_cmap
     f_support  = st.file_uploader("Support policy (optional)",       type=["json"], key="support")
     f_triangle = st.file_uploader("Triangle schema (optional)",      type=["json"], key="tri")
     seed       = st.text_input("Seed", "super-seed-A")
@@ -1260,6 +1264,7 @@ with colA:
     )
 with colB:
     f_H = st.file_uploader("Homotopy H (optional)", type=["json"], key="H_up")
+    st.session_state["uploaded_H"] = f_H
 
 proj_upload = st.file_uploader(
     "Projector Π (k=3) file (only for projected(file))",
