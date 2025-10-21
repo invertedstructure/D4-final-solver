@@ -1675,7 +1675,7 @@ def run_overlap():
     if rc["mode"] == "projected(file)":
         rc["projector_hash"] = rc.get("projector_hash") or meta.get("projector_hash","") or ""
     elif rc["mode"] == "projected(auto)":
-        rc["projector_hash"] = _auto_pj_hash_from_rc(rc) if " _auto_pj_hash_from_rc" in globals() else (rc.get("projector_hash","") or "")
+        rc["projector_hash"] = _auto_pj_hash_from_rc(rc) if "_auto_pj_hash_from_rc" in globals() else (rc.get("projector_hash","") or "")
     # stamp inputs_sig from frozen SSOT
     if "current_inputs_sig" in globals():
         rc["inputs_sig"] = current_inputs_sig(_ib=st.session_state.get("_inputs_block") or {})
