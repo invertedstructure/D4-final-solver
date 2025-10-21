@@ -2437,15 +2437,35 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
             st.success(header)
             st.caption(f"certs → strict: {Path(p_strict).name} · projected: {Path(p_proj).name} · ab: {Path(p_ab).name}")
 
-            # 7) pin (lane-aware, unified; keeps header freshness in sync)
+            # 7) pin (lane-aware, unified; keeps all freshness checkers in sync)
+            policy_tag_now = "projected(columns@k=3,auto)"
+            
+            payload = {
+                # embed signature (kept for the simple header that compares embed_sig directly)
+                "embed_sig": _svr_embed_sig(inputs_sig, policy_tag_now,
+                                            (lanes if not proj_meta.get("na") else proj_meta["reason"])),
+            
+                # canonical fields used by _ab_is_fresh_now(...)
+                "inputs_sig": list(inputs_sig),
+                "policy_tag": policy_tag_now,
+            }
+            
+            # add projected context for provenance
+            if proj_meta.get("na"):
+                payload["projected"] = {"mode": "auto", "lanes": []}
+                payload["projected_na_reason"] = proj_meta["reason"]
+            else:
+                payload["projected"] = {"mode": "auto", "lanes": list(lanes)}
+            
             st.session_state["ab_pin"] = {
                 "state": "pinned",
-                "payload": {"embed_sig": embed_sig},
+                "payload": payload,
                 "consumed": False,
             }
+            
+            # (Optional) if you use the one-shot A/B ticket gate elsewhere, mark the write as handled
+            st.session_state["_last_ab_ticket_written"] = st.session_state.get("_ab_ticket_pending")
 
-        except Exception as e:
-            st.error(f"Solver run failed: {e}")
 # === END PATCH: SINGLE-BUTTON SOLVER ===
 
 
