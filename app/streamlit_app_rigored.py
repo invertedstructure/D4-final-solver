@@ -2259,7 +2259,8 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
         if n2p and n3p:
             I3pf = _svr_eye(len(C3pf)) if (C3pf and len(C3pf) == len(C3pf[0])) else []
             C3pIpf = _svr_xor(C3pf, I3pf) if I3pf else []
-            bottom_H = (_svr_mul(H2pf, d3pf)[-1] if (H2pf and d3pf and _svr_mul(H2pf, d3pf)) else [])
+            H2d3_pf = _svr_mul(H2pf, d3pf)
+            bottom_H = (H2d3_pf[-1] if H2d3_pf else [])
             bottom_C = (C3pf[-1] if C3pf else [])
             bottom_CI = (C3pIpf[-1] if C3pIpf else [])
             st.caption(
@@ -2290,14 +2291,29 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
                 pb["H"][1], pb["B"][1], pb["C"][1]
             )
 
-            # 4) write certs
+            # 4) inputs signature + identity (for certs, gallery, and pin)
             inputs_sig = _svr_inputs_sig(ib)
+            bhash = (ib.get("hashes") or {}).get("boundaries_hash", "") or ""
+            _DMAP = globals().get("DISTRICT_MAP", {}) or {}
+            # try full hash, then 12-hex short, then unknown
+            district_id = _DMAP.get(bhash) or _DMAP.get(bhash[:12]) or "UNKNOWN"
+            policy_tag_now = "projected(columns@k=3,auto)"
+            fixture_label = f"{district_id} · {policy_tag_now} · n3={int((ib.get('dims') or {}).get('n3') or 0)}"
 
+            # helper: turn eq->bit for summaries
+            def _kbits(out):
+                def _bit(v): return 1 if v is True else (0 if v is False else None)
+                return {"k2": _bit(out["2"]["eq"]), "k3": _bit(out["3"]["eq"])}
+
+            # 5) write certs (now include identity + summaries)
             strict_cert = _svr_cert_common(ib, rc, "strict")
+            strict_cert["identity"] = {"district_id": district_id, "fixture_label": fixture_label}
             strict_cert["results"] = {"out": strict_out}
+            strict_cert["summary"] = _kbits(strict_out)
             p_strict = _svr_write_cert(strict_cert, "cert_strict")
 
-            p_cert = _svr_cert_common(ib, rc, "projected(columns@k=3,auto)")
+            p_cert = _svr_cert_common(ib, rc, policy_tag_now)
+            p_cert["identity"] = {"district_id": district_id, "fixture_label": fixture_label}
             if proj_meta.get("na"):
                 p_cert["results"] = {
                     "out": {"2": {"eq": None}, "3": {"eq": None}},
@@ -2305,23 +2321,24 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
                     "lanes": lanes,
                     "lane_policy": "C bottom row",
                 }
+                p_cert["summary"] = {"k2": None, "k3": None}
             else:
                 p_cert["results"] = {
                     "out": projected_out,
                     "lanes": lanes,
                     "lane_policy": "C bottom row",
                 }
+                p_cert["summary"] = _kbits(projected_out)
             p_proj = _svr_write_cert(p_cert, "cert_projected")
 
-            # 5) A/B cert (strict vs projected(auto)) — embed sig built inline
-            policy_tag_now = "projected(columns@k=3,auto)"
+            # 6) A/B cert (strict vs projected(auto)) — lane-aware embed sig
             embed_sig = _svr_embed_sig(
                 inputs_sig,
                 policy_tag_now,
                 (lanes if not proj_meta.get("na") else proj_meta["reason"])
             )
-
             ab_cert = _svr_cert_common(ib, rc, "A/B")
+            ab_cert["identity"] = {"district_id": district_id, "fixture_label": fixture_label}
             ab_cert["ab_pair"] = {
                 "pair_tag": "strict__VS__projected(columns@k=3,auto)",
                 "embed_sig": embed_sig,
@@ -2330,7 +2347,7 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
             }
             p_ab = _svr_write_cert(ab_cert, "cert_ab")
 
-            # 6) banner
+            # 7) banner
             s2 = "✅" if strict_out["2"]["eq"] is True else ("❌" if strict_out["2"]["eq"] is False else "N/A")
             s3 = "✅" if strict_out["3"]["eq"] is True else ("❌" if strict_out["3"]["eq"] is False else "N/A")
             if proj_meta.get("na"):
@@ -2355,14 +2372,12 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
                 f"projected: {Path(p_proj).name} · ab: {Path(p_ab).name}"
             )
 
-            # 7) pin (lane-aware, unified; keeps all freshness checkers in sync)
+            # 8) pin (canonical fields so freshness + gallery agree)
             payload = {
-                # embed signature used by lightweight headers
                 "embed_sig": embed_sig,
-
-                # canonical freshness tuple used by _ab_is_fresh_now(...)
                 "inputs_sig": list(inputs_sig),
                 "policy_tag": policy_tag_now,
+                "identity": {"district_id": district_id, "fixture_label": fixture_label},
             }
             if proj_meta.get("na"):
                 payload["projected"] = {"mode": "auto", "lanes": []}
@@ -2370,16 +2385,13 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
             else:
                 payload["projected"] = {"mode": "auto", "lanes": list(lanes)}
 
-            st.session_state["ab_pin"] = {
-                "state": "pinned",
-                "payload": payload,
-                "consumed": False,
-            }
+            st.session_state["ab_pin"] = {"state": "pinned", "payload": payload, "consumed": False}
             st.session_state["_last_ab_ticket_written"] = st.session_state.get("_ab_ticket_pending")
 
         except Exception as e:
             st.error(f"Solver run failed: {e}")
 # === END PATCH: SINGLE-BUTTON SOLVER ===
+
 # ---------------- Fixture registry (cache + matcher) ----------------
 _FIXTURE_CACHE = {"hash":"", "data":None}
 
