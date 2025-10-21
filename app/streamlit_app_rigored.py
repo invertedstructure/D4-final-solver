@@ -248,8 +248,7 @@ def _ab_lane_vectors_bottom(H2, d3, C3, lm):
     vC = [int(bC[j]) & 1 for j in idx] if (bC and idx and max(idx) < len(bC)) else []
     return vH, vC
 
-    return hv, cv
-
+   
 # ---------------- Fixture helpers (single source of truth) ----------------
 
 def match_fixture_from_snapshot(snap: dict) -> dict:
@@ -1432,26 +1431,46 @@ def _resolve_projector(cfg_active: dict, boundaries) -> tuple[list[list[int]], d
 
     return P_active, meta
 
-        
-# ------------------------------ Run Overlap (SSOT-staging; cert-aligned, final) ------------------------------
+# ---------------------- Run Overlap (N/A-safe, policy-accurate) ----------------------
 def run_overlap():
-    # ── tiny locals ────────────────────────────────────────────────────────────
-    def _truth_mask_from_d3(d3: list[list[int]]) -> list[int]:
-        if not d3 or not d3[0]: return []
-        rows, n3 = len(d3), len(d3[0])
-        return [1 if any(d3[i][j] & 1 for i in range(rows)) else 0 for j in range(n3)]
+    import streamlit as st
+    ss = st.session_state
 
+    # ---- tiny local helpers ---------------------------------------------------------
     def _xor_mat(A, B):
-        # prefer library 'add' when present
         if "add" in globals() and callable(globals()["add"]):
-            return globals()["add"](A, B)
+            try: return globals()["add"](A, B)
+            except Exception: pass
         if not A: return [r[:] for r in (B or [])]
         if not B: return [r[:] for r in (A or [])]
         r, c = len(A), len(A[0])
         return [[(A[i][j] ^ B[i][j]) & 1 for j in range(c)] for i in range(r)]
 
-    def _is_zero(M):  # local, safe
+    def _mul_gf2(A, B):
+        if "mul" in globals() and callable(globals()["mul"]):
+            try: return globals()["mul"](A, B)
+            except Exception: pass
+        if not A or not B or not A[0] or not B[0] or len(A[0]) != len(B): return []
+        m, k, n = len(A), len(A[0]), len(B[0])
+        C = [[0]*n for _ in range(m)]
+        for i in range(m):
+            Ai = A[i]
+            for t in range(k):
+                if Ai[t] & 1:
+                    Bt = B[t]
+                    for j in range(n):
+                        C[i][j] ^= (Bt[j] & 1)
+        return C
+
+    def _is_zero(M):  # zero over GF(2)
         return (not M) or all((x & 1) == 0 for row in M for x in row)
+
+    def _shape_ok_for_mul(A, B):
+        return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
+
+    def _diag_from_mask(lm):
+        n = len(lm or [])
+        return [[1 if (i == j and int(lm[j]) == 1) else 0 for j in range(n)] for i in range(n)]
 
     def _residual_tag(R3, mask):
         if _is_zero(R3): return "none"
@@ -1464,239 +1483,169 @@ def run_overlap():
         if ker_support:   return "ker"
         return "none"
 
-    def _diag_from_mask(lm: list[int]) -> list[list[int]]:
-        n = len(lm or [])
-        return [[1 if (i == j and int(lm[j]) == 1) else 0 for j in range(n)] for i in range(n)]
+    def _bottom_row(M): 
+        return M[-1] if (M and len(M)) else []
 
-    def _shape_ok_for_mul(A, B):  # GF(2) matrix multiply compatibility
-        return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
+    # ---- pull inputs / config safely ------------------------------------------------
+    boundaries = globals().get("boundaries") or ss.get("boundaries_obj")
+    cmap       = globals().get("cmap")       or ss.get("cmap_obj")
+    shapes     = globals().get("shapes")     or ss.get("shapes_obj")
+    H_local    = ss.get("overlap_H") or ss.get("H_obj")
 
-    # ── STEP 1: clear per-run artifacts (keep A/B pin, fixtures cache, frozen IB) ─────
-    _keep = {"ab_pin", "_fixtures_cache", "_fixtures_bytes_hash", "_inputs_block", "_last_ib_sig"}
-    for k in (
-        "proj_meta", "run_ctx", "residual_tags", "overlap_out",
-        "overlap_H", "overlap_C", "overlap_cfg", "overlap_policy_label",
-        "overlap_policy_tag", "_file_mode_error"
-    ):
-        if k not in _keep:
-            st.session_state.pop(k, None)
-
-    # ── STEP 2: projector resolve (handles projected:file fail path) ──────────────────
-    try:
-        # If you don't have _resolve_projector, use: P_active, meta = projector_choose_active(cfg_active, boundaries)
-        P_active, meta = _resolve_projector(cfg_active, boundaries)
-    except ValueError as e:
-        # Determine intended mode from policy source
-        source3 = (cfg_active.get("source") or {}).get("3", "auto")
-        mode_str = "projected(file)" if source3 == "file" else "projected(auto)"
-
-        pjfn    = (cfg_active.get("projector_files", {}) or {}).get("3", "")
-        d3_now  = (boundaries.blocks.__root__.get("3") or [])
-        n3_now  = (len(d3_now[0]) if (d3_now and d3_now[0]) else 0)
-        lm_now  = _truth_mask_from_d3(d3_now)
-        pol_lbl = policy_label_from_cfg(cfg_active)
-
-        st.session_state["run_ctx"] = {
-            "policy_tag": pol_lbl, "mode": mode_str,
-            "d3": d3_now, "n3": n3_now, "lane_mask_k3": lm_now,
-            "P_active": [],
-            "projector_filename": pjfn, "projector_hash": "",
-            "projector_consistent_with_d": (False if mode_str == "projected(file)" else None),
-            "source": (cfg_active.get("source") or {}),
-            "errors": [str(e)],
-        }
-        st.session_state["overlap_out"]          = {"3": {"eq": False, "n_k": n3_now}, "2": {"eq": True}}
-        st.session_state["overlap_cfg"]          = cfg_active
-        st.session_state["overlap_policy_label"] = pol_lbl
-        st.session_state["overlap_policy_tag"]   = pol_lbl
-
-        # Freeze SSOT even on resolver error
-        H_local = _load_h_local()
-        st.session_state["overlap_H"] = H_local
-        st.session_state["overlap_C"] = cmap
-        pub = ssot_publish_block(
-            boundaries_obj=boundaries,
-            cmap_obj=cmap,
-            H_obj=H_local,
-            shapes_obj=shapes,
-            n3=n3_now,
-            projector_filename=(""
-                if mode_str != "projected(file)" else pjfn),
-        )
-        st.caption(f"SSOT sig (before → after): {list(pub['before'])} → {list(pub['after'])}")
-
+    # if models expose .blocks.__root__, unwrap; else assume dict{"blocks":...}
+    def _blk(model):
         try:
-            _reconcile_di_vs_ssot()
+            root = getattr(getattr(model, "blocks", None), "__root__", None)
+            if isinstance(root, dict): return root
         except Exception:
             pass
+        if isinstance(model, dict) and "blocks" in model: 
+            return model["blocks"]
+        return {}
 
-        # FILE invalid only if we’re actually in FILE mode
-        st.session_state["file_pi_valid"]   = (mode_str != "projected(file)")
-        st.session_state["file_pi_reasons"] = ([str(e)] if mode_str == "projected(file)" else [])
-        st.session_state["write_armed"]     = True
-        st.session_state["armed_by"]        = ("file_invalid" if mode_str == "projected(file)" else "overlap_run")
+    bB = _blk(boundaries)
+    bC = _blk(cmap)
+    bH = _blk(H_local)
 
-        if mode_str == "projected(file)":
-            st.error(f"Projected(FILE) validation failed: {e}")
-        else:
-            st.info("AUTO mode selected; projector FILE not required. Continuing without Π.")
-        return  # early exit on resolve failure
+    d3 = bB.get("3") or []
+    H2 = bH.get("2") or []
+    C3 = bC.get("3") or []
 
-    # ---- success path (strict + projected residuals; persist SSOT) --------------------
-    # meta may carry d3/n3/mode; fall back to boundaries
-    d3   = meta.get("d3") if ("d3" in meta) else (boundaries.blocks.__root__.get("3") or [])
-    n3   = meta.get("n3") if ("n3" in meta) else (len(d3[0]) if (d3 and d3[0]) else 0)
-    mode = str(meta.get("mode", "strict"))
+    n2 = len(d3)
+    n3 = len(d3[0]) if (d3 and d3[0]) else 0
 
-    # lane mask (truth)
-    lm_truth = _truth_mask_from_d3(d3)
-    if n3 and len(lm_truth) != n3:
-        raise RuntimeError(f"lane_mask_k3 length {len(lm_truth)} != n3 {n3}")
-
-    # strict residuals (shape-safe)
-    H_local = _load_h_local()
-    H2 = (H_local.blocks.__root__.get("2") or [])
-    C3 = (cmap.blocks.__root__.get("3") or [])
     I3 = [[1 if i == j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
 
-    R3_strict = []
-    if _shape_ok_for_mul(H2, d3) and C3 and C3[0] and (len(C3) == len(C3[0])):  # C3 square
+    # ---- strict lap (N/A if not posed; no silent green) ----------------------------
+    R3_strict, eq3_strict, tag_strict = [], None, "n/a"
+    if _shape_ok_for_mul(H2, d3) and C3 and C3[0] and (len(C3) == len(C3[0])):  # require C3 square
         try:
-            R3_strict = _xor_mat(mul(H2, d3), _xor_mat(C3, I3))
+            R3_strict  = _xor_mat(_mul_gf2(H2, d3), _xor_mat(C3, I3))
+            eq3_strict = _is_zero(R3_strict)
+            tag_strict = _residual_tag(R3_strict, [1]* (len(C3[0]) if C3 else 0))
         except Exception:
-            R3_strict = []
+            R3_strict, eq3_strict, tag_strict = [], None, "n/a"
 
-    tag_strict = _residual_tag(R3_strict, lm_truth)
-    eq3_strict = _is_zero(R3_strict)
-
-    # --- projected leg (always compute; AUTO may not supply P_active) ---
-    P_eff = (meta.get("P_active") or P_active or _diag_from_mask(lm_truth)) if lm_truth else (meta.get("P_active") or P_active or [])
-    R3_proj  = mul(R3_strict, P_eff) if (R3_strict and P_eff) else []
-    eq3_proj = _is_zero(R3_proj)
-    tag_proj = _residual_tag(R3_proj, lm_truth)
-
-    # Stamp projected result as the authoritative k=3 equality for this run
-    out = {"3": {"eq": bool(eq3_proj), "n_k": n3}, "2": {"eq": True}}
-    st.session_state["residual_tags"] = {"strict": tag_strict, "projected": tag_proj}
-
-    # --- compute lane-bottom diagnostics for matcher (shape-safe)
-    def _bottom_row(M): return M[-1] if (M and len(M)) else []
-    def _xor(A,B):
-        if not A: return [r[:] for r in (B or [])]
-        if not B: return [r[:] for r in (A or [])]
-        r,c = len(A), len(A[0]); return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
-    def _shape_ok(A,B): return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
-
-    H2d3  = mul(H2, d3) if _shape_ok(H2, d3) else []
-    C3pI3 = _xor(C3, I3) if (C3 and C3[0]) else []
-
-    bottom_H2d3  = _bottom_row(H2d3)
-    bottom_C3pI3 = _bottom_row(C3pI3)
-
-    idx = [j for j,m in enumerate(lm_truth or []) if m]
-    lane_vec_H2d3  = [bottom_H2d3[j]  for j in idx] if (bottom_H2d3 and idx) else []
-    lane_vec_C3pI3 = [bottom_C3pI3[j] for j in idx] if (bottom_C3pI3 and idx) else []
-
-    # --- auto-apply fixture (no UI); prefer registry matcher if present
-    di = st.session_state.get("_district_info") or {}
-    district_id = di.get("district_id", "UNKNOWN")
-    pol_lbl = policy_label_from_cfg(cfg_active)
-
-    if ("match_fixture_from_snapshot" in globals()) and ("apply_fixture_to_session" in globals()):
-        snapshot_for_fixture = {
-            "identity": {"district_id": district_id},
-            "policy":   {"canon": pol_lbl},
-            "inputs":   {"lane_mask_k3": lm_truth},
-            "diagnostics": {
-                "lane_vec_H2@d3": lane_vec_H2d3,
-                "lane_vec_C3+I3": lane_vec_C3pI3,
-            },
-            "checks": {"k":{"3":{"eq": bool(eq3_strict)}}},
-            "growth": {"growth_bumps": int(st.session_state.get("growth_bumps",0) or 0)},
-        }
-        try:
-            fx = match_fixture_from_snapshot(snapshot_for_fixture)  # registry-driven
-            apply_fixture_to_session(fx)  # stamps fixture_label/tag/strictify/growth into session + rc
-        except Exception:
-            pass
-    elif "_apply_fixture_after_overlap" in globals():
-        try:
-            _apply_fixture_after_overlap(
-                rc=st.session_state.get("run_ctx") or {},
-                diag={"lane_vec_H2@d3": lane_vec_H2d3, "lane_vec_C3+I3": lane_vec_C3pI3},
-            )
-        except Exception:
-            pass
-
-    # persist run_ctx (SSOT for cert)
-    st.session_state["overlap_out"]          = out
-    st.session_state["overlap_cfg"]          = cfg_active
-    st.session_state["overlap_policy_label"] = pol_lbl
-    st.session_state["overlap_policy_tag"]   = pol_lbl
-    st.session_state["run_ctx"] = {
-        "policy_tag": pol_lbl, "mode": mode,
-        "d3": d3, "n3": n3, "lane_mask_k3": lm_truth,
-        "P_active": (meta.get("P_active", P_active) or _diag_from_mask(lm_truth)),
-        "projector_filename": meta.get("projector_filename", ""),
-        "projector_hash": meta.get("projector_hash", ""),
-        "projector_consistent_with_d": meta.get("projector_consistent_with_d", None),
-        "source": (cfg_active.get("source") or {}),
-    }
-
-    # make objects available to Cert/Reports
-    st.session_state["overlap_H"] = H_local
-    st.session_state["overlap_C"] = cmap
-
-    # publish SSOT
-    pub = ssot_publish_block(
-        boundaries_obj=boundaries,
-        cmap_obj=cmap,
-        H_obj=H_local,
-        shapes_obj=shapes,
-        n3=n3,
-        projector_filename=st.session_state["run_ctx"].get("projector_filename",""),
-    )
-    st.caption(f"SSOT sig (before → after): {list(pub['before'])} → {list(pub['after'])}")
-
+    # ---- policy / mode resolve ------------------------------------------------------
+    cfg_active = globals().get("cfg_active") or ss.get("cfg_active") or {}
+    # best-effort mode stamp
     try:
-        _reconcile_di_vs_ssot()
+        pol_lbl = globals()["policy_label_from_cfg"](cfg_active)
+    except Exception:
+        pol_lbl = str(ss.get("overlap_policy_label") or ss.get("overlap_policy_tag") or "projected(auto)")
+    mode = "projected(auto)" if ("auto" in pol_lbl) else ("projected(file)" if "file" in pol_lbl else "strict")
+
+    # ---- PATCH 3: policy lanes come from C3 bottom row (AUTO) or diag(P) (FILE) ----
+    P_active = (ss.get("run_ctx") or {}).get("P_active") or []
+    proj_na_reason = None
+    lm_policy = []
+
+    if mode == "projected(auto)":
+        if C3 and C3[0] and (len(C3) == len(C3[0])):
+            # lanes = bottom row of C3
+            lm_policy = [1 if int(x) == 1 else 0 for x in (C3[-1] if C3 else [])]
+            if sum(lm_policy) == 0:
+                proj_na_reason = "ZERO_LANE_PROJECTOR"
+        else:
+            proj_na_reason = "AUTO_REQUIRES_SQUARE_C3"
+
+    elif mode == "projected(file)":
+        # accept P_active from run_ctx/cfg; validate shape n3×n3
+        if P_active and (len(P_active) == len(P_active[0]) == n3):
+            lm_policy = [int(P_active[j][j]) & 1 for j in range(n3)]
+        else:
+            proj_na_reason = "BAD_PROJECTOR"
+
+    else:
+        # strict mode: projected leg not applicable; treat as AUTO with not posed
+        proj_na_reason = "N/A_STRICT_MODE"
+
+    # ---- projected residual (N/A-safe) ---------------------------------------------
+    R3_proj, eq3_proj, tag_proj = [], None, "n/a"
+    if proj_na_reason is None and R3_strict:
+        P_eff = P_active if mode == "projected(file)" else _diag_from_mask(lm_policy)
+        if P_eff and len(P_eff) == (len(R3_strict[0]) if R3_strict else 0):
+            try:
+                R3_proj  = _mul_gf2(R3_strict, P_eff)
+                eq3_proj = _is_zero(R3_proj)
+                tag_proj = _residual_tag(R3_proj, lm_policy)
+            except Exception:
+                R3_proj, eq3_proj, tag_proj = [], None, "n/a"
+        else:
+            proj_na_reason = "ZERO_LANE_PROJECTOR" if sum(lm_policy or []) == 0 else "BAD_PROJECTOR"
+
+    # ---- PATCH 4: witness lanes follow policy lanes --------------------------------
+    H2d3  = _mul_gf2(H2, d3) if _shape_ok_for_mul(H2, d3) else []
+    C3pI3 = _xor_mat(C3, I3) if (C3 and C3[0]) else []
+    br_H2d3  = _bottom_row(H2d3)
+    br_C3pI3 = _bottom_row(C3pI3)
+    idx = [j for j, m in enumerate(lm_policy or []) if m]
+    lane_vec_H2d3  = [int(br_H2d3[j]) & 1 for j in idx] if (br_H2d3 and idx) else []
+    lane_vec_C3pI3 = [int(br_C3pI3[j]) & 1 for j in idx] if (br_C3pI3 and idx) else []
+
+    # ---- publish overlap results (non-crashing; N/A uses None) ---------------------
+    ss["residual_tags"] = {"strict": tag_strict, "projected": tag_proj}
+    ss["proj_na_reason"] = proj_na_reason or ""
+
+    # legacy structure: overlap_out carries projected eq; keep strict alongside
+    ss["overlap_out"]         = {"3": {"eq": eq3_proj, "n_k": n3}, "2": {"eq": True}}
+    ss["overlap_out_strict"]  = {"3": {"eq": eq3_strict, "n_k": n3}, "2": {"eq": True}}
+    ss["overlap_H"]           = H_local
+    ss["overlap_C"]           = cmap
+
+    # normalize run_ctx snapshot for downstream consumers
+    rc = dict(ss.get("run_ctx") or {})
+    rc.update({
+        "mode": mode,
+        "policy_tag": pol_lbl,
+        "d3": d3, "n3": n3,
+        "lane_mask_k3": list(lm_policy or []),
+        "P_active": (P_active if mode == "projected(file)" else _diag_from_mask(lm_policy)),
+        "projector_filename": rc.get("projector_filename",""),
+        "projector_hash": rc.get("projector_hash","") if mode == "projected(file)" else "",
+        "projector_consistent_with_d": rc.get("projector_consistent_with_d", None),
+    })
+    ss["run_ctx"] = rc
+
+    # optional: publish SSOT if you have the helper (no crash if missing)
+    try:
+        if "ssot_publish_block" in globals() and callable(globals()["ssot_publish_block"]):
+            pub = ssot_publish_block(
+                boundaries_obj=boundaries,
+                cmap_obj=cmap,
+                H_obj=H_local,
+                shapes_obj=shapes,
+                n3=n3,
+                projector_filename=(rc.get("projector_filename","") if mode == "projected(file)" else "")
+            )
+            st.caption(f"SSOT sig (before → after): {list(pub.get('before', []))} → {list(pub.get('after', []))}")
     except Exception:
         pass
 
-    # normalize/stamp rc for downstream freshness logic
-    rc = st.session_state.get("run_ctx") or {}
-    rc.update({
-        "mode":       policy_label_from_cfg(cfg_active).replace("projected(columns@k=3,", "projected(").rstrip(")") + ")",
-        "policy_tag": pol_lbl,
-        "n3":         int((st.session_state.get("_inputs_block") or {}).get("dims", {}).get("n3") or 0),
-        "lane_mask_k3": list(st.session_state.get("_district_info", {}).get("lane_mask_k3") or lm_truth),
-        "projector_filename": (st.session_state.get("ov_last_pj_path") or rc.get("projector_filename","")),
-    })
-    if rc["mode"] == "projected(file)":
-        rc["projector_hash"] = rc.get("projector_hash") or meta.get("projector_hash","") or ""
-    elif rc["mode"] == "projected(auto)":
-        rc["projector_hash"] = _auto_pj_hash_from_rc(rc) if "_auto_pj_hash_from_rc" in globals() else (rc.get("projector_hash","") or "")
-    # stamp inputs_sig from frozen SSOT
-    if "current_inputs_sig" in globals():
-        rc["inputs_sig"] = current_inputs_sig(_ib=st.session_state.get("_inputs_block") or {})
-    else:
-        ib = st.session_state.get("_inputs_block") or {}
-        h  = ib.get("hashes") or {}
-        rc["inputs_sig"] = [
-            str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
-            str(h.get("C_hash",          ib.get("C_hash",""))),
-            str(h.get("H_hash",          ib.get("H_hash",""))),
-            str(h.get("U_hash",          ib.get("U_hash",""))),
-            str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
-        ]
-    st.session_state["run_ctx"] = rc
+    # arming flags: a lap ran; downstream writers can consider this a fresh read
+    ss["write_armed"] = True
+    ss["armed_by"]    = "overlap_run"
 
-    # mark FILE Π validation ok on success path
-    st.session_state["file_pi_valid"]   = True
-    st.session_state["file_pi_reasons"] = []
-    st.session_state["write_armed"]     = True
-    st.session_state["armed_by"]        = "overlap_run"
-# -------------------------------- end run_overlap --------------------------------
+    # friendly summary line (compact, won’t throw)
+    strict_badge    = "N/A" if eq3_strict is None else ("✅" if eq3_strict else "❌")
+    proj_badge      = "N/A" if eq3_proj   is None else ("✅" if eq3_proj   else "❌")
+    lanes_preview   = (f"lanes={list(lm_policy)}" if lm_policy else "lanes=N/A")
+    reason_preview  = (f" · reason={ss['proj_na_reason']}" if ss.get("proj_na_reason") else "")
+    st.caption(
+        f"Strict k3={strict_badge} · Projected({('auto' if 'auto' in mode else 'file' if 'file' in mode else 'n/a')}) k3={proj_badge} "
+        f"· n₃={n3} · {lanes_preview}{reason_preview}"
+    )
+
+    # also stash witnesses for any UI that wants them
+    ss["overlap_witness"] = {
+        "lane_vec_H2@d3": lane_vec_H2d3,
+        "lane_vec_C3+I3": lane_vec_C3pI3,
+        "lanes_idx": idx,
+        "lanes_mask": list(lm_policy or []),
+    }
+# ------------------------------- end run_overlap ------------------------------------
+        
+
 
 # ---- Minimal ABX upload duck-typing helper (ensures orchestrator works) ----
 if 'abx_is_uploaded_file' not in globals():
@@ -2151,15 +2100,13 @@ def _abx_write_cert(payload: dict, prefix: str) -> Path:
 
 
 
-
-
 # ======================= SINGLE-BUTTON SOLVER (strict → auto → A/B) =======================
 import os, json as _json, hashlib as _hashlib
 from pathlib import Path
 from datetime import datetime, timezone
 import streamlit as st
 
-# --- tiny shims (only if missing) ---
+# --- shims (define only if missing) --------------------------------------------------------
 if "abx_read_json_any" not in globals():
     def abx_is_uploaded_file(x):
         return hasattr(x, "getvalue") and hasattr(x, "name")
@@ -2194,13 +2141,17 @@ if "abx_read_json_any" not in globals():
             return x, "", "dict"
         return {}, "", ""
 
-# --- constants/paths ---
+# --- constants/paths -----------------------------------------------------------------------
 LOGS_DIR    = Path(globals().get("LOGS_DIR", "logs"))
 UPLOADS_DIR = LOGS_DIR / "_uploads"
 CERTS_DIR   = LOGS_DIR / "certs"
 for _p in (UPLOADS_DIR, CERTS_DIR): _p.mkdir(parents=True, exist_ok=True)
 
-# --- linear algebra helpers ---
+# --- utils ---------------------------------------------------------------------------------
+def _svr_now_iso():
+    try: return datetime.now(timezone.utc).isoformat().replace("+00:00","Z")
+    except Exception: return ""
+
 def _svr_hash_json(obj) -> str:
     try:
         blob = _json.dumps(obj, separators=(",", ":"), sort_keys=True)
@@ -2209,6 +2160,7 @@ def _svr_hash_json(obj) -> str:
         return ""
 
 def _svr_atomic_write_json(path: Path, payload: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
         _json.dump(payload, f, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
@@ -2237,7 +2189,27 @@ def _svr_xor(A,B):
     r,c = len(A), len(A[0])
     return [[(int(A[i][j]) ^ int(B[i][j])) & 1 for j in range(c)] for i in range(r)]
 
-# --- source resolution (uploads → fname_* → frozen filenames → globals) ---
+def _svr_as_blocks(j: dict, kind: str) -> dict:
+    """
+    Normalize JSON into {"blocks": {...}} → return the inner blocks dict.
+    Accepts either {"blocks":{"3":[[]],"2":[[]]}} or raw {"3":[[]],"2":[[]]}.
+    Ensures ints (0/1) and 2-D lists.
+    """
+    if not isinstance(j, dict): return {}
+    blocks = j.get("blocks") if "blocks" in j else j
+    if not isinstance(blocks, dict): return {}
+    def _to_2d(M):
+        if not isinstance(M, list): return []
+        if M and isinstance(M[0], (int, str)): M = [M]  # lift 1D to 2D if user gave a row
+        try: return [[int(x) & 1 for x in row] for row in M]
+        except Exception: return []
+    out = {}
+    for deg in ("3","2","1","0"):
+        if deg in blocks:
+            out[deg] = _to_2d(blocks.get(deg))
+    return out
+
+# --- source resolution (uploads → fname_* → frozen filenames → globals) --------------------
 def _svr_pick_source(kind: str):
     ss = st.session_state
     ib_files = ((ss.get("_inputs_block") or {}).get("filenames") or {})
@@ -2257,18 +2229,14 @@ def _svr_pick_source(kind: str):
 
 def _svr_resolve_all_to_paths():
     """
-    Read B/C/H/U. DO NOT persist empties. If a required block is empty/invalid,
-    raise INPUTS_INCOMPLETE with precise reasons.
+    Read B/C/H/U with uploads-first precedence. Validate required slices exist
+    (B[3], C[3], H[2]) BEFORE persisting. Persist only non-empty blocks.
     """
-    out = {}
-    raw = {}
+    out, raw = {}, {}
     for kind, base in (("B","boundaries.json"),("C","cmap.json"),("H","H.json"),("U","shapes.json")):
         src = _svr_pick_source(kind)
         j, p, _ = abx_read_json_any(src, kind={"B":"boundaries","C":"cmap","H":"H","U":"shapes"}[kind])
-
-        # ⬇️ NEW: tolerate both schemas
         blocks = _svr_as_blocks(j, kind)
-
         raw[kind] = {"p": p, "blocks": blocks, "base": base}
 
     # validate non-empty required slices BEFORE persisting
@@ -2297,8 +2265,7 @@ def _svr_resolve_all_to_paths():
         st.session_state[{"B":"fname_boundaries","C":"fname_cmap","H":"fname_h","U":"fname_shapes"}[kind]] = p
     return out
 
-
-# --- freeze SSOT (no lanes invented here) ---
+# --- freeze SSOT (no lanes invented here) --------------------------------------------------
 def _svr_freeze_ssot(pb):
     (pB,bB) = pb["B"]; (pC,bC) = pb["C"]; (pH,bH) = pb["H"]; (pU,bU) = pb["U"]
     d3 = bB.get("3") or []
@@ -2334,42 +2301,37 @@ def _svr_inputs_sig(ib):
         str(h.get("shapes_hash","")),
     ]
 
-# --- strict lap: R3 = H2·d3 ⊕ (C3 ⊕ I3) ; pass iff R3 == 0 ---
+# --- strict lap: R3 = H2·d3 ⊕ (C3 ⊕ I3) ; pass iff R3 == 0 -------------------------------
 def _svr_strict_from_blocks(bH,bB,bC):
     H2 = bH.get("2") or []
     d3 = bB.get("3") or []
     C3 = bC.get("3") or []
-    if not (H2 and d3 and C3 and len(C3)==len(C3[0])):  # undefined → handled earlier; keep safe
+    if not (H2 and d3 and C3 and len(C3)==len(C3[0])):  # undefined
         return {"2":{"eq": None}, "3":{"eq": None}}
     I3 = _svr_eye(len(C3))
     R3s = _svr_xor(_svr_mul(H2, d3), _svr_xor(C3, I3))
     eq3 = _svr_is_zero(R3s)
-    # k2 placeholder (fill in when you finalize k=2)
+    # k2 placeholder: True = posed-and-passed (you can wire real k2 later)
     return {"2":{"eq": True}, "3":{"eq": bool(eq3)}}
 
-# --- projected(auto): lanes = bottom row of C3 ; P = diag(lanes) ; pass iff R3·P == 0 ---
+# --- projected(auto): lanes = bottom row of C3 ; P = diag(lanes) ; pass iff R3·P == 0 -----
 def _svr_projected_auto_from_blocks(bH,bB,bC):
     H2 = bH.get("2") or []
     d3 = bB.get("3") or []
     C3 = bC.get("3") or []
-    if not (C3 and len(C3)==len(C3[0])):
+    if not (C3 and len(C3)==len(C3[0])):  # must be square
         return {"na": True, "reason": "AUTO_REQUIRES_SQUARE_C3"}, [], {"2":{"eq": None}, "3":{"eq": None}}
     lanes = [1 if int(x)==1 else 0 for x in (C3[-1] if C3 else [])]
     if sum(lanes)==0:
         return {"na": True, "reason": "ZERO_LANE_PROJECTOR"}, lanes, {"2":{"eq": None}, "3":{"eq": None}}
     I3 = _svr_eye(len(C3))
     R3s = _svr_xor(_svr_mul(H2, d3), _svr_xor(C3, I3))
-    # P = diag(lanes)
     P = [[1 if (i==j and lanes[j]==1) else 0 for j in range(len(lanes))] for i in range(len(lanes))]
     R3p = _svr_mul(R3s, P) if (R3s and len(R3s[0])==len(P)) else []
     eq3 = _svr_is_zero(R3p)
     return {"na": False, "policy": "auto_c_bottom"}, lanes, {"2":{"eq": True}, "3":{"eq": bool(eq3)}}
 
-# --- certs / pin ---
-def _svr_now_iso():
-    try: return datetime.now(timezone.utc).isoformat().replace("+00:00","Z")
-    except Exception: return ""
-
+# --- certs / pin --------------------------------------------------------------------------
 def _svr_cert_common(ib, rc, policy_tag: str) -> dict:
     return {
         "schema_version": globals().get("SCHEMA_VERSION", "1"),
@@ -2395,7 +2357,7 @@ def _svr_embed_sig(inputs_sig, policy_tag, lanes_or_reason):
         blob["projected_na_reason"] = str(lanes_or_reason)
     return _hashlib.sha256(_json.dumps(blob, separators=(",", ":"), sort_keys=True).encode("ascii")).hexdigest()
 
-# --- UI: single expander with one button ---
+# --- UI: single expander with one button ---------------------------------------------------
 with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
     # Preflight (read-only): shows what will be frozen
     try:
@@ -2404,9 +2366,10 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
         st.caption(f"Sources → B:{pB} · C:{pC} · H:{pH} · U:{pU}")
         d3pf = pf["B"][1].get("3") or []; C3pf = pf["C"][1].get("3") or []; H2pf = pf["H"][1].get("2") or []
         n2p, n3p = len(d3pf), (len(d3pf[0]) if (d3pf and d3pf[0]) else 0)
-        I3pf = _svr_eye(len(C3pf)) if (C3pf and len(C3pf)==len(C3pf[0])) else []
+        I3pf = _svr_eye(len(C3pf)) if (C3pf and C3pf[0] and len(C3pf)==len(C3pf[0])) else []
+        H2d3pf = _svr_mul(H2pf, d3pf) if (H2pf and d3pf and len(H2pf[0])==len(d3pf)) else []
         C3pIpf = _svr_xor(C3pf, I3pf) if I3pf else []
-        bottom_H = (_svr_mul(H2pf, d3pf)[-1] if (H2pf and d3pf) else [])
+        bottom_H = (H2d3pf[-1] if H2d3pf else [])
         bottom_C  = (C3pf[-1] if C3pf else [])
         bottom_CI = (C3pIpf[-1] if C3pIpf else [])
         if n2p and n3p:
@@ -2426,7 +2389,7 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
             # 2) strict lap (R3 == 0)
             strict_out = _svr_strict_from_blocks(pb["H"][1], pb["B"][1], pb["C"][1])
 
-            # 3) projected(auto) lap (lanes = C3 bottom row; strict-only if C3 not square)
+            # 3) projected(auto) lap (lanes = C3 bottom row; strict-only if not posed)
             proj_meta, lanes, projected_out = _svr_projected_auto_from_blocks(pb["H"][1], pb["B"][1], pb["C"][1])
 
             # 4) write certs
@@ -2438,10 +2401,12 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
 
             p_cert = _svr_cert_common(ib, rc, "projected(columns@k=3,auto)")
             if proj_meta.get("na"):
-                p_cert["results"] = {"out": {"2":{"eq": None},"3":{"eq": None}},
-                                     "na_reason": proj_meta["reason"],
-                                     "lanes": lanes,
-                                     "lane_policy": "C bottom row"}
+                p_cert["results"] = {
+                    "out": {"2":{"eq": None},"3":{"eq": None}},
+                    "na_reason": proj_meta["reason"],
+                    "lanes": lanes,
+                    "lane_policy": "C bottom row"
+                }
             else:
                 p_cert["results"] = {"out": projected_out, "lanes": lanes, "lane_policy": "C bottom row"}
             p_proj = _svr_write_cert(p_cert, "cert_projected")
@@ -2483,6 +2448,9 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
         except Exception as e:
             st.error(f"Solver run failed: {e}")
 # =================== /SINGLE-BUTTON SOLVER (strict → auto → A/B) ===================
+
+
+
 
 
 
