@@ -2655,12 +2655,12 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
         else:
             ss['_solver_busy'] = True
             ss['_solver_one_button_active'] = True
-            try:
+           
             try:
                 # 1) freeze SSOT (uploads-first)
                 pb = _svr_resolve_all_to_paths()
                 ib, rc = _svr_freeze_ssot(pb)
-            rc["run_id"] = str(__import__("uuid").uuid4())
+                rc["run_id"] = str(__import__("uuid").uuid4())
             
                 # 2) strict lap
                 strict_out = _svr_strict_from_blocks(pb["H"][1], pb["B"][1], pb["C"][1])
