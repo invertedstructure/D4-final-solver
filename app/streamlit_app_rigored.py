@@ -3092,23 +3092,26 @@ with safe_expander("Cert & provenance (read‑only; solver writes bundles)", exp
         except Exception:
             pass
 
-    # Safe debug writer (avoid DeltaGenerator in st.write payloads)
+       # Safe debug writer (avoid DeltaGenerator in st.write payloads)
     def _safe_write_json(obj, *, label: str | None = None):
-        def _coerce(
-    if not st.session_state.get("_solver_one_button_active"):
-        st.info("Read-only panel: run the solver to write certs.")
-        return
-x):
+        def _coerce(x):
             try:
-                json.dumps(x); return x
+                json.dumps(x)
+                return x
             except Exception:
                 return str(x)
+    
         def _walk(v):
             if isinstance(v, dict):
                 return {k: _walk(vv) for k, vv in v.items()}
             if isinstance(v, (list, tuple)):
                 return [_walk(vv) for vv in v]
             return _coerce(v)
+    
+        if not st.session_state.get("_solver_one_button_active"):
+            st.info("Read-only panel: run the solver to write certs.")
+            return
+    
         safe = _walk(obj)
         if label:
             st.caption(label)
