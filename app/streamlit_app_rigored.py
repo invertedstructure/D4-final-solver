@@ -7818,11 +7818,10 @@ def load_fixture_from_paths(*, boundaries_path, cmap_path, H_path, shapes_path):
     """
     Resolve paths then parse fixtures via io.parse_*.
     """
-    def _read_json(
-    if not st.session_state.get("_solver_one_button_active"):
-        st.info("Read-only panel: run the solver to write certs.")
-        return
-p):
+    def _read_json(p):
+        if not st.session_state.get("_solver_one_button_active"):
+            st.info("Read-only panel: run the solver to write certs.")
+            return None
         with open(p, "r", encoding="utf-8") as f:
             return _json.load(f)
 
