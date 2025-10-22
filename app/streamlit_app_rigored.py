@@ -2530,27 +2530,43 @@ if "_svr_cert_common" not in globals():
             "integrity":      {"content_hash": ""},
         }
 
+# cert scaffold (reuse your existing ones if present)
+if "_svr_cert_common" not in globals():
+    def _svr_cert_common(ib, rc, policy_tag: str) -> dict:
+        return {
+            "schema_version": globals().get("SCHEMA_VERSION", "1"),
+            "engine_rev":     globals().get("ENGINE_REV", ""),
+            "written_at_utc": _svr_now_iso(),
+            "app_version":    globals().get("APP_VERSION", "dev"),
+            "policy_tag":     str(policy_tag),
+            "run_id":         (rc.get("run_id") or ""),
+            "district_id":    (ib.get("district_id") or ""),
+            "sig8":           "",
+            "inputs":         dict(ib),
+            "integrity":      {"content_hash": ""},
+        }
+
 if "_svr_write_cert" not in globals():
     LOGS_DIR    = Path(globals().get("LOGS_DIR", "logs"))
     CERTS_DIR   = LOGS_DIR / "certs"
     CERTS_DIR.mkdir(parents=True, exist_ok=True)
     def _svr_write_cert(payload: dict, prefix: str) -> Path:
-            # Guard: only allow writes during one-button solver handler
-    try:
-        import streamlit as _st
-        if not _st.session_state.get('_solver_one_button_active', False):
-            # Skip writes silently outside solver; callers can still see intended path if needed
-            # Create directory to return the would-be path for preview only
-            LOGS_DIR = Path(globals().get('LOGS_DIR', DIRS.get('root', 'logs')))
-            CERTS_DIR = Path(DIRS.get('certs','logs/certs'))
-            CERTS_DIR.mkdir(parents=True, exist_ok=True)
-            payload.setdefault('integrity', {}).setdefault('content_hash', '')
-            h12 = (payload['integrity']['content_hash'] or '000000000000')[:12]
-            p = CERTS_DIR / f"{prefix}__{h12}.json"
-            return p
-    except Exception:
-        pass
-payload["integrity"]["content_hash"] = _svr_hash(payload)
+        # Guard: only allow writes during one-button solver handler
+        try:
+            import streamlit as _st
+            if not _st.session_state.get('_solver_one_button_active', False):
+                # Skip writes silently outside solver; callers can still see intended path if needed
+                # Create directory to return the would-be path for preview only
+                LOGS_DIR = Path(globals().get('LOGS_DIR', DIRS.get('root', 'logs')))
+                CERTS_DIR = Path(DIRS.get('certs','logs/certs'))
+                CERTS_DIR.mkdir(parents=True, exist_ok=True)
+                payload.setdefault('integrity', {}).setdefault('content_hash', '')
+                h12 = (payload['integrity']['content_hash'] or '000000000000')[:12]
+                p = CERTS_DIR / f"{prefix}__{h12}.json"
+                return p
+        except Exception:
+            pass
+        payload["integrity"]["content_hash"] = _svr_hash(payload)
         h12 = payload["integrity"]["content_hash"][:12]
         p = CERTS_DIR / f"{prefix}__{h12}.json"
         _svr_atomic_write_json(p, payload)
