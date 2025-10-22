@@ -8368,7 +8368,7 @@ class _allow_writes:
         _WRITES_ALLOWED = False
         return False  # don't swallow exceptions
 # ====================================================================================
-\n
+
 # Ensure canonical directories exist
 from pathlib import Path as _Path
 try:
@@ -8377,7 +8377,7 @@ try:
     _Path(DIRS["projectors"]).mkdir(parents=True, exist_ok=True)
 except Exception:
     pass
-======== 
+
                       
             
 
