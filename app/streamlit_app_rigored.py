@@ -2455,6 +2455,20 @@ def _svr_build_embed(ib: dict, *, policy: str, lanes: list[int] | None = None,
 
 # small witness helper
 def _bottom_row(M): return M[-1] if (M and len(M)) else []
+# --- guard: make optional cert-path vars exist (avoid NameError) ---
+for _v in (
+    "p_strict", "p_cert_strict",
+    "p_proj", "p_proj_auto", "p_projected_auto",
+    "p_proj_file", "p_projected_file",
+    "p_ab", "p_ab_auto", "p_ab_file",
+    "p_freezer", "p_freezer_cert",
+):
+    if _v not in globals():
+        globals()[_v] = None  # define as global fallback
+
+from pathlib import Path
+def _name_or_dash(p):
+    return Path(p).name if isinstance(p, (str, Path)) and str(p) else "—"
 
 # ---------- UI ----------
 with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
@@ -2561,6 +2575,7 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
                 freezer_cert = _svr_cert_common(ib, rc, "projector_freezer")
                 freezer_cert["freezer"] = {"status":"OK", "lanes": lanes, "projector_hash": projector_hash}
                 p_freezer = _svr_write_cert(freezer_cert, "cert_freezer")
+                
 
             
                 # 6) banners (AUTO + FILE) with explicit pin freshness (robust + compat aliases)
@@ -2638,15 +2653,15 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
                 
                 st.success("\n\n".join([line1, line2] + ([line3] if line3 else [])))
                 
-                # safe caption: include only certs that actually exist (using compat aliases)
                 parts = []
-                if p_strict_safe:    parts.append(f"strict: {_cert_name(p_strict_safe)}")
-                if p_proj_auto_safe: parts.append(f"projected(auto): {_cert_name(p_proj_auto_safe)}")
-                if p_ab_auto_safe:   parts.append(f"ab(auto): {_cert_name(p_ab_auto_safe)}")
-                if p_freezer_safe:   parts.append(f"freezer: {_cert_name(p_freezer_safe)}")
-                if p_proj_file_safe: parts.append(f"projected(file): {_cert_name(p_proj_file_safe)}")
-                if p_ab_file_safe:   parts.append(f"ab(file): {_cert_name(p_ab_file_safe)}")
-                st.caption("certs → " + (" · ".join(parts) if parts else "(none)"))
+                parts.append(f"strict: {_name_or_dash(p_strict or p_cert_strict)}")
+                parts.append(f"projected(auto): {_name_or_dash(p_proj or p_proj_auto or p_projected_auto)}")
+                parts.append(f"ab(auto): {_name_or_dash(p_ab or p_ab_auto)}")
+                parts.append(f"freezer: {_name_or_dash(p_freezer or p_freezer_cert)}")
+                parts.append(f"projected(file): {_name_or_dash(p_proj_file or p_projected_file)}")
+                parts.append(f"ab(file): {_name_or_dash(p_ab_file)}")
+                st.caption("certs → " + " · ".join(parts))
+
                 
                 # 7) update pins AFTER displaying status (so next run compares against these)
                 st.session_state["ab_pin_auto"] = {
