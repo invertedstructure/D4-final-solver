@@ -2461,22 +2461,22 @@ if "_svr_write_cert" not in globals():
     CERTS_DIR   = LOGS_DIR / "certs"
     CERTS_DIR.mkdir(parents=True, exist_ok=True)
     def _svr_write_cert(payload: dict, prefix: str) -> Path:
-            # Guard: only allow writes during one-button solver handler
-    try:
-        import streamlit as _st
-        if not _st.session_state.get('_solver_one_button_active', False):
-            # Skip writes silently outside solver; callers can still see intended path if needed
-            # Create directory to return the would-be path for preview only
-            LOGS_DIR = Path(globals().get('LOGS_DIR', DIRS.get('root', 'logs')))
-            CERTS_DIR = Path(DIRS.get('certs','logs/certs'))
-            CERTS_DIR.mkdir(parents=True, exist_ok=True)
-            payload.setdefault('integrity', {}).setdefault('content_hash', '')
-            h12 = (payload['integrity']['content_hash'] or '000000000000')[:12]
-            p = CERTS_DIR / f"{prefix}__{h12}.json"
-            return p
-    except Exception:
-        pass
-payload["integrity"]["content_hash"] = _svr_hash(payload)
+        # Guard: only allow writes during one-button solver handler
+        try:
+            import streamlit as _st
+            if not _st.session_state.get('_solver_one_button_active', False):
+                # Skip writes silently outside solver; callers can still see intended path if needed
+                # Create directory to return the would-be path for preview only
+                LOGS_DIR = Path(globals().get('LOGS_DIR', DIRS.get('root', 'logs')))
+                CERTS_DIR = Path(DIRS.get('certs','logs/certs'))
+                CERTS_DIR.mkdir(parents=True, exist_ok=True)
+                payload.setdefault('integrity', {}).setdefault('content_hash', '')
+                h12 = (payload['integrity']['content_hash'] or '000000000000')[:12]
+                p = CERTS_DIR / f"{prefix}__{h12}.json"
+                return p
+        except Exception:
+            pass
+        payload["integrity"]["content_hash"] = _svr_hash(payload)
         h12 = payload["integrity"]["content_hash"][:12]
         p = CERTS_DIR / f"{prefix}__{h12}.json"
         _svr_atomic_write_json(p, payload)
@@ -2516,7 +2516,8 @@ def _svr_build_embed(ib: dict, *, policy: str, lanes: list[int] | None = None,
     return embed, _svr_hash(embed)
 
 # small witness helper
-def _bottom_row(M): return M[-1] if (M and len(M)) else []
+def _bottom_row(M):
+    return M[-1] if (M and len(M)) else []
 
 # ---------- UI ----------
 with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded=False):
