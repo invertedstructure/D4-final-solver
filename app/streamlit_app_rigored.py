@@ -5051,7 +5051,7 @@ def _publish_ssot_if_pending():
             "dims": {"n2": int(dims.get("n2", 0)), "n3": int(dims.get("n3", 0))},
             "hashes": pend.copy(),
             "lane_mask_k3": (st.session_state.get("run_ctx") or {}).get("lane_mask_k3", []),
-        }
+        
 
 # 2) UI (container to avoid nested expander issues)
 with st.container():
