@@ -113,6 +113,37 @@ DISTRICT_MAP: dict[str, str] = {
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
 
+# --- inputs signature helpers (guarded) ----------------------------------------
+if "_svr_inputs_sig" not in globals():
+    def _svr_inputs_sig(ib: dict) -> list[str]:
+        """
+        Legacy 5-tuple used by existing cert writers.
+        Order: boundaries, C, H, U, shapes. Missing entries become "".
+        """
+        h = (ib.get("hashes") or {})
+        return [
+            str(h.get("boundaries_hash", "")),
+            str(h.get("C_hash", "")),
+            str(h.get("H_hash", "")),
+            str(h.get("U_hash", "")),
+            str(h.get("shapes_hash", "")),
+        ]
+
+if "_svr_inputs_sig_map" not in globals():
+    def _svr_inputs_sig_map(ib: dict) -> dict:
+        """
+        Map form for the unified embed signature. If you don’t yet persist
+        separate support-C/H hashes, keep them as "" (stable schema).
+        """
+        h = (ib.get("hashes") or {})
+        return {
+            "hash_d":       str(h.get("boundaries_hash", "")),
+            "hash_U":       str(h.get("U_hash", "")),
+            "hash_suppC":   str(h.get("suppC_hash", "")),   # OK if missing
+            "hash_suppH":   str(h.get("suppH_hash", "")),   # OK if missing
+            "hash_shapes":  str(h.get("shapes_hash", "")),
+        }
+
 # --- Unified A/B embed signature (lane-aware, cert-aligned) -------------------
 import json as _json
 from pathlib import Path
