@@ -2792,20 +2792,7 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
                 "refreshed_at": st.session_state["ab_pin"]["refreshed_at"],
             }
             
-            # FREEZER pin (what downstream “freezer consumers” can read)
-            st.session_state["freezer_pin"] = {
-                "state": "pinned",
-                "payload": {
-                    "status": ("OK" if not file_na_reason else "N/A"),
-                    "lanes": list(lanes),
-                    "projector_hash": (projector_hash or ""),
-                    "na_reason": (file_na_reason or ""),
-                    "inputs_sig": list(inputs_sig),
-                    "n3": (ib.get("dims") or {}).get("n3", 0),
-                },
-                "consumed": False,
-                "refreshed_at": st.session_state["ab_pin"]["refreshed_at"],
-            }
+         
 
         except Exception as e:
             st.error(f"Solver run failed: {e}")
