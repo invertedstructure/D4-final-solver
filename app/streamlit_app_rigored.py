@@ -5029,7 +5029,7 @@ def _publish_ssot_if_pending():
     if all(pend.get(k) for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")) and dims:
         st.session_state["inputs_hashes"] = pend.copy()
         # PURGED: _inputs_block write = {
-            "filenames": files if files else {
+                "filenames": files if files else {
                 "boundaries": st.session_state.get("fname_boundaries","boundaries.json"),
                 "C":          st.session_state.get("fname_cmap","cmap.json"),
                 "H":          st.session_state.get("fname_h","H.json"),
