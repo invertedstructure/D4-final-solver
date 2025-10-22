@@ -1176,11 +1176,10 @@ def safe_expander(label: str, expanded: bool = False):
         return st.expander(label, expanded=expanded)
     except Exception:
         @contextlib.contextmanager
-        def _noop(
-    if not st.session_state.get("_solver_one_button_active"):
-        st.info("Read-only panel: run the solver to write certs.")
-        return
-):
+        def _noop():
+            if not st.session_state.get("_solver_one_button_active"):
+                st.info("Read-only panel: run the solver to write certs.")
+                return
             yield
         return _noop()
 
