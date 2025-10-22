@@ -2562,7 +2562,18 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
                 freezer_cert["freezer"] = {"status":"OK", "lanes": lanes, "projector_hash": projector_hash}
                 p_freezer = _svr_write_cert(freezer_cert, "cert_freezer")
 
-            # 6) banners (AUTO + FILE) with explicit pin freshness (robust to missing vars)
+            
+                # 6) banners (AUTO + FILE) with explicit pin freshness (robust + compat aliases)
+
+                # --- compatibility aliases for cert paths (handles p_ab vs p_ab_auto etc.) ---
+                p_strict_safe    = locals().get("p_strict")           or locals().get("p_cert_strict")
+                p_proj_auto_safe = locals().get("p_proj")             or locals().get("p_proj_auto") or locals().get("p_projected_auto")
+                p_ab_auto_safe   = locals().get("p_ab")               or locals().get("p_ab_auto")
+                p_freezer_safe   = locals().get("p_freezer")          or locals().get("p_freezer_cert")
+                p_proj_file_safe = locals().get("p_proj_file")        or locals().get("p_projected_file")
+                p_ab_file_safe   = locals().get("p_ab_file")          or locals().get("p_ab_file_cert") or locals().get("p_ab_file_proj")
+                
+                # --- helpers ---
                 def _pin_status_text(pin_obj, expected_sig: str) -> str:
                     payload = (pin_obj or {}).get("payload") or {}
                     have = str(payload.get("embed_sig",""))
@@ -2591,18 +2602,18 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
                 n3 = int((ib.get("dims") or {}).get("n3", 0))
                 
                 # expected embed sigs (AUTO)
-                policy_auto = "projected(columns@k=3,auto)"
-                inputs_sig_now = _svr_inputs_sig(ib)
-                auto_embed_sig = _svr_embed_sig(inputs_sig_now, policy_auto,
-                                                (lanes if not proj_meta.get("na") else proj_meta["reason"]))
+                policy_auto      = "projected(columns@k=3,auto)"
+                inputs_sig_now   = _svr_inputs_sig(ib)
+                auto_embed_sig   = _svr_embed_sig(inputs_sig_now, policy_auto,
+                                                  (lanes if not proj_meta.get("na") else proj_meta["reason"]))
                 
                 # FILE context (guarded)
-                freezer_meta = locals().get("freezer_meta", {}) or {}
-                proj_hash = freezer_meta.get("projector_hash", "")
+                freezer_meta       = locals().get("freezer_meta", {}) or {}
+                proj_hash          = freezer_meta.get("projector_hash", "")
                 projected_file_out = locals().get("projected_file_out", {"3": {"eq": None}})
-                file_embed_sig = ""
+                file_embed_sig     = ""
                 if proj_hash:
-                    policy_file = "projected(columns@k=3,file)"
+                    policy_file   = "projected(columns@k=3,file)"
                     file_embed_sig = _svr_embed_sig(inputs_sig_now, policy_file, str(proj_hash))
                 
                 # freshness badges BEFORE overwriting pins
@@ -2627,14 +2638,14 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
                 
                 st.success("\n\n".join([line1, line2] + ([line3] if line3 else [])))
                 
-                # safe caption: include only certs that actually exist
+                # safe caption: include only certs that actually exist (using compat aliases)
                 parts = []
-                if 'p_strict' in locals():      parts.append(f"strict: {_cert_name(p_strict)}")
-                if 'p_proj' in locals():         parts.append(f"projected(auto): {_cert_name(p_proj)}")
-                if 'p_ab' in locals():           parts.append(f"ab(auto): {_cert_name(p_ab)}")
-                if 'p_freezer' in locals():      parts.append(f"freezer: {_cert_name(p_freezer)}")
-                if 'p_proj_file' in locals():    parts.append(f"projected(file): {_cert_name(p_proj_file)}")
-                if 'p_ab_file' in locals():      parts.append(f"ab(file): {_cert_name(p_ab_file)}")
+                if p_strict_safe:    parts.append(f"strict: {_cert_name(p_strict_safe)}")
+                if p_proj_auto_safe: parts.append(f"projected(auto): {_cert_name(p_proj_auto_safe)}")
+                if p_ab_auto_safe:   parts.append(f"ab(auto): {_cert_name(p_ab_auto_safe)}")
+                if p_freezer_safe:   parts.append(f"freezer: {_cert_name(p_freezer_safe)}")
+                if p_proj_file_safe: parts.append(f"projected(file): {_cert_name(p_proj_file_safe)}")
+                if p_ab_file_safe:   parts.append(f"ab(file): {_cert_name(p_ab_file_safe)}")
                 st.caption("certs → " + (" · ".join(parts) if parts else "(none)"))
                 
                 # 7) update pins AFTER displaying status (so next run compares against these)
@@ -2662,7 +2673,7 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
                         "consumed": False,
                     }
                 
-                
+                                
 
            
 
