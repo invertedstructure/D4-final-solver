@@ -912,22 +912,39 @@ def require_fresh_run_ctx(*, stop_on_error: bool = False):
     _ensure_fixture_nonce()
     ss = st.session_state
     rc = ss.get("run_ctx")
-    def _halt(
-    if not st.session_state.get("_solver_one_button_active"):
-        st.info("Read-only panel: run the solver to write certs.")
-        return(msg):
+
+    def _halt(msg):
+        if not ss.get("_solver_one_button_active"):
+            st.info("Read-only panel: run the solver to write certs.")
+            return
         st.warning(msg)
         if stop_on_error:
             st.stop()
 
     if not rc:
-        _halt("STALE_RUN_CTX: Run Overlap first."); return None
-    if int(rc.get("fixture_nonce", -1)) != int(ss.get("fixture_nonce", -2)):
-        _halt("STALE_RUN_CTX: Inputs changed; please click Run Overlap to refresh."); return None
-    n3 = int(rc.get("n3") or 0)
-    lm = list(rc.get("lane_mask_k3") or [])
-    if lm and n3 and len(lm) != n3:
-        _halt("Context mask length mismatch; please click Run Overlap to refresh."); return None
+        _halt("STALE_RUN_CTX: Run Overlap first.")
+        return None
+
+    try:
+        fixture_nonce_rc = int(rc.get("fixture_nonce", -1))
+        fixture_nonce_ss = int(ss.get("fixture_nonce", -2))
+        if fixture_nonce_rc != fixture_nonce_ss:
+            _halt("STALE_RUN_CTX: Inputs changed; please click Run Overlap to refresh.")
+            return None
+    except Exception:
+        _halt("Error verifying fixture nonce.")
+        return None
+
+    try:
+        n3 = int(rc.get("n3") or 0)
+        lm = list(rc.get("lane_mask_k3") or [])
+        if lm and n3 and len(lm) != n3:
+            _halt("Context mask length mismatch; please click Run Overlap to refresh.")
+            return None
+    except Exception:
+        _halt("Error verifying run context parameters.")
+        return None
+
     return rc
 
 # ------------------------- Mask from d3 (truth mask) -------------------------
