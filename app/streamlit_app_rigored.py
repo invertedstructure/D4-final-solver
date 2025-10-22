@@ -2346,6 +2346,39 @@ if "_svr_embed_sig" not in globals():
             # fail-safe: still return a stable-ish value to avoid crashes
             return _hashlib.sha256(b"svr-embed-sig-fallback").hexdigest()
 
+
+# --- SAFE CERT NAME HELPERS (null-safe, no Path(None)) ---
+import os
+from pathlib import Path as _Path
+
+def _first_non_none(*vals):
+    for v in vals:
+        if v is not None and v != "":
+            return v
+    return None
+
+def _name_or_dash(p):
+    try:
+        if isinstance(p, str):
+            return os.path.basename(p) if p else "—"
+        if isinstance(p, _Path):
+            return p.name or "—"
+    except Exception:
+        pass
+    return "—"
+
+# Ensure optional cert-path vars exist to avoid NameError
+for _v in (
+    "p_strict", "p_cert_strict",
+    "p_proj", "p_proj_auto", "p_projected_auto",
+    "p_proj_file", "p_projected_file",
+    "p_ab", "p_ab_auto", "p_ab_file",
+    "p_freezer", "p_freezer_cert",
+):
+    if _v not in locals():
+        locals()[_v] = None
+
+
 # === SINGLE-BUTTON SOLVER — strict → projected(auto) → A/B(auto) → freezer → A/B(file) ===
 import os, json as _json, hashlib as _hashlib
 from pathlib import Path
@@ -2654,13 +2687,14 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
                 st.success("\n\n".join([line1, line2] + ([line3] if line3 else [])))
                 
                 parts = []
-                parts.append(f"strict: {_name_or_dash(p_strict or p_cert_strict)}")
-                parts.append(f"projected(auto): {_name_or_dash(p_proj or p_proj_auto or p_projected_auto)}")
-                parts.append(f"ab(auto): {_name_or_dash(p_ab or p_ab_auto)}")
-                parts.append(f"freezer: {_name_or_dash(p_freezer or p_freezer_cert)}")
-                parts.append(f"projected(file): {_name_or_dash(p_proj_file or p_projected_file)}")
+                parts.append(f"strict: {_name_or_dash(_first_non_none(p_strict, p_cert_strict))}")
+                parts.append(f"projected(auto): {_name_or_dash(_first_non_none(p_proj, p_proj_auto, p_projected_auto))}")
+                parts.append(f"ab(auto): {_name_or_dash(_first_non_none(p_ab_auto, p_ab))}")
+                parts.append(f"freezer: {_name_or_dash(_first_non_none(p_freezer, p_freezer_cert))}")
+                parts.append(f"projected(file): {_name_or_dash(_first_non_none(p_proj_file, p_projected_file))}")
                 parts.append(f"ab(file): {_name_or_dash(p_ab_file)}")
                 st.caption("certs → " + " · ".join(parts))
+
 
                 
                 # 7) update pins AFTER displaying status (so next run compares against these)
