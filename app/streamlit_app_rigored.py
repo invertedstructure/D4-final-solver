@@ -2029,6 +2029,172 @@ if "abx_policy_tag" not in globals():
         if "projected" in m: return "projected(columns@k=3,auto)"
         return "strict"
 # ===== /helpers =====
+# === helpers required by the single-button solver (uploads-first source resolver) ===
+import os, json as _json, hashlib as _hashlib
+from pathlib import Path
+import streamlit as st
+
+# dirs
+if "LOGS_DIR" not in globals():
+    LOGS_DIR = Path("logs")
+UPLOADS_DIR = LOGS_DIR / "_uploads"
+for _p in (LOGS_DIR, UPLOADS_DIR):
+    _p.mkdir(parents=True, exist_ok=True)
+
+# tiny I/O shims
+def _svr_hash_json(obj) -> str:
+    try:
+        blob = _json.dumps(obj, separators=(",", ":"), sort_keys=True)
+        return _hashlib.sha256(blob.encode("utf-8")).hexdigest()
+    except Exception:
+        return ""
+
+def _svr_atomic_write_json(path: Path, payload: dict):
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        _json.dump(payload, f, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, path)
+
+# accept path / UploadedFile / dict
+def _is_uploaded_file(x): return hasattr(x, "getvalue") and hasattr(x, "name")
+
+def abx_read_json_any(x, *, kind: str):
+    """
+    Return (json_obj, canonical_path_str, origin) where origin ∈ {"file","upload","dict",""}
+    """
+    if not x: return {}, "", ""
+    # path-like
+    try:
+        if isinstance(x, (str, Path)):
+            p = Path(x)
+            if p.exists():
+                return _json.loads(p.read_text(encoding="utf-8")), str(p), "file"
+    except Exception:
+        pass
+    # UploadedFile
+    if _is_uploaded_file(x):
+        try:
+            raw = x.getvalue()
+            text = raw.decode("utf-8")
+            j = _json.loads(text)
+        except Exception:
+            return {}, "", ""
+        h12  = _hashlib.sha256(raw).hexdigest()[:12]
+        base = Path(getattr(x, "name", f"{kind}.json")).name
+        outp = UPLOADS_DIR / f"{kind}__{h12}__{base}"
+        try: outp.write_text(text, encoding="utf-8")
+        except Exception: pass
+        return j, str(outp), "upload"
+    # raw dict
+    if isinstance(x, dict):
+        return x, "", "dict"
+    return {}, "", ""
+
+# normalize per kind → "blocks" payload we hash/persist
+def _svr_as_blocks(j: dict, kind: str) -> dict:
+    if not isinstance(j, dict): return {}
+    if kind in ("B","C","H"):
+        # prefer canonical {"blocks": {...}}
+        if isinstance(j.get("blocks"), dict):
+            return dict(j["blocks"])
+        # tolerate legacy top-level degrees
+        blk = {}
+        for deg in ("1","2","3"):
+            if deg in j and isinstance(j[deg], list):
+                blk[deg] = j[deg]
+        return blk
+    # shapes: keep json as-is (we only hash it; not validated for slices)
+    if isinstance(j.get("blocks"), dict):
+        return dict(j["blocks"])
+    return dict(j)
+
+# session precedence → source object
+def _svr_pick_source(kind: str):
+    ss = st.session_state
+    # previously frozen canonical filenames (from _svr_freeze_ssot)
+    ib_files = ((ss.get("_inputs_block") or {}).get("filenames") or {})
+    frozen_key = {"B":"boundaries","C":"C","H":"H","U":"U"}[kind]
+    # uploads-first precedence across common aliases
+    precedence = {
+        "B": ["uploaded_boundaries","fname_boundaries","B_up","f_B","boundaries_file","boundaries_obj","boundaries"],
+        "C": ["uploaded_cmap","fname_cmap","C_up","f_C","cmap_file","cmap_obj","cmap"],
+        "H": ["uploaded_H","fname_h","H_up","f_H","h_file","H_obj","overlap_H","H"],
+        "U": ["uploaded_shapes","fname_shapes","U_up","f_U","shapes_file","shapes_obj","shapes","U"],
+    }[kind]
+    for k in precedence:
+        if k in ss and ss.get(k) is not None:
+            return ss.get(k)
+    if ib_files.get(frozen_key):
+        return ib_files.get(frozen_key)
+    for k in precedence:
+        if k in globals() and globals().get(k) is not None:
+            return globals().get(k)
+    return None
+
+def _svr_resolve_all_to_paths():
+    """
+    Read B/C/H/U per uploads-first order, normalize, validate B[3], C[3], H[2] non-empty.
+    Persist to logs/_uploads if needed. Return {"B":(path,blocks), ...}.
+    """
+    out, raw = {}, {}
+    for kind, base in (("B","boundaries.json"),("C","cmap.json"),("H","H.json"),("U","shapes.json")):
+        src = _svr_pick_source(kind)
+        j, p, _ = abx_read_json_any(src, kind={"B":"boundaries","C":"cmap","H":"H","U":"shapes"}[kind])
+        blocks = _svr_as_blocks(j, kind)
+        raw[kind] = {"p": p, "blocks": blocks, "base": base}
+
+    # validate required slices before persisting
+    bB = raw["B"]["blocks"]; bC = raw["C"]["blocks"]; bH = raw["H"]["blocks"]
+    d3 = bB.get("3") or []
+    C3 = bC.get("3") or []
+    H2 = bH.get("2") or []
+    reasons = []
+    if not (d3 and d3[0]): reasons.append("B[3] empty")
+    if not (C3 and C3[0]): reasons.append("C[3] empty")
+    if not (H2 and H2[0]): reasons.append("H[2] empty")
+    if reasons:
+        raise RuntimeError("INPUTS_INCOMPLETE: " + ", ".join(reasons))
+
+    # persist canonical jsons (only if no path yet)
+    for kind in ("B","C","H","U"):
+        blocks = raw[kind]["blocks"]; base = raw[kind]["base"]
+        p = raw[kind]["p"]
+        if not p:
+            canon = _json.dumps({"blocks": blocks}, separators=(",", ":"), sort_keys=True)
+            h12 = _hashlib.sha256(canon.encode("utf-8")).hexdigest()[:12]
+            pth = UPLOADS_DIR / f"{kind.lower()}__{h12}__{base}"
+            _svr_atomic_write_json(pth, {"blocks": blocks})
+            p = str(pth)
+        out[kind] = (p, blocks)
+        # also expose canonical filename back to session for future runs
+        st.session_state[{"B":"fname_boundaries","C":"fname_cmap","H":"fname_h","U":"fname_shapes"}[kind]] = p
+    return out
+
+def _svr_freeze_ssot(pb):
+    """Stamp _inputs_block in session with filenames, hashes, dims."""
+    (pB,bB) = pb["B"]; (pC,bC) = pb["C"]; (pH,bH) = pb["H"]; (pU,bU) = pb["U"]
+    d3 = bB.get("3") or []
+    n2, n3 = len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)
+    hashes = {
+        "boundaries_hash": _svr_hash_json({"blocks": bB}),
+        "C_hash":          _svr_hash_json({"blocks": bC}),
+        "H_hash":          _svr_hash_json({"blocks": bH}),
+        "U_hash":          _svr_hash_json({"blocks": bU}),
+        "shapes_hash":     _svr_hash_json({"blocks": bU}),  # shapes carried as-is
+    }
+    ib = {
+        "filenames": {"boundaries": pB, "C": pC, "H": pH, "U": pU},
+        "hashes": dict(hashes),
+        "dims": {"n2": n2, "n3": n3},
+    }
+    st.session_state["_inputs_block"] = ib
+    # keep run_ctx consistent
+    rc = dict(st.session_state.get("run_ctx") or {})
+    rc.update({"n2": n2, "n3": n3, "d3": d3})
+    st.session_state["run_ctx"] = rc
+    return ib, rc
+# === /helpers ===
 
 # === SINGLE-BUTTON SOLVER — strict → projected(auto) → A/B(auto) → freezer → A/B(file) ===
 import os, json as _json, hashlib as _hashlib
