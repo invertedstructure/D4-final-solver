@@ -2779,19 +2779,22 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
             }
             
             # FILE pin (A/B:file)
-            _svr_set_pin_file(st.session_state,  
-                "state": "pinned",
-                "payload": {
-                    "embed_sig": embed_sig_file,
-                    "inputs_sig": list(inputs_sig),
-                    "policy_tag": "projected(columns@k=3,file)",
-                    "projector_hash": (projector_hash or ""),
-                    "projected_na_reason": (file_na_reason or ""),
-                },
-                "consumed": False,
-                "refreshed_at": st.session_state["ab_pin"]["refreshed_at"],
-            }
-            
+            _svrr_set_pin_file(
+                st.session_state,
+                {
+                    "state": "pinned",
+                    "payload": {
+                        "embed_sig": embed_sig_file,
+                        "inputs_sig": list(inputs_sig),
+                        "policy_tag": "projected(columns@k=3,file)",
+                        "projector_hash": (projector_hash or ""),
+                        "projected_na_reason": (file_na_reason or ""),
+                    },
+                    "consumed": False,
+                    "refreshed_at": st.session_state["ab_pin"]["refreshed_at"],
+                }
+            )
+                        
             # FREEZER pin (what downstream “freezer consumers” can read)
             st.session_state["freezer_pin"] = {
                 "state": "pinned",
