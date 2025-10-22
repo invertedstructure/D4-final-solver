@@ -228,25 +228,25 @@ if "_svr_xor" not in globals():
 
 if "_svr_strict_from_blocks" not in globals():
 
-def _svr_strict_from_blocks(bH: dict, bB: dict, bC: dict) -> dict:
-    """
-    Strict k=3: R3 = H2 @ d3 ⊕ (C3 ⊕ I3); pass iff R3 == 0.
-    Returns {"2":{"eq": True|None}, "3":{"eq": True|False|None}, "na_reason_code": <opt>}
-    N/A (None) when C3 not square or shapes don’t pose H2@d3.
-    """
-    H2 = (bH.get("2") or [])
-    d3 = (bB.get("3") or [])
-    C3 = (bC.get("3") or [])
-    # guard A: C3 must be square
-    if not (C3 and C3[0] and len(C3) == len(C3[0])):
-        return {"2": {"eq": None}, "3": {"eq": None}, "na_reason_code": "C3_NOT_SQUARE"}
-    # guard B: H2@d3 shapes must conform
-    if not _svr_shape_ok_for_mul(H2, d3):
-        return {"2": {"eq": None}, "3": {"eq": None}, "na_reason_code": "BAD_SHAPE"}
-    I3  = _svr_eye(len(C3))
-    R3s = _svr_xor(_svr_mul(H2, d3), _svr_xor(C3, I3))
-    eq3 = _svr_is_zero(R3s)
-    return {"2": {"eq": True}, "3": {"eq": bool(eq3)}}
+    def _svr_strict_from_blocks(bH: dict, bB: dict, bC: dict) -> dict:
+        """
+        Strict k=3: R3 = H2 @ d3 ⊕ (C3 ⊕ I3); pass iff R3 == 0.
+        Returns {"2":{"eq": True|None}, "3":{"eq": True|False|None}, "na_reason_code": <opt>}
+        N/A (None) when C3 not square or shapes don’t pose H2@d3.
+        """
+        H2 = (bH.get("2") or [])
+        d3 = (bB.get("3") or [])
+        C3 = (bC.get("3") or [])
+        # guard A: C3 must be square
+        if not (C3 and C3[0] and len(C3) == len(C3[0])):
+            return {"2": {"eq": None}, "3": {"eq": None}, "na_reason_code": "C3_NOT_SQUARE"}
+        # guard B: H2@d3 shapes must conform
+        if not _svr_shape_ok_for_mul(H2, d3):
+            return {"2": {"eq": None}, "3": {"eq": None}, "na_reason_code": "BAD_SHAPE"}
+        I3  = _svr_eye(len(C3))
+        R3s = _svr_xor(_svr_mul(H2, d3), _svr_xor(C3, I3))
+        eq3 = _svr_is_zero(R3s)
+        return {"2": {"eq": True}, "3": {"eq": bool(eq3)}}
 if "_svr_projected_auto_from_blocks" not in globals():
     def _svr_projected_auto_from_blocks(bH: dict, bB: dict, bC: dict):
         """
