@@ -1751,33 +1751,46 @@ def overlap_ui_from_frozen():
     n2, n3 = len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)
 
     # Diagnostics (no writes)
-    st.caption(f"[Overlap UI] n₂×n₃ = {n2}×{n3} · src B:{Path(pB).name} · C:{Path(pC).name} · H:{Path(pH).name}")
-    if C3 and len(C3)==len(C3[0]):
-        I3 = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))]
-        def _mul(A,B):
-            if not A or not B or not A[0] or not B[0] or len(A[0])!=len(B): return []
-            m,k = len(A), len(A[0]); n = len(B[0])
-            C = [[0]*n for _ in range(m)]
-            for i in range(m):
-                for t in range(k):
-                    if A[i][t] & 1:
-                        for j in range(n): C[i][j] ^= (B[t][j] & 1)
-            return C
-        def _xor(
+st.caption(f"[Overlap UI] n₂×n₃ = {n2}×{n3} · src B:{Path(pB).name} · C:{Path(pC).name} · H:{Path(pH).name}")
+
+if C3 and len(C3) == len(C3[0]):
+    I3 = [[1 if i == j else 0 for j in range(len(C3))] for i in range(len(C3))]
+    
+    def _mul(A, B):
+        if not A or not B or not A[0] or not B[0] or len(A[0]) != len(B):
+            return []
+        m, k = len(A), len(A[0])
+        n = len(B[0])
+        C = [[0] * n for _ in range(m)]
+        for i in range(m):
+            for t in range(k):
+                if A[i][t] & 1:
+                    for j in range(n):
+                        C[i][j] ^= (B[t][j] & 1)
+        return C
+
+    def _xor(A, B):
+        if not A:
+            return [row[:] for row in (B or [])]
+        if not B:
+            return [row[:] for row in (A or [])]
+        r, c = len(A), len(A[0])
+        return [[(A[i][j] ^ B[i][j]) & 1 for j in range(c)] for i in range(r)]
+    
+    # Ensure session state check
     if not st.session_state.get("_solver_one_button_active"):
         st.info("Read-only panel: run the solver to write certs.")
         return
-A,B):
-            if not A: return [r[:] for r in (B or [])]
-            if not B: return [r[:] for r in (A or [])]
-            r,c = len(A), len(A[0]); return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
-        R3s = _xor(_mul(H2, d3), _xor(C3, I3)) if (H2 and d3) else []
-        bottom_H = (_mul(H2, d3)[-1] if (H2 and d3) else [])
-        bottom_CI = (_xor(C3, I3)[-1] if C3 else [])
-        lanes_auto = (C3[-1] if C3 else [])
-        st.caption(f"[Overlap UI] (H2·d3)_bottom={bottom_H} · (C3⊕I3)_bottom={bottom_CI} · lanes(auto from C₃ bottom)={lanes_auto}")
-    else:
-        st.caption("[Overlap UI] C₃ not square; projected(columns@k=3,auto) is N/A here.")
+    
+    # Calculate R3s if H2 and d3 are defined
+    R3s = (_xor(_mul(H2, d3), _xor(C3, I3))) if (H2 and d3) else []
+    bottom_H = (_mul(H2, d3)[-1] if (H2 and d3) else [])
+    bottom_CI = (_xor(C3, I3)[-1] if C3 else [])
+    lanes_auto = (C3[-1] if C3 else [])
+    
+    st.caption(f"[Overlap UI] (H2·d3)_bottom={bottom_H} · (C3⊕I3)_bottom={bottom_CI} · lanes(auto from C₃ bottom)={lanes_auto}")
+else:
+    st.caption("[Overlap UI] C₃ not square; projected(columns@k=3,auto) is N/A here.")
 # === END PATCH: READ-ONLY OVERLAP HYDRATOR ===
 
 
