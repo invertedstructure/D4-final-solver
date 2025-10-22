@@ -113,6 +113,94 @@ DISTRICT_MAP: dict[str, str] = {
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
 
+# --- strict / projected(auto) helpers (guarded) --------------------------------
+if "_svr_shape_ok_for_mul" not in globals():
+    def _svr_shape_ok_for_mul(A, B):
+        return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
+
+if "_svr_eye" not in globals():
+    def _svr_eye(n: int):
+        return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
+
+if "_svr_is_zero" not in globals():
+    def _svr_is_zero(M):
+        return (not M) or all((int(x) & 1) == 0 for row in M for x in row)
+
+if "_svr_mul" not in globals():
+    def _svr_mul(A, B):
+        # GF(2) multiply with shape guard
+        if not _svr_shape_ok_for_mul(A, B):
+            return []
+        m, k, n = len(A), len(A[0]), len(B[0])
+        C = [[0]*n for _ in range(m)]
+        for i in range(m):
+            Ai = A[i]
+            for t in range(k):
+                if int(Ai[t]) & 1:
+                    Bt = B[t]
+                    for j in range(n):
+                        C[i][j] ^= (int(Bt[j]) & 1)
+        return C
+
+if "_svr_xor" not in globals():
+    def _svr_xor(A, B):
+        if not A: return [r[:] for r in (B or [])]
+        if not B: return [r[:] for r in (A or [])]
+        r, c = len(A), len(A[0])
+        return [[(int(A[i][j]) ^ int(B[i][j])) & 1 for j in range(c)] for i in range(r)]
+
+if "_svr_strict_from_blocks" not in globals():
+    def _svr_strict_from_blocks(bH: dict, bB: dict, bC: dict) -> dict:
+        """
+        Strict k=3: R3 = H2 @ d3 ⊕ (C3 ⊕ I3); pass iff R3 == 0.
+        Returns {"2":{"eq": True|None}, "3":{"eq": True|False|None}}
+        N/A (None) when C3 not square or shapes don’t pose H2@d3.
+        """
+        H2 = (bH.get("2") or [])
+        d3 = (bB.get("3") or [])
+        C3 = (bC.get("3") or [])
+        # guards: posed only if C3 square and H2@d3 shape OK
+        if not (C3 and C3[0] and len(C3) == len(C3[0]) and _svr_shape_ok_for_mul(H2, d3)):
+            return {"2": {"eq": None}, "3": {"eq": None}}
+        I3  = _svr_eye(len(C3))
+        R3s = _svr_xor(_svr_mul(H2, d3), _svr_xor(C3, I3))
+        eq3 = _svr_is_zero(R3s)
+        return {"2": {"eq": True}, "3": {"eq": bool(eq3)}}
+
+if "_svr_projected_auto_from_blocks" not in globals():
+    def _svr_projected_auto_from_blocks(bH: dict, bB: dict, bC: dict):
+        """
+        Projected(auto) k=3:
+          lanes = bottom row of C3 (requires C3 square and non-zero mask)
+          P = diag(lanes), test R3 @ P == 0.
+        Returns (meta, lanes, out) where:
+          meta = {"na": True, "reason": ...} on N/A; else {"na": False, "policy": "auto_c_bottom"}
+          lanes = list[int] length n3 (or [] on N/A)
+          out   = {"2":{"eq": ...}, "3":{"eq": ...}} (None on N/A)
+        """
+        H2 = (bH.get("2") or [])
+        d3 = (bB.get("3") or [])
+        C3 = (bC.get("3") or [])
+        # guard A: C3 square
+        if not (C3 and C3[0] and len(C3) == len(C3[0])):
+            return {"na": True, "reason": "AUTO_REQUIRES_SQUARE_C3"}, [], {"2": {"eq": None}, "3": {"eq": None}}
+        n3 = len(C3)
+        lanes = [1 if int(x) == 1 else 0 for x in (C3[-1] if C3 else [])]
+        # guard B: non-zero mask
+        if sum(lanes) == 0:
+            return {"na": True, "reason": "ZERO_LANE_PROJECTOR"}, lanes, {"2": {"eq": None}, "3": {"eq": None}}
+        # guard C: shapes OK for H2@d3
+        if not _svr_shape_ok_for_mul(H2, d3):
+            return {"na": True, "reason": "BAD_SHAPE"}, lanes, {"2": {"eq": None}, "3": {"eq": None}}
+        I3  = _svr_eye(n3)
+        R3s = _svr_xor(_svr_mul(H2, d3), _svr_xor(C3, I3))
+        # P = diag(lanes)
+        P   = [[1 if (i == j and lanes[j] == 1) else 0 for j in range(n3)] for i in range(n3)]
+        R3p = _svr_mul(R3s, P)
+        eq3 = _svr_is_zero(R3p)
+        return {"na": False, "policy": "auto_c_bottom"}, lanes, {"2": {"eq": True}, "3": {"eq": bool(eq3)}}
+
+
 # --- inputs signature helpers (guarded) ----------------------------------------
 if "_svr_inputs_sig" not in globals():
     def _svr_inputs_sig(ib: dict) -> list[str]:
