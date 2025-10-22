@@ -2779,7 +2779,7 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
             }
             
             # FILE pin (A/B:file)
-            _svr_set_pin_file(st.session_state,  {
+            _svr_set_pin_file(st.session_state,  
                 "state": "pinned",
                 "payload": {
                     "embed_sig": embed_sig_file,
