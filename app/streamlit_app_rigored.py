@@ -146,7 +146,7 @@ class _allow_writes:
         _WRITES_ALLOWED = False
         return False  # don't swallow exceptions
 # ====================================================================================
-\n
+
 
 def ssot_publish_block(*a, **k):
     if not globals().get("_WRITES_ALLOWED", False):
