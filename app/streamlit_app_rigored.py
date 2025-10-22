@@ -494,7 +494,6 @@ def _ab_lane_vectors_bottom(H2, d3, C3, lm):
     if not st.session_state.get("_solver_one_button_active"):
         st.info("Read-only panel: run the solver to write certs.")
         return
-M): 
         try: return M[-1] if (M and len(M)) else []
         except Exception: return []
     bH, bC = _bottom(H2d3), _bottom(C3pI3)
