@@ -2450,14 +2450,10 @@ if "_svr_cert_common" not in globals():
     def _svr_cert_common(ib, rc, policy_tag: str) -> dict:
         return {
             "schema_version": globals().get("SCHEMA_VERSION", "1"),
-            "engine_rev":     globals().get("ENGINE_REV", ""),
             "written_at_utc": _svr_now_iso(),
             "app_version":    globals().get("APP_VERSION", "dev"),
-            "policy_tag":     str(policy_tag),
-            "run_id":         (rc.get("run_id") or ""),
-            "district_id":    (ib.get("district_id") or ""),
-            "sig8":           "",
             "inputs":         dict(ib),
+            "policy":         {"policy_tag": policy_tag},
             "integrity":      {"content_hash": ""},
         }
 
@@ -2466,26 +2462,63 @@ if "_svr_write_cert" not in globals():
     CERTS_DIR   = LOGS_DIR / "certs"
     CERTS_DIR.mkdir(parents=True, exist_ok=True)
     def _svr_write_cert(payload: dict, prefix: str) -> Path:
-            # Guard: only allow writes during one-button solver handler
-    try:
-        import streamlit as _st
-        if not _st.session_state.get('_solver_one_button_active', False):
-            # Skip writes silently outside solver; callers can still see intended path if needed
-            # Create directory to return the would-be path for preview only
-            LOGS_DIR = Path(globals().get('LOGS_DIR', DIRS.get('root', 'logs')))
-            CERTS_DIR = Path(DIRS.get('certs','logs/certs'))
-            CERTS_DIR.mkdir(parents=True, exist_ok=True)
-            payload.setdefault('integrity', {}).setdefault('content_hash', '')
-            h12 = (payload['integrity']['content_hash'] or '000000000000')[:12]
-            p = CERTS_DIR / f"{prefix}__{h12}.json"
-            return p
-    except Exception:
-        pass
-payload["integrity"]["content_hash"] = _svr_hash(payload)
+        # Guard: only allow writes during one-button solver handler
+        try:
+            import streamlit as _st
+            if not _st.session_state.get('_solver_one_button_active', False):
+                # Skip writes silently outside solver; callers can still see intended path if needed
+                # Create directory to return the would-be path for preview only
+                LOGS_DIR = Path(globals().get('LOGS_DIR', DIRS.get('root', 'logs')))
+                CERTS_DIR = Path(DIRS.get('certs','logs/certs'))
+                CERTS_DIR.mkdir(parents=True, exist_ok=True)
+                payload.setdefault('integrity', {}).setdefault('content_hash', '')
+                h12 = (payload['integrity']['content_hash'] or '000000000000')[:12]
+                p = CERTS_DIR / f"{prefix}__{h12}.json"
+                return p
+        except Exception:
+            pass
+        payload["integrity"]["content_hash"] = _svr_hash(payload)
         h12 = payload["integrity"]["content_hash"][:12]
         p = CERTS_DIR / f"{prefix}__{h12}.json"
         _svr_atomic_write_json(p, payload)
         return p
+
+# unified embed builder (AUTO/File)
+def _svr_build_embed(ib: dict, *, policy: str, lanes: list[int] | None = None,
+                     projector_hash: str | None = None, na_reason: str | None = None) -> tuple[dict, str]:
+    hashes = ib.get("hashes") or {}
+    dims   = ib.get("dims") or {}
+    # map to 5-hash schema (keep suppC slot present but empty if unused)
+    embed5 = {
+        "hash_d":       str(hashes.get("boundaries_hash","")),
+        "hash_U":       str(hashes.get("C_hash","")),     # using C map here
+        "hash_suppC":   "",                               # reserved slot
+        "hash_suppH":   str(hashes.get("H_hash","")),
+        "hash_shapes":  str(hashes.get("shapes_hash","")),
+    }
+    district_id   = "D" + embed5["hash_d"][:8] if embed5["hash_d"] else "DUNKNOWN"
+    fixture_label = str(st.session_state.get("fixture_label") or "UNKNOWN")
+    proj_ctx: dict = {}
+    if lanes is not None:
+        proj_ctx["lanes"] = list(lanes)
+    if projector_hash is not None:
+        proj_ctx["projector_hash"] = projector_hash
+    if na_reason is not None:
+        proj_ctx["na_reason"] = na_reason
+
+    embed = {
+        "inputs_sig_5": embed5,
+        "dims": {"n2": int(dims.get("n2") or 0), "n3": int(dims.get("n3") or 0)},
+        "district_id": district_id,
+        "fixture_label": fixture_label,
+        "policy": policy,
+        "projection_context": proj_ctx,
+    }
+    return embed, _svr_hash(embed)
+
+# small witness helper
+def _bottom_row(M):
+    return M[-1] if (M and len(M)) else []
 
 # unified embed builder (AUTO/File)
 
