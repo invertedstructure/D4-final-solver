@@ -2588,59 +2588,59 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
                 inputs_sig = _svr_inputs_sig(ib)
             
                 
-strict_cert = _svr_cert_common(ib, rc, "strict")
-# compute witness: bottom rows and residuals
-H2 = pb["H"][1].get("2") or []; d3 = pb["B"][1].get("3") or []; C3 = pb["C"][1].get("3") or []
-I3  = _svr_eye(len(C3)) if (C3 and C3[0] and len(C3)==len(C3[0])) else []
-R3s = _svr_xor(_svr_mul(H2, d3), _svr_xor(C3, I3)) if I3 else []
-bH  = (_svr_mul(H2, d3)[-1] if (H2 and d3 and _svr_mul(H2, d3)) else [])
-bCI = (( _svr_xor(C3, I3)[-1] ) if I3 else [])
-sel_mask = [1]*(len(C3[0]) if (C3 and C3[0]) else 0)
-bR = (R3s[-1] if R3s else [])
-strict_cert["witness"] = _witness_pack(bH, bCI, lanes=None)
-strict_cert["results"] = {
-    "out": strict_out,
-    "selected_cols": sel_mask,
-    "mismatch_cols_selected": _svr_mismatch_cols(bR, sel_mask),
-    "residual_tag_selected": _svr_residual_bits(bR, sel_mask),
-    "k2": None,
-    "na_reason_code": (strict_out.get("na_reason_code") if isinstance(strict_out, dict) else None)
-}
-p_strict = _svr_write_cert(strict_cert, "cert_strict")
-            
-                
-p_cert = _svr_cert_common(ib, rc, "projected(columns@k=3,auto)")
-H2 = pb["H"][1].get("2") or []; d3 = pb["B"][1].get("3") or []; C3 = pb["C"][1].get("3") or []
-I3  = _svr_eye(len(C3)) if (C3 and C3[0] and len(C3)==len(C3[0])) else []
-R3s = _svr_xor(_svr_mul(H2, d3), _svr_xor(C3, I3)) if I3 else []
-bH  = (_svr_mul(H2, d3)[-1] if (H2 and d3 and _svr_mul(H2, d3)) else [])
-bCI = (( _svr_xor(C3, I3)[-1] ) if I3 else [])
-if proj_meta.get("na"):
-    p_cert["witness"] = _witness_pack(bH, bCI, lanes=None)
-    p_cert["results"] = {
-        "out": {"2":{"eq": None},"3":{"eq": None}},
-        "na_reason_code": proj_meta["reason"],
-        "lanes": lanes,
-        "lane_policy": "C bottom row",
-        "selected_cols": list(lanes or []),
-        "mismatch_cols_selected": [],
-        "residual_tag_selected": "",
-        "k2": None,
-    }
-else:
-    # residual restricted to selected lanes
-    R3s_bot = (R3s[-1] if R3s else [])
-    p_cert["witness"] = _witness_pack(bH, bCI, lanes=lanes)
-    p_cert["results"] = {
-        "out": projected_out,
-        "lanes": lanes,
-        "lane_policy": "C bottom row",
-        "selected_cols": list(lanes or []),
-        "mismatch_cols_selected": _svr_mismatch_cols(R3s_bot, lanes),
-        "residual_tag_selected": _svr_residual_bits(R3s_bot, lanes),
-        "k2": None,
-    }
-p_proj_auto = _svr_write_cert(p_cert, "cert_projected")
+                strict_cert = _svr_cert_common(ib, rc, "strict")
+                # compute witness: bottom rows and residuals
+                H2 = pb["H"][1].get("2") or []; d3 = pb["B"][1].get("3") or []; C3 = pb["C"][1].get("3") or []
+                I3  = _svr_eye(len(C3)) if (C3 and C3[0] and len(C3)==len(C3[0])) else []
+                R3s = _svr_xor(_svr_mul(H2, d3), _svr_xor(C3, I3)) if I3 else []
+                bH  = (_svr_mul(H2, d3)[-1] if (H2 and d3 and _svr_mul(H2, d3)) else [])
+                bCI = (( _svr_xor(C3, I3)[-1] ) if I3 else [])
+                sel_mask = [1]*(len(C3[0]) if (C3 and C3[0]) else 0)
+                bR = (R3s[-1] if R3s else [])
+                strict_cert["witness"] = _witness_pack(bH, bCI, lanes=None)
+                strict_cert["results"] = {
+                    "out": strict_out,
+                    "selected_cols": sel_mask,
+                    "mismatch_cols_selected": _svr_mismatch_cols(bR, sel_mask),
+                    "residual_tag_selected": _svr_residual_bits(bR, sel_mask),
+                    "k2": None,
+                    "na_reason_code": (strict_out.get("na_reason_code") if isinstance(strict_out, dict) else None)
+                }
+                p_strict = _svr_write_cert(strict_cert, "cert_strict")
+                            
+                                
+                p_cert = _svr_cert_common(ib, rc, "projected(columns@k=3,auto)")
+                H2 = pb["H"][1].get("2") or []; d3 = pb["B"][1].get("3") or []; C3 = pb["C"][1].get("3") or []
+                I3  = _svr_eye(len(C3)) if (C3 and C3[0] and len(C3)==len(C3[0])) else []
+                R3s = _svr_xor(_svr_mul(H2, d3), _svr_xor(C3, I3)) if I3 else []
+                bH  = (_svr_mul(H2, d3)[-1] if (H2 and d3 and _svr_mul(H2, d3)) else [])
+                bCI = (( _svr_xor(C3, I3)[-1] ) if I3 else [])
+                if proj_meta.get("na"):
+                    p_cert["witness"] = _witness_pack(bH, bCI, lanes=None)
+                    p_cert["results"] = {
+                        "out": {"2":{"eq": None},"3":{"eq": None}},
+                        "na_reason_code": proj_meta["reason"],
+                        "lanes": lanes,
+                        "lane_policy": "C bottom row",
+                        "selected_cols": list(lanes or []),
+                        "mismatch_cols_selected": [],
+                        "residual_tag_selected": "",
+                        "k2": None,
+                    }
+                else:
+                    # residual restricted to selected lanes
+                    R3s_bot = (R3s[-1] if R3s else [])
+                    p_cert["witness"] = _witness_pack(bH, bCI, lanes=lanes)
+                    p_cert["results"] = {
+                        "out": projected_out,
+                        "lanes": lanes,
+                        "lane_policy": "C bottom row",
+                        "selected_cols": list(lanes or []),
+                        "mismatch_cols_selected": _svr_mismatch_cols(R3s_bot, lanes),
+                        "residual_tag_selected": _svr_residual_bits(R3s_bot, lanes),
+                        "k2": None,
+                    }
+                p_proj_auto = _svr_write_cert(p_cert, "cert_projected")
 
             
                 # ----- 5) freezer: AUTO → FILE (deterministic; may be N/A) -----
@@ -2708,14 +2708,14 @@ p_proj_auto = _svr_write_cert(p_cert, "cert_projected")
                     "projected_cert":{"path": str(p_proj_auto),  "hash": p_cert["integrity"]["content_hash"]},
                 }
                 _svr_apply_sig8(strict_cert, embed_sig_auto)
-_svr_apply_sig8(p_cert, embed_sig_auto)
-_svr_apply_sig8(ab_auto, embed_sig_auto)
-p_ab_auto = _svr_write_cert(ab_auto, "cert_ab")
-st.session_state["ab_pin"] = {"state":"pinned","payload":{"embed_sig":embed_sig_auto,"policy_tag":"projected(columns@k=3,auto)"},"refreshed_at":_svr_now_iso()}
+                _svr_apply_sig8(p_cert, embed_sig_auto)
+                _svr_apply_sig8(ab_auto, embed_sig_auto)
+                p_ab_auto = _svr_write_cert(ab_auto, "cert_ab")
+                st.session_state["ab_pin"] = {"state":"pinned","payload":{"embed_sig":embed_sig_auto,"policy_tag":"projected(columns@k=3,auto)"},"refreshed_at":_svr_now_iso()}
             
                 # 7) A/B(file) cert (always emit; uses projector_hash or N/A)
                 embed_file, embed_sig_file = _svr_build_embed(ib, policy="strict__VS__projected(columns@k=3,file)", projector_hash=(projector_hash if not file_na_reason else None), na_reason=(file_na_reason if file_na_reason else None))
-ab_file = _svr_cert_common(ib, rc, "A/B")
+                ab_file = _svr_cert_common(ib, rc, "A/B")
                 ab_file["ab_pair"] = {
                     "pair_tag": "strict__VS__projected(columns@k=3,file)",
                     "embed_sig": embed_sig_file,
