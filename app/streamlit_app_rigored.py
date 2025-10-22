@@ -6535,32 +6535,45 @@ def _b2_row_from_cert(cert):
 
 def _b2_sort_key(row, curated_order):
     # curated codes first by ordering; then no-code by fixture label
-    code = row.get("fixture_code","") or ""
+    code = row.get("fixture_code", "") or ""
     if code and code in curated_order:
-        return (0, curated_order.index(code), row.get("fixture",""))
-    return (1, 10**9, row.get("fixture",""))
+        return (0, curated_order.index(code), row.get("fixture", ""))
+    return (1, 10**9, row.get("fixture", ""))
 
 def _b2_best_pick(rows):
     """
     For a given (district, fixture) bucket, pick ONE row by:
-      1) A/B-embedded projected (canon in {projected:auto, projected:file}), newest
+      1) A/B-embedded projected (canonical in {projected:auto, projected:file}), newest
       2) else projected (auto/file), newest
       3) else strict, newest
-    Caller must pass rows already newest→oldest.
+    Caller must pass rows already sorted from newest to oldest.
     """
-def is_proj(r): return r.get("projected") in (
     if not st.session_state.get("_solver_one_button_active"):
         st.info("Read-only panel: run the solver to write certs.")
-        return
-"projected:auto","projected:file")
-def is_ab(r):   return r.get("ab_embedded") == "true"
-    # newest first already
+        return None
+
+    def is_proj(r):
+        return r.get("projected") in ("projected:auto", "projected:file")
+
+    def is_ab(r):
+        return r.get("ab_embedded") == "true"
+
+    # Check for A/B-embedded projected (newest first)
     for r in rows:
-        if is_proj(r) and is_ab(r): return r
+        if is_proj(r) and is_ab(r):
+            return r
+
+    # Next, check for projected (auto/file)
     for r in rows:
-        if is_proj(r): return r
+        if is_proj(r):
+            return r
+
+    # Lastly, check for strict projected
     for r in rows:
-        if r.get("projected") == "strict": return r
+        if r.get("projected") == "strict":
+            return r
+
+    # Default: return the first row if exists
     return rows[0] if rows else None
 
 def build_b2_gallery(debounce: bool = True):
