@@ -235,27 +235,27 @@ if "_svr_projected_auto_from_blocks" not in globals():
           out   = {"2":{"eq": ...}, "3":{"eq": ...}} (None on N/A)
         """
         
-H2 = (bH.get("2") or [])
-d3 = (bB.get("3") or [])
-C3 = (bC.get("3") or [])
-# guard A: C3 square
-if not (C3 and C3[0] and len(C3) == len(C3[0])):
-    return {"na": True, "reason": NA["AUTO_REQUIRES_SQUARE_C3"]}, [], {"2": {"eq": None, "na_reason": NA["AUTO_REQUIRES_SQUARE_C3"]}, "3": {"eq": None, "na_reason": NA["AUTO_REQUIRES_SQUARE_C3"]}}
-n3 = len(C3)
-lanes = [1 if int(x) == 1 else 0 for x in (C3[-1] if C3 else [])]
-# guard B: non-zero mask
-if sum(lanes) == 0:
-    return {"na": True, "reason": NA["ZERO_LANE_PROJECTOR"]}, lanes, {"2": {"eq": None, "na_reason": NA["ZERO_LANE_PROJECTOR"]}, "3": {"eq": None, "na_reason": NA["ZERO_LANE_PROJECTOR"]}}
-# guard C: shapes OK for H2@d3
-if not _svr_shape_ok_for_mul(H2, d3):
-    return {"na": True, "reason": NA["BAD_SHAPE"]}, lanes, {"2": {"eq": None, "na_reason": NA["BAD_SHAPE"]}, "3": {"eq": None, "na_reason": NA["BAD_SHAPE"]}}
-I3  = _svr_eye(n3)
-R3s = _svr_xor(_svr_mul(H2, d3), _svr_xor(C3, I3))
-# P = diag(lanes)
-P   = [[1 if (i == j and lanes[j] == 1) else 0 for j in range(n3)] for i in range(n3)]
-R3p = _svr_mul(R3s, P)
-eq3 = _svr_is_zero(R3p)
-return {"na": False, "policy": "auto_c_bottom"}, lanes, {"2": {"eq": True, "na_reason": None}, "3": {"eq": bool(eq3), "na_reason": None}}
+        H2 = (bH.get("2") or [])
+        d3 = (bB.get("3") or [])
+        C3 = (bC.get("3") or [])
+        # guard A: C3 square
+        if not (C3 and C3[0] and len(C3) == len(C3[0])):
+            return {"na": True, "reason": NA["AUTO_REQUIRES_SQUARE_C3"]}, [], {"2": {"eq": None, "na_reason": NA["AUTO_REQUIRES_SQUARE_C3"]}, "3": {"eq": None, "na_reason": NA["AUTO_REQUIRES_SQUARE_C3"]}}
+        n3 = len(C3)
+        lanes = [1 if int(x) == 1 else 0 for x in (C3[-1] if C3 else [])]
+        # guard B: non-zero mask
+        if sum(lanes) == 0:
+            return {"na": True, "reason": NA["ZERO_LANE_PROJECTOR"]}, lanes, {"2": {"eq": None, "na_reason": NA["ZERO_LANE_PROJECTOR"]}, "3": {"eq": None, "na_reason": NA["ZERO_LANE_PROJECTOR"]}}
+        # guard C: shapes OK for H2@d3
+        if not _svr_shape_ok_for_mul(H2, d3):
+            return {"na": True, "reason": NA["BAD_SHAPE"]}, lanes, {"2": {"eq": None, "na_reason": NA["BAD_SHAPE"]}, "3": {"eq": None, "na_reason": NA["BAD_SHAPE"]}}
+        I3  = _svr_eye(n3)
+        R3s = _svr_xor(_svr_mul(H2, d3), _svr_xor(C3, I3))
+        # P = diag(lanes)
+        P   = [[1 if (i == j and lanes[j] == 1) else 0 for j in range(n3)] for i in range(n3)]
+        R3p = _svr_mul(R3s, P)
+        eq3 = _svr_is_zero(R3p)
+        return {"na": False, "policy": "auto_c_bottom"}, lanes, {"2": {"eq": True, "na_reason": None}, "3": {"eq": bool(eq3), "na_reason": None}}
 
 
 # --- inputs signature helpers (guarded) ----------------------------------------
