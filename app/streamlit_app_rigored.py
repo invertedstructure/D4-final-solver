@@ -915,8 +915,7 @@ def require_fresh_run_ctx(*, stop_on_error: bool = False):
     def _halt(
     if not st.session_state.get("_solver_one_button_active"):
         st.info("Read-only panel: run the solver to write certs.")
-        return
-msg):
+        return(msg):
         st.warning(msg)
         if stop_on_error:
             st.stop()
