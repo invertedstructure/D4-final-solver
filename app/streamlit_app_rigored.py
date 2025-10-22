@@ -482,27 +482,36 @@ def projector_hash_of(P_blocks: list[list[int]], *, mode: str = "blocks") -> str
     return ""
 
 
-# ---- helper for recomputing diag lanes if the snapshot lacks them
+# Helper for recomputing diag lanes if the snapshot lacks them
 def _ab_lane_vectors_bottom(H2, d3, C3, lm):
     """Lane vectors as bottom-row probes (matches your earlier UI semantics)."""
     try:
-        H2d3  = mul(H2, d3) if _ab_shape_ok(H2, d3) else []
+        H2d3 = mul(H2, d3) if _ab_shape_ok(H2, d3) else []
         C3pI3 = _ab_xor(C3, _ab_eye(len(C3))) if (C3 and C3[0]) else []
     except Exception:
         H2d3, C3pI3 = [], []
-    def _bottom(M):
-    if not st.session_state.get("_solver_one_button_active"):
-        st.info("Read-only panel: run the solver to write certs.")
-        return
-        try: return M[-1] if (M and len(M)) else []
-        except Exception: return []
-    bH, bC = _bottom(H2d3), _bottom(C3pI3)
-    idx = [j for j,m in enumerate(lm or []) if m]
+
+    # Nested function to get bottom row values
+    def _bottom(matrix):
+        if not st.session_state.get("_solver_one_button_active"):
+            st.info("Read-only panel: run the solver to write certs.")
+            return []
+        try:
+            return matrix[-1] if (matrix and len(matrix)) else []
+        except Exception:
+            return []
+
+    # Compute bottom row values for H2d3 and C3pI3
+    bH = _bottom(H2d3)
+    bC = _bottom(C3pI3)
+
+    # Get indices where lm is True
+    idx = [j for j, m in enumerate(lm or []) if m]
+
+    # Calculate vH and vC based on bottom row values
     vH = [int(bH[j]) & 1 for j in idx] if (bH and idx and max(idx) < len(bH)) else []
     vC = [int(bC[j]) & 1 for j in idx] if (bC and idx and max(idx) < len(bC)) else []
-    return vH, vC
 
-    return hv, cv
 
 # ---------------- Fixture helpers (single source of truth) ----------------
 
