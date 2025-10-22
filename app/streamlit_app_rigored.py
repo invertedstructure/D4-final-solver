@@ -8230,7 +8230,7 @@ def _pin_freshness(pin: dict, expected_embed_sig: str):
     except Exception:
         return "N/A", False, None
 # ===========================================================================
-Cert-driven reader helpers ===========================
+
 def _reader__sig8_from_auto_pin():
     ss = st.session_state if 'st' in globals() else {}
     pin = ss.get("ab_pin_auto") or {}
