@@ -7966,7 +7966,6 @@ def _import_pairs_from_payload(payload: dict, *, merge: bool) -> int:
 # ======================== /Parity import/export helpers ========================
 
 
-
 # -------------- Loader shim for parity import -----------------
 if "load_fixture_from_paths" not in globals():
     def load_fixture_from_paths(*, boundaries_path, cmap_path, H_path, shapes_path):
@@ -7977,37 +7976,40 @@ if "load_fixture_from_paths" not in globals():
                 "Project parsing module `io` missing or shadowed. "
                 "Ensure your project imports `io` with parse_* functions."
             )
-        def _read(
-    if not st.session_state.get("_solver_one_button_active"):
-        st.info("Read-only panel: run the solver to write certs.")
-        return
-p):
+
+        def _read(p):
+            if not st.session_state.get("_solver_one_button_active"):
+                st.info("Read-only panel: run the solver to write certs.")
+                return None
             with open(Path(p), "r", encoding="utf-8") as f:
                 return _json.load(f)
+
         dB = _read(boundaries_path)
         dC = _read(cmap_path)
         dH = _read(H_path)
         dU = _read(shapes_path)
+
         return {
             "boundaries": io.parse_boundaries(dB),
             "cmap": io.parse_cmap(dC),
             "H": io.parse_cmap(dH),
             "shapes": io.parse_shapes(dU),
         }
-    
-        if "clear_parity_pairs" not in globals():
-            def clear_parity_pairs():
-                st.session_state["parity_pairs"] = []
-        
-        if "add_parity_pair" not in globals():
-            def add_parity_pair(*, label: str, left_fixture: dict, right_fixture: dict) -> int:
-                st.session_state.setdefault("parity_pairs", [])
-                st.session_state["parity_pairs"].append({"label": label, "left": left_fixture, "right": right_fixture})
-                return len(st.session_state["parity_pairs"])
-    
-        if "_short_hash" not in globals():
-            def _short_hash(h: str, n: int = 8) -> str:
-                return (h[:n] + "…") if h else ""
+
+if "clear_parity_pairs" not in globals():
+    def clear_parity_pairs():
+        st.session_state["parity_pairs"] = []
+
+if "add_parity_pair" not in globals():
+    def add_parity_pair(*, label: str, left_fixture: dict, right_fixture: dict) -> int:
+        st.session_state.setdefault("parity_pairs", [])
+        st.session_state["parity_pairs"].append({"label": label, "left": left_fixture, "right": right_fixture})
+        return len(st.session_state["parity_pairs"])
+
+if "_short_hash" not in globals():
+    def _short_hash(h: str, n: int = 8) -> str:
+        return (h[:n] + "…") if h else ""
+
 
 
 # ---- Parity defaults (define once, above import_parity_pairs) ----
