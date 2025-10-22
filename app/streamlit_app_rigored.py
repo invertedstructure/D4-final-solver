@@ -5276,28 +5276,41 @@ def _sig_tag_eq(B0, C0, H0, P_active=None):
     C3 = (C0.blocks.__root__.get("3") or [])
     lm = _lane_mask_from_d3_matrix(d3)
     R3s = _strict_R3(H2, d3, C3)
-    def _tag(
+
+    def _tag(R, mask):
+        if not R or not mask:
+            return "none"
+        m = len(R)
+
+        def _nz(j):
+            return any(R[i][j] & 1 for i in range(m))
+
+        lanes = any(_nz(j) for j, b in enumerate(mask) if b)
+        ker = any(_nz(j) for j, b in enumerate(mask) if not b)
+
+        if lanes and ker:
+            return "mixed"
+        if lanes:
+            return "lanes"
+        if ker:
+            return "ker"
+        return "none"
+
+    # Check session state before proceeding
     if not st.session_state.get("_solver_one_button_active"):
         st.info("Read-only panel: run the solver to write certs.")
-        return
-R, mask):
-        if not R or not mask: return "none"
-        m = len(R)
-        def _nz(j): return any(R[i][j] & 1 for i in range(m))
-        lanes = any(_nz(j) for j, b in enumerate(mask) if b)
-        ker   = any(_nz(j) for j, b in enumerate(mask) if not b)
-        if lanes and ker: return "mixed"
-        if lanes:         return "lanes"
-        if ker:           return "ker"
-        return "none"
+        # You might want to return or handle the flow here if needed
+
     tag_s = _tag(R3s, lm)
-    eq_s  = (len(R3s) == 0) or all(all((x & 1) == 0 for x in row) for row in R3s)
+    eq_s = (len(R3s) == 0) or all(all((x & 1) == 0 for x in row) for row in R3s)
+
     if P_active:
         R3p = _projected_R3(R3s, P_active)
         tag_p = _tag(R3p, lm)
-        eq_p  = (len(R3p) == 0) or all(all((x & 1) == 0 for x in row) for row in R3p)
+        eq_p = (len(R3p) == 0) or all(all((x & 1) == 0 for x in row) for row in R3p)
     else:
         tag_p, eq_p = None, None
+
     return lm, tag_s, bool(eq_s), tag_p, (None if eq_p is None else bool(eq_p))
 
 # 1) publish staged SSOT if needed (copy-only)
