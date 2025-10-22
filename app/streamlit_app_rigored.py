@@ -2685,7 +2685,7 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
                     freezer_cert["freezer"] = {"status": freezer_status, "lanes": list(lanes or []), "projector_hash": projector_hash, "na_reason_code": (file_na_reason or "")}
                     p_freezer = _svr_write_cert(freezer_cert, "cert_freezer")
                     p_proj_file = None
-                else:
+                    else:
                     # projected(columns@k=3,file) cert
                     p_cert_file = _svr_cert_common(ib, rc, "projected(columns@k=3,file)")
                     p_cert_file["results"] = {"out": proj_file_out, "projector_hash": projector_hash}
