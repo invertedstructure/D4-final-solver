@@ -7474,7 +7474,6 @@ PARITY_CSV_PATH  = globals().get("PARITY_CSV_PATH",  PARITY_SUMMARY_CSV)
 
 LOGS_DIR = Path(globals().get("LOGS_DIR", "logs"))
 
-
 # --------- Universal adapter: capture old _paths_from_fixture_or_current ----------
 # Capture the existing function once, outside the new definition
 _OLD_PFFC = globals().get("_paths_from_fixture_or_current", None)
@@ -7482,12 +7481,12 @@ _OLD_PFFC = globals().get("_paths_from_fixture_or_current", None)
 def _paths_from_fixture_or_current(*args):
     # Use the captured old function to avoid recursion issues
     if "residual_tag" not in globals():
-        def residual_tag(
-    if not st.session_state.get("_solver_one_button_active"):
-        st.info("Read-only panel: run the solver to write certs.")
-        return
-matrix, mask):
+        def residual_tag(*matrix_mask):
             return "unknown"
+
+        if not st.session_state.get("_solver_one_button_active"):
+            st.info("Read-only panel: run the solver to write certs.")
+            return
 
     # Extract fx from args
     if len(args) == 1 and isinstance(args[0], dict):
@@ -7520,6 +7519,7 @@ matrix, mask):
         out.setdefault(k, default_paths[k])
 
     return out
+
 
 # ---- Parity types & state ----
 from typing import TypedDict, Optional, Literal
