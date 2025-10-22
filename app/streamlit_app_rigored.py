@@ -4926,54 +4926,61 @@ def _lane_mask_from_d3_matrix(d3: list[list[int]]) -> list[int]:
         return []
     rows, n3 = len(d3), len(d3[0])
     return [1 if any(d3[i][j] & 1 for i in range(rows)) else 0 for j in range(n3)]
-
+    
 def _sig_tag_eq(boundaries_obj, cmap_obj, H_used_obj, P_active=None):
     """
     Return (lane_mask, tag_strict, eq3_strict, tag_proj, eq3_proj).
     Uses optional global residual_tag(R3, lane_mask) if available.
     """
+    # Extract matrices from objects
     d3 = (boundaries_obj.blocks.__root__.get("3") or [])
     H2 = (H_used_obj.blocks.__root__.get("2") or [])
     C3 = (cmap_obj.blocks.__root__.get("3") or [])
+
+    # Generate lane mask from d3 matrix
     lm = _lane_mask_from_d3_matrix(d3)
+
+    # Compute R3s based on H2, d3, C3
     R3s = _strict_R3(H2, d3, C3)
 
+    # Check for residual_tag function in globals
     if "residual_tag" in globals() and callable(globals()["residual_tag"]):
         try:
             tag_s = residual_tag(R3s, lm)  # type: ignore[name-defined]
         except Exception:
             tag_s = "error"
     else:
-          # Local classifier
-   def _residual_tag_local(R, mask):
-       if not R or not mask:
-           return "none"
-       m = len(R)
-    
-       def _nz(j):
-           return any(R[i][j] & 1 for i in range(m))
-    
-       lanes = any(_nz(j) for j, b in enumerate(mask) if b)
-       ker = any(_nz(j) for j, b in enumerate(mask) if not b)
-    
-       if lanes and ker:
-           return "mixed"
-       if lanes:
-           return "lanes"
-       if ker:
-           return "ker"
-       return "none"
-    
-   if not st.session_state.get("_solver_one_button_active"):
-       st.info("Read-only panel: run the solver to write certs.")
-       # You might want to return or handle the flow here if needed
-    
-    # Assuming R3s and lm are defined elsewhere in your code
-    tag_s = _residual_tag_local(R3s, lm)
-    
+        # Local classifier if residual_tag not available
+        def _residual_tag_local(R, mask):
+            if not R or not mask:
+                return "none"
+            m = len(R)
+
+            def _nz(j):
+                return any(R[i][j] & 1 for i in range(m))
+
+            lanes = any(_nz(j) for j, b in enumerate(mask) if b)
+            ker = any(_nz(j) for j, b in enumerate(mask) if not b)
+
+            if lanes and ker:
+                return "mixed"
+            if lanes:
+                return "lanes"
+            if ker:
+                return "ker"
+            return "none"
+
+        # Check session state before proceeding
+        if not st.session_state.get("_solver_one_button_active"):
+            st.info("Read-only panel: run the solver to write certs.")
+            # Depending on context, you might want to return or handle flow here
+
+        # Assuming R3s and lm are defined elsewhere in your code
+        tag_s = _residual_tag_local(R3s, lm)
+
     # Check if R3s is all zeros
     eq_s = (len(R3s) == 0) or all(all((x & 1) == 0 for x in row) for row in R3s)
-    
+
     if P_active:
         R3p = _projected_R3(R3s, P_active)  # Assuming this function is defined elsewhere
         # Check if residual_tag function exists
@@ -4987,9 +4994,10 @@ def _sig_tag_eq(boundaries_obj, cmap_obj, H_used_obj, P_active=None):
         eq_p = (len(R3p) == 0) or all(all((x & 1) == 0 for x in row) for row in R3p)
     else:
         tag_p, eq_p = None, None
-    
-    # Return statement (assuming this is part of a larger function)
-    return lm, tag_s, bool(eq_s), tag_p, (None if eq_p is None else bool(eq_p))     
+
+    # Return the gathered information
+    return lm, tag_s, bool(eq_s), tag_p, (None if eq_p is None else bool(eq_p))
+ 
   
 
 # -------- optional carrier (U) mutation hooks (fallback implementation) --------
