@@ -6892,17 +6892,19 @@ def build_b2_gallery(*, debounce: bool = True) -> tuple[Path, Path, dict]:
 def render_b2_gallery_controls():
     with st.container():
         st.markdown("### B2 — Lane exploration gallery (CSV)")
-        col1, col2 = st.columns([1,3])
+        col1, col2 = st.columns([1, 3])
         with col1:
             if st.button("Build Gallery CSV", key="btn_b2_build"):
                 csvp, valp, rec = build_b2_gallery(debounce=False)
                 st.success(f"Built → `{csvp.as_posix()}` · rows={rec['rows_written']}")
-                with st.expander("Validation receipt"):
-    if not st.session_state.get("_solver_one_button_active"):
-        st.info("Read-only panel: run the solver to write certs.")
-        return
 
-                    st.json(rec)
+    with st.expander("Validation receipt"):
+        if not st.session_state.get("_solver_one_button_active"):
+            st.info("Read-only panel: run the solver to write certs.")
+            return
+        # Display the JSON receipt if available
+        st.json(rec)
+        col1, col2 = st.columns([1, 3])
         with col2:
             if (REPORTS_DIR / "b2_gallery.csv").exists():
                 st.caption(f"Latest: `{(REPORTS_DIR / 'b2_gallery.csv').as_posix()}`")
