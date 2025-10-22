@@ -2558,7 +2558,7 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
         else:
             ss['_solver_busy'] = True
             ss['_solver_one_button_active'] = True
-            try:
+            
             try:
                 # 1) freeze SSOT (uploads-first)
                 pb = _svr_resolve_all_to_paths()
