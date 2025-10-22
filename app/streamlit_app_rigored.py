@@ -2776,7 +2776,7 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
                 },
                 "consumed": False,
                 "refreshed_at": _svr_now_iso(),
-            }
+            })
             
             # FILE pin (A/B:file)
             _svr_set_pin_DISABLED(st.session_state,  {
