@@ -2691,10 +2691,10 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
                     "projected_cert":{"path": str(p_proj_auto),  "hash": p_cert["integrity"]["content_hash"]},
                 }
                 _svr_apply_sig8(strict_cert, embed_sig_auto)
-_svr_apply_sig8(p_cert, embed_sig_auto)
-_svr_apply_sig8(ab_auto, embed_sig_auto)
-p_ab_auto = _svr_write_cert(ab_auto, "cert_ab")
-st.session_state["ab_pin"] = {"state":"pinned","payload":{"embed_sig":embed_sig_auto,"policy_tag":"projected(columns@k=3,auto)"},"refreshed_at":_svr_now_iso()}
+                _svr_apply_sig8(p_cert, embed_sig_auto)
+                _svr_apply_sig8(ab_auto, embed_sig_auto)
+                p_ab_auto = _svr_write_cert(ab_auto, "cert_ab")
+                st.session_state["ab_pin"] = {"state":"pinned","payload":{"embed_sig":embed_sig_auto,"policy_tag":"projected(columns@k=3,auto)"},"refreshed_at":_svr_now_iso()}
             
                 # 7) A/B(file) cert (always emit; uses projector_hash or N/A)
                 embed_file, embed_sig_file = _svr_build_embed(ib, policy="strict__VS__projected(columns@k=3,file)", projector_hash=(projector_hash if not file_na_reason else None), na_reason=(file_na_reason if file_na_reason else None))
