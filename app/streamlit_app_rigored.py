@@ -4944,76 +4944,53 @@ def _sig_tag_eq(boundaries_obj, cmap_obj, H_used_obj, P_active=None):
         except Exception:
             tag_s = "error"
     else:
-           
-     # Local classifier
-    def _residual_tag_local(R, mask):
-        if not R or not mask:
-            return "none"
-        m = len(R)
-    
-        def _nz(j):
-            return any(R[i][j] & 1 for i in range(m))
-    
-        lanes = any(_nz(j) for j, b in enumerate(mask) if b)
-        ker = any(_nz(j) for j, b in enumerate(mask) if not b)
-    
-        if lanes and ker:
-            return "mixed"
-        if lanes:
-            return "lanes"
-        if ker:
-            return "ker"
+      # Local classifier
+def _residual_tag_local(R, mask):
+    if not R or not mask:
         return "none"
-    
-    if not st.session_state.get("_solver_one_button_active"):
-        st.info("Read-only panel: run the solver to write certs.")
-        # You might want to return or handle the flow here if needed
-    
-    # Assuming R3s and lm are defined elsewhere in your code
-    tag_s = _residual_tag_local(R3s, lm)
-    
-    # Check if R3s is all zeros
-    eq_s = (len(R3s) == 0) or all(all((x & 1) == 0 for x in row) for row in R3s)
-    
-    if P_active:
-        R3p = _projected_R3(R3s, P_active)  # Assuming this function is defined elsewhere
-        # Check if residual_tag function exists
-        if "residual_tag" in globals() and callable(globals()["residual_tag"]):
-            try:
-                tag_p = residual_tag(R3p, lm)  # type: ignore[name-defined]
-            except Exception:
-                tag_p = "error"
-        else:
-            tag_p = tag_s
-        eq_p = (len(R3p) == 0) or all(all((x & 1) == 0 for x in row) for row in R3p)
+    m = len(R)
+
+    def _nz(j):
+        return any(R[i][j] & 1 for i in range(m))
+
+    lanes = any(_nz(j) for j, b in enumerate(mask) if b)
+    ker = any(_nz(j) for j, b in enumerate(mask) if not b)
+
+    if lanes and ker:
+        return "mixed"
+    if lanes:
+        return "lanes"
+    if ker:
+        return "ker"
+    return "none"
+
+if not st.session_state.get("_solver_one_button_active"):
+    st.info("Read-only panel: run the solver to write certs.")
+    # You might want to return or handle the flow here if needed
+
+# Assuming R3s and lm are defined elsewhere in your code
+tag_s = _residual_tag_local(R3s, lm)
+
+# Check if R3s is all zeros
+eq_s = (len(R3s) == 0) or all(all((x & 1) == 0 for x in row) for row in R3s)
+
+if P_active:
+    R3p = _projected_R3(R3s, P_active)  # Assuming this function is defined elsewhere
+    # Check if residual_tag function exists
+    if "residual_tag" in globals() and callable(globals()["residual_tag"]):
+        try:
+            tag_p = residual_tag(R3p, lm)  # type: ignore[name-defined]
+        except Exception:
+            tag_p = "error"
     else:
-        tag_p, eq_p = None, None
-    
-    # Return statement (assuming this is part of a larger function)
-    return lm, tag_s, bool(eq_s), tag_p, (None if eq_p is None else bool(eq_p))
-    
-    # Assuming R3s and lm are defined elsewhere in your code
-    tag_s = _residual_tag_local(R3s, lm)
-    
-    # Check if R3s is all zeros
-    eq_s = (len(R3s) == 0) or all(all((x & 1) == 0 for x in row) for row in R3s)
-    
-    if P_active:
-        R3p = _projected_R3(R3s, P_active)  # Assuming this function is defined elsewhere
-        # Check if residual_tag function exists
-        if "residual_tag" in globals() and callable(globals()["residual_tag"]):
-            try:
-                tag_p = residual_tag(R3p, lm)  # type: ignore[name-defined]
-            except Exception:
-                tag_p = "error"
-        else:
-            tag_p = tag_s
-        eq_p = (len(R3p) == 0) or all(all((x & 1) == 0 for x in row) for row in R3p)
-    else:
-        tag_p, eq_p = None, None
-    
-    # Return statement (assuming this is part of a larger function)
-    return lm, tag_s, bool(eq_s), tag_p, (None if eq_p is None else bool(eq_p)) 
+        tag_p = tag_s
+    eq_p = (len(R3p) == 0) or all(all((x & 1) == 0 for x in row) for row in R3p)
+else:
+    tag_p, eq_p = None, None
+
+# Return statement (assuming this is part of a larger function)
+return lm, tag_s, bool(eq_s), tag_p, (None if eq_p is None else bool(eq_p))     
+  
 
 # -------- optional carrier (U) mutation hooks (fallback implementation) --------
 # If your project already defines get_carrier_mask / set_carrier_mask, this block is a no-op.
