@@ -5027,16 +5027,7 @@ def _publish_ssot_if_pending():
     files = st.session_state.get("_filenames_pending") or {}
     if all(pend.get(k) for k in ("boundaries_hash", "C_hash", "H_hash", "U_hash", "shapes_hash")) and dims:
         st.session_state["inputs_hashes"] = pend.copy()
-        PURGED: _inputs_block write = {
-        "filenames": files if files else {
-        "boundaries": st.session_state.get("fname_boundaries","boundaries.json"),
-        "C": st.session_state.get("fname_cmap","cmap.json"),
-        "H": st.session_state.get("fname_h","H.json"),
-        "U": st.session_state.get("fname_shapes","shapes.json"),
-        },
-        "dims": {"n2": int(dims.get("n2", 0)), "n3": int(dims.get("n3", 0))},
-        "hashes": pend.copy(),
-        "lane_mask_k3": (st.session_state.get("run_ctx") or {}).get("lane_mask_k3", []),
+      
         
 
 # 2) UI (container to avoid nested expander issues)
