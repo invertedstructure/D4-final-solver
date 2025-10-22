@@ -2308,17 +2308,27 @@ def _bottom_row(M): return M[-1] if (M and len(M)) else []
 
 # ---------- UI ----------
 with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
+    # small local helper for FILE embed sig (kept local to avoid name collisions)
+    def _svr_embed_sig_file(inputs_sig, projector_hash: str):
+        blob = {
+            "inputs": list(inputs_sig),
+            "policy": "projected(columns@k=3,file)",
+            "projector_hash": str(projector_hash or ""),
+        }
+        return _hashlib.sha256(_json.dumps(blob, separators=(",", ":"), sort_keys=True).encode("ascii")).hexdigest()
+
     # Preflight (read-only)
     try:
         pf = _svr_resolve_all_to_paths()
         pB,pC,pH,pU = Path(pf["B"][0]).name, Path(pf["C"][0]).name, Path(pf["H"][0]).name, Path(pf["U"][0]).name
         st.caption(f"Sources → B:{pB} · C:{pC} · H:{pH} · U:{pU}")
+
         d3pf = pf["B"][1].get("3") or []; C3pf = pf["C"][1].get("3") or []; H2pf = pf["H"][1].get("2") or []
         n2p, n3p = len(d3pf), (len(d3pf[0]) if (d3pf and d3pf[0]) else 0)
         if n2p and n3p:
             I3pf = _svr_eye(len(C3pf)) if (C3pf and len(C3pf)==len(C3pf[0])) else []
             C3pIpf = _svr_xor(C3pf, I3pf) if I3pf else []
-            bottom_H = (_svr_mul(H2pf, d3pf)[-1] if (H2pf and d3pf and _svr_mul(H2pf,d3pf)) else [])
+            bottom_H  = (_svr_mul(H2pf, d3pf)[-1] if (H2pf and d3pf and _svr_mul(H2pf, d3pf)) else [])
             bottom_C  = (C3pf[-1] if C3pf else [])
             bottom_CI = (C3pIpf[-1] if C3pIpf else [])
             st.caption(f"Preflight — n₂×n₃ = {n2p}×{n3p} · (H2·d3)_bottom={bottom_H} · C3_bottom={bottom_C} · (C3⊕I3)_bottom={bottom_CI}")
@@ -2327,199 +2337,180 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
     except Exception:
         st.info("Preflight: unable to resolve sources yet.")
 
-    run_btn = st.button("Run solver (freeze → strict → projected(auto) → A/B(auto) → freezer → A/B(file))", key="btn_svr_run")
+    run_btn = st.button("Run solver (freeze → strict → projected(auto) → freezer(FILE) → A/B(auto & file) → write certs)", key="btn_svr_run")
     if run_btn:
         try:
             # 1) freeze SSOT (uploads-first)
             pb = _svr_resolve_all_to_paths()
-            ib, rc = _svr_freeze_ssot(pb)  # sets n2,n3,d3 + hashes/filenames
-
-            # unpack blocks
-            H2 = pb["H"][1].get("2") or []
-            d3 = pb["B"][1].get("3") or []
-            C3 = pb["C"][1].get("3") or []
-            n3 = int((ib.get("dims") or {}).get("n3") or 0)
-
-            # shape guards
-            C_square = bool(C3 and C3[0] and (len(C3)==len(C3[0])==n3))
-            Hd_ok    = bool(H2 and d3 and _svr_mul(H2, d3) and len(_svr_mul(H2,d3)[0])==n3)
-
-            # witnesses (full-bottoms; lane-indexed later if posed)
-            H2d3   = _svr_mul(H2, d3) if Hd_ok else []
-            I3     = _svr_eye(n3) if C_square else []
-            C3pI3  = _svr_xor(C3, I3) if C_square else []
-            w_botH = _bottom_row(H2d3)
-            w_botC = _bottom_row(C3)
-            w_botCI= _bottom_row(C3pI3)
+            ib, rc = _svr_freeze_ssot(pb)
 
             # 2) strict lap
-            strict_na = None
-            strict_eq3 = None
-            R3 = []
-            if not C_square:
-                strict_na = "C3_NOT_SQUARE"
-            elif not Hd_ok:
-                strict_na = "BAD_SHAPE"
-            else:
-                R3 = _svr_xor(_svr_mul(H2, d3), _svr_xor(C3, I3))
-                strict_eq3 = _svr_is_zero(R3)
-
-            strict_out = {"2":{"eq": None}, "3":{"eq": (True if strict_eq3 is True else (False if strict_eq3 is False else None))}}
-            strict_cert = _svr_cert_common(ib, rc, "strict")
-            strict_cert["results"]  = {"out": strict_out, "na_reason": strict_na}
-            strict_cert["witness"]  = {"bottom_H2d3": w_botH, "bottom_C3pI3": w_botCI}
-            p_strict = _svr_write_cert(strict_cert, "cert_strict")
+            strict_out = _svr_strict_from_blocks(pb["H"][1], pb["B"][1], pb["C"][1])
 
             # 3) projected(auto) lap
-            lanes = []
-            proj_auto_na = None
-            proj_auto_eq3 = None
-            R3P = []
-            if not C_square:
-                proj_auto_na = "AUTO_REQUIRES_SQUARE_C3"
-            else:
-                lanes = [1 if int(x)==1 else 0 for x in (C3[-1] if C3 else [])]
-                if sum(lanes)==0:
-                    proj_auto_na = "ZERO_LANE_PROJECTOR"
-                elif not Hd_ok:
-                    proj_auto_na = "BAD_SHAPE"
-                else:
-                    P = [[1 if (i==j and lanes[j]==1) else 0 for j in range(n3)] for i in range(n3)]
-                    R3P = _svr_mul(R3, P) if (R3 and P) else []
-                    proj_auto_eq3 = _svr_is_zero(R3P)
+            proj_meta, lanes, projected_out = _svr_projected_auto_from_blocks(pb["H"][1], pb["B"][1], pb["C"][1])
 
-            projected_out = {"2":{"eq": None}, "3":{"eq": (True if proj_auto_eq3 is True else (False if proj_auto_eq3 is False else None))}}
+            # 4) write strict + projected(auto) certs
+            inputs_sig = _svr_inputs_sig(ib)
 
-            p_auto = _svr_cert_common(ib, rc, "projected(columns@k=3,auto)")
-            p_auto["results"] = {"out": projected_out, "lanes": lanes, "lane_policy": "C bottom row", "na_reason": proj_auto_na}
-            # witness: include lane-indexed when posed
-            if lanes and proj_auto_na is None:
-                idx = [j for j,m in enumerate(lanes) if m]
-                p_auto["witness"] = {
-                    "bottom_H2d3": (_bottom_row(H2d3) if H2d3 else []),
-                    "bottom_C3pI3": (_bottom_row(C3pI3) if C3pI3 else []),
-                    "lane_indexed": True,
-                    "idx": idx,
+            strict_cert = _svr_cert_common(ib, rc, "strict")
+            strict_cert["results"] = {"out": strict_out}
+            p_strict = _svr_write_cert(strict_cert, "cert_strict")
+
+            p_cert = _svr_cert_common(ib, rc, "projected(columns@k=3,auto)")
+            if proj_meta.get("na"):
+                p_cert["results"] = {
+                    "out": {"2":{"eq": None},"3":{"eq": None}},
+                    "na_reason": proj_meta["reason"],
+                    "lanes": lanes,
+                    "lane_policy": "C bottom row",
                 }
             else:
-                p_auto["witness"] = {"bottom_H2d3": w_botH, "bottom_C3pI3": w_botCI, "lane_indexed": False}
-            p_proj = _svr_write_cert(p_auto, "cert_projected")
+                p_cert["results"] = {"out": projected_out, "lanes": lanes, "lane_policy": "C bottom row"}
+            p_proj_auto = _svr_write_cert(p_cert, "cert_projected")
 
-            # 4) A/B(auto) — unified embed
-            embed_auto, embed_sig_auto = _svr_build_embed(
-                ib,
-                policy="strict__VS__projected(columns@k=3,auto)",
-                lanes=(lanes if proj_auto_na is None else None),
-                projector_hash=None,
-                na_reason=(None if proj_auto_na is None else proj_auto_na),
+            # ----- 5) freezer: AUTO → FILE (deterministic; may be N/A) -----
+            # eligibility = AUTO posed & lanes non-zero
+            file_na_reason = None
+            proj_file_out = {"2":{"eq": None},"3":{"eq": None}}
+            projector_hash = ""
+            if proj_meta.get("na"):
+                # map AUTO N/A → FREEZER_* code
+                r = str(proj_meta["reason"])
+                if   r == "AUTO_REQUIRES_SQUARE_C3": file_na_reason = "FREEZER_C3_NOT_SQUARE"
+                elif r == "ZERO_LANE_PROJECTOR":     file_na_reason = "FREEZER_ZERO_LANE_PROJECTOR"
+                else:                                 file_na_reason = "FREEZER_BAD_SHAPE"
+            else:
+                # Build Π = diag(lanes); compute file verdict on the same R3
+                H2 = pb["H"][1].get("2") or []
+                d3 = pb["B"][1].get("3") or []
+                C3 = pb["C"][1].get("3") or []
+                I3 = _svr_eye(len(C3)) if (C3 and len(C3)==len(C3[0])) else []
+                # If strict was posed, we have R3s; else recompute safely
+                if I3 and H2 and d3:
+                    R3s = _svr_xor(_svr_mul(H2, d3), _svr_xor(C3, I3))
+                    P   = [[1 if (i==j and lanes[j]==1) else 0 for j in range(len(lanes))] for i in range(len(lanes))]
+                    R3p_file = _svr_mul(R3s, P) if (R3s and len(R3s[0])==len(P)) else []
+                    proj_file_out = {"2":{"eq": True}, "3":{"eq": _svr_is_zero(R3p_file)}}
+                    projector_hash = "sha256:" + _svr_hash_json({"P": P})
+                else:
+                    file_na_reason = "FREEZER_BAD_SHAPE"
+
+            # write freezer/file cert(s)
+            if file_na_reason:
+                freezer_cert = _svr_cert_common(ib, rc, "projector_freezer")
+                freezer_cert["freezer"] = {"status":"N/A", "na_reason": file_na_reason, "lanes": lanes}
+                p_freezer = _svr_write_cert(freezer_cert, "cert_freezer")
+                p_proj_file = None
+            else:
+                # projected(file) cert
+                p_cert_file = _svr_cert_common(ib, rc, "projected(columns@k=3,file)")
+                p_cert_file["results"] = {"out": proj_file_out, "projector_hash": projector_hash}
+                p_proj_file = _svr_write_cert(p_cert_file, "cert_projected_file")
+                # freezer OK record (optional, lightweight)
+                freezer_cert = _svr_cert_common(ib, rc, "projector_freezer")
+                freezer_cert["freezer"] = {"status":"OK", "lanes": lanes, "projector_hash": projector_hash}
+                p_freezer = _svr_write_cert(freezer_cert, "cert_freezer")
+
+            # 6) A/B(auto) cert (strict vs projected(auto))
+            embed_sig_auto = _svr_embed_sig(
+                inputs_sig, "projected(columns@k=3,auto)",
+                (lanes if not proj_meta.get("na") else proj_meta["reason"])
             )
-            ab_auto = _svr_cert_common(ib, rc, "A/B(auto)")
-            ab_auto["embed"]    = embed_auto
-            ab_auto["verdicts"] = {
-                "strict":    {"k3": strict_out["3"]["eq"]},
-                "projected": {"k3": projected_out["3"]["eq"], "na_reason": proj_auto_na},
+            ab_auto = _svr_cert_common(ib, rc, "A/B")
+            ab_auto["ab_pair"] = {
+                "pair_tag": "strict__VS__projected(columns@k=3,auto)",
+                "embed_sig": embed_sig_auto,
+                "strict_cert":   {"path": str(p_strict),     "hash": strict_cert["integrity"]["content_hash"]},
+                "projected_cert":{"path": str(p_proj_auto),  "hash": p_cert["integrity"]["content_hash"]},
             }
-            ab_auto["witness"]  = {"bottom_H2d3": w_botH, "bottom_C3pI3": w_botCI}
-            p_ab_auto = _svr_write_cert(ab_auto, "cert_ab")  # keep legacy prefix for compatibility
+            p_ab_auto = _svr_write_cert(ab_auto, "cert_ab")
 
-            # 5) Freezer attempt (AUTO → FILE) — always write a freezer record + A/B(file)
-            freezer = {"status": "N/A", "na_reason": None, "projector_hash": None}
-            p_freezer = None
-            p_proj_file = None
-            ab_file = None
-            if proj_auto_na is not None:
-                # not posed → freezer N/A + A/B(file) with na_reason
-                freezer["na_reason"] = {
-                    "AUTO_REQUIRES_SQUARE_C3": "FREEZER_C3_NOT_SQUARE",
-                    "ZERO_LANE_PROJECTOR":     "FREEZER_ZERO_LANE_PROJECTOR",
-                    "BAD_SHAPE":               "FREEZER_BAD_SHAPE",
-                }.get(proj_auto_na, "FREEZER_BAD_SHAPE")
-                freezer_cert = _svr_cert_common(ib, rc, "projector_freezer")
-                freezer_cert["freezer"] = freezer
-                p_freezer = _svr_write_cert(freezer_cert, "cert_freezer")
+            # 7) A/B(file) cert (always emit; uses projector_hash or N/A)
+            embed_sig_file = _svr_embed_sig_file(inputs_sig, projector_hash if not file_na_reason else "")
+            ab_file = _svr_cert_common(ib, rc, "A/B")
+            ab_file["ab_pair"] = {
+                "pair_tag": "strict__VS__projected(columns@k=3,file)",
+                "embed_sig": embed_sig_file,
+                "strict_cert":   {"path": str(p_strict),    "hash": strict_cert["integrity"]["content_hash"]},
+                "projected_cert":{"path": (str(p_proj_file) if p_proj_file else ""), "hash": (p_cert_file["integrity"]["content_hash"] if not file_na_reason else "")},
+                "na_reason": (file_na_reason or ""),
+                "projector_hash": (projector_hash if projector_hash else ""),
+            }
+            p_ab_file = _svr_write_cert(ab_file, "cert_ab")
 
-                embed_file, embed_sig_file = _svr_build_embed(
-                    ib,
-                    policy="strict__VS__projected(columns@k=3,file)",
-                    lanes=None,
-                    projector_hash=None,
-                    na_reason=freezer["na_reason"],
-                )
-                ab_file = _svr_cert_common(ib, rc, "A/B(file)")
-                ab_file["embed"]    = embed_file
-                ab_file["verdicts"] = {"strict":{"k3": strict_out["3"]["eq"]}, "projected":{"k3": None, "na_reason": freezer["na_reason"]}}
-                p_ab_file = _svr_write_cert(ab_file, "cert_ab_file")
-            else:
-                # posed → build Π, verify FILE equals AUTO on same R3
-                P = [[1 if (i==j and lanes[j]==1) else 0 for j in range(n3)] for i in range(n3)]
-                pj_bytes = _json.dumps(P, separators=(",", ":"), sort_keys=True).encode("utf-8")
-                pj_hash  = _hashlib.sha256(pj_bytes).hexdigest()
-                R3Pf     = _svr_mul(R3, P) if R3 else []
-                proj_file_eq3 = _svr_is_zero(R3Pf)
-                freezer["status"] = "OK" if (proj_file_eq3 == projected_out["3"]["eq"]) else "ERROR"
-                freezer["projector_hash"] = pj_hash
-                if freezer["status"] != "OK":
-                    freezer["na_reason"] = "FREEZER_ASSERT_MISMATCH"
-
-                freezer_cert = _svr_cert_common(ib, rc, "projector_freezer")
-                freezer_cert["freezer"] = freezer
-                p_freezer = _svr_write_cert(freezer_cert, "cert_freezer")
-
-                proj_file = _svr_cert_common(ib, rc, "projected(columns@k=3,file)")
-                proj_file["results"] = {"out": {"2":{"eq": None}, "3":{"eq": proj_file_eq3}}, "projector_hash": pj_hash}
-                p_proj_file = _svr_write_cert(proj_file, "cert_projected_file")
-
-                embed_file, embed_sig_file = _svr_build_embed(
-                    ib,
-                    policy="strict__VS__projected(columns@k=3,file)",
-                    lanes=None,
-                    projector_hash=pj_hash,
-                    na_reason=None,
-                )
-                ab_file = _svr_cert_common(ib, rc, "A/B(file)")
-                ab_file["embed"]    = embed_file
-                ab_file["verdicts"] = {"strict":{"k3": strict_out["3"]["eq"]},
-                                       "projected":{"k3": proj_file_eq3}}
-                p_ab_file = _svr_write_cert(ab_file, "cert_ab_file")
-
-            # 6) Banner (+ pin refresh using unified embed_sig_auto)
+            # 8) banners (AUTO + FILE explicit)
             s3 = "✅" if strict_out["3"]["eq"] is True else ("❌" if strict_out["3"]["eq"] is False else "N/A")
-            if proj_auto_na is None:
-                p3 = "✅" if projected_out["3"]["eq"] is True else ("❌" if projected_out["3"]["eq"] is False else "N/A")
-                lanes_txt, reason_txt = str(lanes), ""
+            if proj_meta.get("na"):
+                pA3 = "N/A"; lanes_txt = "N/A"; reasonA = proj_meta["reason"]
             else:
-                p3 = "N/A"
-                lanes_txt, reason_txt = "N/A", f" · N/A({proj_auto_na})"
-            header = (
+                pA3 = "✅" if projected_out["3"]["eq"] is True else ("❌" if projected_out["3"]["eq"] is False else "N/A")
+                lanes_txt = str(lanes); reasonA = ""
+
+            # FILE line
+            if file_na_reason:
+                pF3 = "N/A"; file_tail = f" · N/A({file_na_reason})"
+                Pshort = "—"
+            else:
+                pF3 = "✅" if proj_file_out["3"]["eq"] is True else ("❌" if proj_file_out["3"]["eq"] is False else "N/A")
+                Pshort = (projector_hash or "")[:12]
+                file_tail = f" · P[{Pshort}]"
+
+            n3 = (ib.get("dims") or {}).get("n3", 0)
+
+            line_auto = (
                 f"Strict: k3={s3}  |  "
-                f"Projected(auto): k3={p3}{reason_txt}  |  "
-                f"A/B: strict vs projected(auto) · lanes={lanes_txt} · n₃={n3}"
+                f"Projected(auto): k3={pA3}{'' if not reasonA else f' · N/A({reasonA})'}  |  "
+                f"A/B(auto): lanes={lanes_txt} · n₃={n3}"
             )
-            st.success(header)
-
-            # Files summary
-            st.caption(
-                "certs → strict: "
-                f"{Path(p_strict).name} · projected(auto): {Path(p_proj).name} · ab(auto): {Path(p_ab_auto).name}"
-                + (f" · freezer: {Path(p_freezer).name}" if p_freezer else "")
-                + (f" · projected(file): {Path(p_proj_file).name}" if p_proj_file else "")
+            line_file = (
+                f"Projected(file): k3={pF3}{file_tail}  |  "
+                f"A/B(file): {'P['+Pshort+']' if Pshort!='—' else 'N/A'}"
             )
+            st.success(line_auto)
+            st.info(line_file)
 
-            # Pin refresh (authoritative)
+            # 9) filenames banner
+            cap_parts = [f"strict: {Path(p_strict).name}",
+                         f"projected(auto): {Path(p_proj_auto).name}",
+                         f"ab(auto): {Path(p_ab_auto).name}",
+                         f"freezer: {Path(p_freezer).name}"]
+            if p_proj_file: cap_parts.append(f"projected(file): {Path(p_proj_file).name}")
+            cap_parts.append(f"ab(file): {Path(p_ab_file).name}")
+            st.caption("certs → " + " · ".join(cap_parts))
+
+            # 10) re-pin (always refresh on each loop)
             st.session_state["ab_pin"] = {
                 "state": "pinned",
-                "payload": {"embed_sig": embed_sig_auto, **embed_auto},
+                "payload": {
+                    "embed_sig": embed_sig_auto,
+                    "inputs_sig": list(inputs_sig),
+                    "policy_tag": "projected(columns@k=3,auto)",
+                    "projected": ({"mode":"auto", "lanes": list(lanes)} if not proj_meta.get("na")
+                                  else {"mode":"auto", "lanes": []}),
+                    "projected_na_reason": (proj_meta["reason"] if proj_meta.get("na") else ""),
+                },
                 "consumed": False,
+                "refreshed_at": _svr_now_iso() if " _svr_now_iso" in globals() else None,
             }
-            # Reset policy back to strict in run_ctx to avoid FILE drift elsewhere
-            rc2 = dict(st.session_state.get("run_ctx") or {})
-            rc2["policy_tag"] = "strict"
-            rc2["mode"] = "strict"
-            st.session_state["run_ctx"] = rc2
+            # also pin FILE context separately (optional, won’t disturb existing readers)
+            st.session_state["ab_pin_file"] = {
+                "state": "pinned",
+                "payload": {
+                    "embed_sig": embed_sig_file,
+                    "inputs_sig": list(inputs_sig),
+                    "policy_tag": "projected(columns@k=3,file)",
+                    "projector_hash": (projector_hash or ""),
+                    "projected_na_reason": (file_na_reason or ""),
+                },
+                "consumed": False,
+                "refreshed_at": st.session_state.get("ab_pin", {}).get("refreshed_at"),
+            }
 
         except Exception as e:
             st.error(f"Solver run failed: {e}")
-# === /SINGLE-BUTTON SOLVER ===
+# === END UI PATCH ===
+
 
 
 
