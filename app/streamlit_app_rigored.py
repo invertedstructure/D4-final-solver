@@ -2347,36 +2347,6 @@ if "_svr_embed_sig" not in globals():
             return _hashlib.sha256(b"svr-embed-sig-fallback").hexdigest()
 
 
-# --- SAFE CERT NAME HELPERS (null-safe, no Path(None)) ---
-import os
-from pathlib import Path as _Path
-
-def _first_non_none(*vals):
-    for v in vals:
-        if v is not None and v != "":
-            return v
-    return None
-
-def _name_or_dash(p):
-    try:
-        if isinstance(p, str):
-            return os.path.basename(p) if p else "—"
-        if isinstance(p, _Path):
-            return p.name or "—"
-    except Exception:
-        pass
-    return "—"
-
-# Ensure optional cert-path vars exist to avoid NameError
-for _v in (
-    "p_strict", "p_cert_strict",
-    "p_proj", "p_proj_auto", "p_projected_auto",
-    "p_proj_file", "p_projected_file",
-    "p_ab", "p_ab_auto", "p_ab_file",
-    "p_freezer", "p_freezer_cert",
-):
-    if _v not in locals():
-        locals()[_v] = None
 
 
 # === SINGLE-BUTTON SOLVER — strict → projected(auto) → A/B(auto) → freezer → A/B(file) ===
@@ -2609,6 +2579,36 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
                 freezer_cert["freezer"] = {"status":"OK", "lanes": lanes, "projector_hash": projector_hash}
                 p_freezer = _svr_write_cert(freezer_cert, "cert_freezer")
                 
+                # --- SAFE CERT NAME HELPERS (null-safe, no Path(None)) ---
+                import os
+                from pathlib import Path as _Path
+                
+                def _first_non_none(*vals):
+                    for v in vals:
+                        if v is not None and v != "":
+                            return v
+                    return None
+                
+                def _name_or_dash(p):
+                    try:
+                        if isinstance(p, str):
+                            return os.path.basename(p) if p else "—"
+                        if isinstance(p, _Path):
+                            return p.name or "—"
+                    except Exception:
+                        pass
+                    return "—"
+                
+                # Ensure optional cert-path vars exist to avoid NameError
+                for _v in (
+                    "p_strict", "p_cert_strict",
+                    "p_proj", "p_proj_auto", "p_projected_auto",
+                    "p_proj_file", "p_projected_file",
+                    "p_ab", "p_ab_auto", "p_ab_file",
+                    "p_freezer", "p_freezer_cert",
+                ):
+                    if _v not in locals():
+                        locals()[_v] = None
 
             
                 # 6) banners (AUTO + FILE) with explicit pin freshness (robust + compat aliases)
