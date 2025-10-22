@@ -2195,6 +2195,64 @@ def _svr_freeze_ssot(pb):
     st.session_state["run_ctx"] = rc
     return ib, rc
 # === /helpers ===
+# --- strict/projected helpers (guarded; drop near other helpers) ----------------
+if "_svr_strict_from_blocks" not in globals():
+    def _svr_strict_from_blocks(bH: dict, bB: dict, bC: dict) -> dict:
+        """
+        Strict k=3: R3 = H2·d3 ⊕ (C3 ⊕ I3); pass iff R3 == 0.
+        Returns {"2":{"eq":True},"3":{"eq":bool}} or {"2":{"eq":None},"3":{"eq":None}} when not posed.
+        """
+        H2 = bH.get("2") or []
+        d3 = bB.get("3") or []
+        C3 = bC.get("3") or []
+
+        # Not posed → return N/A (None)
+        if not (H2 and d3 and C3): 
+            return {"2":{"eq": None}, "3":{"eq": None}}
+        # C3 must be square; H2·d3 dims must line up
+        if not (len(C3) == len(C3[0])): 
+            return {"2":{"eq": None}, "3":{"eq": None}}
+        if not (H2 and d3 and H2[0] and d3[0] and len(H2[0]) == len(d3)): 
+            return {"2":{"eq": None}, "3":{"eq": None}}
+
+        I3  = _svr_eye(len(C3))
+        R3s = _svr_xor(_svr_mul(H2, d3), _svr_xor(C3, I3))
+        return {"2":{"eq": True}, "3":{"eq": _svr_is_zero(R3s)}}
+
+if "_svr_projected_auto_from_blocks" not in globals():
+    def _svr_projected_auto_from_blocks(bH: dict, bB: dict, bC: dict):
+        """
+        Projected(AUTO) k=3: lanes = bottom row of C3 (C3 must be square and lanes non-zero).
+        Returns (meta, lanes, out) where:
+          - meta: {"na": True, "reason": "..."} or {"na": False, "policy": "auto_c_bottom"}
+          - lanes: List[int]
+          - out: {"2":{"eq":...},"3":{"eq":...}} or N/A when not posed
+        """
+        H2 = bH.get("2") or []
+        d3 = bB.get("3") or []
+        C3 = bC.get("3") or []
+
+        # Guard A: C3 must be square
+        if not (C3 and C3[0] and len(C3) == len(C3[0])):
+            return {"na": True, "reason": "AUTO_REQUIRES_SQUARE_C3"}, [], {"2":{"eq": None}, "3":{"eq": None}}
+
+        lanes = [1 if int(x) == 1 else 0 for x in (C3[-1] if C3 else [])]
+        # Guard B: non-zero lanes
+        if sum(lanes) == 0:
+            return {"na": True, "reason": "ZERO_LANE_PROJECTOR"}, lanes, {"2":{"eq": None}, "3":{"eq": None}}
+
+        # H2·d3 must be well-posed
+        if not (H2 and d3 and H2[0] and d3[0] and len(H2[0]) == len(d3)):
+            return {"na": True, "reason": "BAD_SHAPE"}, lanes, {"2":{"eq": None}, "3":{"eq": None}}
+
+        I3  = _svr_eye(len(C3))
+        R3s = _svr_xor(_svr_mul(H2, d3), _svr_xor(C3, I3))
+
+        # P = diag(lanes)
+        n3 = len(lanes)
+        P  = [[1 if (i == j and lanes[j] == 1) else 0 for j in range(n3)] for i in range(n3)]
+        R3p = _svr_mul(R3s, P) if (R3s and len(R3s[0]) == len(P)) else []
+        return {"na": False, "policy": "auto_c_bottom"}, lanes, {"2":{"eq": True}, "3":{"eq": _svr_is_zero(R3p)}}
 
 # === SINGLE-BUTTON SOLVER — strict → projected(auto) → A/B(auto) → freezer → A/B(file) ===
 import os, json as _json, hashlib as _hashlib
@@ -2479,7 +2537,8 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
             cap_parts.append(f"ab(file): {Path(p_ab_file).name}")
             st.caption("certs → " + " · ".join(cap_parts))
 
-            # 10) re-pin (always refresh on each loop)
+            # 10) pins — refresh on each loop (AUTO, FILE, and FREEZER)
+            # AUTO pin (A/B:auto)
             st.session_state["ab_pin"] = {
                 "state": "pinned",
                 "payload": {
@@ -2491,9 +2550,10 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
                     "projected_na_reason": (proj_meta["reason"] if proj_meta.get("na") else ""),
                 },
                 "consumed": False,
-                "refreshed_at": _svr_now_iso() if " _svr_now_iso" in globals() else None,
+                "refreshed_at": _svr_now_iso(),
             }
-            # also pin FILE context separately (optional, won’t disturb existing readers)
+            
+            # FILE pin (A/B:file)
             st.session_state["ab_pin_file"] = {
                 "state": "pinned",
                 "payload": {
@@ -2504,8 +2564,24 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
                     "projected_na_reason": (file_na_reason or ""),
                 },
                 "consumed": False,
-                "refreshed_at": st.session_state.get("ab_pin", {}).get("refreshed_at"),
+                "refreshed_at": st.session_state["ab_pin"]["refreshed_at"],
             }
+            
+            # FREEZER pin (what downstream “freezer consumers” can read)
+            st.session_state["freezer_pin"] = {
+                "state": "pinned",
+                "payload": {
+                    "status": ("OK" if not file_na_reason else "N/A"),
+                    "lanes": list(lanes),
+                    "projector_hash": (projector_hash or ""),
+                    "na_reason": (file_na_reason or ""),
+                    "inputs_sig": list(inputs_sig),
+                    "n3": (ib.get("dims") or {}).get("n3", 0),
+                },
+                "consumed": False,
+                "refreshed_at": st.session_state["ab_pin"]["refreshed_at"],
+            }
+
 
         except Exception as e:
             st.error(f"Solver run failed: {e}")
