@@ -6548,12 +6548,12 @@ def _b2_best_pick(rows):
       3) else strict, newest
     Caller must pass rows already newest→oldest.
     """
-    def is_proj(r): return r.get("projected") in (
+def is_proj(r): return r.get("projected") in (
     if not st.session_state.get("_solver_one_button_active"):
         st.info("Read-only panel: run the solver to write certs.")
         return
 "projected:auto","projected:file")
-    def is_ab(r):   return r.get("ab_embedded") == "true"
+def is_ab(r):   return r.get("ab_embedded") == "true"
     # newest first already
     for r in rows:
         if is_proj(r) and is_ab(r): return r
