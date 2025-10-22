@@ -2621,7 +2621,28 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
                 p_proj_file_safe = locals().get("p_proj_file")        or locals().get("p_projected_file")
                 p_ab_file_safe   = locals().get("p_ab_file")          or locals().get("p_ab_file_cert") or locals().get("p_ab_file_proj")
                 
-                # --- helpers ---
+                # --- banner + pins + caption (null-safe, conflict-free) ---
+
+                # Local helpers (idempotent definitions)
+                import os
+                from pathlib import Path as _Path
+                
+                def _first_non_none(*vals):
+                    for v in vals:
+                        if v is not None and v != "":
+                            return v
+                    return None
+                
+                def _name_or_dash(x):
+                    try:
+                        if isinstance(x, str):
+                            return os.path.basename(x) if x else "—"
+                        if isinstance(x, _Path):
+                            return x.name or "—"
+                    except Exception:
+                        pass
+                    return "—"
+                
                 def _pin_status_text(pin_obj, expected_sig: str) -> str:
                     payload = (pin_obj or {}).get("payload") or {}
                     have = str(payload.get("embed_sig",""))
@@ -2631,45 +2652,46 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
                         return "—"
                     return "🟢 Fresh" if have == expected_sig else "⚠️ Stale"
                 
-                def _cert_name(x):
-                    try:
-                        return Path(x).name
-                    except Exception:
-                        return "—"
-                
-                # strict result text
+                # ---- derive booleans / strings for strict + projected(auto) ----
                 s3 = "✅" if strict_out["3"]["eq"] is True else ("❌" if strict_out["3"]["eq"] is False else "N/A")
                 
-                # projected(auto) texts
                 if proj_meta.get("na"):
-                    p3_auto = "N/A"; lanes_txt = "N/A"; reason_auto = proj_meta["reason"]
+                    p3_auto     = "N/A"
+                    lanes_txt   = "N/A"
+                    reason_auto = proj_meta["reason"]
                 else:
-                    p3_auto = "✅" if projected_out["3"]["eq"] is True else ("❌" if projected_out["3"]["eq"] is False else "N/A")
-                    lanes_txt = str(lanes); reason_auto = ""
+                    p3_auto     = "✅" if projected_out["3"]["eq"] is True else ("❌" if projected_out["3"]["eq"] is False else "N/A")
+                    lanes_txt   = str(lanes)
+                    reason_auto = ""
                 
                 n3 = int((ib.get("dims") or {}).get("n3", 0))
                 
-                # expected embed sigs (AUTO)
-                policy_auto      = "projected(columns@k=3,auto)"
-                inputs_sig_now   = _svr_inputs_sig(ib)
-                auto_embed_sig   = _svr_embed_sig(inputs_sig_now, policy_auto,
-                                                  (lanes if not proj_meta.get("na") else proj_meta["reason"]))
+                # ---- expected embed sigs for freshness badges ----
+                policy_auto    = "projected(columns@k=3,auto)"
+                inputs_sig_now = _svr_inputs_sig(ib)
+                auto_embed_sig = _svr_embed_sig(
+                    inputs_sig_now,
+                    policy_auto,
+                    (lanes if not proj_meta.get("na") else proj_meta["reason"])
+                )
                 
-                # FILE context (guarded)
-                freezer_meta       = locals().get("freezer_meta", {}) or {}
-                proj_hash          = freezer_meta.get("projector_hash", "")
-                projected_file_out = locals().get("projected_file_out", {"3": {"eq": None}})
-                file_embed_sig     = ""
+                # FILE context (all optional / guarded)
+                freezer_meta        = (locals().get("freezer_meta") or {})  # set earlier in your loop
+                projected_file_out  = (locals().get("projected_file_out") or locals().get("proj_file_out") or {"3":{"eq": None}})
+                proj_hash           = str(freezer_meta.get("projector_hash") or "")
+                file_na_reason      = freezer_meta.get("na_reason")  # None if posed OK
+                
+                file_embed_sig = ""
                 if proj_hash:
-                    policy_file   = "projected(columns@k=3,file)"
-                    file_embed_sig = _svr_embed_sig(inputs_sig_now, policy_file, str(proj_hash))
+                    file_embed_sig = _svr_embed_sig(inputs_sig_now, "projected(columns@k=3,file)", proj_hash)
                 
-                # freshness badges BEFORE overwriting pins
+                # ---- freshness badges BEFORE overwriting pins ----
                 pin_auto_status = _pin_status_text(st.session_state.get("ab_pin_auto"), auto_embed_sig)
                 pin_file_status = _pin_status_text(st.session_state.get("ab_pin_file"), file_embed_sig) if file_embed_sig else "—"
                 
-                # compose banner lines
+                # ---- compose banner lines ----
                 line1 = f"Strict: k3={s3}"
+                
                 line2 = (
                     f"Projected(auto): k3={p3_auto}"
                     f"{'' if not reason_auto else f' · N/A({reason_auto})'}"
@@ -2677,14 +2699,35 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
                 )
                 
                 line3 = ""
-                if proj_hash:
-                    p3_file = "✅" if projected_file_out["3"]["eq"] is True else ("❌" if projected_file_out["3"]["eq"] is False else "N/A")
+                if proj_hash or file_na_reason:
+                    if file_na_reason:
+                        p3_file = "N/A"
+                        file_tail = f" · N/A({file_na_reason})"
+                        pshort = "—"
+                    else:
+                        p3_file  = "✅" if projected_file_out["3"]["eq"] is True else ("❌" if projected_file_out["3"]["eq"] is False else "N/A")
+                        pshort   = proj_hash[:5]
+                        file_tail = f" · P[sha256:{pshort}]"
                     line3 = (
-                        f"Projected(file): k3={p3_file} · P[sha256:{str(proj_hash)[:5]}]"
-                        f" | A/B(file): P[sha256:{str(proj_hash)[:5]}] · pin={pin_file_status}"
+                        f"Projected(file): k3={p3_file}{file_tail}"
+                        f" | A/B(file): {'P[sha256:'+pshort+']' if pshort!='—' else 'N/A'} · pin={pin_file_status}"
                     )
                 
                 st.success("\n\n".join([line1, line2] + ([line3] if line3 else [])))
+                
+                # ---- cert filenames caption (null-safe; tolerate unset vars) ----
+                p_strict            = locals().get("p_strict")
+                p_cert_strict       = locals().get("p_cert_strict")
+                p_proj              = locals().get("p_proj")
+                p_proj_auto         = locals().get("p_proj_auto")
+                p_projected_auto    = locals().get("p_projected_auto")
+                p_ab_auto           = locals().get("p_ab_auto")
+                p_ab                = locals().get("p_ab")
+                p_freezer           = locals().get("p_freezer")
+                p_freezer_cert      = locals().get("p_freezer_cert")
+                p_proj_file         = locals().get("p_proj_file")
+                p_projected_file    = locals().get("p_projected_file")
+                p_ab_file           = locals().get("p_ab_file")
                 
                 parts = []
                 parts.append(f"strict: {_name_or_dash(_first_non_none(p_strict, p_cert_strict))}")
@@ -2694,10 +2737,8 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
                 parts.append(f"projected(file): {_name_or_dash(_first_non_none(p_proj_file, p_projected_file))}")
                 parts.append(f"ab(file): {_name_or_dash(p_ab_file)}")
                 st.caption("certs → " + " · ".join(parts))
-
-
                 
-                # 7) update pins AFTER displaying status (so next run compares against these)
+                # ---- update pins AFTER displaying status (so next run compares to these) ----
                 st.session_state["ab_pin_auto"] = {
                     "state": "pinned",
                     "payload": {
@@ -2717,99 +2758,11 @@ with st.expander("A/B compare (strict vs projected(auto))", expanded=False):
                             "embed_sig": file_embed_sig,
                             "inputs_sig": inputs_sig_now,
                             "policy_tag": "projected(columns@k=3,file)",
-                            "projected": {"mode": "file", "projector_hash": str(proj_hash)},
+                            "projected": {"mode": "file", "projector_hash": proj_hash},
                         },
                         "consumed": False,
                     }
                 
-                                
-
-           
-
-            # 8) banners (AUTO + FILE explicit)
-            s3 = "✅" if strict_out["3"]["eq"] is True else ("❌" if strict_out["3"]["eq"] is False else "N/A")
-            if proj_meta.get("na"):
-                pA3 = "N/A"; lanes_txt = "N/A"; reasonA = proj_meta["reason"]
-            else:
-                pA3 = "✅" if projected_out["3"]["eq"] is True else ("❌" if projected_out["3"]["eq"] is False else "N/A")
-                lanes_txt = str(lanes); reasonA = ""
-
-            # FILE line
-            if file_na_reason:
-                pF3 = "N/A"; file_tail = f" · N/A({file_na_reason})"
-                Pshort = "—"
-            else:
-                pF3 = "✅" if proj_file_out["3"]["eq"] is True else ("❌" if proj_file_out["3"]["eq"] is False else "N/A")
-                Pshort = (projector_hash or "")[:12]
-                file_tail = f" · P[{Pshort}]"
-
-            n3 = (ib.get("dims") or {}).get("n3", 0)
-
-            line_auto = (
-                f"Strict: k3={s3}  |  "
-                f"Projected(auto): k3={pA3}{'' if not reasonA else f' · N/A({reasonA})'}  |  "
-                f"A/B(auto): lanes={lanes_txt} · n₃={n3}"
-            )
-            line_file = (
-                f"Projected(file): k3={pF3}{file_tail}  |  "
-                f"A/B(file): {'P['+Pshort+']' if Pshort!='—' else 'N/A'}"
-            )
-            st.success(line_auto)
-            st.info(line_file)
-
-            # 9) filenames banner
-            cap_parts = [f"strict: {Path(p_strict).name}",
-                         f"projected(auto): {Path(p_proj_auto).name}",
-                         f"ab(auto): {Path(p_ab_auto).name}",
-                         f"freezer: {Path(p_freezer).name}"]
-            if p_proj_file: cap_parts.append(f"projected(file): {Path(p_proj_file).name}")
-            cap_parts.append(f"ab(file): {Path(p_ab_file).name}")
-            st.caption("certs → " + " · ".join(cap_parts))
-
-            # 10) pins — refresh on each loop (AUTO, FILE, and FREEZER)
-            # AUTO pin (A/B:auto)
-            st.session_state["ab_pin"] = {
-                "state": "pinned",
-                "payload": {
-                    "embed_sig": embed_sig_auto,
-                    "inputs_sig": list(inputs_sig),
-                    "policy_tag": "projected(columns@k=3,auto)",
-                    "projected": ({"mode":"auto", "lanes": list(lanes)} if not proj_meta.get("na")
-                                  else {"mode":"auto", "lanes": []}),
-                    "projected_na_reason": (proj_meta["reason"] if proj_meta.get("na") else ""),
-                },
-                "consumed": False,
-                "refreshed_at": _svr_now_iso(),
-            }
-            
-            # FILE pin (A/B:file)
-            st.session_state["ab_pin_file"] = {
-                "state": "pinned",
-                "payload": {
-                    "embed_sig": embed_sig_file,
-                    "inputs_sig": list(inputs_sig),
-                    "policy_tag": "projected(columns@k=3,file)",
-                    "projector_hash": (projector_hash or ""),
-                    "projected_na_reason": (file_na_reason or ""),
-                },
-                "consumed": False,
-                "refreshed_at": st.session_state["ab_pin"]["refreshed_at"],
-            }
-            
-            # FREEZER pin (what downstream “freezer consumers” can read)
-            st.session_state["freezer_pin"] = {
-                "state": "pinned",
-                "payload": {
-                    "status": ("OK" if not file_na_reason else "N/A"),
-                    "lanes": list(lanes),
-                    "projector_hash": (projector_hash or ""),
-                    "na_reason": (file_na_reason or ""),
-                    "inputs_sig": list(inputs_sig),
-                    "n3": (ib.get("dims") or {}).get("n3", 0),
-                },
-                "consumed": False,
-                "refreshed_at": st.session_state["ab_pin"]["refreshed_at"],
-            }
 
 
         except Exception as e:
