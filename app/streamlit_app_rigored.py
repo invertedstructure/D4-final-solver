@@ -209,18 +209,18 @@ if "_svr_strict_from_blocks" not in globals():
         N/A (None) when C3 not square or shapes don’t pose H2@d3.
         """
         
-H2 = (bH.get("2") or [])
-d3 = (bB.get("3") or [])
-C3 = (bC.get("3") or [])
-# guards: posed only if C3 square and H2@d3 shape OK
-if not (C3 and C3[0] and len(C3) == len(C3[0])):
-    return {"2": {"eq": None, "na_reason": NA["C3_NOT_SQUARE"]}, "3": {"eq": None, "na_reason": NA["C3_NOT_SQUARE"]}}
-if not _svr_shape_ok_for_mul(H2, d3):
-    return {"2": {"eq": None, "na_reason": NA["BAD_SHAPE"]}, "3": {"eq": None, "na_reason": NA["BAD_SHAPE"]}}
-I3  = _svr_eye(len(C3))
-R3s = _svr_xor(_svr_mul(H2, d3), _svr_xor(C3, I3))
-eq3 = _svr_is_zero(R3s)
-return {"2": {"eq": True, "na_reason": None}, "3": {"eq": bool(eq3), "na_reason": None}}
+        H2 = (bH.get("2") or [])
+        d3 = (bB.get("3") or [])
+        C3 = (bC.get("3") or [])
+        # guards: posed only if C3 square and H2@d3 shape OK
+        if not (C3 and C3[0] and len(C3) == len(C3[0])):
+            return {"2": {"eq": None, "na_reason": NA["C3_NOT_SQUARE"]}, "3": {"eq": None, "na_reason": NA["C3_NOT_SQUARE"]}}
+        if not _svr_shape_ok_for_mul(H2, d3):
+            return {"2": {"eq": None, "na_reason": NA["BAD_SHAPE"]}, "3": {"eq": None, "na_reason": NA["BAD_SHAPE"]}}
+        I3  = _svr_eye(len(C3))
+        R3s = _svr_xor(_svr_mul(H2, d3), _svr_xor(C3, I3))
+        eq3 = _svr_is_zero(R3s)
+        return {"2": {"eq": True, "na_reason": None}, "3": {"eq": bool(eq3), "na_reason": None}}
 
 
 if "_svr_projected_auto_from_blocks" not in globals():
