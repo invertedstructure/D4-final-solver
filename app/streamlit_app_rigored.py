@@ -3157,40 +3157,40 @@ with safe_expander("Cert & provenance (read‑only; solver writes bundles)", exp
     stale = ssot_is_stale()
     _toggle_key = ensure_unique_widget_key("allow_stale_ssot__cert")
     allow_stale = False  # panel is read-only; writes only from solver press
-if stale and not allow_stale:
+    if stale and not allow_stale:
         st.warning("Inputs changed since last Overlap — run Overlap to refresh SSOT before writing or reporting.")
         # Don’t stop; we only disable the write later.
 
         # Canonical, frozen sig + view
         inputs_sig = current_inputs_sig(_ib=ib)
-# Try to publish from pending once if IB was blank
-def _publish_inputs_block_from_pending() -> bool:
-    ph = ss.get("_inputs_hashes_pending") or {}
-    pd = ss.get("_dims_pending") or {}
-    pf = ss.get("_filenames_pending") or {}
-    if not ph or not pd:
-        return False
-    ss["_inputs_block"] = {
-        "hashes": dict(ph),
-        "dims":   dict(pd),
-        "filenames": dict(pf),
-        # legacy top-level keys:
-        "boundaries_hash": ph.get("boundaries_hash",""),
-        "C_hash":          ph.get("C_hash",""),
-        "H_hash":          ph.get("H_hash",""),
-        "U_hash":          ph.get("U_hash",""),
-        "shapes_hash":     ph.get("shapes_hash",""),
-    }
-    return True
-
-if (not ib) or (not ib.get("hashes") and not ib.get("boundaries_hash")):
-    if _publish_inputs_block_from_pending():
-        ib = dict(ss.get("_inputs_block") or {})
-        inputs_sig = current_inputs_sig(_ib=ib)
-
-# Raw SSOT toggle (debug)
-pass  # raw SSOT debug removed
-   
+    # Try to publish from pending once if IB was blank
+    def _publish_inputs_block_from_pending() -> bool:
+        ph = ss.get("_inputs_hashes_pending") or {}
+        pd = ss.get("_dims_pending") or {}
+        pf = ss.get("_filenames_pending") or {}
+        if not ph or not pd:
+            return False
+        ss["_inputs_block"] = {
+            "hashes": dict(ph),
+            "dims":   dict(pd),
+            "filenames": dict(pf),
+            # legacy top-level keys:
+            "boundaries_hash": ph.get("boundaries_hash",""),
+            "C_hash":          ph.get("C_hash",""),
+            "H_hash":          ph.get("H_hash",""),
+            "U_hash":          ph.get("U_hash",""),
+            "shapes_hash":     ph.get("shapes_hash",""),
+        }
+        return True
+    
+    if (not ib) or (not ib.get("hashes") and not ib.get("boundaries_hash")):
+        if _publish_inputs_block_from_pending():
+            ib = dict(ss.get("_inputs_block") or {})
+            inputs_sig = current_inputs_sig(_ib=ib)
+    
+    # Raw SSOT toggle (debug)
+    pass  # raw SSOT debug removed
+       
     # ---------- FILE Π validity & inputs completeness ----------
     file_pi_valid   = bool(ss.get("file_pi_valid", True))
     file_pi_reasons = list(ss.get("file_pi_reasons", []) or [])
