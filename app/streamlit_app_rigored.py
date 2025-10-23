@@ -1671,213 +1671,49 @@ except Exception:
     def eye(n):
         return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
 
-# ───────────────────────── Reuse canonical helpers (NO redefinitions here) ─────────────
-# We purposefully do NOT redefine _deep_intify/hash_json/_sha256_* etc. Use the canonical
-# ones you placed at the top of the file:
-#   - hash_json(...)
-#   - ssot_stable_blocks_sha(...)
-#   - ssot_publish_block(...)
-#   - ssot_live_sig(...), ssot_frozen_sig_from_ib(...), ssot_is_stale(...)
-#   - _truth_mask_from_d3(...)
-# If any of these are missing, define them in the canonical block (not here).
-
-# ---------- SSOT publisher (alias to canonical) ----------
-def publish_inputs_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int, projector_filename: str = ""):
-    """
-    Thin alias so callers in this tab can keep using publish_inputs_block(...).
-    Delegates to your canonical ssot_publish_block.
-    """
-    return ssot_publish_block(
-        boundaries_obj=boundaries_obj,
-        cmap_obj=cmap_obj,
-        H_obj=H_obj,
-        shapes_obj=shapes_obj,
-        n3=n3,
-        projector_filename=projector_filename,
-    )
-with tab2:
-    st.subheader("Overlap")
-    # Your provided code starts here
-    def _xor_mat(A, B):
-        # prefer library add() if available (keeps one implementation)
-        if "add" in globals() and callable(globals()["add"]):
-            return globals()["add"](A, B)
-        if not A: return [r[:] for r in (B or [])]
-        if not B: return [r[:] for r in (A or [])]
-        r, c = len(A), len(A[0])
-        return [[(A[i][j] ^ B[i][j]) & 1 for j in range(c)] for i in range(r)]
-
-    def _bottom_row(M):
-        return M[-1] if (M and len(M)) else []
-
-    def _load_h_local():
-        """Best-effort H loader used in Tab 2; resilient to missing file/var."""
-        try:
-            # prefer a session-uploaded H if your UI stashes it in st.session_state
-            up = st.session_state.get("f_H")
-            if up is not None:
-                return io.parse_cmap(read_json_file(up))
-        except Exception:
-            pass
-        try:
-            # fall back to a module-level f_H if present
-            if 'f_H' in globals() and globals()['f_H'] is not None:
-                return io.parse_cmap(read_json_file(globals()['f_H']))
-        except Exception:
-            pass
-        try:
-            # finally, fall back to whatever was produced by Overlap
-            H_obj = st.session_state.get("overlap_H")
-            if H_obj is not None:
-                return H_obj
-        except Exception:
-            pass
-        # last resort: empty cmap
-        return io.parse_cmap({"blocks": {}})
-
-    def _lane_mask_from_d3_strict(boundaries_obj):
-        """Derive lane mask directly from d3 by column support (strict truth)."""
-        try:
-            d3 = boundaries_obj.blocks.__root__.get("3") or []
-        except Exception:
-            d3 = []
-        return _truth_mask_from_d3(d3)
-
-    def _lane_mask_from_d3_local(boundaries_obj):
-        # alias maintained for existing call-sites
-        return _lane_mask_from_d3_strict(boundaries_obj)
-
-    def _derive_mode_from_cfg(cfg: dict) -> str:
-        if not cfg or not cfg.get("enabled_layers"):
-            return "strict"
-        src = (cfg.get("source", {}) or {}).get("3", "auto")
-        return "projected(columns@k=3,file)" if src == "file" else "projected(columns@k=3,auto)"
-
-    # Projected(FILE) validation banner (single source)
-    def file_validation_failed() -> bool:
-        """Return True if last attempt to use FILE Π failed validation."""
-        return bool(st.session_state.get("_file_mode_error"))
-
-    def _shape(M):
-        return (len(M), len(M[0]) if (M and M[0]) else 0)
-
-    def _guard_r3_shapes(H2, d3, C3):
-        """Ensure H2·d3 and (C3⊕I3) shapes are consistent; tolerate empty during exploration."""
-        rH, cH = _shape(H2); rD, cD = _shape(d3); rC, cC = _shape(C3)
-        if not (rH and cH and rD and cD and rC and cC):
-            return  # allow empty while exploring
-        n3, n2 = rH, cH
-        if not (rD == n2 and cD == n3 and rC == n3 and cC == n3):
-            raise RuntimeError(
-                f"R3_SHAPE: expected H2({n3}×{n2})·d3({n2}×{n3}) and (C3⊕I3)({n3}×{n3}); "
-                f"got H2({rH}×{cH}), d3({rD}×{cD}), C3({rC}×{cC})"
-            )
-
-    # You can add additional UI controls or logic here as needed for your app.
 
 
-# ------------------------------ UI: policy + H + projector ------------------------------
-colA, colB = st.columns([2, 2])
-with colA:
-    policy_choice = st.radio(
-        "Policy",
-        ["strict", "projected(columns@k=3,auto)", "projected(columns@k=3,file)"],
-        index=0,
-        horizontal=True,
-        key="ov_policy_choice",
-    )
-with colB:
-    f_H = st.file_uploader("Homotopy H (optional)", type=["json"], key="H_up")
-    st.session_state["uploaded_H"] = f_H
-
-proj_upload = st.file_uploader(
-    "Projector Π (k=3) file (only for projected(columns@k=3,file))",
-    type=["json"],
-    key="pj_up",
-)
-
-# Active configuration builder
-def _cfg_from_policy(policy_choice_str: str, pj_path: str | None) -> dict:
-    if policy_choice_str == "strict":
-        return cfg_strict()
-    cfg = cfg_projected_base()
-    if policy_choice_str.endswith("(auto)"):
-        cfg.setdefault("source", {})["3"] = "auto"
-        cfg.setdefault("projector_files", {})
-    else:
-        cfg.setdefault("source", {})["3"] = "file"
-        if pj_path:
-            cfg.setdefault("projector_files", {})["3"] = pj_path
-    return cfg
-
-# Handle projector upload
-pj_saved_path = ""
-if proj_upload is not None:
-    os.makedirs("projectors", exist_ok=True)
-    pj_saved_path = os.path.join("projectors", proj_upload.name)
-    with open(pj_saved_path, "wb") as _pf:
-        _pf.write(proj_upload.getvalue())
-    st.caption(f"Saved projector: `{pj_saved_path}`")
-    st.session_state["ov_last_pj_path"] = pj_saved_path
-
-# Compute active config
-cfg_active = _cfg_from_policy(
-    policy_choice,
-    st.session_state.get("ov_last_pj_path") or pj_saved_path or "",
-)
-
-# Display active policy label
-st.caption(f"Active policy: `{policy_label_from_cfg(cfg_active)}`")
 
 
-def _resolve_projector(cfg_active: dict, boundaries) -> tuple[list[list[int]], dict]:
-    """
-    Normalize projector_choose_active(...) to (P_active, meta).
-    Accepts (P_active, meta) or a meta dict; raises ValueError on failure.
-    Fills defaults for mode/d3/n3/projector fields.
-    """
-    try:
-        res = projector_choose_active(cfg_active, boundaries)
-    except ValueError as e:
-        raise
-    except Exception as e:
-        raise ValueError(f"PROJECTOR_RESOLVE_RUNTIME: {e}")
 
-    if res is None:
-        raise ValueError("PROJECTOR_RESOLVE_NONE")
+# ========================= HEADER (single, read-only) =========================
+_rc = st.session_state.get("run_ctx") or {}
+_ib = st.session_state.get("_inputs_block") or {}
 
-    if isinstance(res, tuple) and len(res) == 2:
-        P_active, meta = res
-    elif isinstance(res, dict):
-        meta = dict(res)
-        P_active = meta.get("P_active") or meta.get("P") or []
-    else:
-        raise ValueError(f"PROJECTOR_RESOLVE_BAD_RETURN: {type(res)!r}")
+policy_tag = _rc.get("policy_tag") or policy_label_from_cfg(cfg_active)
 
-    # defaults
-    source3 = (cfg_active.get("source") or {}).get("3", "auto")
-    meta.setdefault("mode", "projected(columns@k=3,file)" if source3 == "file" else ("projected(columns@k=3,auto)" if source3 == "auto" else "strict"))
-    if "d3" not in meta:
-        try:
-            meta["d3"] = (boundaries.blocks.__root__.get("3") or [])
-        except Exception:
-            meta["d3"] = []
-    meta.setdefault("n3", (len(meta["d3"][0]) if (meta["d3"] and meta["d3"][0]) else 0))
-    meta.setdefault("projector_filename", (cfg_active.get("projector_files") or {}).get("3", ""))
-    meta.setdefault("projector_hash", "")
-    meta.setdefault("projector_consistent_with_d", None)
+dims = (_ib.get("dims") or {})
+n3   = dims.get("n3", 0)
+h    = (_ib.get("hashes") or {})
 
-    return P_active, meta
+def _short8(x): return (str(x or ""))[:8]
 
-        
-# === BEGIN PATCH: READ-ONLY OVERLAP HYDRATOR (uses frozen SSOT only) ===
+b8 = _short8(h.get("boundaries_hash") or _ib.get("boundaries_hash"))
+c8 = _short8(h.get("C_hash")         or _ib.get("C_hash"))
+h8 = _short8(h.get("H_hash")         or _ib.get("H_hash"))
+u8 = _short8(h.get("U_hash")         or _ib.get("U_hash"))
+
+p8 = "—"
+if str(_rc.get("freezer_status","")).upper() == "OK":
+    p8 = _short8(_rc.get("projector_hash"))
+
+sig8 = _short8(_rc.get("sig8"))
+run8 = _short8(_rc.get("run_id"))
+
+st.markdown(f"**Policy:** `{policy_tag}`")
+st.caption(f"{policy_tag} | n3={n3} | B={b8} C={c8} H={h8} U={u8} | P={p8} | S={sig8 or '—'} | run={run8 or '—'}")
+
+# Gentle hint only if any core hash is blank
+if any(x in ("", None) for x in (h.get("boundaries_hash"), h.get("C_hash"), h.get("H_hash"), h.get("U_hash"))):
+    st.info("SSOT isn’t fully populated yet. Run Overlap once to publish provenance hashes.")
+
+# ======================= READ-ONLY OVERLAP HYDRATOR ===========================
 def overlap_ui_from_frozen():
     """
     Read-only UI refresh that re-computes visuals strictly from the *frozen* SSOT.
     It does NOT resolve sources, does NOT write fname_*, and does NOT freeze state.
     Safe to call after the single-button solver completed.
     """
-
     from pathlib import Path
     import json as _json
 
@@ -1896,7 +1732,6 @@ def overlap_ui_from_frozen():
     d3 = bB.get("3") or []; C3 = bC.get("3") or []; H2 = bH.get("2") or []
     n2, n3 = len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)
 
-    # Diagnostics (no writes)
     st.caption(f"[Overlap UI] n₂×n₃ = {n2}×{n3} · src B:{Path(pB).name} · C:{Path(pC).name} · H:{Path(pH).name}")
     if C3 and len(C3)==len(C3[0]):
         I3 = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))]
@@ -1914,96 +1749,36 @@ def overlap_ui_from_frozen():
             if not B: return [r[:] for r in (A or [])]
             r,c = len(A), len(A[0]); return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
         R3s = _xor(_mul(H2, d3), _xor(C3, I3)) if (H2 and d3) else []
-        bottom_H = (_mul(H2, d3)[-1] if (H2 and d3) else [])
+        bottom_H  = (_mul(H2, d3)[-1] if (H2 and d3) else [])
         bottom_CI = (_xor(C3, I3)[-1] if C3 else [])
         lanes_auto = (C3[-1] if C3 else [])
         st.caption(f"[Overlap UI] (H2·d3)_bottom={bottom_H} · (C3⊕I3)_bottom={bottom_CI} · lanes(auto from C₃ bottom)={lanes_auto}")
     else:
         st.caption("[Overlap UI] C₃ not square; projected(columns@k=3,auto) is N/A here.")
-# === END PATCH: READ-ONLY OVERLAP HYDRATOR ===
 
-# --- Policy pill + run stamp (single rendering; read-only) -------------------
-_rc = st.session_state.get("run_ctx") or {}
-_ib = st.session_state.get("_inputs_block") or {}
-
-# keep your existing policy labeler if you prefer
-policy_tag = _rc.get("policy_tag") or policy_label_from_cfg(cfg_active)
-
-# prefer frozen SSOT for dims/hashes (no recompute)
-dims = (_ib.get("dims") or {})
-n3   = dims.get("n3", 0)
-h    = (_ib.get("hashes") or {})
-
-def _short8(x): 
-    return (str(x or ""))[:8]
-
-b8 = _short8(h.get("boundaries_hash") or _ib.get("boundaries_hash"))
-c8 = _short8(h.get("C_hash")         or _ib.get("C_hash"))
-h8 = _short8(h.get("H_hash")         or _ib.get("H_hash"))
-u8 = _short8(h.get("U_hash")         or _ib.get("U_hash"))
-
-# projector hash only if last press produced FILE successfully
-p8 = "—"
-if str(_rc.get("freezer_status","")).upper() == "OK":
-    p8 = _short8(_rc.get("projector_hash"))
-
-# optional sig8/run8 for quick diagnostics (safe if missing)
-sig8 = _short8(_rc.get("sig8"))
-run8 = _short8(_rc.get("run_id"))
-
-st.markdown(f"**Policy:** `{policy_tag}`")
-st.caption(f"{policy_tag} | n3={n3} | B={b8} C={c8} H={h8} U={u8} | P={p8} | S={sig8 or '—'} | run={run8 or '—'}")
-
-
-# Gentle hint only if any core hash is blank
-if any(x in ("", None) for x in (h.get("boundaries_hash"), h.get("C_hash"), h.get("H_hash"), h.get("U_hash"))):
-    st.info("SSOT isn’t fully populated yet. Run Overlap once to publish provenance hashes.")
-
-
-
-
-# --- A/B status chip (no HTML repr; no duplicate logic) ------------------------
-ab_pin = st.session_state.get("ab_pin") or {}
-if ab_pin.get("state") == "pinned":
-    fresh, reason = _ab_is_fresh_now(
-        rc=_rc,
-        ib=_ib,
-        ab_payload=(ab_pin.get("payload") or {})
-    )
-    if fresh:
-        st.success("A/B: Pinned · Fresh (will embed)")
-    else:
-        st.warning(f"A/B: Pinned · Stale ({reason})")
-else:
-    st.caption("A/B: —")
-
-
-# --- add this helper near your AB helpers (top-level once) -------------------
+# ==================== UPLOADS-FIRST RESOLVER + SSOT FREEZE ====================
 from pathlib import Path
-import json as _json, hashlib as _hashlib
+import os, json as _json, hashlib as _hashlib
+
+if "LOGS_DIR" not in globals():
+    LOGS_DIR = Path("logs")
+UPLOADS_DIR = LOGS_DIR / "_uploads"
+for _p in (LOGS_DIR, UPLOADS_DIR):
+    _p.mkdir(parents=True, exist_ok=True)
 
 def abx_is_uploaded_file(x):
-    # duck-type Streamlit's UploadedFile
     return hasattr(x, "getvalue") and hasattr(x, "name")
 
 def abx_read_json_any(x, *, kind: str) -> tuple[dict, str, str]:
-    """
-    Accepts a path string/Path, a Streamlit UploadedFile, or a plain dict.
-    Returns (json_obj, canonical_path, origin_tag).
-      origin_tag ∈ {"file","upload","dict",""}
-    For uploads, writes a stable copy under logs/_uploads and returns that path.
-    """
-    if not x:
-        return {}, "", ""
+    """Accept path/UploadedFile/dict → (json_obj, canonical_path, origin_tag)."""
+    if not x: return {}, "", ""
     # 1) path-like
     try:
         if isinstance(x, (str, Path)):
             p = Path(x)
             if p.exists():
-                try:
-                    return _json.loads(p.read_text(encoding="utf-8")), str(p), "file"
-                except Exception:
-                    return {}, "", ""
+                try:  return _json.loads(p.read_text(encoding="utf-8")), str(p), "file"
+                except Exception: return {}, "", ""
     except Exception:
         pass
     # 2) UploadedFile
@@ -2019,199 +1794,14 @@ def abx_read_json_any(x, *, kind: str) -> tuple[dict, str, str]:
         h12  = _hashlib.sha256(raw).hexdigest()[:12]
         base = Path(getattr(x, "name", f"{kind}.json")).name
         outp = uploads_dir / f"{kind}__{h12}__{base}"
-        try:
-            outp.write_text(text, encoding="utf-8")
-        except Exception:
-            # even if persisting fails, still return the parsed JSON
-            pass
+        try: outp.write_text(text, encoding="utf-8")
+        except Exception: pass
         return j, str(outp), "upload"
     # 3) already-parsed dict
     if isinstance(x, dict):
         return x, "", "dict"
     return {}, "", ""
 
-# ---------- A/B canonical helpers (drop-in) ----------
-
-from pathlib import Path
-import json as _json
-
-def _ab_frozen_inputs_sig_list() -> list[str]:
-    """Canonical 5-hash signature, frozen if your freezer provides it."""
-    try:
-        if "ssot_frozen_sig_from_ib" in globals() and callable(globals()["ssot_frozen_sig_from_ib"]):
-            sig = ssot_frozen_sig_from_ib()
-            if sig: return list(sig)
-    except Exception:
-        pass
-    ib = st.session_state.get("_inputs_block") or {}
-    h  = (ib.get("hashes") or {})
-    return [
-        str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
-        str(h.get("C_hash",          ib.get("C_hash",""))),
-        str(h.get("H_hash",          ib.get("H_hash",""))),
-        str(h.get("U_hash",          ib.get("U_hash",""))),
-        str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
-    ]
-
-
-
-def _ab_load_h_latest():
-    """
-    Always try to read H from the *current* file path used by SSOT,
-    then fall back to any freezer/local helpers, then session.
-    """
-    ss = st.session_state
-    # 1) _inputs_block.filenames.H (preferred)
-    fn = ((ss.get("_inputs_block") or {}).get("filenames") or {}).get("H") or ""
-    # 2) explicit filename in session (older UIs used fname_h)
-    if not fn:
-        fn = ss.get("fname_h", "") or ""
-    try:
-        if fn and Path(fn).exists():
-            data = _json.loads(Path(fn).read_text(encoding="utf-8"))
-            return io.parse_cmap(data)
-    except Exception:
-        pass
-    # 3) your app’s loader, if present
-    try:
-        if "_load_h_local" in globals() and callable(globals()["_load_h_local"]):
-            return _load_h_local()
-    except Exception:
-        pass
-    # 4) last resort – session snapshot
-    return ss.get("overlap_H") or io.parse_cmap({"blocks": {}})
-
-# ====================== A/B compat shims (define only if missing) ======================
-import copy as _copy
-
-if "_shape_ok" not in globals():
-    def _shape_ok(A, B):
-        try:
-            return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
-        except Exception:
-            return False
-
-if "_xor_gf2" not in globals():
-    def _xor_gf2(A, B):
-        if not A: return [r[:] for r in (B or [])]
-        if not B: return [r[:] for r in (A or [])]
-        r, c = len(A), len(A[0])
-        return [[(A[i][j] ^ B[i][j]) & 1 for j in range(c)] for i in range(r)]
-
-if "_eye" not in globals():
-    def _eye(n):
-        return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
-
-if "_is_zero" not in globals():
-    def _is_zero(M):
-        return (not M) or all((x & 1) == 0 for row in M for x in row)
-
-
-
-
-
-
-# ===== ABX fixture helpers (module-scope, guarded) =====
-from pathlib import Path
-import json as _json, hashlib as _hashlib
-
-if "abx_is_uploaded_file" not in globals():
-    def abx_is_uploaded_file(x):
-        # duck-type Streamlit's UploadedFile
-        return hasattr(x, "getvalue") and hasattr(x, "name")
-
-if "abx_read_json_any" not in globals():
-    def abx_read_json_any(x, *, kind: str) -> tuple[dict, str, str]:
-        """
-        Accepts a path string/Path, a Streamlit UploadedFile, or a plain dict.
-        Returns (json_obj, canonical_path, origin_tag) where origin_tag∈{"file","upload","dict",""}.
-        For uploads, saves a stable copy under logs/_uploads and returns that path.
-        """
-        if not x:
-            return {}, "", ""
-        # 1) path-like
-        try:
-            if isinstance(x, (str, Path)):
-                p = Path(x)
-                if p.exists():
-                    try:
-                        return _json.loads(p.read_text(encoding="utf-8")), str(p), "file"
-                    except Exception:
-                        return {}, "", ""
-        except Exception:
-            pass
-        # 2) UploadedFile
-        if abx_is_uploaded_file(x):
-            try:
-                raw  = x.getvalue()
-                text = raw.decode("utf-8")
-                j    = _json.loads(text)
-            except Exception:
-                return {}, "", ""
-            uploads_dir = Path(st.session_state.get("LOGS_DIR", "logs")) / "_uploads"
-            uploads_dir.mkdir(parents=True, exist_ok=True)
-            h12  = _hashlib.sha256(raw).hexdigest()[:12]
-            base = Path(getattr(x, "name", f"{kind}.json")).name
-            outp = uploads_dir / f"{kind}__{h12}__{base}"
-            try:
-                outp.write_text(text, encoding="utf-8")
-            except Exception:
-                pass
-            return j, str(outp), "upload"
-        # 3) already-parsed dict
-        if isinstance(x, dict):
-            return x, "", "dict"
-        return {}, "", ""
-
-if "abx_blocks_view" not in globals():
-    def abx_blocks_view(obj):
-        """Return {'blocks': ...} for your model/dict, or empty structure."""
-        try:
-            if hasattr(obj, "blocks") and hasattr(obj.blocks, "__root__"):
-                return {"blocks": obj.blocks.__root__}
-        except Exception:
-            pass
-        return obj if (isinstance(obj, dict) and "blocks" in obj) else {"blocks": {}}
-
-if "abx_lane_mask_from_d3" not in globals():
-    def abx_lane_mask_from_d3(d):
-        return [1 if any(int(d[i][j]) & 1 for i in range(len(d))) else 0
-                for j in range(len(d[0]) if (d and d[0]) else 0)]
-
-if "abx_hash_json" not in globals():
-    def abx_hash_json(obj):
-        try:
-            blob = _json.dumps(obj, separators=(",", ":"), sort_keys=True)
-            return _hashlib.sha256(blob.encode("utf-8")).hexdigest()
-        except Exception:
-            return ""
-
-if "abx_diag_from_mask" not in globals():
-    def abx_diag_from_mask(lm_):
-        n = len(lm_ or [])
-        return [[1 if (i == j and int(lm_[j]) == 1) else 0 for j in range(n)] for i in range(n)]
-
-if "abx_policy_tag" not in globals():
-    def abx_policy_tag():
-        rc0 = st.session_state.get("run_ctx") or {}
-        m = str(rc0.get("mode", "strict")).lower()
-        if m == "strict": return "strict"
-        if "projected" in m and "file" in m: return "projected(columns@k=3,file)"
-        if "projected" in m: return "projected(columns@k=3,auto)"
-        return "strict"
-# ===== /helpers =====
-# === helpers required by the single-button solver (uploads-first source resolver) ===
-import os, json as _json, hashlib as _hashlib
-from pathlib import Path
-
-# dirs
-if "LOGS_DIR" not in globals():
-    LOGS_DIR = Path("logs")
-UPLOADS_DIR = LOGS_DIR / "_uploads"
-for _p in (LOGS_DIR, UPLOADS_DIR):
-    _p.mkdir(parents=True, exist_ok=True)
-
-# tiny I/O shims
 def _svr_hash_json(obj) -> str:
     try:
         blob = _json.dumps(obj, separators=(",", ":"), sort_keys=True)
@@ -2219,60 +1809,24 @@ def _svr_hash_json(obj) -> str:
     except Exception:
         return ""
 
-
-# =============================== Bundle helpers ===============================
-def _svr_bundle_dir(district_id: str, sig8: str) -> Path:
-    base = Path(DIRS.get("certs","logs/certs"))
-    p = base / str(district_id) / str(sig8)
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-def _svr_bundle_fname(kind: str, district_id: str, sig8: str) -> str:
-    # Map kind to canonical filenames
-    if kind == "strict":
-        return f"overlap__{district_id}__strict__{sig8}.json"
-    if kind == "projected_auto":
-        return f"overlap__{district_id}__projected_columns_k_3_auto__{sig8}.json"
-    if kind == "ab_auto":
-        return f"ab_compare__strict_vs_projected_auto__{sig8}.json"
-    if kind == "freezer":
-        return f"projector_freezer__{district_id}__{sig8}.json"
-    if kind == "ab_file":
-        return f"ab_compare__strict_vs_projected_file__{sig8}.json"
-    if kind == "projected_file":
-        return f"overlap__{district_id}__projected_columns_k_3_file__{sig8}.json"
-    return f"{kind}__{district_id}__{sig8}.json"
-
-
-# ==============================================================================
-
-
-
-# normalize per kind → "blocks" payload we hash/persist
 def _svr_as_blocks(j: dict, kind: str) -> dict:
     if not isinstance(j, dict): return {}
     if kind in ("B","C","H"):
-        # prefer canonical {"blocks": {...}}
         if isinstance(j.get("blocks"), dict):
             return dict(j["blocks"])
-        # tolerate legacy top-level degrees
         blk = {}
         for deg in ("1","2","3"):
             if deg in j and isinstance(j[deg], list):
                 blk[deg] = j[deg]
         return blk
-    # shapes: keep json as-is (we only hash it; not validated for slices)
     if isinstance(j.get("blocks"), dict):
         return dict(j["blocks"])
     return dict(j)
 
-
 def _svr_pick_source(kind: str):
     ss = st.session_state
-    # previously frozen canonical filenames (from _svr_freeze_ssot)
     ib_files = ((ss.get("_inputs_block") or {}).get("filenames") or {})
     frozen_key = {"B":"boundaries","C":"C","H":"H","U":"U"}[kind]
-    # uploads-first precedence across common aliases
     precedence = {
         "B": ["uploaded_boundaries","fname_boundaries","B_up","f_B","boundaries_file","boundaries_obj","boundaries"],
         "C": ["uploaded_cmap","fname_cmap","C_up","f_C","cmap_file","cmap_obj","cmap"],
@@ -2291,7 +1845,7 @@ def _svr_pick_source(kind: str):
 
 def _svr_resolve_all_to_paths():
     """
-    Read B/C/H/U per uploads-first order, normalize, validate B[3], C[3], H[2] non-empty.
+    Read B/C/H/U per uploads-first order, normalize, validate B[3], C[3], H[2].
     Persist to logs/_uploads if needed. Return {"B":(path,blocks), ...}.
     """
     out, raw = {}, {}
@@ -2301,11 +1855,8 @@ def _svr_resolve_all_to_paths():
         blocks = _svr_as_blocks(j, kind)
         raw[kind] = {"p": p, "blocks": blocks, "base": base}
 
-    # validate required slices before persisting
     bB = raw["B"]["blocks"]; bC = raw["C"]["blocks"]; bH = raw["H"]["blocks"]
-    d3 = bB.get("3") or []
-    C3 = bC.get("3") or []
-    H2 = bH.get("2") or []
+    d3 = bB.get("3") or []; C3 = bC.get("3") or []; H2 = bH.get("2") or []
     reasons = []
     if not (d3 and d3[0]): reasons.append("B[3] empty")
     if not (C3 and C3[0]): reasons.append("C[3] empty")
@@ -2313,7 +1864,6 @@ def _svr_resolve_all_to_paths():
     if reasons:
         raise RuntimeError("INPUTS_INCOMPLETE: " + ", ".join(reasons))
 
-    # persist canonical jsons (only if no path yet)
     for kind in ("B","C","H","U"):
         blocks = raw[kind]["blocks"]; base = raw[kind]["base"]
         p = raw[kind]["p"]
@@ -2321,10 +1871,9 @@ def _svr_resolve_all_to_paths():
             canon = _json.dumps({"blocks": blocks}, separators=(",", ":"), sort_keys=True)
             h12 = _hashlib.sha256(canon.encode("utf-8")).hexdigest()[:12]
             pth = UPLOADS_DIR / f"{kind.lower()}__{h12}__{base}"
-            _svr_guarded_atomic_write_json(pth, {"blocks": blocks})
+            _svr_guarded_atomic_write_json(pth, {"blocks": blocks})  # canonical guarded writer (top-level)
             p = str(pth)
         out[kind] = (p, blocks)
-        # also expose canonical filename back to session for future runs
         st.session_state[{"B":"fname_boundaries","C":"fname_cmap","H":"fname_h","U":"fname_shapes"}[kind]] = p
     return out
 
@@ -2338,7 +1887,7 @@ def _svr_freeze_ssot(pb):
         "C_hash":          _svr_hash_json({"blocks": bC}),
         "H_hash":          _svr_hash_json({"blocks": bH}),
         "U_hash":          _svr_hash_json({"blocks": bU}),
-        "shapes_hash":     _svr_hash_json({"blocks": bU}),  # shapes carried as-is
+        "shapes_hash":     _svr_hash_json({"blocks": bU}),
     }
     ib = {
         "filenames": {"boundaries": pB, "C": pC, "H": pH, "U": pU},
@@ -2347,58 +1896,126 @@ def _svr_freeze_ssot(pb):
         "district_id": district_from_hash(hashes["boundaries_hash"]),
     }
     st.session_state["_inputs_block"] = ib
-    # keep run_ctx consistent
     rc = dict(st.session_state.get("run_ctx") or {})
     rc.update({"n2": n2, "n3": n3, "d3": d3})
     st.session_state["run_ctx"] = rc
     return ib, rc
-# === /helpers ===
 
-
-
-# === SINGLE-BUTTON SOLVER — strict → projected(columns@k=3,auto) → A/B(auto) → freezer → A/B(file) ===
-import os, json as _json, hashlib as _hashlib
+# ============================= BUNDLE HELPERS =================================
 from pathlib import Path
+
+def _svr_bundle_dir(district_id: str, sig8: str) -> Path:
+    base = Path(DIRS.get("certs","logs/certs"))
+    p = base / str(district_id) / str(sig8)
+    p.mkdir(parents=True, exist_ok=True)
+    return p
+
+def _svr_bundle_fname(kind: str, district_id: str, sig8: str) -> str:
+    if kind == "strict":
+        return f"overlap__{district_id}__strict__{sig8}.json"
+    if kind == "projected_auto":
+        return f"overlap__{district_id}__projected_columns_k_3_auto__{sig8}.json"
+    if kind == "ab_auto":
+        return f"ab_compare__strict_vs_projected_auto__{sig8}.json"
+    if kind == "freezer":
+        return f"projector_freezer__{district_id}__{sig8}.json"
+    if kind == "ab_file":
+        return f"ab_compare__strict_vs_projected_file__{sig8}.json"
+    if kind == "projected_file":
+        return f"overlap__{district_id}__projected_columns_k_3_file__{sig8}.json"
+    return f"{kind}__{district_id}__{sig8}.json"
+
+def _svr_write_cert_in_bundle(bundle_dir: Path, filename: str, payload: dict) -> Path:
+    payload.setdefault("integrity", {})
+    payload["integrity"]["content_hash"] = _svr_hash(payload)
+    p = (bundle_dir / filename)
+    tmp = p.with_suffix(".json.tmp") if p.suffix==".json" else p.with_suffix(p.suffix + ".tmp")
+    if p.exists():
+        try:
+            old = json.loads(p.read_text(encoding="utf-8"))
+            if (old or {}).get("integrity", {}).get("content_hash") == payload["integrity"]["content_hash"]:
+                return p  # unchanged — skipping rewrite
+        except Exception:
+            pass
+    with open(tmp, "w", encoding="utf-8") as f:
+        _json.dump(payload, f, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, p)
+    return p
+
+# ============================= GF(2) PRIMS ====================================
 from datetime import datetime, timezone
+import hashlib as _hashlib, json as _json, os
 
-# ---------- tiny helpers (only define if missing) ----------
-if "_svr_now_iso" not in globals():
-    def _svr_now_iso():
-        try: return datetime.now(timezone.utc).isoformat().replace("+00:00","Z")
-        except Exception: return ""
+def _svr_now_iso():
+    try: return datetime.now(timezone.utc).isoformat().replace("+00:00","Z")
+    except Exception: return ""
 
-if "_svr_hash" not in globals():
-    def _svr_hash(obj):  # sha256(canonical json)
-        return _hashlib.sha256(_json.dumps(obj, separators=(",", ":"), sort_keys=True).encode("utf-8")).hexdigest()
+def _svr_hash(obj):
+    return _hashlib.sha256(_json.dumps(obj, separators=(",", ":"), sort_keys=True).encode("utf-8")).hexdigest()
 
-if "_svr_eye" not in globals():
-    def _svr_eye(n): return [[1 if i==j else 0 for j in range(n)] for i in range(n)]
+def _svr_eye(n): 
+    return [[1 if i==j else 0 for j in range(n)] for i in range(n)]
 
-if "_svr_is_zero" not in globals():
-    def _svr_is_zero(M): return (not M) or all((int(x) & 1) == 0 for row in M for x in row)
+def _svr_is_zero(M): 
+    return (not M) or all((int(x) & 1) == 0 for row in M for x in row)
 
-if "_svr_mul" not in globals():
-    def _svr_mul(A,B):
-        if not A or not B or not A[0] or not B[0] or len(A[0])!=len(B): return []
-        m,k = len(A), len(A[0]); n = len(B[0])
-        C = [[0]*n for _ in range(m)]
-        for i in range(m):
-            Ai = A[i]
-            for t in range(k):
-                if int(Ai[t]) & 1:
-                    Bt = B[t]
-                    for j in range(n):
-                        C[i][j] ^= (int(Bt[j]) & 1)
-        return C
+def _svr_mul(A,B):
+    if not A or not B or not A[0] or not B[0] or len(A[0])!=len(B): return []
+    m,k = len(A), len(A[0]); n = len(B[0])
+    C = [[0]*n for _ in range(m)]
+    for i in range(m):
+        Ai = A[i]
+        for t in range(k):
+            if int(Ai[t]) & 1:
+                Bt = B[t]
+                for j in range(n):
+                    C[i][j] ^= (int(Bt[j]) & 1)
+    return C
 
-if "_svr_xor" not in globals():
-    def _svr_xor(A,B):
-        if not A: return [row[:] for row in (B or [])]
-        if not B: return [row[:] for row in (A or [])]
-        r,c = len(A), len(A[0])
-        return [[(int(A[i][j]) ^ int(B[i][j])) & 1 for j in range(c)] for i in range(r)]
+def _svr_xor(A,B):
+    if not A: return [row[:] for row in (B or [])]
+    if not B: return [row[:] for row in (A or [])]
+    r,c = len(A), len(A[0])
+    return [[(int(A[i][j]) ^ int(B[i][j])) & 1 for j in range(c)] for i in range(r)]
 
+# ============================ EMBED HELPERS ===================================
+def _svr_build_embed(ib: dict, *, policy: str, lanes: list[int] | None = None,
+                     projector_hash: str | None = None, na_reason: str | None = None) -> tuple[dict, str]:
+    hashes = ib.get("hashes") or {}
+    dims   = ib.get("dims") or {}
+    inputs_sig_5 = [
+        str(hashes.get("boundaries_hash","")),
+        str(hashes.get("C_hash","")),
+        str(hashes.get("U_hash","")),   # include U_hash
+        str(hashes.get("H_hash","")),
+        str(hashes.get("shapes_hash","")),
+    ]
+    district_id   = ib.get("district_id") or district_from_hash(hashes.get("boundaries_hash",""))
+    fixture_label = str(st.session_state.get("fixture_label") or "")
+    projection_context: dict = {}
+    if lanes is not None and not na_reason:
+        projection_context = {"lanes": list(lanes)}
+    elif projector_hash is not None and not na_reason:
+        projection_context = {"projector_hash": str(projector_hash)}
+    elif na_reason:
+        projection_context = {"na_reason_code": str(na_reason)}
+    embed = {
+        "schema_version": SCHEMA_VERSION,
+        "engine_rev": ENGINE_REV,
+        "inputs_sig_5": inputs_sig_5,
+        "dims": dict(dims),
+        "district_id": district_id,
+        "fixture_label": fixture_label,
+        "policy": str(policy),
+        "projection_context": projection_context
+    }
+    blob = _json.dumps(embed, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    sig = _hashlib.sha256(blob).hexdigest()
+    return embed, sig
 
+def _svr_apply_sig8(cert: dict, embed_sig: str) -> None:
+    cert["sig8"] = (embed_sig or "")[:8]
 
 
 
@@ -2420,53 +2037,7 @@ if "_svr_cert_common" not in globals():
 
 
 
-# unified embed builder (AUTO/File)
 
-def _svr_build_embed(ib: dict, *, policy: str, lanes: list[int] | None = None,
-                     projector_hash: str | None = None, na_reason: str | None = None) -> tuple[dict, str]:
-    hashes = ib.get("hashes") or {}
-    dims   = ib.get("dims") or {}
-    inputs_sig_5 = [
-        str(hashes.get("boundaries_hash","")),
-        str(hashes.get("C_hash","")),
-        "",
-        str(hashes.get("H_hash","")),
-        str(hashes.get("shapes_hash","")),
-    ]
-    district_id   = ib.get("district_id") or ("D" + (inputs_sig_5[0] or "")[:8] if inputs_sig_5[0] else "DUNKNOWN")
-    fixture_label = str(st.session_state.get("fixture_label") or "")
-    projection_context: dict = {}
-    if lanes is not None and not na_reason:
-        projection_context = {"lanes": list(lanes)}
-    elif projector_hash is not None and not na_reason:
-        projection_context = {"projector_hash": str(projector_hash)}
-    elif na_reason:
-        projection_context = {"na_reason_code": str(na_reason)}
-    embed = {
-        "schema_version": SCHEMA_VERSION,
-        "engine_rev": ENGINE_REV,
-        "inputs_sig_5": inputs_sig_5,
-        "dims": dict(dims),
-        "district_id": district_id,
-        "fixture_label": fixture_label,
-        "policy": str(policy),
-        "projection_context": projection_context
-    }
-    hashes = ib.get("hashes") or {}
-    inputs_sig_5 = [
-        str(hashes.get("boundaries_hash","")),
-        str(hashes.get("C_hash","")),
-        str(hashes.get("U_hash","")),   # ← was "", fix to U_hash
-        str(hashes.get("H_hash","")),
-        str(hashes.get("shapes_hash","")),
-    ]
-                   
-    blob = _json.dumps(embed, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    sig = _hashlib.sha256(blob).hexdigest()
-    return embed, sig
-
-def _svr_apply_sig8(cert: dict, embed_sig: str) -> None:
-    cert["sig8"] = (embed_sig or "")[:8]
 
 
 # small witness helper
