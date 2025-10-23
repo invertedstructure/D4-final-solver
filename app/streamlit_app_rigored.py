@@ -1673,6 +1673,8 @@ except Exception:
 
 
 
+
+
 # --- safety shims (place ABOVE the header/policy usage) -----------------------
 
 # 1) cfg_active: provide a default so header code can call policy_label_from_cfg(cfg_active)
