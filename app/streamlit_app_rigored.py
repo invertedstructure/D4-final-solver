@@ -2453,7 +2453,7 @@ def _svr_build_embed(ib: dict, *, policy: str, lanes: list[int] | None = None,
         "projection_context": projection_context
     }
     hashes = ib.get("hashes") or {}
-        inputs_sig_5 = [
+    inputs_sig_5 = [
         str(hashes.get("boundaries_hash","")),
         str(hashes.get("C_hash","")),
         str(hashes.get("U_hash","")),   # ← was "", fix to U_hash
