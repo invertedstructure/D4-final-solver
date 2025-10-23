@@ -3164,7 +3164,7 @@ if stale and not allow_stale:
         # Canonical, frozen sig + view
         inputs_sig = current_inputs_sig(_ib=ib)
 
-    # Try to publish from pending once if IB was blank
+      # Try to publish from pending once if IB was blank
     def _publish_inputs_block_from_pending() -> bool:
         ph = ss.get("_inputs_hashes_pending") or {}
         pd = ss.get("_dims_pending") or {}
@@ -3183,15 +3183,14 @@ if stale and not allow_stale:
             "shapes_hash":     ph.get("shapes_hash",""),
         }
         return True
-
+    
     if (not ib) or (not ib.get("hashes") and not ib.get("boundaries_hash")):
         if _publish_inputs_block_from_pending():
             ib = dict(ss.get("_inputs_block") or {})
             inputs_sig = current_inputs_sig(_ib=ib)
-
+    
     # Raw SSOT toggle (debug)
     pass  # raw SSOT debug removed
-or {})
 
     # ---------- FILE Π validity & inputs completeness ----------
     file_pi_valid   = bool(ss.get("file_pi_valid", True))
