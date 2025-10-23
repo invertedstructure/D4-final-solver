@@ -1673,6 +1673,38 @@ except Exception:
 
 
 
+# --- safety shims (place ABOVE the header/policy usage) -----------------------
+
+# 1) cfg_active: provide a default so header code can call policy_label_from_cfg(cfg_active)
+if "cfg_active" not in globals():
+    cfg_active = {
+        "enabled_layers": [],          # no extra layers -> default to strict/auto
+        "source": {"3": "auto"},       # can be "auto" or "file"
+        "projector_files": {},         # optional
+    }
+
+# If your app didn't define this yet, provide a minimal labeler.
+if "policy_label_from_cfg" not in globals():
+    def policy_label_from_cfg(cfg: dict | None) -> str:
+        cfg = cfg or {}
+        src = (cfg.get("source") or {}).get("3", "auto")
+        if src == "file":
+            return "projected(columns@k=3,file)"
+        if src == "auto":
+            return "projected(columns@k=3,auto)"
+        return "strict"
+
+# 2) _canon_policy: normalize any free-form label into the canonical tag used everywhere
+if "_canon_policy" not in globals():
+    def _canon_policy(label_raw: str | None) -> str:
+        t = (label_raw or "").lower()
+        if "strict" in t:
+            return "strict"
+        if "projected" in t and "file" in t:
+            return "projected(columns@k=3,file)"
+        if "projected" in t:
+            return "projected(columns@k=3,auto)"
+        return "strict"
 
 
 
