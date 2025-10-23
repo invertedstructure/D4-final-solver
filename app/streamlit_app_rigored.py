@@ -3191,7 +3191,7 @@ with safe_expander("Cert & provenance (read‑only; solver writes bundles)", exp
 
     # Raw SSOT toggle (debug)
     pass  # raw SSOT debug removed
-    or {}
+    
 
     # ---------- FILE Π validity & inputs completeness ----------
     file_pi_valid   = bool(ss.get("file_pi_valid", True))
