@@ -3161,8 +3161,8 @@ if stale and not allow_stale:
         st.warning("Inputs changed since last Overlap — run Overlap to refresh SSOT before writing or reporting.")
         # Don’t stop; we only disable the write later.
 
-    # Canonical, frozen sig + view
-    inputs_sig = current_inputs_sig(_ib=ib)
+        # Canonical, frozen sig + view
+        inputs_sig = current_inputs_sig(_ib=ib)
 
     # Try to publish from pending once if IB was blank
     def _publish_inputs_block_from_pending() -> bool:
