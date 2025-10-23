@@ -1960,6 +1960,8 @@ if any(x in ("", None) for x in (h.get("boundaries_hash"), h.get("C_hash"), h.ge
     st.info("SSOT isn’t fully populated yet. Run Overlap once to publish provenance hashes.")
 
 
+
+
 # --- A/B status chip (no HTML repr; no duplicate logic) ------------------------
 ab_pin = st.session_state.get("ab_pin") or {}
 if ab_pin.get("state") == "pinned":
@@ -2241,26 +2243,7 @@ def _svr_bundle_fname(kind: str, district_id: str, sig8: str) -> str:
         return f"overlap__{district_id}__projected_columns_k_3_file__{sig8}.json"
     return f"{kind}__{district_id}__{sig8}.json"
 
-def _svr_write_cert_in_bundle(bundle_dir: Path, filename: str, payload: dict) -> Path:
-    # Compute content hash, write atomically; skip rewrite when unchanged
-    payload.setdefault("integrity", {})
-    payload["integrity"]["content_hash"] = _svr_hash(payload)
-    p = (bundle_dir / filename)
-    tmp = p.with_suffix(".json.tmp") if p.suffix==".json" else p.with_suffix(p.suffix + ".tmp")
-    # Dedup: if exists and same content hash, skip rewrite
-    if p.exists():
-        try:
-            old = json.loads(p.read_text(encoding="utf-8"))
-            if (old or {}).get("integrity", {}).get("content_hash") == payload["integrity"]["content_hash"]:
-                # unchanged — skipping rewrite
-                return p
-        except Exception:
-            pass
-    with open(tmp, "w", encoding="utf-8") as f:
-        _json.dump(payload, f, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        f.flush(); os.fsync(f.fileno())
-    os.replace(tmp, p)
-    return p
+
 # ==============================================================================
 
 
@@ -2283,7 +2266,7 @@ def _svr_as_blocks(j: dict, kind: str) -> dict:
         return dict(j["blocks"])
     return dict(j)
 
-# session precedence → source object
+
 def _svr_pick_source(kind: str):
     ss = st.session_state
     # previously frozen canonical filenames (from _svr_freeze_ssot)
@@ -2371,26 +2354,7 @@ def _svr_freeze_ssot(pb):
     return ib, rc
 # === /helpers ===
 
-# --- legacy A/B embed signature (guarded) --------------------------------------
-# Used by older pin/cert code paths: embed_sig = sha256({"inputs": [...], "policy": "...", lanes|reason})
-if "_svr_embed_sig" not in globals():
-    def _svr_embed_sig(inputs_sig, policy_tag, lanes_or_reason):
-        """
-        inputs_sig: list[str]  # 5-hash in any order you're passing today
-        policy_tag: str        # e.g. "projected(columns@k=3,auto)"
-        lanes_or_reason: list[int] OR str (N/A reason)
-        """
-        try:
-            blob = {"inputs": list(inputs_sig or []), "policy": str(policy_tag)}
-            if isinstance(lanes_or_reason, (list, tuple)):
-                blob["lanes"] = [int(x) & 1 for x in lanes_or_reason]
-            else:
-                blob["projected_na_reason"] = str(lanes_or_reason)
-            payload = _json.dumps(blob, separators=(",", ":"), sort_keys=True).encode("utf-8")
-            return _hashlib.sha256(payload).hexdigest()
-        except Exception:
-            # fail-safe: still return a stable-ish value to avoid crashes
-            return _hashlib.sha256(b"svr-embed-sig-fallback").hexdigest()
+
 
 # === SINGLE-BUTTON SOLVER — strict → projected(columns@k=3,auto) → A/B(auto) → freezer → A/B(file) ===
 import os, json as _json, hashlib as _hashlib
@@ -2434,13 +2398,9 @@ if "_svr_xor" not in globals():
         r,c = len(A), len(A[0])
         return [[(int(A[i][j]) ^ int(B[i][j])) & 1 for j in range(c)] for i in range(r)]
 
-if "_svr_atomic_write_json" not in globals():
-    def _svr_guarded_atomic_write_json(path: Path, payload: dict):
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            _json.dump(payload, f, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-            f.flush(); os.fsync(f.fileno())
-        os.replace(tmp, path)
+
+
+
 
 # cert scaffold (reuse your existing ones if present)
 if "_svr_cert_common" not in globals():
@@ -2458,47 +2418,7 @@ if "_svr_cert_common" not in globals():
             "integrity":      {"content_hash": ""},
         }
 
-# cert scaffold (reuse your existing ones if present)
-if "_svr_cert_common" not in globals():
-    def _svr_cert_common(ib, rc, policy_tag: str) -> dict:
-        return {
-            "schema_version": globals().get("SCHEMA_VERSION", "1"),
-            "engine_rev":     globals().get("ENGINE_REV", ""),
-            "written_at_utc": _svr_now_iso(),
-            "app_version":    globals().get("APP_VERSION", "dev"),
-            "policy_tag":     str(policy_tag),
-            "run_id":         (rc.get("run_id") or ""),
-            "district_id":    (ib.get("district_id") or ""),
-            "sig8":           "",
-            "inputs":         dict(ib),
-            "integrity":      {"content_hash": ""},
-        }
 
-if "_svr_write_cert" not in globals():
-    LOGS_DIR    = Path(globals().get("LOGS_DIR", "logs"))
-    CERTS_DIR   = LOGS_DIR / "certs"
-    CERTS_DIR.mkdir(parents=True, exist_ok=True)
-    def _svr_write_cert(payload: dict, prefix: str) -> Path:
-        # Guard: only allow writes during one-button solver handler
-        try:
-            import streamlit as _st
-            if not _st.session_state.get('_solver_one_button_active', False):
-                # Skip writes silently outside solver; callers can still see intended path if needed
-                # Create directory to return the would-be path for preview only
-                LOGS_DIR = Path(globals().get('LOGS_DIR', DIRS.get('root', 'logs')))
-                CERTS_DIR = Path(DIRS.get('certs','logs/certs'))
-                CERTS_DIR.mkdir(parents=True, exist_ok=True)
-                payload.setdefault('integrity', {}).setdefault('content_hash', '')
-                h12 = (payload['integrity']['content_hash'] or '000000000000')[:12]
-                p = CERTS_DIR / f"{prefix}__{h12}.json"
-                return p
-        except Exception:
-            pass
-        payload["integrity"]["content_hash"] = _svr_hash(payload)
-        h12 = payload["integrity"]["content_hash"][:12]
-        p = CERTS_DIR / f"{prefix}__{h12}.json"
-        _svr_guarded_atomic_write_json(p, payload)
-        return p
 
 # unified embed builder (AUTO/File)
 
@@ -2532,13 +2452,21 @@ def _svr_build_embed(ib: dict, *, policy: str, lanes: list[int] | None = None,
         "policy": str(policy),
         "projection_context": projection_context
     }
+    hashes = ib.get("hashes") or {}
+        inputs_sig_5 = [
+        str(hashes.get("boundaries_hash","")),
+        str(hashes.get("C_hash","")),
+        str(hashes.get("U_hash","")),   # ← was "", fix to U_hash
+        str(hashes.get("H_hash","")),
+        str(hashes.get("shapes_hash","")),
+    ]
+                   
     blob = _json.dumps(embed, separators=(",", ":"), sort_keys=True).encode("utf-8")
     sig = _hashlib.sha256(blob).hexdigest()
     return embed, sig
 
 def _svr_apply_sig8(cert: dict, embed_sig: str) -> None:
     cert["sig8"] = (embed_sig or "")[:8]
-
 
 
 # small witness helper
