@@ -3184,27 +3184,27 @@ with safe_expander("Cert & provenance (read‑only; solver writes bundles)", exp
         }
         return True
 
-    if (not ib) or (not ib.get("hashes") and not ib.get("boundaries_hash")):
-        if _publish_inputs_block_from_pending():
-            ib = dict(ss.get("_inputs_block") or {})
-            inputs_sig = current_inputs_sig(_ib=ib)
-
-    # Raw SSOT toggle (debug)
-    pass  # raw SSOT debug removed
+        if (not ib) or (not ib.get("hashes") and not ib.get("boundaries_hash")):
+            if _publish_inputs_block_from_pending():
+                ib = dict(ss.get("_inputs_block") or {})
+                inputs_sig = current_inputs_sig(_ib=ib)
+    
+        # Raw SSOT toggle (debug)
+        pass  # raw SSOT debug removed
     
 
     # ---------- FILE Π validity & inputs completeness ----------
     file_pi_valid   = bool(ss.get("file_pi_valid", True))
     file_pi_reasons = list(ss.get("file_pi_reasons", []) or [])
-        # --- derive 5-hash inputs_sig safely (used only for completeness gating) ---
-        ib = ss.get("_inputs_block") or {}
-        h  = (ib.get("hashes") or {})
-        inputs_sig = [
-            str(h.get("hash_d") or h.get("boundaries_hash") or h.get("B_hash") or ""),
-            str(h.get("hash_suppC") or h.get("C_hash") or ""),
-            str(h.get("hash_suppH") or h.get("H_hash") or ""),
-            str(h.get("hash_U") or h.get("U_hash") or ""),
-            str(h.get("hash_shapes") or h.get("S_hash") or h.get("shapes_hash") or ""),
+ # --- derive 5-hash inputs_sig safely (used only for completeness gating) ---
+    ib = ss.get("_inputs_block") or {}
+    h  = (ib.get("hashes") or {})
+    inputs_sig = [
+    str(h.get("hash_d") or h.get("boundaries_hash") or h.get("B_hash") or ""),
+    str(h.get("hash_suppC") or h.get("C_hash") or ""),
+    str(h.get("hash_suppH") or h.get("H_hash") or ""),
+    str(h.get("hash_U") or h.get("U_hash") or ""),
+    str(h.get("hash_shapes") or h.get("S_hash") or h.get("shapes_hash") or ""),
         ]
     inputs_complete = all(isinstance(x, str) and x for x in (inputs_sig[0], inputs_sig[1], inputs_sig[2], inputs_sig[4]))
 
