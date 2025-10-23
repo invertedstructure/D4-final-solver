@@ -3157,7 +3157,7 @@ with safe_expander("Cert & provenance (read‑only; solver writes bundles)", exp
     stale = ssot_is_stale()
     _toggle_key = ensure_unique_widget_key("allow_stale_ssot__cert")
     allow_stale = False  # panel is read-only; writes only from solver press
-if stale and not allow_stale:
+    if stale and not allow_stale:
         st.warning("Inputs changed since last Overlap — run Overlap to refresh SSOT before writing or reporting.")
         # Don’t stop; we only disable the write later.
 
