@@ -1669,11 +1669,11 @@ with colA:
         key="ov_policy_choice",
     )
 with colB:
-proj_upload = st.file_uploader(
-    "Projector Π (k=3) file (only for projected(columns@k=3,file))",
-    type=["json"],
-    key="pj_up",
-)
+    proj_upload = st.file_uploader(
+        "Projector Π (k=3) file (only for projected(columns@k=3,file))",
+        type=["json"],
+        key="pj_up",
+    )
 
 # Active configuration builder
 def _cfg_from_policy(policy_choice_str: str, pj_path: str | None) -> dict:
