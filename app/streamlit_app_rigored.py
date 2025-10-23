@@ -3365,7 +3365,7 @@ or {})
         if write_enabled and is_ab_pinned and (ab_ticket_pending == last_ab_ticket_written):
             skip_reason = REASON.SKIP_AB_TICKET_ALREADY_WRITTEN
     
-        _append_witness({
+            _append_witness({
             "ts": _utc_now_z(),
             "outcome": skip_reason,
             "armed": write_armed,
