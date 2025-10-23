@@ -1922,127 +1922,6 @@ def overlap_ui_from_frozen():
         st.caption("[Overlap UI] C₃ not square; projected(columns@k=3,auto) is N/A here.")
 # === END PATCH: READ-ONLY OVERLAP HYDRATOR ===
 
-
-    
-
-
-# -------------------- Health checks + compact, non-duplicated UI --------------------
-import hashlib, json
-
-# --- tiny utils used here ---
-def _deep_intify(o):
-    if isinstance(o, bool): return 1 if o else 0
-    if isinstance(o, list): return [_deep_intify(x) for x in o]
-    if isinstance(o, dict): return {k: _deep_intify(v) for k, v in o.items()}
-    return o
-
-def _stable_blocks_sha(obj) -> str:
-    try:
-        data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (obj if isinstance(obj, dict) else {"blocks": {}})
-        s = json.dumps(_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-        return hashlib.sha256(s).hexdigest()
-    except Exception:
-        return ""
-
-def _canon_policy(label_raw: str) -> str:
-        t = (label_raw or "").lower()
-        if "strict" in t: return "strict"
-        if "projected" in t and "file" in t: return "projected:file"
-        return "projected:auto"
-
-def _policy_tag_now_from_rc(rc: dict) -> str:
-    """Prefer stamped label; otherwise derive from rc['mode']."""
-    pol = (rc or {}).get("policy_tag")
-    if pol:
-        return str(pol)
-    mode = str((rc or {}).get("mode",""))
-    if mode == "strict":            return "strict"
-    if mode == "projected(columns@k=3,file)":   return "projected(columns@k=3,file)"
-    if mode == "projected(columns@k=3,auto)":   return "projected(columns@k=3,auto)"
-    return "projected(columns@k=3,auto)"
-
-def _frozen_inputs_sig_from_ib(ib: dict) -> tuple[str,str,str,str,str]:
-    """Canonical 5-tuple (D,C,H,U,S) from SSOT; supports legacy and nested."""
-    h = (ib.get("hashes") or {})
-    return (
-        str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
-        str(h.get("C_hash",          ib.get("C_hash",""))),
-        str(h.get("H_hash",          ib.get("H_hash",""))),
-        str(h.get("U_hash",          ib.get("U_hash",""))),
-        str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
-    )
-
-def _ab_is_fresh_now(*, rc: dict, ib: dict, ab_payload: dict) -> tuple[bool, str]:
-    """
-    Returns (fresh, reason). `reason` is "" if fresh, otherwise one of:
-    AB_STALE_INPUTS_SIG | AB_STALE_POLICY | AB_STALE_PROJECTOR_HASH | AB_NONE
-    """
-    if not ab_payload:
-        return (False, "AB_NONE")
-
-    frozen = tuple(_frozen_inputs_sig_from_ib(ib))
-    ab_sig = tuple(ab_payload.get("inputs_sig") or ())
-    if ab_sig != frozen:
-        return (False, "AB_STALE_INPUTS_SIG")
-
-    pol_now = _policy_tag_now_from_rc(rc)
-    ab_pol  = str(ab_payload.get("policy_tag",""))
-    if ab_pol != pol_now:
-        return (False, "AB_STALE_POLICY")
-
-    if str(rc.get("mode","")) == "projected(columns@k=3,file)":
-        pj_now = rc.get("projector_hash","") or ""
-        pj_ab  = ((ab_payload.get("projected") or {}).get("projector_hash","") or "")
-        if pj_ab != pj_now:
-            return (False, "AB_STALE_PROJECTOR_HASH")
-
-    return (True, "")
-
-
-# --- Self-tests (startup-friendly, minimal) -----------------------------------
-def run_self_tests():
-    failures, warnings = [], []
-    ss = st.session_state
-    ib = ss.get("_inputs_block") or {}
-    rc = ss.get("run_ctx") or {}
-    out = ss.get("overlap_out") or {}
-
-    # 1) SSOT completeness (support nested hashes)
-    h = ib.get("hashes") or {}
-    for k in ("boundaries_hash","C_hash","H_hash","U_hash"):
-        if not (ib.get(k) or h.get(k)):
-            warnings.append(f"SSOT: missing {k}")
-
-    # 2) Freshness (only after publish)
-    try:
-        if ss.get("_has_overlap"):
-            if "ssot_is_stale_v2" in globals() and callable(globals()["ssot_is_stale_v2"]):
-                if ssot_is_stale_v2():  # type: ignore[name-defined]
-                    warnings.append("SSOT_STALE: live inputs changed; run Overlap to refresh SSOT")
-            elif "ssot_is_stale" in globals() and callable(globals()["ssot_is_stale"]):
-                if ssot_is_stale():     # type: ignore[name-defined]
-                    warnings.append("SSOT_STALE: live inputs changed; run Overlap to refresh SSOT")
-    except Exception as e:
-        warnings.append(f"SSOT_STALE_CHECK: {e}")
-
-    # 3) Mode sanity
-    mode = str(rc.get("mode",""))
-    if mode == "projected(columns@k=3,file)":
-        if not bool(rc.get("projector_consistent_with_d", False)):
-            failures.append("FILE_OK: projected(columns@k=3,file) not consistent with d3")
-    elif mode == "projected(columns@k=3,auto)":
-        if "3" not in (out or {}):
-            warnings.append("AUTO_OK: no overlap_out present yet")
-
-    # 4) A/B snapshot freshness (only warn if snapshot exists)
-    ab = ss.get("ab_compare") or {}
-    if ab:
-        fresh, _reason = _ab_is_fresh_now(rc=rc, ib=ib, ab_payload=ab)
-        if not fresh:
-            warnings.append("AB_FRESH: A/B snapshot is stale (won’t embed)")
-
-    return failures, warnings
-
 # --- Policy pill + run stamp (single rendering; read-only) -------------------
 _rc = st.session_state.get("run_ctx") or {}
 _ib = st.session_state.get("_inputs_block") or {}
@@ -2077,8 +1956,9 @@ st.caption(f"{policy_tag} | n3={n3} | B={b8} C={c8} H={h8} U={u8} | P={p8} | S={
 
 
 # Gentle hint only if any core hash is blank
-if any(x in ("", None) for x in (_h.get("boundaries_hash"), _h.get("C_hash"), _h.get("H_hash"), _h.get("U_hash"))):
+if any(x in ("", None) for x in (h.get("boundaries_hash"), h.get("C_hash"), h.get("H_hash"), h.get("U_hash"))):
     st.info("SSOT isn’t fully populated yet. Run Overlap once to publish provenance hashes.")
+
 
 # --- A/B status chip (no HTML repr; no duplicate logic) ------------------------
 ab_pin = st.session_state.get("ab_pin") or {}
@@ -2171,9 +2051,7 @@ def _ab_frozen_inputs_sig_list() -> list[str]:
         str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
     ]
 
-def _ab_embed_sig() -> str:
-    """One-line canonical embed sig for A/B pins and embed consumer."""
-    return "|".join(_ab_frozen_inputs_sig_list())
+
 
 def _ab_load_h_latest():
     """
@@ -2226,182 +2104,10 @@ if "_is_zero" not in globals():
     def _is_zero(M):
         return (not M) or all((x & 1) == 0 for row in M for x in row)
 
-if "_recompute_strict_out" not in globals():
-    def _recompute_strict_out(*, boundaries_obj, cmap_obj, H_obj, d3) -> dict:
-        H2 = (H_obj.blocks.__root__.get("2") or []) if H_obj else []
-        C3 = (cmap_obj.blocks.__root__.get("3") or [])
-        I3 = _eye(len(C3)) if C3 else []
-        eq3 = False
-        try:
-            if _shape_ok(H2, d3) and C3 and C3[0] and (len(C3) == len(C3[0])):
-                if "mul" not in globals() or not callable(globals()["mul"]):
-                    raise RuntimeError("GF(2) mul(H2,d3) not available.")
-                R3 = _xor_gf2(mul(H2, d3), _xor_gf2(C3, I3))  # type: ignore[name-defined]
-                eq3 = _is_zero(R3)
-        except Exception:
-            eq3 = False
-        return {"2": {"eq": True}, "3": {"eq": bool(eq3), "n_k": (len(d3[0]) if (d3 and d3[0]) else 0)}}
 
-if "_recompute_projected_out" not in globals():
-    def _recompute_projected_out(*, rc, boundaries_obj, cmap_obj, H_obj) -> tuple[dict, dict]:
-        d3 = rc.get("d3") or (boundaries_obj.blocks.__root__.get("3") or [])
-        n3 = len(d3[0]) if (d3 and d3[0]) else 0
-        lm = list(rc.get("lane_mask_k3") or ([1] * n3))
-        # Use active Π if present; else diagonal(lm)
-        P  = rc.get("P_active") or [[1 if (i == j and int(lm[j]) == 1) else 0 for j in range(n3)] for i in range(n3)]
 
-        H2 = (H_obj.blocks.__root__.get("2") or []) if H_obj else []
-        C3 = (cmap_obj.blocks.__root__.get("3") or [])
-        I3 = _eye(len(C3)) if C3 else []
 
-        shapes = {
-            "H2": (len(H2), len(H2[0]) if H2 else 0),
-            "d3": (len(d3), len(d3[0]) if d3 else 0),
-            "C3": (len(C3), len(C3[0]) if C3 else 0),
-            "P_active": (len(P), len(P[0]) if P else 0),
-        }
 
-        R3s, R3p = [], []
-        try:
-            if "mul" not in globals() or not callable(globals()["mul"]):
-                raise RuntimeError("GF(2) mul missing.")
-            R3s = _xor_gf2(mul(H2, d3), _xor_gf2(C3, I3)) if (_shape_ok(H2, d3) and C3 and C3[0] and (len(C3) == len(C3[0]))) else []
-            R3p = mul(R3s, P) if (R3s and P and len(R3s[0]) == len(P)) else []
-        except Exception:
-            R3s, R3p = [], []
-
-        def _nz_cols(M):
-            if not M: return []
-            r, c = len(M), len(M[0])
-            return [j for j in range(c) if any(M[i][j] & 1 for i in range(r))]
-
-        debug = {
-            "shapes": shapes,
-            "R3_strict_nz_cols": _nz_cols(R3s),
-            "R3_projected_nz_cols": _nz_cols(R3p),
-        }
-        eq3_proj = _is_zero(R3p)
-        return ({"2": {"eq": True}, "3": {"eq": bool(eq3_proj), "n_k": n3}}, debug)
-
-if "_lane_bottoms_for_diag" not in globals():
-    def _lane_bottoms_for_diag(*, H_obj, cmap_obj, d3, lane_mask):
-        def _bottom_row(M): return M[-1] if (M and len(M)) else []
-        H2 = (H_obj.blocks.__root__.get("2") or []) if H_obj else []
-        C3 = (cmap_obj.blocks.__root__.get("3") or [])
-        I3 = _eye(len(C3)) if C3 else []
-        try:
-            if "mul" not in globals() or not callable(globals()["mul"]):
-                raise RuntimeError("GF(2) mul missing.")
-            H2d3  = mul(H2, d3) if _shape_ok(H2, d3) else []
-            C3pI3 = _xor_gf2(C3, I3) if (C3 and C3[0]) else []
-        except Exception:
-            H2d3, C3pI3 = [], []
-        idx = [j for j, m in enumerate(lane_mask or []) if m]
-        bH = _bottom_row(H2d3); bC = _bottom_row(C3pI3)
-        return ([bH[j] for j in idx] if (bH and idx) else [],
-                [bC[j] for j in idx] if (bC and idx) else [])
-# =================== /A/B compat shims ===================
-# ============== A/B policy + embed signature helpers (compat) ==============
-import hashlib as _hash
-import json as _json
-
-if "_canonical_policy_tag" not in globals():
-    def _canonical_policy_tag(rc: dict | None) -> str:
-        rc = rc or {}
-        # 1) If your app already stamped a label, trust it.
-        lbl = rc.get("policy_tag")
-        if lbl:
-            return str(lbl)
-        # 2) If your app exposes a policy label helper, use it.
-        if "policy_label_from_cfg" in globals() and "cfg_active" in globals():
-            try:
-                return str(policy_label_from_cfg(cfg_active))  # type: ignore[name-defined]
-            except Exception:
-                pass
-        # 3) Fallback from mode → canonical strings used across your UI.
-        m = str(rc.get("mode", "strict")).lower()
-        if m == "strict":
-            return "strict"
-        if "projected" in m and "file" in m:
-            return "projected(columns@k=3,file)"
-        if "projected" in m:
-            return "projected(columns@k=3,auto)"
-        return "strict"
-
-if "_inputs_sig_now_from_ib" not in globals():
-    def _inputs_sig_now_from_ib(ib: dict | None) -> list[str]:
-        ib = ib or {}
-        h = (ib.get("hashes") or {})
-        return [
-            str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
-            str(h.get("C_hash",          ib.get("C_hash",""))),
-            str(h.get("H_hash",          ib.get("H_hash",""))),
-            str(h.get("U_hash",          ib.get("U_hash",""))),
-            str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
-        ]
-
-if "_ab_embed_sig" not in globals():
-    def _ab_embed_sig() -> str:
-        """
-        Canonical signature that gates whether a pinned A/B snapshot is still
-        'fresh' enough to embed into the cert/gallery. Includes:
-          - frozen/current inputs_sig
-          - canonical policy tag
-          - projector hash (only for projected(columns@k=3,file))
-        """
-        ss = st.session_state
-        rc = ss.get("run_ctx") or {}
-        ib = ss.get("_inputs_block") or {}
-
-        # Prefer frozen sig if your SSOT helper exists; else current inputs.
-        try:
-            if "ssot_frozen_sig_from_ib" in globals() and callable(globals()["ssot_frozen_sig_from_ib"]):
-                inputs_sig = list(ssot_frozen_sig_from_ib() or [])  # type: ignore[name-defined]
-            else:
-                inputs_sig = _inputs_sig_now_from_ib(ib)
-        except Exception:
-            inputs_sig = _inputs_sig_now_from_ib(ib)
-
-        pol = _canonical_policy_tag(rc)
-        pj  = rc.get("projector_hash","") if str(rc.get("mode","")) == "projected(columns@k=3,file)" else ""
-
-        blob = {"inputs": inputs_sig, "policy": pol, "projector_hash": pj}
-        return _hash.sha256(_json.dumps(blob, separators=(",", ":"), sort_keys=True).encode("ascii")).hexdigest()
-# ============ /A/B policy + embed signature helpers (compat) ============
-def _pin_ab_for_cert(strict_out: dict, projected_out: dict):
-    """Pin A/B snapshot into session with a canonical embed_sig + one-shot ticket."""
-
-    ss = st.session_state
-    ib = ss.get("_inputs_block") or {}
-    rc = ss.get("run_ctx") or {}
-
-    # inputs_sig: prefer frozen SSOT if available, else current block
-    try:
-        if "ssot_frozen_sig_from_ib" in globals() and callable(globals()["ssot_frozen_sig_from_ib"]):
-            inputs_sig = list(ssot_frozen_sig_from_ib() or [])  # type: ignore[name-defined]
-        else:
-            inputs_sig = _inputs_sig_now_from_ib(ib)
-    except Exception:
-        inputs_sig = _inputs_sig_now_from_ib(ib)
-
-    pol_tag = _canonical_policy_tag(rc)
-    pj_hash = rc.get("projector_hash","") if str(rc.get("mode","")) == "projected(columns@k=3,file)" else ""
-
-    payload = {
-        "pair_tag": f"strict__VS__{pol_tag}",
-        "inputs_sig": inputs_sig,
-        "policy_tag": pol_tag,
-        "strict":    {"out": dict(strict_out or {})},
-        "projected": {"out": dict(projected_out or {}), "policy_tag": pol_tag, "projector_hash": pj_hash},
-    }
-
-    # >>> stamp canonical embed signature <<<
-    payload["embed_sig"] = _ab_embed_sig()
-
-    ss["ab_pin"] = {"state": "pinned", "payload": payload, "consumed": False}
-    ss["_ab_ticket_pending"] = int(ss.get("_ab_ticket_pending", 0)) + 1
-    ss["write_armed"] = True
-    ss["armed_by"]    = "ab_compare"
 
 # ===== ABX fixture helpers (module-scope, guarded) =====
 from pathlib import Path
@@ -2556,47 +2262,8 @@ def _svr_write_cert_in_bundle(bundle_dir: Path, filename: str, payload: dict) ->
     os.replace(tmp, p)
     return p
 # ==============================================================================
-def _svr_guarded_atomic_write_json(path: Path, payload: dict):
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        _json.dump(payload, f, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        f.flush(); os.fsync(f.fileno())
-    os.replace(tmp, path)
 
-# accept path / UploadedFile / dict
-def _is_uploaded_file(x): return hasattr(x, "getvalue") and hasattr(x, "name")
 
-def abx_read_json_any(x, *, kind: str):
-    """
-    Return (json_obj, canonical_path_str, origin) where origin ∈ {"file","upload","dict",""}
-    """
-    if not x: return {}, "", ""
-    # path-like
-    try:
-        if isinstance(x, (str, Path)):
-            p = Path(x)
-            if p.exists():
-                return _json.loads(p.read_text(encoding="utf-8")), str(p), "file"
-    except Exception:
-        pass
-    # UploadedFile
-    if _is_uploaded_file(x):
-        try:
-            raw = x.getvalue()
-            text = raw.decode("utf-8")
-            j = _json.loads(text)
-        except Exception:
-            return {}, "", ""
-        h12  = _hashlib.sha256(raw).hexdigest()[:12]
-        base = Path(getattr(x, "name", f"{kind}.json")).name
-        outp = UPLOADS_DIR / f"{kind}__{h12}__{base}"
-        try: outp.write_text(text, encoding="utf-8")
-        except Exception: pass
-        return j, str(outp), "upload"
-    # raw dict
-    if isinstance(x, dict):
-        return x, "", "dict"
-    return {}, "", ""
 
 # normalize per kind → "blocks" payload we hash/persist
 def _svr_as_blocks(j: dict, kind: str) -> dict:
@@ -3205,12 +2872,7 @@ with safe_expander("Cert & provenance (read‑only; solver writes bundles)", exp
     def _sanitize(s: str) -> str:
         return "".join(ch if (ch.isalnum() or ch in "-_@=,") else "_" for ch in (s or ""))[:80]
 
-    def _canon_policy(label_raw: str) -> str:
-        t = (label_raw or "").lower()
-        if "strict" in t: return "strict"
-        if "projected" in t and "file" in t: return "projected:file"
-        return "projected:auto"
-
+ 
     def _python_version_str() -> str:
         return f"python-{platform.python_version()}"
 
