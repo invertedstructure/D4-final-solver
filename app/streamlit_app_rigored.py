@@ -4909,6 +4909,74 @@ def _reports_hydrate_BCH() -> tuple:
 
     return B, C, H
 
+# ── Reports: tiny helpers (final) ─────────────────────────────────────────────
+import streamlit as st
+
+def reports_pin_lane_mask_from_d3(d3: list[list[int]]) -> list[int]:
+    """
+    Ensure run_ctx.lane_mask_k3 exists. If missing, derive it from d3 and pin it.
+    Returns the lane mask as 0/1 list of length n3.
+    """
+    ss = st.session_state
+    rc = ss.get("run_ctx") or {}
+
+    lm = rc.get("lane_mask_k3")
+    if isinstance(lm, list) and lm:
+        return [int(x) & 1 for x in lm]
+
+    if not d3 or not (d3[0] if d3 else []):
+        return []
+
+    rows, n3 = len(d3), len(d3[0])
+    lm = [1 if any(int(d3[i][j]) & 1 for i in range(rows)) else 0 for j in range(n3)]
+    rc["lane_mask_k3"] = lm
+    ss["run_ctx"] = rc
+    return lm
+
+def reports_dims_from_d3(d3: list[list[int]]) -> tuple[int, int]:
+    return len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)
+
+# math shims only if your app didn’t define them
+def _strict_R3_fallback(H2, d3, C3):
+    n3 = len(C3)
+    I3 = [[1 if i == j else 0 for j in range(n3)] for i in range(n3)]
+    # GF(2) multiply with app's mul if present
+    if "mul" in globals() and callable(globals()["mul"]):
+        H2d3 = mul(H2, d3)  # type: ignore[name-defined]
+    else:
+        if not H2 or not d3: return []
+        m, k, n = len(H2), len(H2[0]), len(d3[0])
+        H2d3 = [[0]*n for _ in range(m)]
+        for i in range(m):
+            Ai = H2[i]
+            for t in range(k):
+                if Ai[t] & 1:
+                    Bt = d3[t]
+                    for j in range(n):
+                        H2d3[i][j] ^= (Bt[j] & 1)
+    C3pI = [[(C3[i][j] ^ I3[i][j]) & 1 for j in range(n3)] for i in range(n3)]
+    return [[(H2d3[i][j] ^ C3pI[i][j]) & 1 for j in range(n3)] for i in range(n3)]
+
+if "_strict_R3" not in globals():
+    _strict_R3 = _strict_R3_fallback
+
+def _projected_R3_fallback(R3, P):
+    if not (R3 and P): return []
+    if "mul" in globals() and callable(globals()["mul"]):
+        return mul(R3, P)  # type: ignore[name-defined]
+    m, k, n = len(R3), len(R3[0]), len(P[0])
+    out = [[0]*n for _ in range(m)]
+    for i in range(m):
+        for t in range(k):
+            if R3[i][t] & 1:
+                Pt = P[t]
+                for j in range(n):
+                    out[i][j] ^= (Pt[j] & 1)
+    return out
+
+if "_projected_R3" not in globals():
+    _projected_R3 = _projected_R3_fallback
+# ─────────────────────────────────────────────────────────────────────────────
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Reports: Perturbation sanity (d3 flips, lanes-only) + optional Fence stress
@@ -4935,32 +5003,32 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
     rc["projector_filename"] = rc.get("projector_filename") or _pj_path_from_context_or_fs()
     ss["run_ctx"] = rc
 
-    # ─── Preflight: hydrate B/C/H and assert H2/d3/C3 exist ───
+        # ─── Preflight: hydrate B/C/H and assert H2/d3/C3 exist ───
     B0, C0, H0 = _reports_hydrate_BCH()
-    try:
-        d3 = (B0.blocks.__root__.get("3") or [])
-        C3 = (C0.blocks.__root__.get("3") or [])
-        H2 = (H0.blocks.__root__.get("2") or [])
-        n2, n3 = len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)
-        if not (n2 and n3 and H2 and C3):  # do NOT multiply; just a presence/shape sniff
-            raise RuntimeError("missing")
-    except Exception:
+    
+    # Pull blocks once
+    d3_base = (B0.blocks.__root__.get("3") or []) if B0 else []
+    C3      = (C0.blocks.__root__.get("3") or []) if C0 else []
+    H2      = (H0.blocks.__root__.get("2") or []) if H0 else []
+    
+    # Presence/shape sniff only (no matmul here)
+    n2 = len(d3_base)
+    n3 = len(d3_base[0]) if (n2 and d3_base[0]) else 0
+    if not (n2 and n3 and H2 and (H2[0] if H2 else []) and C3 and (C3[0] if C3 else [])):
         st.error("Reports: missing H2/d3/C3 — run Overlap/Cert once to freeze SSOT.")
         st.stop()
-
-    st.caption(f"Reports inputs live → H2:{len(H2)}×{len(H2[0]) if H2 and H2[0] else 0} · d3:{n2}×{n3} · C3:{len(C3)}×{len(C3[0]) if C3 and C3[0] else 0}")
-    # --- Lane-mask fallback (when SSOT pin is missing) ---
-    rc = st.session_state.get("run_ctx") or {}
     
-    # Prefer the SSOT pin; if absent, derive from current d3 and pin it for this run.
+    st.caption(f"Reports inputs live → H2:{len(H2)}×{len(H2[0]) if H2 and H2[0] else 0} · d3:{n2}×{n3} · C3:{len(C3)}×{len(C3[0]) if C3 and C3[0] else 0}")
+    
+    # --- Lane-mask: prefer SSOT pin; else derive from d3 and pin it (copy-only) ---
+    rc = st.session_state.get("run_ctx") or {}
     lane_mask = [int(x) & 1 for x in (rc.get("lane_mask_k3") or [])]
     if not lane_mask:
-        lane_mask = _lane_mask_from_d3_matrix(d3_base)  # lanes = columns with any 1 in d3
-        # pin into run_ctx (copy-only; no widget keys), so downstream reads are consistent
+        lane_mask = [1 if any(int(d3_base[i][j]) & 1 for i in range(n2)) else 0 for j in range(n3)]
         rc["lane_mask_k3"] = lane_mask
-        st.session_state["run_ctx"] = rc
+        st.session_state["run_ctx"] = rc  # pin for downstream consumers
     
-    # Build diagonal projector from the mask (used for the “projected” check in this panel)
+    # Build diagonal projector once
     P_diag = _diag_from_mask_local(lane_mask) if lane_mask else None
     
     # Flip domain = lanes-only
@@ -4969,9 +5037,6 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
     # Tiny visibility so you can sanity check quickly
     st.caption(f"Lane mask → {lane_mask} (lanes: {len(selected_cols)}/{n3})")
 
-    # Lane mask / projector diag (copy-only; prefer SSOT mask; no recompute)
-    lanes = [int(x) & 1 for x in ((ss.get("run_ctx") or {}).get("lane_mask_k3") or [])]
-    P_diag = _diag_from_mask_local(lanes) if lanes else None
 
     # Projector validation tag (copy-only)
     proj_status = {"status": "OK", "na_reason_code": ""}
