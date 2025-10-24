@@ -4938,8 +4938,8 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
     rc["projector_filename"] = rc.get("projector_filename") or _pj_path_from_context_or_fs()
     st.session_state["run_ctx"] = rc
     
-            # make sure H/C/B objects are actually present before shape checks
-        H_used = st.session_state.get("overlap_H") or _load_h_local()
+    # make sure H/C/B objects are actually present before shape checks
+    H_used = st.session_state.get("overlap_H") or _load_h_local()
 
        # ─── Preflight: load BCH and assert we actually have H2/d3/C3 ───
     B0, C0, H0 = _reports_hydrate_BCH()
