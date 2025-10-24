@@ -1750,7 +1750,7 @@ def _resolve_projector(cfg_active: dict, boundaries) -> tuple[list[list[int]], d
     meta.setdefault("projector_consistent_with_d", None)
 
     return P_active, meta
-ef _ab_is_fresh_now(*, rc: dict, ib: dict, ab_payload: dict) -> tuple[bool, str]:
+def _ab_is_fresh_now(*, rc: dict, ib: dict, ab_payload: dict) -> tuple[bool, str]:
     """
     Returns (fresh, reason). `reason` is "" if fresh, otherwise one of:
     AB_STALE_INPUTS_SIG | AB_STALE_POLICY | AB_STALE_PROJECTOR_HASH | AB_NONE
