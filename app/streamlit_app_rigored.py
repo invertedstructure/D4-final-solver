@@ -4908,6 +4908,18 @@ def _reports_hydrate_BCH() -> tuple:
             H = io.parse_cmap(data)   # H uses the same parse_cmap schema (blocks:{ "2": ... })
 
     return B, C, H
+    
+def _pin_lane_mask_and_projector(d3_base, n2, n3):
+    """Return (lane_mask, P_diag, selected_cols) and pin lane_mask_k3 into run_ctx if missing."""
+    rc = st.session_state.get("run_ctx") or {}
+    lm = [int(x) & 1 for x in (rc.get("lane_mask_k3") or [])]
+    if not lm:
+        lm = [1 if any(int(d3_base[i][j]) & 1 for i in range(n2)) else 0 for j in range(n3)]
+        rc["lane_mask_k3"] = lm
+        st.session_state["run_ctx"] = rc
+    P = _diag_from_mask_local(lm) if lm else None
+    sel = {j for j, b in enumerate(lm) if b == 1}
+    return lm, P, sel
 
 # ── Reports: tiny helpers (final) ─────────────────────────────────────────────
 import streamlit as st
@@ -5020,8 +5032,9 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
     
     st.caption(f"Reports inputs live → H2:{len(H2)}×{len(H2[0]) if H2 and H2[0] else 0} · d3:{n2}×{n3} · C3:{len(C3)}×{len(C3[0]) if C3 and C3[0] else 0}")
         
-       # --- Lane-mask pin & projector diag (final/clean) ---
+      # --- Lane-mask pin & projector diag (final/clean) ---
     rc = st.session_state.get("run_ctx") or {}
+    
     lane_mask = [int(x) & 1 for x in (rc.get("lane_mask_k3") or [])]
     if not lane_mask:
         # derive from d3 once and pin for downstream consumers
@@ -5031,11 +5044,16 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
     
     P_diag = _diag_from_mask_local(lane_mask) if lane_mask else None
     
-    # Back-compat aliases so older lines won't NameError
-    lanes = lane_mask
-    lane_cols = selected_cols  # some places use 'lane_cols'
+    # compute set FIRST
+    selected_cols = {j for j, b in enumerate(lane_mask) if b == 1}
+    
+    # then aliases (for older code paths)
+    lane_mask, P_diag, selected_cols = _pin_lane_mask_and_projector(d3_base, n2, n3)
+    lanes = lane_mask          # back-compat
+    lane_cols = selected_cols  # back-compat
     
     st.caption(f"Lane mask → {lane_mask} (lanes: {len(selected_cols)}/{n3})")
+
 
     
     # Build diagonal projector once
