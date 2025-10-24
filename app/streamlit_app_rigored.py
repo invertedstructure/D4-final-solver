@@ -4150,6 +4150,129 @@ import streamlit as st
 # === Projector resolver (strict FILE provenance, no UI writes) ================
 from pathlib import Path
 import json, hashlib, streamlit as st
+# ── Reports/Cert shims: projector normalize + A/B pin unify + safe helpers ──
+from pathlib import Path
+import hashlib, json as _json
+
+def _pj_path_from_context_or_fs__tiny() -> str:
+    ss = st.session_state
+    rc = ss.get("run_ctx") or {}
+    # 1) run_ctx choice
+    p = (rc.get("projector_filename") or "").strip()
+    if p and Path(p).exists(): return p
+    # 2) last UI pick
+    p = (ss.get("ov_last_pj_path") or "").strip()
+    if p and Path(p).exists(): return p
+    # 3) registry by district (last hit wins)
+    try:
+        reg = Path(ss.get("PROJECTORS_DIR","projectors")) / "projector_registry.jsonl"
+        di  = (ss.get("_district_info") or {}).get("district_id","")
+        if reg.exists():
+            latest = ""
+            with open(reg, "r", encoding="utf-8") as f:
+                for ln in f:
+                    try:
+                        row = _json.loads(ln)
+                        if not di or row.get("district") == di:
+                            cand = (row.get("filename") or "").strip()
+                            if cand and Path(cand).exists():
+                                latest = cand
+                    except Exception:
+                        continue
+            if latest: return latest
+    except Exception:
+        pass
+    # 4) newest in projectors/
+    pjdir = Path(ss.get("PROJECTORS_DIR","projectors"))
+    if pjdir.exists():
+        files = sorted(pjdir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if files: return files[0].as_posix()
+    return ""
+
+def _normalize_projector_in_run_ctx__tiny():
+    """Idempotent. If mode=projected(...,file) but filename/hash are empty, fill them."""
+    ss = st.session_state
+    rc = ss.get("run_ctx") or {}
+    m  = str(rc.get("mode","strict"))
+    if m.startswith("projected(") and "file" in m:
+        fn = (rc.get("projector_filename") or "").strip() or _pj_path_from_context_or_fs__tiny()
+        if fn and Path(fn).exists():
+            rc.setdefault("projector_filename", fn)
+            rc.setdefault("projector_hash", hashlib.sha256(Path(fn).read_bytes()).hexdigest())
+    ss["run_ctx"] = rc
+    return rc
+
+def _resolve_projector_from_rc():
+    """
+    Minimal resolver to satisfy destructuring elsewhere:
+      returns (mode, submode, filename, projector_hash, projector_diag_or_None)
+    """
+    rc = st.session_state.get("run_ctx") or {}
+    m  = str(rc.get("mode","strict"))
+    mode, submode = ("strict","")
+    if m.startswith("projected("):
+        mode = "projected"
+        submode = "file" if "file" in m else "auto"
+    fn = rc.get("projector_filename","") if submode=="file" else ""
+    pj_hash = rc.get("projector_hash","") if submode=="file" else ""
+    return mode, submode, fn, pj_hash, None  # diag None is fine for callers that only need the tuple
+
+def _ab_unify_pin__tiny():
+    """
+    Make sure everyone reads the same key.
+    If a variant pin exists, mirror it into st.session_state['ab_pin'].
+    """
+    ss = st.session_state
+    pin = ss.get("ab_pin") or ss.get("ab_pin_file") or ss.get("ab_pin_auto") or {}
+    if pin and not ss.get("ab_pin"):
+        ss["ab_pin"] = pin
+    return ss.get("ab_pin") or {}
+
+# lane-mask from d3 (shared by several panels)
+def _lane_mask_from_d3_matrix(d3):
+    if not d3 or not (d3[0] if d3 else []): return []
+    rows, n3 = len(d3), len(d3[0])
+    return [1 if any(int(d3[i][j]) & 1 for i in range(rows)) else 0 for j in range(n3)]
+
+# strict inputs block (copy-only; no recompute). If you already have it, this is a no-op wrapper.
+if "_inputs_block_from_session" not in globals():
+    def _inputs_block_from_session(strict_dims: tuple[int,int] | None = None) -> dict:
+        rc = st.session_state.get("run_ctx") or {}
+        ih = (st.session_state.get("inputs_hashes") or {}).copy()
+        # merge from rc if viewer cleared inputs_hashes
+        for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"):
+            ih[k] = ih.get(k) or rc.get(k) or ""
+        if strict_dims is not None:
+            n2, n3 = int(strict_dims[0]), int(strict_dims[1])
+        else:
+            try:
+                n2 = int(rc.get("n2")) if rc.get("n2") is not None else 0
+                n3 = int(rc.get("n3")) if rc.get("n3") is not None else 0
+            except Exception:
+                n2, n3 = 0, 0
+        lm = [int(x) & 1 for x in (rc.get("lane_mask_k3") or [])]
+        return {"hashes": ih, "dims": {"n2": n2, "n3": n3}, "lane_mask_k3": lm}
+
+# minimal H/C/B access shims so early-renders don't crash (no recompute)
+if "io" not in globals():
+    class _IO_STUB:
+        @staticmethod
+        def parse_cmap(d):
+            class _X:
+                def __init__(self, d):
+                    self.blocks = type("B", (), {"__root__": d.get("blocks", {})})
+                def dict(self): return {"blocks": self.blocks.__root__}
+            return _X(d or {"blocks": {}})
+        @staticmethod
+        def parse_boundaries(d): return _IO_STUB.parse_cmap(d)
+    io = _IO_STUB()
+if "_load_h_local" not in globals():
+    def _load_h_local():
+        return st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
+
+# call these once at the top of the panel before reading rc/H/C/B:
+_normalize_projector_in_run_ctx__tiny()
+_ab_unify_pin__tiny()
 
 def _resolve_projector_from_rc():
     """
@@ -4695,6 +4818,10 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
     rc["mode"] = rc.get("mode") or "projected(columns@k=3,file)"
     rc["projector_filename"] = rc.get("projector_filename") or _pj_path_from_context_or_fs()
     st.session_state["run_ctx"] = rc
+    
+        # make sure H/C/B objects are actually present before shape checks
+    H_used = st.session_state.get("overlap_H") or _load_h_local()
+
 
 
     # Freeze current SSOT (copy-only)
