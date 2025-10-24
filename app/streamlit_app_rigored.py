@@ -4144,8 +4144,7 @@ import random as _random  # harmless; some callers use it
 # 1) Schema/version + field (one source of truth for F1/F2/F3)
 FIELD          = "GF(2)"     # identity.field in all JSON payloads
 
-# 2) Guard enum (must match certs / parity)
-GUARD_ENUM = ["grid", "wiggle", "echo", "fence", "ker_guard", "none", "error"]
+
 
 # ==================== REPORTS: unified Π resolver + shims (drop-in) ====================
 from pathlib import Path
