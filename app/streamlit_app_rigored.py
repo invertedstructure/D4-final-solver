@@ -4569,6 +4569,27 @@ def _inputs_block_from_session(strict_dims: tuple[int, int] | None = None) -> di
 
 # keep older call sites happy
 _inputs_block_from_session_SAFE = _inputs_block_from_session
+
+def _reports_hydrate_BCH():
+    ss = st.session_state
+    # Prefer session-pinned objects, then globals; never construct empties here.
+    B = ss.get("boundaries") or globals().get("boundaries")
+    C = ss.get("cmap") or globals().get("cmap")
+
+    # H has been named a few ways in different paths; check them all.
+    H = (
+        ss.get("overlap_H")
+        or ss.get("H_used")
+        or ss.get("H")                   # some older rigs
+        or globals().get("overlap_H")
+    )
+
+    # If we successfully hydrated H but "overlap_H" isn’t set, pin it so any
+    # legacy code that reads st.session_state["overlap_H"] also succeeds.
+    if H is not None and ss.get("overlap_H") is None:
+        ss["overlap_H"] = H
+
+    return B, C, H
 # ============================================================================== 
 
 def _hash_json(obj) -> str:
@@ -4880,28 +4901,6 @@ if "set_carrier_mask" not in globals():
         return True
 # ============================================================================== 
 
-
-# --- Reports: single-source BCH resolver (use everywhere in reports) ---
-def _reports_hydrate_BCH():
-    ss = st.session_state
-    # Prefer session-pinned objects, then globals; never construct empties here.
-    B = ss.get("boundaries") or globals().get("boundaries")
-    C = ss.get("cmap")       or globals().get("cmap")
-
-    # H has been named a few ways in different paths; check them all.
-    H = (
-        ss.get("overlap_H")
-        or ss.get("H_used")
-        or ss.get("H")                   # some older rigs
-        or globals().get("overlap_H")
-    )
-
-    # If we successfully hydrated H but "overlap_H" isn’t set, pin it so any
-    # legacy code that reads st.session_state["overlap_H"] also succeeds.
-    if H is not None and ss.get("overlap_H") is None:
-        ss["overlap_H"] = H
-
-    return B, C, H
 
 
 
