@@ -348,7 +348,7 @@ def _lane_mask_from_d3(*args):
 
     # Unknown shape
     return []
-    if "_lane_mask_from_d3" not in globals():
+if "_lane_mask_from_d3" not in globals():
     def _lane_mask_from_d3(*args):
         # Prefer C3 if present
         C3 = None
@@ -364,6 +364,7 @@ def _lane_mask_from_d3(*args):
         d3 = (args[0].get("3") if len(args) >= 1 and isinstance(args[0], dict) else (args[0] if len(args)>=1 else None))
         n3 = (len(d3[0]) if d3 and d3 and isinstance(d3[0], list) else 0)
         return [0]*n3 if n3 else []
+
 
 
 
