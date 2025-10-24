@@ -149,66 +149,6 @@ if "_selected_mask_auto" not in globals():
 
 
 
-
-# =============================== Header helpers ===============================
-def _svr_header_line(ib: dict, sig8: str, projector_hash: str | None, policy_tag: str, run_id: str) -> str:
-    h = (ib.get("hashes") or {})
-    b8 = (h.get("boundaries_hash","") or "")[:8]
-    c8 = (h.get("C_hash","") or "")[:8]
-    h8 = (h.get("H_hash","") or "")[:8]
-    u8 = (h.get("U_hash","") or "")[:8]
-    p8 = (projector_hash or "")[:8] if projector_hash else "—"
-    n3 = int((ib.get("dims") or {}).get("n3") or 0)
-    run8 = (run_id or "")[:8]
-    return f"{policy_tag} | n3={n3} | B={b8} C={c8} H={h8} U={u8} S={sig8} | P={p8} | run={run8}"
-# ==============================================================================
-# ────────────────────────────── IMPORTS (top) ──────────────────────────────
-
-# ────────────────────────────── CONSTANTS (SSOT) ──────────────────────────────
-# Single source of truth: constants + directories (mkdirs on import)
-from datetime import datetime as _svr_dt
-try:
-    SCHEMA_VERSION
-except NameError:
-    SCHEMA_VERSION = "2.0.0"
-pass
-# Engine/logic revision (bump when code/logic changes)
-if "ENGINE_REV" not in globals():
-    ENGINE_REV = "rev-20251022-1"
-    pass
-# N/A reason codes taxonomy (upper snake case)
-if "NA_CODES" not in globals():
-    NA_CODES = {
-        "C3_NOT_SQUARE",
-        "BAD_SHAPE",
-        "AUTO_REQUIRES_SQUARE_C3",
-        "ZERO_LANE_PROJECTOR",
-        "FREEZER_C3_NOT_SQUARE",
-        "FREEZER_ZERO_LANE_PROJECTOR",
-        "FREEZER_BAD_SHAPE",
-        "FREEZER_ASSERT_MISMATCH",
-        "BAD_PROJECTOR_SHAPE",
-        "NOT_IDEMPOTENT"
-    }
-
-# Directory map (only certs here are guaranteed; keep 'reports' for existing features)
-from pathlib import Path
-if "DIRS" not in globals():
-    DIRS = {
-        "root": "logs",
-        "certs": "logs/certs",
-        "reports": "reports"
-    }
-# mkdirs on import
-Path(DIRS["root"]).mkdir(parents=True, exist_ok=True)
-Path(DIRS["certs"]).mkdir(parents=True, exist_ok=True)
-
-# Short helper (8 chars); keep alias to existing _short if present
-def short(h: str) -> str:
-    try:
-        return _short(h, 8)  # reuse if defined
-    except Exception:
-        return (h or "")[:8]
 # ─────────────────────────────────────────────────────────────────────────────
 import sys
 import os
@@ -1095,23 +1035,7 @@ def run_stamp_line() -> str:
     rid= (rc.get("run_id","")         or "")[:8]
     return f"{pol} | n3={n3} | B {hB} · C {hC} · H {hH} · U {hU} | P {pH} | run {rid}"
 
-# ------------------------- IO/Zip helpers (stubs retained) -------------------------
-def read_json_file(upload): pass
-def _stamp_filename(state_key: str, upload): pass
-def _guarded_atomic_write_json(path: str | Path, obj: dict, *, pretty: bool = False): pass
-def atomic_write_json(path: str | Path, obj: dict, *, pretty: bool = False): _guarded_atomic_write_json(path, obj, pretty=pretty)
-def atomic_append_jsonl(path: str | Path, row: dict): pass
-def _atomic_write_csv(path: Path, header: list[str], rows: list[list], meta_comment_lines: list[str] | None = None): pass
-def _lane_mask_from_d3(boundaries) -> list[int]: pass
-def _district_signature(mask: list[int], r: int, c: int) -> str: pass
-def policy_label_from_cfg(cfg: dict) -> str: pass
-def _read_projector_matrix(path_str: str): pass
-def projector_choose_active(cfg_active: dict, boundaries): pass
-def hash_matrix_norm(M) -> str: pass
-def _zip_arcname(abspath: str) -> str: pass
-def build_cert_bundle(*, district_id: str, policy_tag: str, cert_path: str,
-                      content_hash: str | None = None, extras: list[str] | None = None) -> str: pass
-def build_inputs_block(boundaries, cmap, H_used, shapes, filenames: dict) -> dict: pass
+
 # ============================= END TOP HELPERS — CANONICAL =============================
 # ---------- Uploaded-file cache ----------
 def _upload_cache() -> dict:
