@@ -8,7 +8,14 @@ import json as _json
 import hashlib as _hashlib
 import uuid as _uuid
 import datetime as _datetime
+from pathlib import Path
+import os, tempfile
+import copy as _copy
+import json as _json
+import hashlib as _hash
 
+import datetime as _dt
+import random as _random
 # Page config must be the first Streamlit command
 SCHEMA_VERSION = "2.0.0"
 ENGINE_REV     = "rev-20251022-1"
@@ -4154,32 +4161,67 @@ def _apply_fixture_after_overlap(*, rc: dict, diag: dict) -> dict:
 
 
 
-
-
-
-# ========= F · Helpers & invariants (shared by F1/F2/F3) =========
+# ===================== Reports: unified helpers (final) =======================
 from pathlib import Path
-import os, tempfile
-import copy as _copy
-import json as _json
-import hashlib as _hash
+import os, json as _json, hashlib as _hash, csv as _csv
+from datetime import datetime as _dt
+import streamlit as st
 
-import datetime as _dt
-import random as _random  # harmless; some callers use it
+# ── Safe “io” stub (only if your real one isn’t loaded) ───────────────────────
+if "io" not in globals():
+    class _IO_STUB:
+        @staticmethod
+        def parse_cmap(d):
+            class _X:
+                def __init__(self, d):
+                    self.blocks = type("B", (), {"__root__": d.get("blocks", {})})
+                def dict(self): return {"blocks": self.blocks.__root__}
+            return _X(d or {"blocks": {}})
+        @staticmethod
+        def parse_boundaries(d):
+            return _IO_STUB.parse_cmap(d)
+    io = _IO_STUB()
 
-# 1) Schema/version + field (one source of truth for F1/F2/F3)
-FIELD          = "GF(2)"     # identity.field in all JSON payloads
+# ── Tiny utils: time + hashing + atomic writers ───────────────────────────────
+def _utc_iso_z() -> str:
+    try:
+        return _dt.utcnow().replace(microsecond=0).isoformat() + "Z"
+    except Exception:
+        # ultra-paranoid fallback
+        return _dt.utcnow().replace(microsecond=0).isoformat() + "Z"
 
+def _deep_intify(o):
+    if isinstance(o, bool): return 1 if o else 0
+    if isinstance(o, list): return [_deep_intify(x) for x in o]
+    if isinstance(o, dict): return {k: _deep_intify(v) for k, v in o.items()}
+    return o
 
+def _hash_json(obj) -> str:
+    canon = _deep_intify(obj)
+    b = _json.dumps(canon, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    return _hash.sha256(b).hexdigest()
 
+def _guarded_atomic_write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        _json.dump(payload, f, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, path)
 
+def _atomic_write_csv(path: Path, header: list[str], rows: list[list], meta_lines: list[str] | None = None) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8", newline="") as f:
+        if meta_lines:
+            for line in meta_lines:
+                f.write(f"# {line}\n")
+        w = _csv.writer(f); w.writerow(header); w.writerows(rows)
+        f.flush(); os.fsync(f.fileno())
+    os.replace(tmp, path)
 
-
-# ── Reports/Cert shims: projector normalize + A/B pin unify + safe helpers ──
-from pathlib import Path
-import hashlib, json as _json
-
-def _pj_path_from_context_or_fs__tiny() -> str:
+# ── Projector path + rc normalizers (pure read; no recompute) ─────────────────
+def _pj_path_from_context_or_fs() -> str:
     ss = st.session_state
     rc = ss.get("run_ctx") or {}
     # 1) run_ctx choice
@@ -4214,192 +4256,49 @@ def _pj_path_from_context_or_fs__tiny() -> str:
         if files: return files[0].as_posix()
     return ""
 
-def _normalize_projector_in_run_ctx__tiny():
-    """Idempotent. If mode=projected(...,file) but filename/hash are empty, fill them."""
+def _normalize_projector_in_run_ctx():
+    """Idempotent fill for FILE mode: filename/hash if missing (no recompute)."""
     ss = st.session_state
     rc = ss.get("run_ctx") or {}
     m  = str(rc.get("mode","strict"))
     if m.startswith("projected(") and "file" in m:
-        fn = (rc.get("projector_filename") or "").strip() or _pj_path_from_context_or_fs__tiny()
+        fn = (rc.get("projector_filename") or "").strip() or _pj_path_from_context_or_fs()
         if fn and Path(fn).exists():
             rc.setdefault("projector_filename", fn)
-            rc.setdefault("projector_hash", hashlib.sha256(Path(fn).read_bytes()).hexdigest())
+            try:
+                rc.setdefault("projector_hash", _hash.sha256(Path(fn).read_bytes()).hexdigest())
+            except Exception:
+                pass
     ss["run_ctx"] = rc
     return rc
 
 def _resolve_projector_from_rc():
     """
-    Minimal resolver to satisfy destructuring elsewhere:
-      returns (mode, submode, filename, projector_hash, projector_diag_or_None)
-    """
-    rc = st.session_state.get("run_ctx") or {}
-    m  = str(rc.get("mode","strict"))
-    mode, submode = ("strict","")
-    if m.startswith("projected("):
-        mode = "projected"
-        submode = "file" if "file" in m else "auto"
-    fn = rc.get("projector_filename","") if submode=="file" else ""
-    pj_hash = rc.get("projector_hash","") if submode=="file" else ""
-    return mode, submode, fn, pj_hash, None  # diag None is fine for callers that only need the tuple
-
-def _ab_unify_pin__tiny():
-    """
-    Make sure everyone reads the same key.
-    If a variant pin exists, mirror it into st.session_state['ab_pin'].
-    """
-    ss = st.session_state
-    pin = ss.get("ab_pin") or ss.get("ab_pin_file") or ss.get("ab_pin_auto") or {}
-    if pin and not ss.get("ab_pin"):
-        ss["ab_pin"] = pin
-    return ss.get("ab_pin") or {}
-
-# lane-mask from d3 (shared by several panels)
-def _lane_mask_from_d3_matrix(d3):
-    if not d3 or not (d3[0] if d3 else []): return []
-    rows, n3 = len(d3), len(d3[0])
-    return [1 if any(int(d3[i][j]) & 1 for i in range(rows)) else 0 for j in range(n3)]
-
-
-
-# minimal H/C/B access shims so early-renders don't crash (no recompute)
-if "io" not in globals():
-    class _IO_STUB:
-        @staticmethod
-        def parse_cmap(d):
-            class _X:
-                def __init__(self, d):
-                    self.blocks = type("B", (), {"__root__": d.get("blocks", {})})
-                def dict(self): return {"blocks": self.blocks.__root__}
-            return _X(d or {"blocks": {}})
-        @staticmethod
-        def parse_boundaries(d): return _IO_STUB.parse_cmap(d)
-    io = _IO_STUB()
-if "_load_h_local" not in globals():
-    def _load_h_local():
-        return st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
-
-# call these once at the top of the panel before reading rc/H/C/B:
-_normalize_projector_in_run_ctx__tiny()
-_ab_unify_pin__tiny()
-
-def _resolve_projector_from_rc():
-    """
-    Returns:
-        (mode, submode, projector_filename, projector_hash, projector_diag_or_None)
-
-    Rules:
-    - strict  -> ("strict","", "", "", None)
-    - projected(auto) -> ("projected","auto","", "", None)
-    - projected(file) -> validate file exists, sha256 it, read blocks.3 as Π (n3×n3)
-      Raises RuntimeError with P3_* messages if missing/invalid.
+    Returns: (mode, submode, filename, projector_hash, projector_diag_or_None)
+    Never writes widgets; diag is None here (runner uses lane-mask diag).
     """
     rc = st.session_state.get("run_ctx") or {}
     m  = str(rc.get("mode", "strict")).strip()
 
     if m == "strict":
         return ("strict", "", "", "", None)
-
     if m == "projected(columns@k=3,auto)":
         return ("projected", "auto", "", "", None)
-
     if m == "projected(columns@k=3,file)":
-        fn = (rc.get("projector_filename") or "").strip()
-        if not fn:
-            # try to auto-pick without mutating session
-            try:
-                fn = _pj_path_from_context_or_fs()
-            except Exception:
-                fn = ""
-        if not fn or not Path(fn).exists():
-            raise RuntimeError("P3_FILE_MISSING: projector FILE missing/invalid.")
-
-        # hash + parse
-        try:
-            b        = Path(fn).read_bytes()
-            pj_hash  = hashlib.sha256(b).hexdigest()
-            payload  = json.loads(b.decode("utf-8", errors="strict"))
-        except UnicodeDecodeError:
-            payload  = json.loads(Path(fn).read_text(encoding="utf-8"))
-            pj_hash  = hashlib.sha256(Path(fn).read_bytes()).hexdigest()
-        except Exception as e:
-            raise RuntimeError(f"P3_FILE_INVALID: {e}")
-
-        blocks3 = (payload.get("blocks", {}) or {}).get("3", [])
-        if not isinstance(blocks3, list) or (blocks3 and not isinstance(blocks3[0], list)):
-            raise RuntimeError("P3_FILE_INVALID: bad 'blocks.3' format.")
-
-        # Optional sanity: if n3 is known, allow mismatch but don’t crash
-        try:
-            n3 = int(rc.get("n3") or 0)
-            if n3 and (len(blocks3) != n3 or (blocks3 and len(blocks3[0]) != n3)):
-                # we keep going; upstream mismatch checks can flag it later
-                pass
-        except Exception:
-            pass
-
-        return ("projected", "file", fn, pj_hash, blocks3)
-
-    # anything else: treat as strict
+        fn = (rc.get("projector_filename") or "").strip() or _pj_path_from_context_or_fs()
+        pj_hash = rc.get("projector_hash","")
+        return ("projected", "file", fn, pj_hash, None)
     return ("strict", "", "", "", None)
-# ===============================================================================
 
+def _ab_unify_pin():
+    """Make sure everyone reads the same key; mirror known variants."""
+    ss = st.session_state
+    pin = ss.get("ab_pin") or ss.get("ab_pin_file") or ss.get("ab_pin_auto") or {}
+    if pin and not ss.get("ab_pin"):
+        ss["ab_pin"] = pin
+    return ss.get("ab_pin") or {}
 
-
-
-# ==================== REPORTS: unified Π resolver + shims (drop-in) ====================
-from pathlib import Path
-import json, hashlib
-# ──────────────────────────────────────────────────────────────────────────────
-# Perturbation sanity (final, solver-aligned): flip H2 supports, lanes-only.
-# Reads SSOT from session, never recomputes, and writes reports/ CSV + JSON.
-# ──────────────────────────────────────────────────────────────────────────────
-from pathlib import Path
-import json as _json, os, hashlib as _hash, io as _io
-from datetime import datetime as _dt
-
-def _gf2_mul(A, B):
-    """Local GF(2) matmul with fallbacks (_svr_mul or mul if present)."""
-    if "_svr_mul" in globals() and callable(globals()["_svr_mul"]):
-        return _svr_mul(A, B)  # type: ignore[name-defined]
-    if "mul" in globals() and callable(globals()["mul"]):
-        return mul(A, B)       # type: ignore[name-defined]
-    # tiny pure-Python fallback (fine for n3<=256)
-    if not A or not B: return []
-    m, k, n = len(A), len(A[0]), len(B[0])
-    C = [[0]*n for _ in range(m)]
-    for i in range(m):
-        Ai = A[i]
-        for t in range(k):
-            if Ai[t] & 1:
-                Bt = B[t]
-                for j in range(n):
-                    C[i][j] ^= (Bt[j] & 1)
-    return C
-
-def _eq_zero(M): 
-    return (not M) or all((x & 1) == 0 for row in M for x in row)
-
-def _strict_R3_local(H2, d3, C3):
-    if not (H2 and d3 and C3 and C3[0]): 
-        raise RuntimeError("R3_INPUTS_MISSING")
-    n3 = len(C3)
-    I3 = [[1 if i==j else 0 for j in range(n3)] for i in range(n3)]
-    H2d3 = _gf2_mul(H2, d3)
-    C3pI = [[(C3[i][j]^I3[i][j]) & 1 for j in range(n3)] for i in range(n3)]
-    return [[(H2d3[i][j]^C3pI[i][j]) & 1 for j in range(n3)] for i in range(n3)]
-
-def _diag_from_mask(mask):
-    n = len(mask or [])
-    return [[1 if (i==j and int(mask[j])==1) else 0 for j in range(n)] for i in range(n)]
-
-def _deep_intify(o):
-    if isinstance(o, bool): return 1 if o else 0
-    if isinstance(o, list): return [_deep_intify(x) for x in o]
-    if isinstance(o, dict): return {k: _deep_intify(v) for k,v in o.items()}
-    return o
-# === SSOT input block (lean, no widget writes) ================================
-import streamlit as st
-
+# ── Input SSOT block (copy-only; no recompute) ─────────────────────────────────
 def _inputs_block_from_session(strict_dims: tuple[int, int] | None = None) -> dict:
     """
     Returns:
@@ -4408,22 +4307,19 @@ def _inputs_block_from_session(strict_dims: tuple[int, int] | None = None) -> di
         "dims":   {"n2": int, "n3": int},
         "lane_mask_k3": [...]
       }
-    - Hashes are read copy-only from inputs_hashes/run_ctx/session.
-    - Dims come from strict_dims -> run_ctx -> 0.
-    - Lane mask is read from run_ctx (SSOT).
     """
     rc = st.session_state.get("run_ctx") or {}
     ih = st.session_state.get("inputs_hashes") or {}
 
-    def grab(key: str) -> str:
-        return ih.get(key) or rc.get(key) or st.session_state.get(key) or ""
+    def _grab(k: str) -> str:
+        return ih.get(k) or rc.get(k) or st.session_state.get(k) or ""
 
     hashes = {
-        "boundaries_hash": grab("boundaries_hash"),
-        "C_hash":          grab("C_hash"),
-        "H_hash":          grab("H_hash"),
-        "U_hash":          grab("U_hash"),
-        "shapes_hash":     grab("shapes_hash"),
+        "boundaries_hash": _grab("boundaries_hash"),
+        "C_hash":          _grab("C_hash"),
+        "H_hash":          _grab("H_hash"),
+        "U_hash":          _grab("U_hash"),
+        "shapes_hash":     _grab("shapes_hash"),
     }
 
     if strict_dims is not None:
@@ -4441,29 +4337,164 @@ def _inputs_block_from_session(strict_dims: tuple[int, int] | None = None) -> di
     lane_mask = [int(x) & 1 for x in (rc.get("lane_mask_k3") or [])]
     return {"hashes": hashes, "dims": {"n2": n2, "n3": n3}, "lane_mask_k3": lane_mask}
 
-# keep older call sites happy
+# Back-compat alias some older names if they’re missing
 _inputs_block_from_session_SAFE = _inputs_block_from_session
 
+# ── Hydrate B/C/H from session (NEVER writes widget keys) ─────────────────────
 def _reports_hydrate_BCH():
     ss = st.session_state
-    # Prefer session-pinned objects, then globals; never construct empties here.
     B = ss.get("boundaries") or globals().get("boundaries")
-    C = ss.get("cmap") or globals().get("cmap")
-
-    # H has been named a few ways in different paths; check them all.
+    C = ss.get("cmap")       or globals().get("cmap")
     H = (
         ss.get("overlap_H")
         or ss.get("H_used")
-        or ss.get("H")                   # some older rigs
+        or ss.get("H")
         or globals().get("overlap_H")
     )
-
-    # If we successfully hydrated H but "overlap_H" isn’t set, pin it so any
-    # legacy code that reads st.session_state["overlap_H"] also succeeds.
-    if H is not None and ss.get("overlap_H") is None:
-        ss["overlap_H"] = H
-
     return B, C, H
+
+# ── Math: GF(2) helpers (strict) ──────────────────────────────────────────────
+def _gf2_mul(A, B):
+    """Pure-Python GF(2) matmul (uses mul/_svr_mul if app already provided)."""
+    if "_svr_mul" in globals() and callable(globals()["_svr_mul"]):
+        return _svr_mul(A, B)  # type: ignore[name-defined]
+    if "mul" in globals() and callable(globals()["mul"]):
+        return mul(A, B)       # type: ignore[name-defined]
+    if not A or not B: return []
+    m, k, n = len(A), len(A[0]), len(B[0])
+    C = [[0]*n for _ in range(m)]
+    for i in range(m):
+        Ai = A[i]
+        for t in range(k):
+            if Ai[t] & 1:
+                Bt = B[t]
+                for j in range(n):
+                    C[i][j] ^= (Bt[j] & 1)
+    return C
+
+def _strict_R3(H2: list[list[int]], d3: list[list[int]], C3: list[list[int]]) -> list[list[int]]:
+    """R3 = (H2 @ d3) XOR (C3 XOR I3). Raises if shapes empty/incompatible."""
+    if not (H2 and d3 and C3 and C3[0]): 
+        raise RuntimeError("R3_INPUTS_MISSING: need non-empty H2/d3/C3.")
+    n3 = len(C3)
+    I3 = [[1 if i==j else 0 for j in range(n3)] for i in range(n3)]
+    H2d3 = _gf2_mul(H2, d3)
+    if not H2d3 or len(H2d3[0]) != n3:  # quick shape sanity
+        raise RuntimeError("R3_SHAPE: mul(H2,d3) incompatible with C3.")
+    C3pI = [[(C3[i][j]^I3[i][j]) & 1 for j in range(n3)] for i in range(n3)]
+    return [[(H2d3[i][j]^C3pI[i][j]) & 1 for j in range(n3)] for i in range(n3)]
+
+def _projected_R3(R3: list[list[int]], P: list[list[int]] | None):
+    if not (R3 and P): return []
+    if len(R3[0]) != len(P): 
+        raise RuntimeError(f"R3P_SHAPE: expected R3(*,{len(R3[0])})·Π({len(P)},{len(P[0])}).")
+    return _gf2_mul(R3, P)
+
+def _lane_mask_from_d3_matrix(d3: list[list[int]]) -> list[int]:
+    if not d3 or not (d3[0] if d3 else []): return []
+    rows, n3 = len(d3), len(d3[0])
+    return [1 if any(int(d3[i][j]) & 1 for i in range(rows)) else 0 for j in range(n3)]
+
+def _first_tripped_guard(strict_out: dict) -> str:
+    """Adapter: if app defines first_tripped_guard, use it; else eq→none/fence."""
+    if "first_tripped_guard" in globals() and callable(globals()["first_tripped_guard"]):
+        try:
+            g = first_tripped_guard(strict_out)
+            return g if isinstance(g, str) else "error"
+        except Exception:
+            return "error"
+    k3eq = (strict_out or {}).get("3", {}).get("eq", None)
+    if k3eq is True:  return "none"
+    if k3eq is False: return "fence"
+    return "none"
+
+def _sig_tag_eq(B0, C0, H0, P_active=None):
+    """
+    Return (lane_mask, tag_strict, eq3_strict, tag_proj, eq3_proj).
+    Uses app's residual_tag if available; otherwise classifies locally.
+    """
+    d3 = (B0.blocks.__root__.get("3") or [])
+    H2 = (H0.blocks.__root__.get("2") or [])
+    C3 = (C0.blocks.__root__.get("3") or [])
+    lm = _lane_mask_from_d3_matrix(d3)
+    R3s = _strict_R3(H2, d3, C3)
+
+    def _local_tag(R, mask):
+        if not R or not mask: return "none"
+        m = len(R)
+        def _nz(j): return any(R[i][j] & 1 for i in range(m))
+        lanes = any(_nz(j) for j, b in enumerate(mask) if b)
+        ker   = any(_nz(j) for j, b in enumerate(mask) if not b)
+        if lanes and ker: return "mixed"
+        if lanes:         return "lanes"
+        if ker:           return "ker"
+        return "none"
+
+    if "residual_tag" in globals() and callable(globals()["residual_tag"]):
+        try:    tag_s = residual_tag(R3s, lm)  # type: ignore[name-defined]
+        except Exception: tag_s = "error"
+    else:
+        tag_s = _local_tag(R3s, lm)
+
+    eq_s = (not R3s) or all((x & 1) == 0 for row in R3s for x in row)
+
+    if P_active:
+        R3p = _projected_R3(R3s, P_active)
+        if "residual_tag" in globals() and callable(globals()["residual_tag"]):
+            try:    tag_p = residual_tag(R3p, lm)  # type: ignore[name-defined]
+            except Exception: tag_p = "error"
+        else:
+            tag_p = _local_tag(R3p, lm)
+        eq_p = (not R3p) or all((x & 1) == 0 for row in R3p for x in row)
+    else:
+        tag_p, eq_p = None, None
+
+    return lm, tag_s, bool(eq_s), tag_p, (None if eq_p is None else bool(eq_p))
+
+# ── Policy + validation shims (copy-only) ─────────────────────────────────────
+if "SCHEMA_VERSION" not in globals(): SCHEMA_VERSION = "1.1.0"
+if "FIELD" not in globals():           FIELD          = "GF(2)"
+if "APP_VERSION" not in globals():     APP_VERSION    = "v0.1-core"
+
+def _policy_block_from_run_ctx(rc: dict) -> dict:
+    mode = str(rc.get("mode", "strict"))
+    if mode == "strict":
+        return {"policy_tag":"strict","projector_mode":"strict","projector_filename":"","projector_hash":""}
+    if mode == "projected(columns@k=3,auto)":
+        diag_hash = _hash.sha256(
+            _json.dumps(rc.get("lane_mask_k3") or [], separators=(",", ":"), sort_keys=True).encode("utf-8")
+        ).hexdigest()
+        return {"policy_tag":"projected(columns@k=3,auto)","projector_mode":"auto","projector_filename":"","projector_hash":diag_hash}
+    return {
+        "policy_tag":"projected(columns@k=3,file)","projector_mode":"file",
+        "projector_filename": rc.get("projector_filename","") or "",
+        "projector_hash": rc.get("projector_hash","") or "",
+    }
+
+def file_validation_failed() -> bool:
+    """Soft gate used for UI hints; never blocks runner."""
+    rc = st.session_state.get("run_ctx") or {}
+    if rc.get("mode") != "projected(columns@k=3,file)":
+        return False
+    fn = (rc.get("projector_filename") or "").strip()
+    if not fn or not Path(fn).exists():
+        return True
+    try:
+        if rc.get("projector_hash"): return False
+        st.session_state["run_ctx"]["projector_hash"] = _hash.sha256(Path(fn).read_bytes()).hexdigest()
+        return False
+    except Exception:
+        return False
+
+# ── One-time normalizers (call at panel top) ──────────────────────────────────
+_normalize_projector_in_run_ctx()
+_ab_unify_pin()
+# =================== /Reports: unified helpers (final) ========================
+
+
+
+
+
 # ============================================================================== 
 
 def _hash_json(obj) -> str:
