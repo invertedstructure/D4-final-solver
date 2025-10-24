@@ -3154,6 +3154,32 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
                     )
                 except Exception as _be:
                     st.warning(f"bundle.json not written: {_be}")
+
+                                # after A/B or solver completes (where you *know* files and shapes)
+                ss = st.session_state
+                b_path = ss.get("fname_boundaries")
+                c_path = ss.get("fname_cmap")
+                h_path = ss.get("fname_h")
+                u_path = ss.get("fname_shapes")
+                
+                # compute/collect the 5 hashes once (however your solver already does it)
+                hashes = ss.get("inputs_hashes") or {
+                    "boundaries_hash": "...", "C_hash": "...", "H_hash": "...", "U_hash": "...", "shapes_hash": "..."
+                }
+                
+                # dims + lane mask
+                d3 = (ss.get("boundaries") or ss.get("B_obj") or boundaries).blocks.__root__.get("3") or []
+                n2, n3 = len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)
+                lane_mask = (ss.get("run_ctx") or {}).get("lane_mask_k3") or [1 if any(row[j] & 1 for row in d3) else 0 for j in range(n3)]
+                
+                ss["_inputs_block"] = {
+                    "filenames": {"boundaries": b_path, "C": c_path, "H": h_path, "U": u_path},
+                    "dims": {"n2": n2, "n3": n3},
+                    "hashes": hashes,
+                    "lane_mask_k3": lane_mask,
+                }
+                ss["inputs_hashes"] = hashes
+
     
                 # remember paths for sanity panel
                 st.session_state["last_bundle_dir"] = str(_bundle_dir)
