@@ -4941,75 +4941,75 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
             # make sure H/C/B objects are actually present before shape checks
         H_used = st.session_state.get("overlap_H") or _load_h_local()
 
-   # ─── Preflight: load BCH and assert we actually have H2/d3/C3 ───
-B0, C0, H0 = _reports_hydrate_BCH()
-try:
-    d3 = (B0.blocks.__root__.get("3") or []) if B0 else []
-    C3 = (C0.blocks.__root__.get("3") or []) if C0 else []
-    H2 = (H0.blocks.__root__.get("2") or []) if H0 else []
-    n2  = len(d3)
-    n3  = len(d3[0]) if (n2 and d3[0]) else 0
-    # lightweight shape sniff (we don’t multiply; just guard for empties)
-    if not (n2 and n3 and H2 and C3):
-        raise RuntimeError("missing")
-except Exception:
-    st.error("Reports: missing H2/d3/C3 — run Overlap/Cert once to freeze SSOT.")
-    st.stop()
-
-# (Optional) tiny debug line so you can see what’s live without a debugger:
-st.caption(f"Reports inputs live → H2:{len(H2)}×{len(H2[0]) if H2 and H2[0] else 0} · d3:{n2}×{n3} · C3:{len(C3)}×{len(C3[0]) if C3 and C3[0] else 0}")
-
-# after A/B or solver completes (where you *know* files and shapes)
-ss = st.session_state
-b_path = ss.get("fname_boundaries")
-c_path = ss.get("fname_cmap")
-h_path = ss.get("fname_h")
-u_path = ss.get("fname_shapes")
-
-# compute/collect the 5 hashes once (however your solver already does it)
-hashes = ss.get("inputs_hashes") or {
-    "boundaries_hash": "...", "C_hash": "...", "H_hash": "...", "U_hash": "...", "shapes_hash": "..."
-}
-
-# dims + lane mask
-d3 = (ss.get("boundaries") or ss.get("B_obj") or boundaries).blocks.__root__.get("3") or []
-n2, n3 = len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)
-lane_mask = (ss.get("run_ctx") or {}).get("lane_mask_k3") or [1 if any(row[j] & 1 for row in d3) else 0 for j in range(n3)]
-
-ss["_inputs_block"] = {
-    "filenames": {"boundaries": b_path, "C": c_path, "H": h_path, "U": u_path},
-    "dims": {"n2": n2, "n3": n3},
-    "hashes": hashes,
-    "lane_mask_k3": lane_mask,
-}
-ss["inputs_hashes"] = hashes
-
-# Freeze current SSOT (copy-only)
-B0 = boundaries
-C0 = cmap
-H0 = ss.get("overlap_H") or io.parse_cmap({"blocks": {}})
-
-d3_base = (B0.blocks.__root__.get("3") or [])
-C3      = (C0.blocks.__root__.get("3") or [])
-H2      = (H0.blocks.__root__.get("2") or [])
-if not (d3_base and d3_base[0] and C3 and C3[0] and H2 and H2[0]):
-    st.error("Reports: missing H2/d3/C3 — run Overlap/Cert once to freeze SSOT.")
-    return
-
-n2, n3 = len(d3_base), len(d3_base[0])
-rc = ss.get("run_ctx") or {}
-lane_mask = [int(x) & 1 for x in (rc.get("lane_mask_k3") or [])]
-P_diag = _diag_from_mask_local(lane_mask) if lane_mask else None
-
-# quick debug print (safe to run once)
-B = st.session_state.get("boundaries")
-C = st.session_state.get("cmap")
-H = st.session_state.get("overlap_H")
-st.write({
-    "has_B3": bool((getattr(B, "blocks", None) or {}).__dict__.get("__root__", {}).get("3")),
-    "has_C3": bool((getattr(C, "blocks", None) or {}).__dict__.get("__root__", {}).get("3")),
-    "has_H2": bool((getattr(H, "blocks", None) or {}).__dict__.get("__root__", {}).get("2")),
-})
+       # ─── Preflight: load BCH and assert we actually have H2/d3/C3 ───
+    B0, C0, H0 = _reports_hydrate_BCH()
+    try:
+        d3 = (B0.blocks.__root__.get("3") or []) if B0 else []
+        C3 = (C0.blocks.__root__.get("3") or []) if C0 else []
+        H2 = (H0.blocks.__root__.get("2") or []) if H0 else []
+        n2  = len(d3)
+        n3  = len(d3[0]) if (n2 and d3[0]) else 0
+        # lightweight shape sniff (we don’t multiply; just guard for empties)
+        if not (n2 and n3 and H2 and C3):
+            raise RuntimeError("missing")
+    except Exception:
+        st.error("Reports: missing H2/d3/C3 — run Overlap/Cert once to freeze SSOT.")
+        st.stop()
+    
+    # (Optional) tiny debug line so you can see what’s live without a debugger:
+    st.caption(f"Reports inputs live → H2:{len(H2)}×{len(H2[0]) if H2 and H2[0] else 0} · d3:{n2}×{n3} · C3:{len(C3)}×{len(C3[0]) if C3 and C3[0] else 0}")
+    
+    # after A/B or solver completes (where you *know* files and shapes)
+    ss = st.session_state
+    b_path = ss.get("fname_boundaries")
+    c_path = ss.get("fname_cmap")
+    h_path = ss.get("fname_h")
+    u_path = ss.get("fname_shapes")
+    
+    # compute/collect the 5 hashes once (however your solver already does it)
+    hashes = ss.get("inputs_hashes") or {
+        "boundaries_hash": "...", "C_hash": "...", "H_hash": "...", "U_hash": "...", "shapes_hash": "..."
+    }
+    
+    # dims + lane mask
+    d3 = (ss.get("boundaries") or ss.get("B_obj") or boundaries).blocks.__root__.get("3") or []
+    n2, n3 = len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)
+    lane_mask = (ss.get("run_ctx") or {}).get("lane_mask_k3") or [1 if any(row[j] & 1 for row in d3) else 0 for j in range(n3)]
+    
+    ss["_inputs_block"] = {
+        "filenames": {"boundaries": b_path, "C": c_path, "H": h_path, "U": u_path},
+        "dims": {"n2": n2, "n3": n3},
+        "hashes": hashes,
+        "lane_mask_k3": lane_mask,
+    }
+    ss["inputs_hashes"] = hashes
+    
+    # Freeze current SSOT (copy-only)
+    B0 = boundaries
+    C0 = cmap
+    H0 = ss.get("overlap_H") or io.parse_cmap({"blocks": {}})
+    
+    d3_base = (B0.blocks.__root__.get("3") or [])
+    C3      = (C0.blocks.__root__.get("3") or [])
+    H2      = (H0.blocks.__root__.get("2") or [])
+    if not (d3_base and d3_base[0] and C3 and C3[0] and H2 and H2[0]):
+        st.error("Reports: missing H2/d3/C3 — run Overlap/Cert once to freeze SSOT.")
+        return
+    
+    n2, n3 = len(d3_base), len(d3_base[0])
+    rc = ss.get("run_ctx") or {}
+    lane_mask = [int(x) & 1 for x in (rc.get("lane_mask_k3") or [])]
+    P_diag = _diag_from_mask_local(lane_mask) if lane_mask else None
+    
+    # quick debug print (safe to run once)
+    B = st.session_state.get("boundaries")
+    C = st.session_state.get("cmap")
+    H = st.session_state.get("overlap_H")
+    st.write({
+        "has_B3": bool((getattr(B, "blocks", None) or {}).__dict__.get("__root__", {}).get("3")),
+        "has_C3": bool((getattr(C, "blocks", None) or {}).__dict__.get("__root__", {}).get("3")),
+        "has_H2": bool((getattr(H, "blocks", None) or {}).__dict__.get("__root__", {}).get("2")),
+    })
 
 
     # Projector validation status (copy-only; no recompute)
