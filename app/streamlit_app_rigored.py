@@ -4150,6 +4150,70 @@ import streamlit as st
 # === Projector resolver (strict FILE provenance, no UI writes) ================
 from pathlib import Path
 import json, hashlib, streamlit as st
+
+# ───────────────────── REPORTS: BCH Hydrator (no widget collisions) ─────────────────────
+def _reports_hydrate_BCH() -> tuple:
+    """
+    Return (B0, C0, H0) as parsed objects without touching widget keys.
+    We try, in order:
+      1) module-level objects if your A/B already created them,
+      2) safe session keys like *_obj,
+      3) parse from pinned filenames shown in the UI.
+    """
+    ss = st.session_state
+
+    # 1) module-level (A/B often leaves these around)
+    B = globals().get("boundaries_obj") or globals().get("boundaries")
+    C = globals().get("cmap_obj")       or globals().get("cmap")
+    H = globals().get("overlap_H")
+
+    # 2) safe session copies (avoid widget keys like 'cmap'/'boundaries')
+    B = B or ss.get("B_obj") or ss.get("_B_obj")
+    C = C or ss.get("C_obj") or ss.get("_C_obj")
+    H = H or ss.get("overlap_H") or ss.get("H_obj") or ss.get("_H_obj")
+
+    # 3) parse from the already-selected files (what the UI shows in “Sources → …”)
+    files = (ss.get("_inputs_block") or {}).get("filenames") or {}
+    b_path = ss.get("fname_boundaries") or files.get("boundaries")
+    c_path = ss.get("fname_cmap")      or files.get("C")
+    h_path = ss.get("fname_h")         or files.get("H")
+
+    def _read_json(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
+
+    if B is None and b_path:
+        data = _read_json(b_path)
+        if data is not None:
+            B = io.parse_boundaries(data)
+
+    if C is None and c_path:
+        data = _read_json(c_path)
+        if data is not None:
+            C = io.parse_cmap(data)
+
+    if H is None and h_path:
+        data = _read_json(h_path)
+        if data is not None:
+            H = io.parse_cmap(data)   # H uses the same parse_cmap schema (blocks:{ "2": ... })
+
+    return B, C, H
+
+
+# If your older helpers block doesn’t define this alias, add a tiny SAFE fallback so later code compiles.
+if "_inputs_block_from_session" not in globals():
+    def _inputs_block_from_session(strict_dims=None):
+        ss = st.session_state
+        ih = (ss.get("inputs_hashes") or {}).copy()
+        dims = (ss.get("_inputs_block") or {}).get("dims") or {}
+        n2 = int((strict_dims or (dims.get("n2"), dims.get("n3")))[0] or 0)
+        n3 = int((strict_dims or (dims.get("n2"), dims.get("n3")))[1] or 0)
+        lm = [int(x) & 1 for x in (ss.get("run_ctx") or {}).get("lane_mask_k3", [])]
+        return {"hashes": ih, "dims": {"n2": n2, "n3": n3}, "lane_mask_k3": lm}
+
 # ── Reports/Cert shims: projector normalize + A/B pin unify + safe helpers ──
 from pathlib import Path
 import hashlib, json as _json
@@ -4821,7 +4885,24 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
     
         # make sure H/C/B objects are actually present before shape checks
     H_used = st.session_state.get("overlap_H") or _load_h_local()
-
+    # ─── Preflight: load BCH and assert we actually have H2/d3/C3 ───
+    B0, C0, H0 = _reports_hydrate_BCH()
+    try:
+        d3 = (B0.blocks.__root__.get("3") or []) if B0 else []
+        C3 = (C0.blocks.__root__.get("3") or []) if C0 else []
+        H2 = (H0.blocks.__root__.get("2") or []) if H0 else []
+        n2  = len(d3)
+        n3  = len(d3[0]) if (n2 and d3[0]) else 0
+        # lightweight shape sniff (we don’t multiply; just guard for empties)
+        if not (n2 and n3 and H2 and C3):
+            raise RuntimeError("missing")
+    except Exception:
+        st.error("Reports: missing H2/d3/C3 — run Overlap/Cert once to freeze SSOT.")
+        st.stop()
+    
+    # (Optional) tiny debug line so you can see what’s live without a debugger:
+    st.caption(f"Reports inputs live → H2:{len(H2)}×{len(H2[0]) if H2 and H2[0] else 0} · d3:{n2}×{n3} · C3:{len(C3)}×{len(C3[0]) if C3 and C3[0] else 0}")
+    
 
 
     # Freeze current SSOT (copy-only)
