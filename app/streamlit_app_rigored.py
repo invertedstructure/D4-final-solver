@@ -1906,32 +1906,19 @@ cfg_active = _cfg_from_policy(
 st.caption(f"Active policy: `{policy_label_from_cfg(cfg_active)}`")
 
 
-
-def _ab_is_fresh_now(*, rc: dict, ib: dict, ab_payload: dict) -> tuple[bool, str]:
+def _ab_is_fresh_now(pin: dict | None, expected_embed_sig: str) -> tuple[bool, str]:
     """
-    Returns (fresh, reason). `reason` is "" if fresh, otherwise one of:
-    AB_STALE_INPUTS_SIG | AB_STALE_POLICY | AB_STALE_PROJECTOR_HASH | AB_NONE
+    Freshness = (pin exists) and (pin.payload.embed_sig == expected_embed_sig).
+    Returns (is_fresh, reason_tag).
     """
-    if not ab_payload:
-        return (False, "AB_NONE")
+    if not pin or pin.get("state") != "pinned":
+        return (False, "AB_PIN_MISSING")
+    have = ((pin.get("payload") or {}).get("embed_sig") or "")
+    if have == (expected_embed_sig or ""):
+        return (True, "AB_FRESH")
+    return (False, "AB_STALE_EMBED_SIG")
 
-    frozen = tuple(_frozen_inputs_sig_from_ib(ib))
-    ab_sig = tuple(ab_payload.get("inputs_sig") or ())
-    if ab_sig != frozen:
-        return (False, "AB_STALE_INPUTS_SIG")
 
-    pol_now = _policy_tag_now_from_rc(rc)
-    ab_pol  = str(ab_payload.get("policy_tag",""))
-    if ab_pol != pol_now:
-        return (False, "AB_STALE_POLICY")
-
-    if str(rc.get("mode","")) == "projected(columns@k=3,file)":
-        pj_now = rc.get("projector_hash","") or ""
-        pj_ab  = ((ab_payload.get("projected") or {}).get("projector_hash","") or "")
-        if pj_ab != pj_now:
-            return (False, "AB_STALE_PROJECTOR_HASH")
-
-    return (True, "")
         
 # === BEGIN PATCH: READ-ONLY OVERLAP HYDRATOR (uses frozen SSOT only) ===
 def overlap_ui_from_frozen():
@@ -2733,40 +2720,61 @@ if "_svr_cert_common" not in globals():
 
 
 # unified embed builder (AUTO/File)
+def _svr_build_embed(ib: dict,
+                     policy: str,
+                     lanes: list[int] | None = None,
+                     projector_hash: str | None = None,
+                     na_reason: str | None = None):
+    """
+    Build canonical A/B embed + embed_sig.
 
-def _svr_build_embed(ib: dict, *, policy: str, lanes: list[int] | None = None,
-                     projector_hash: str | None = None, na_reason: str | None = None) -> tuple[dict, str]:
-    hashes = ib.get("hashes") or {}
-    dims   = ib.get("dims") or {}
-    inputs_sig_5 = [
-        str(hashes.get("boundaries_hash","")),
-        str(hashes.get("C_hash","")),
-        "",
-        str(hashes.get("H_hash","")),
-        str(hashes.get("shapes_hash","")),
-    ]
-    district_id   = ib.get("district_id") or ("D" + (inputs_sig_5[0] or "")[:8] if inputs_sig_5[0] else "DUNKNOWN")
-    fixture_label = str(st.session_state.get("fixture_label") or "")
-    projection_context: dict = {}
-    if lanes is not None and not na_reason:
-        projection_context = {"lanes": list(lanes)}
-    elif projector_hash is not None and not na_reason:
-        projection_context = {"projector_hash": str(projector_hash)}
-    elif na_reason:
-        projection_context = {"na_reason_code": str(na_reason)}
+    Canonical inputs_sig_5 order:
+      (hash_d, hash_U, hash_suppC, hash_suppH, hash_shapes)
+    """
+    try:
+        _json
+    except NameError:
+        import json as _json  # noqa
+    try:
+        _hashlib
+    except NameError:
+        import hashlib as _hashlib  # noqa
+
+    # dims + ids
+    dims = (ib or {}).get("dims") or {}
+    n2 = int(dims.get("n2") or 0)
+    n3 = int(dims.get("n3") or 0)
+    district_id = (ib or {}).get("district_id") or "DUNKNOWN"
+
+    # canonical 5-hash signature
+    inputs_sig_5 = _frozen_inputs_sig_from_ib(ib, as_tuple=False)
+
+    # schema/engine (be lenient if constants not defined)
+    schema_version = globals().get("SCHEMA_VERSION", "2.0.0")
+    engine_rev = globals().get("ENGINE_REV", "rev-UNSET")
+    fixture_label = (ib or {}).get("fixture_label", "")
+
     embed = {
-        "schema_version": SCHEMA_VERSION,
-        "engine_rev": ENGINE_REV,
-        "inputs_sig_5": inputs_sig_5,
-        "dims": dict(dims),
-        "district_id": district_id,
-        "fixture_label": fixture_label,
+        "schema_version": str(schema_version),
+        "engine_rev": str(engine_rev),
+        "district_id": str(district_id),
+        "fixture_label": str(fixture_label),
+        "dims": {"n2": n2, "n3": n3},
         "policy": str(policy),
-        "projection_context": projection_context
+        "projection_context": {},
+        "inputs_sig_5": list(inputs_sig_5),
     }
-    blob = _json.dumps(embed, separators=(",", ":"), sort_keys=True).encode("utf-8")
-    sig = _hashlib.sha256(blob).hexdigest()
-    return embed, sig
+    if lanes is not None:
+        embed["projection_context"]["lanes"] = [int(x) & 1 for x in lanes]
+    if projector_hash is not None:
+        embed["projection_context"]["projector_hash"] = str(projector_hash)
+    if na_reason is not None:
+        embed["projection_context"]["na_reason_code"] = str(na_reason)
+
+    s = _json.dumps(embed, separators=(",", ":"), sort_keys=True).encode("ascii")
+    embed_sig = _hashlib.sha256(s).hexdigest()
+    return embed, embed_sig
+
 
 def _svr_apply_sig8(cert: dict, embed_sig: str) -> None:
     cert["sig8"] = (embed_sig or "")[:8]
