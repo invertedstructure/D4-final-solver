@@ -4937,18 +4937,19 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
     d3_base = (B0.blocks.__root__.get("3") or []) if B0 else []
     C3      = (C0.blocks.__root__.get("3") or []) if C0 else []
     H2      = (H0.blocks.__root__.get("2") or []) if H0 else []
-    
-   try:
-        d3 = (B0.blocks.__root__.get("3") or []) if B0 else []
-        C3 = (C0.blocks.__root__.get("3") or []) if C0 else []
-        H2 = (H0.blocks.__root__.get("2") or []) if H0 else []
-        n2  = len(d3)
-        n3  = len(d3[0]) if (n2 and d3[0]) else 0
-        # lightweight shape sniff (we don’t multiply; just guard for empties)
-    if not (H2 and H2[0] and d3_base and d3_base[0] and C3 and C3[0]):
-        st.error("Reports: missing H2/d3/C3 — run Overlap/Cert once to freeze SSOT.")
-        st.stop()
 
+try:
+    d3 = (B0.blocks.__root__.get("3") or []) if B0 else []
+    C3 = (C0.blocks.__root__.get("3") or []) if C0 else []
+    H2 = (H0.blocks.__root__.get("2") or []) if H0 else []
+    n2  = len(d3)
+    n3  = len(d3[0]) if (n2 and d3[0]) else 0
+        # lightweight shape sniff (we don’t multiply; just guard for empties)
+if not (H2 and H2[0] and d3_base and d3_base[0] and C3 and C3[0]):
+    st.error("Reports: missing H2/d3/C3 — run Overlap/Cert once to freeze SSOT.")
+    st.stop()
+    
+  
     
     # (Optional) tiny debug line so you can see what’s live without a debugger:
     st.caption(f"Reports inputs live → H2:{len(H2)}×{len(H2[0]) if H2 and H2[0] else 0} · d3:{n2}×{n3} · C3:{len(C3)}×{len(C3[0]) if C3 and C3[0] else 0}")
