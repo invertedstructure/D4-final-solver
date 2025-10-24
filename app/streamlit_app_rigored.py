@@ -1721,44 +1721,7 @@ cfg_active = _cfg_from_policy(
 st.caption(f"Active policy: `{policy_label_from_cfg(cfg_active)}`")
 
 
-def _resolve_projector(cfg_active: dict, boundaries) -> tuple[list[list[int]], dict]:
-    """
-    Normalize projector_choose_active(...) to (P_active, meta).
-    Accepts (P_active, meta) or a meta dict; raises ValueError on failure.
-    Fills defaults for mode/d3/n3/projector fields.
-    """
-    try:
-        res = projector_choose_active(cfg_active, boundaries)
-    except ValueError as e:
-        raise
-    except Exception as e:
-        raise ValueError(f"PROJECTOR_RESOLVE_RUNTIME: {e}")
 
-    if res is None:
-        raise ValueError("PROJECTOR_RESOLVE_NONE")
-
-    if isinstance(res, tuple) and len(res) == 2:
-        P_active, meta = res
-    elif isinstance(res, dict):
-        meta = dict(res)
-        P_active = meta.get("P_active") or meta.get("P") or []
-    else:
-        raise ValueError(f"PROJECTOR_RESOLVE_BAD_RETURN: {type(res)!r}")
-
-    # defaults
-    source3 = (cfg_active.get("source") or {}).get("3", "auto")
-    meta.setdefault("mode", "projected(columns@k=3,file)" if source3 == "file" else ("projected(columns@k=3,auto)" if source3 == "auto" else "strict"))
-    if "d3" not in meta:
-        try:
-            meta["d3"] = (boundaries.blocks.__root__.get("3") or [])
-        except Exception:
-            meta["d3"] = []
-    meta.setdefault("n3", (len(meta["d3"][0]) if (meta["d3"] and meta["d3"][0]) else 0))
-    meta.setdefault("projector_filename", (cfg_active.get("projector_files") or {}).get("3", ""))
-    meta.setdefault("projector_hash", "")
-    meta.setdefault("projector_consistent_with_d", None)
-
-    return P_active, meta
 def _ab_is_fresh_now(*, rc: dict, ib: dict, ab_payload: dict) -> tuple[bool, str]:
     """
     Returns (fresh, reason). `reason` is "" if fresh, otherwise one of:
