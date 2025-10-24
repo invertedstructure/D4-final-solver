@@ -4949,6 +4949,25 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
         st.stop()
 
     st.caption(f"Reports inputs live → H2:{len(H2)}×{len(H2[0]) if H2 and H2[0] else 0} · d3:{n2}×{n3} · C3:{len(C3)}×{len(C3[0]) if C3 and C3[0] else 0}")
+    # --- Lane-mask fallback (when SSOT pin is missing) ---
+    rc = st.session_state.get("run_ctx") or {}
+    
+    # Prefer the SSOT pin; if absent, derive from current d3 and pin it for this run.
+    lane_mask = [int(x) & 1 for x in (rc.get("lane_mask_k3") or [])]
+    if not lane_mask:
+        lane_mask = _lane_mask_from_d3_matrix(d3_base)  # lanes = columns with any 1 in d3
+        # pin into run_ctx (copy-only; no widget keys), so downstream reads are consistent
+        rc["lane_mask_k3"] = lane_mask
+        st.session_state["run_ctx"] = rc
+    
+    # Build diagonal projector from the mask (used for the “projected” check in this panel)
+    P_diag = _diag_from_mask_local(lane_mask) if lane_mask else None
+    
+    # Flip domain = lanes-only
+    selected_cols = {j for j, b in enumerate(lane_mask) if b == 1}
+    
+    # Tiny visibility so you can sanity check quickly
+    st.caption(f"Lane mask → {lane_mask} (lanes: {len(selected_cols)}/{n3})")
 
     # Lane mask / projector diag (copy-only; prefer SSOT mask; no recompute)
     lanes = [int(x) & 1 for x in ((ss.get("run_ctx") or {}).get("lane_mask_k3") or [])]
