@@ -5099,57 +5099,103 @@ def _sig_tag_eq(boundaries_obj, cmap_obj, H_used_obj, P_active=None):
 
     return lm, tag_s, bool(eq_s), tag_p, (None if eq_p is None else bool(eq_p))
 
-# -------- optional carrier (U) mutation hooks (fallback implementation) --------
-# If your project already defines get_carrier_mask / set_carrier_mask, this block is a no-op.
-if "get_carrier_mask" not in globals():
-    def get_carrier_mask(U_obj=None):
-        """
-        Return an n3×n2 0/1 mask. Fallback: all-ones mask (every lane in U).
-        Prefers H2 shape (n3×n2); falls back to d3 (n2×n3) if H2 missing.
-        Allows an override via st.session_state["_u_mask_override"].
-        """
-        # explicit override (used by Fence variants)
-        override = st.session_state.get("_u_mask_override")
-        if isinstance(override, list) and override and isinstance(override[0], list):
-            return override
+# ── SSOT freezer (quick wiring) ───────────────────────────────────────────────
+from pathlib import Path
+import json as _json
 
-        # 1) try H2 (shape n3×n2)
-        try:
-            H_local = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
-            H2 = (H_local.blocks.__root__.get("2") or [])
-            n3 = len(H2)
-            n2 = len(H2[0]) if (H2 and H2[0]) else 0
-        except Exception:
-            n2 = n3 = 0
+def _load_json_if(path_str: str | None):
+    try:
+        p = Path(path_str or "")
+        return _json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
+    except Exception:
+        return None
 
-        # 2) fallback to d3 (shape n2×n3) → infer n2,n3
-        if n3 <= 0 or n2 <= 0:
-            try:
-                B = st.session_state.get("boundaries")
-                d3 = (B.blocks.__root__.get("3") or []) if B else []
-                n2 = len(d3)
-                n3 = len(d3[0]) if (d3 and d3[0]) else 0
-            except Exception:
-                n2 = n3 = 0
+def _find_latest(glob_pat: str):
+    try:
+        files = sorted(Path(".").rglob(glob_pat), key=lambda p: p.stat().st_mtime, reverse=True)
+        return files[0] if files else None
+    except Exception:
+        return None
 
-        if n3 <= 0 or n2 <= 0:
-            # unknown dims → empty mask (Fence will no-op gracefully)
-            return []
+def freeze_ssot_now():
+    ss = st.session_state
 
-        # default: everything in-carrier
-        return [[1] * n2 for _ in range(n3)]
+    # 1) keep existing if already wired
+    B = ss.get("boundaries")
+    C = ss.get("cmap")
+    H = ss.get("overlap_H")
 
-if "set_carrier_mask" not in globals():
-    def set_carrier_mask(U_obj, mask):
-        """Store a session-scoped override U-mask (used by Fence variants)."""
-        st.session_state["_u_mask_override"] = mask
-        return True
+    # 2) try filenames you may already store in state
+    fb = ss.get("fname_boundaries"); fc = ss.get("fname_cmap"); fh = ss.get("fname_h"); fu = ss.get("fname_shapes")
+    jb = _load_json_if(fb) or (_load_json_if(fc) and None)  # cheap probe
+    if jb is None:
+        # 3) fall back to “latest matching” on disk (your bundle names will match these)
+        pb = _find_latest("boundaries*.json")
+        pc = _find_latest("cmap*.json")
+        ph = _find_latest("H*.json")
+        pu = _find_latest("shapes*.json")
+        fb = fb or (str(pb) if pb else "")
+        fc = fc or (str(pc) if pc else "")
+        fh = fh or (str(ph) if ph else "")
+        fu = fu or (str(pu) if pu else "")
 
-# Recompute HAS_U_HOOKS after possible fallback injection
-HAS_U_HOOKS = (
-    "get_carrier_mask" in globals() and "set_carrier_mask" in globals()
-    and callable(globals()["get_carrier_mask"]) and callable(globals()["set_carrier_mask"])
-)
+    # Load JSONs (only if missing in memory)
+    if B is None and fb: 
+        jb = _load_json_if(fb); 
+        if jb: B = io.parse_boundaries(jb)
+    if C is None and fc:
+        jc = _load_json_if(fc)
+        if jc: C = io.parse_cmap(jc)
+    if H is None and fh:
+        jh = _load_json_if(fh)
+        if jh: H = io.parse_cmap(jh)
+    # Shapes are optional for perturbation; needed for Fence U
+    if ss.get("shapes") is None and fu:
+        ju = _load_json_if(fu)
+        if ju: ss["shapes"] = io.parse_cmap(ju)
+
+    # Finalize: stash whatever we got
+    if B: ss["boundaries"] = B
+    if C: ss["cmap"] = C
+    if H: ss["overlap_H"] = H
+
+    # Derive dims + lane mask for downstream
+    try:
+        d3 = (B.blocks.__root__.get("3") or []) if B else []
+        n2 = len(d3); n3 = len(d3[0]) if (d3 and d3[0]) else 0
+        lm = _lane_mask_from_d3_matrix(d3) if d3 else []
+        rc = ss.get("run_ctx") or {}
+        rc.update({"n2": n2, "n3": n3})
+        if lm: rc["lane_mask_k3"] = [int(x)&1 for x in lm]
+        # If projected(file) is selected but no validated hash, fall back to strict to avoid blocking.
+        if rc.get("mode") == "projected(columns@k=3,file)" and not rc.get("projector_hash"):
+            rc["mode"] = "strict"
+        ss["run_ctx"] = rc
+    except Exception:
+        pass
+
+    # Copy input hashes (no recompute)
+    try:
+        _ensure_inputs_hashes()
+    except Exception:
+        pass
+
+    # Quick feedback
+    d3 = (ss.get("boundaries").blocks.__root__.get("3") if ss.get("boundaries") else []) or []
+    C3 = (ss.get("cmap").blocks.__root__.get("3") if ss.get("cmap") else []) or []
+    H2 = (ss.get("overlap_H").blocks.__root__.get("2") if ss.get("overlap_H") else []) or []
+    ready = bool(d3 and d3[0] and C3 and C3[0] and H2 and H2[0])
+    st.caption(f"SSOT freeze: {'OK' if ready else 'incomplete'} · "
+               f"H2={len(H2)}×{(len(H2[0]) if (H2 and H2[0]) else 0)}, "
+               f"d3={len(d3)}×{(len(d3[0]) if (d3 and d3[0]) else 0)}, "
+               f"C3={len(C3)}×{(len(C3[0]) if (C3 and C3[0]) else 0)}")
+
+# Optional: tiny UI
+with st.expander("Freeze SSOT (if reports say H2/d3/C3 missing)"):
+    if st.button("Freeze now"):
+        freeze_ssot_now()
+
+
 
  # ──────────────────────────────────────────────────────────────────────────────
 # Reports: Perturbation sanity (d3 flips, lanes-only) + optional Fence stress
