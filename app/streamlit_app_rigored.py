@@ -4901,121 +4901,127 @@ if "set_carrier_mask" not in globals():
         return True
 # ============================================================================== 
 
+# --- Reports: single-source BCH resolver (coerces UploadedFile/path/dict → parsed) ---
+def _json_from_uploaded(x):
+    try:
+        if hasattr(x, "getvalue"):  # streamlit UploadedFile
+            b = x.getvalue()
+            if not b:
+                try:
+                    x.seek(0)
+                    b = x.read()
+                except Exception:
+                    pass
+            if isinstance(b, (bytes, bytearray)):
+                return json.loads(b.decode("utf-8"))
+            return json.loads(str(b))
+    except Exception:
+        return None
+    return None
+
+def _ensure_boundaries_obj(x):
+    if x is None: return None
+    if hasattr(x, "blocks"): return x
+    if isinstance(x, (str, Path)):
+        try: return io.parse_boundaries(json.loads(Path(x).read_text(encoding="utf-8")))
+        except Exception: return None
+    if isinstance(x, dict):
+        try: return io.parse_boundaries(x)
+        except Exception: return None
+    j = _json_from_uploaded(x)
+    if j is not None:
+        try: return io.parse_boundaries(j)
+        except Exception: return None
+    return None
+
+def _ensure_cmap_obj(x):
+    if x is None: return None
+    if hasattr(x, "blocks"): return x
+    if isinstance(x, (str, Path)):
+        try: return io.parse_cmap(json.loads(Path(x).read_text(encoding="utf-8")))
+        except Exception: return None
+    if isinstance(x, dict):
+        try: return io.parse_cmap(x)
+        except Exception: return None
+    j = _json_from_uploaded(x)
+    if j is not None:
+        try: return io.parse_cmap(j)
+        except Exception: return None
+    return None
+
+def _ensure_h_obj(x):
+    # H has same outer schema as cmap (blocks), so same parser works.
+    return _ensure_cmap_obj(x)
+
+def _reports_hydrate_BCH():
+    ss = st.session_state
+    B_raw = ss.get("boundaries") or globals().get("boundaries")
+    C_raw = ss.get("cmap")       or globals().get("cmap")
+    H_raw = (ss.get("overlap_H") or ss.get("H_used") or ss.get("H") or globals().get("overlap_H"))
+
+    B = _ensure_boundaries_obj(B_raw)
+    C = _ensure_cmap_obj(C_raw)
+    H = _ensure_h_obj(H_raw)
+
+    # Never assign to ss['cmap'] or ss['boundaries'] (widget keys). Pin overlap_H only.
+    if H is not None and ss.get("overlap_H") is None:
+        ss["overlap_H"] = H
+    return B, C, H
 
 
-
-
- # ──────────────────────────────────────────────────────────────────────────────
 # Reports: Perturbation sanity (d3 flips, lanes-only) + optional Fence stress
-# De-duped: relies on existing helpers you kept; no duplicate defs.
+# Hygiene: read-only; hydrate UploadedFile/path/dict → parsed objects; no writes to widget keys.
 # ──────────────────────────────────────────────────────────────────────────────
 from pathlib import Path
 import os, json as _json, io as _io, csv as _csv
 from datetime import datetime as _dt
 
-def _eq_zero_local(M):  # tiny helper for equality checks
+def _eq_zero_local(M):
     return (not M) or all((x & 1) == 0 for row in M for x in row)
 
 def _diag_from_mask_local(mask):
     n = len(mask or [])
-    return [[1 if (i==j and int(mask[j])==1) else 0 for j in range(n)] for i in range(n)]
+    return [[1 if (i == j and int(mask[j]) == 1) else 0 for j in range(n)] for i in range(n)]
 
 def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: bool, enable_witness: bool):
     ss = st.session_state
     REPORTS_DIR = Path(ss.get("REPORTS_DIR", "reports")); REPORTS_DIR.mkdir(parents=True, exist_ok=True)
-   
-    rc = (st.session_state.get("run_ctx") or {}).copy()
-    rc["mode"] = rc.get("mode") or "projected(columns@k=3,file)"
-    rc["projector_filename"] = rc.get("projector_filename") or _pj_path_from_context_or_fs()
-    st.session_state["run_ctx"] = rc
-    
-    # make sure H/C/B objects are actually present before shape checks
-    H_used = st.session_state.get("overlap_H") or _load_h_local()
 
-       # ─── Preflight: load BCH and assert we actually have H2/d3/C3 ───
+    # Mode + projector filename (do not recompute Π here; just wire filename if missing)
+    rc = (ss.get("run_ctx") or {}).copy()
+    rc.setdefault("mode", "projected(columns@k=3,file)")
+    try:
+        pj_path = rc.get("projector_filename") or _pj_path_from_context_or_fs__reports()
+    except Exception:
+        pj_path = rc.get("projector_filename") or ""
+    if pj_path:
+        rc["projector_filename"] = pj_path
+    ss["run_ctx"] = rc
+
+    # ─── Hydrate BCH strictly (UploadedFile/path/dict → parsed objects) ───
     B0, C0, H0 = _reports_hydrate_BCH()
     d3_base = (B0.blocks.__root__.get("3") or []) if B0 else []
     C3      = (C0.blocks.__root__.get("3") or []) if C0 else []
     H2      = (H0.blocks.__root__.get("2") or []) if H0 else []
 
-    try:
-        d3 = (B0.blocks.__root__.get("3") or []) if B0 else []
-        C3 = (C0.blocks.__root__.get("3") or []) if C0 else []
-        H2 = (H0.blocks.__root__.get("2") or []) if H0 else []
-        n2  = len(d3)
-        n3  = len(d3[0]) if (n2 and d3[0]) else 0
-    except Exception as e:
-        st.error("Error loading shapes: " + str(e))
-        st.stop()
-    
-    # Now, the if statement is outside the try block
-    if not (H2 and H2[0] and d3_base and d3_base[0] and C3 and C3[0]):
+    # Validate presence (pure read; no backfill/normalize here)
+    if not (H2 and (H2[0] if H2 else []) and d3_base and (d3_base[0] if d3_base else []) and C3 and (C3[0] if C3 else [])):
         st.error("Reports: missing H2/d3/C3 — run Overlap/Cert once to freeze SSOT.")
         st.stop()
-        
-  
-    
-    # (Optional) tiny debug line so you can see what’s live without a debugger:
-    st.caption(f"Reports inputs live → H2:{len(H2)}×{len(H2[0]) if H2 and H2[0] else 0} · d3:{n2}×{n3} · C3:{len(C3)}×{len(C3[0]) if C3 and C3[0] else 0}")
-    
-    # after A/B or solver completes (where you *know* files and shapes)
-    ss = st.session_state
-    b_path = ss.get("fname_boundaries")
-    c_path = ss.get("fname_cmap")
-    h_path = ss.get("fname_h")
-    u_path = ss.get("fname_shapes")
-    
-    # compute/collect the 5 hashes once (however your solver already does it)
-    hashes = ss.get("inputs_hashes") or {
-        "boundaries_hash": "...", "C_hash": "...", "H_hash": "...", "U_hash": "...", "shapes_hash": "..."
-    }
-    
-    # dims + lane mask
-    d3 = (ss.get("boundaries") or ss.get("B_obj") or boundaries).blocks.__root__.get("3") or []
-    n2, n3 = len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)
-    lane_mask = (ss.get("run_ctx") or {}).get("lane_mask_k3") or [1 if any(row[j] & 1 for row in d3) else 0 for j in range(n3)]
-    
-    ss["_inputs_block"] = {
-        "filenames": {"boundaries": b_path, "C": c_path, "H": h_path, "U": u_path},
-        "dims": {"n2": n2, "n3": n3},
-        "hashes": hashes,
-        "lane_mask_k3": lane_mask,
-    }
-    ss["inputs_hashes"] = hashes
-    
-    # Freeze current SSOT (copy-only)
-    B0 = boundaries
-    C0 = cmap
-    H0 = ss.get("overlap_H") or io.parse_cmap({"blocks": {}})
-    
-    d3_base = (B0.blocks.__root__.get("3") or [])
-    C3      = (C0.blocks.__root__.get("3") or [])
-    H2      = (H0.blocks.__root__.get("2") or [])
-    if not (d3_base and d3_base[0] and C3 and C3[0] and H2 and H2[0]):
-        st.error("Reports: missing H2/d3/C3 — run Overlap/Cert once to freeze SSOT.")
-        return
-    
+
     n2, n3 = len(d3_base), len(d3_base[0])
-    rc = ss.get("run_ctx") or {}
-    lane_mask = [int(x) & 1 for x in (rc.get("lane_mask_k3") or [])]
+    st.caption(f"Reports inputs live → H2:{len(H2)}×{len(H2[0])} · d3:{n2}×{n3} · C3:{len(C3)}×{len(C3[0])}")
+
+    # Lane mask from SSOT if present; otherwise infer from current d3 (read-only)
+    lm_rc = (ss.get("run_ctx") or {}).get("lane_mask_k3")
+    lane_mask = [int(x) & 1 for x in lm_rc] if isinstance(lm_rc, list) and lm_rc else _lane_mask_from_d3_matrix(d3_base)
     P_diag = _diag_from_mask_local(lane_mask) if lane_mask else None
-    
-    # quick debug print (safe to run once)
-    B = st.session_state.get("boundaries")
-    C = st.session_state.get("cmap")
-    H = st.session_state.get("overlap_H")
-    st.write({
-        "has_B3": bool((getattr(B, "blocks", None) or {}).__dict__.get("__root__", {}).get("3")),
-        "has_C3": bool((getattr(C, "blocks", None) or {}).__dict__.get("__root__", {}).get("3")),
-        "has_H2": bool((getattr(H, "blocks", None) or {}).__dict__.get("__root__", {}).get("2")),
-    })
 
-
-    # Projector validation status (copy-only; no recompute)
+    # Projector validation status (copy-only)
     proj_status = {"status": "OK", "na_reason_code": ""}
     try:
         if rc.get("mode") == "projected(columns@k=3,file)" and file_validation_failed():
-            proj_status = {"status":"N/A", "na_reason_code":"P3_FILE_INVALID"}
+            proj_status = {"status": "N/A", "na_reason_code": "P3_FILE_INVALID"}
     except Exception:
         pass
 
@@ -5025,7 +5031,7 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
     k3_proj_base   = (_eq_zero_local(_projected_R3(R3_base, P_diag)) if P_diag else None)
 
     # Flip domain: lanes-only (skip ker columns)
-    selected_cols = {j for j,b in enumerate(lane_mask) if b==1}
+    selected_cols = {j for j, b in enumerate(lane_mask) if b == 1}
     import hashlib as _hashlib
     h = int(_hashlib.sha256(str(seed).encode("utf-8")).hexdigest(), 16)
     def _flip_targets(n2_, n3_, budget):
@@ -5036,67 +5042,63 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
             i = (i + 1 + (h % 3)) % (n2_ or 1)
             j = (j + 2 + ((h >> 5) % 5)) % (n3_ or 1)
 
-    # Run perturbation
+    # Run perturbation (read-only evaluation)
     rows_csv, results_json = [], []
-    total_flips = in_domain_flips = mismatches = 0
+    total_flips = in_domain_flips = 0
 
     for (r, c, k) in _flip_targets(n2, n3, max_flips):
         total_flips += 1
-        lane_col = (c in selected_cols) if selected_cols else False
-
-        if not lane_col:
+        if c not in selected_cols:
             rows_csv.append([k, "none", "none", "off-domain (ker column)"])
             results_json.append({
-                "flip_id": int(k), "flip": {"row": int(r), "col": int(c), "lane_col": False, "skip_reason": "off-domain"},
+                "flip_id": int(k),
+                "flip": {"row": int(r), "col": int(c), "lane_col": False, "skip_reason": "off-domain"},
                 "baseline": {"k3_strict": bool(k3_strict_base), "k3_projected": (None if k3_proj_base is None else bool(k3_proj_base))},
                 "after":    {"k3_strict": bool(k3_strict_base), "k3_projected": (None if k3_proj_base is None else bool(k3_proj_base))},
-                "note": "off-domain (ker column)"
+                "guard_tripped": "none",
+                "residual_tag_after": "none",
             })
             continue
 
         in_domain_flips += 1
-        # mutate one bit in d3 (lanes-only)
         d3_mut = [row[:] for row in d3_base]
         d3_mut[r][c] ^= 1
 
-        # eval strict/projected
         dB = B0.dict() if hasattr(B0, "dict") else {"blocks": {}}
         dB = _json.loads(_json.dumps(dB)); dB.setdefault("blocks", {})["3"] = d3_mut
         Bk = io.parse_boundaries(dB)
 
         _, tag_sK, eq_sK, tag_pK, eq_pK = _sig_tag_eq(Bk, C0, H0, P_diag)
-
-        # guard (if you’ve got full guard logic, _first_tripped_guard uses it)
         strict_out = {"3": {"eq": bool(eq_sK)}}
         guard = _first_tripped_guard(strict_out)
-        rows_csv.append([k, guard, guard, ""])
 
+        rows_csv.append([k, guard, guard, ""])
         results_json.append({
             "flip_id": int(k),
             "flip": {"row": int(r), "col": int(c), "lane_col": True},
             "baseline": {"k3_strict": bool(k3_strict_base), "k3_projected": (None if k3_proj_base is None else bool(k3_proj_base))},
-            "after":    {"k3_strict": bool(eq_sK),            "k3_projected": (None if eq_pK is None else bool(eq_pK))},
-            "residual_tag_after": str(tag_sK or "none"),
+            "after":    {"k3_strict": bool(eq_sK),           "k3_projected": (None if eq_pK is None else bool(eq_pK))},
             "guard_tripped": guard,
+            "residual_tag_after": str(tag_sK or "none"),
         })
 
     # CSV
     csv_path = REPORTS_DIR / "perturbation_sanity.csv"
     _atomic_write_csv(
         csv_path,
-        header=["flip_id","guard_tripped","expected_guard","note"],
+        header=["flip_id", "guard_tripped", "expected_guard", "note"],
         rows=rows_csv,
         meta_lines=[
             f"schema_version={SCHEMA_VERSION}",
             f"saved_at={_utc_iso_z()}",
-            f"run_id={(st.session_state.get('run_ctx') or {}).get('run_id','')}",
+            f"run_id={(ss.get('run_ctx') or {}).get('run_id','')}",
             f"app_version={APP_VERSION}",
             f"seed={seed}",
             f"n2={n2}", f"n3={n3}",
         ],
     )
 
-    # JSON
+    # JSON (pure read of SSOT block; no staging/writes)
     policy_block = _policy_block_from_run_ctx(rc)
     inputs_block = _inputs_block_from_session(strict_dims=(n2, n3))
     _hash_fields = ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")
@@ -5132,10 +5134,12 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
     with open(csv_path, "rb") as cf:
         st.download_button("Download perturbation_sanity.csv", cf, file_name=csv_path.name, key=f"dl_ps_csv_{csv_path.stem[-8:]}")
 
-    # ── Fence (U) optional
+    # ── Fence (U) optional — strictly read-only
     if include_fence:
         HAS_U = ("get_carrier_mask" in globals() and "set_carrier_mask" in globals()
                  and callable(globals()["get_carrier_mask"]) and callable(globals()["set_carrier_mask"]))
+        shapes_ref = ss.get("shapes") or globals().get("shapes")  # pass-through to hook
+
         if not HAS_U:
             fence_json = {
                 "schema_version": SCHEMA_VERSION, "written_at_utc": _utc_iso_z(), "app_version": APP_VERSION, "field": FIELD,
@@ -5152,18 +5156,15 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
             return
 
         # Base
-        R3_b = _strict_R3(H2, d3_base, C3)
-        k2_b, k3_b = True, _eq_zero_local(R3_b)
+        R3_b = _strict_R3(H2, d3_base, C3); k2_b, k3_b = True, _eq_zero_local(R3_b)
 
         # Normalize U to n3×n2 and apply
-        U_mask = get_carrier_mask(shapes)  # shape: n3×n2 expected
-        n3_h2, n2_h2 = len(H2), (len(H2[0]) if (H2 and H2[0]) else 0)
+        U_mask = get_carrier_mask(shapes_ref)
+        n3_h2, n2_h2 = len(H2), len(H2[0])
         def _norm(mask):
-            try:
-                ok = len(mask)==n3_h2 and (not mask or len(mask[0])==n2_h2)
-            except Exception:
-                ok = False
-            return [[1]*n2_h2 for _ in range(n3_h2)] if not ok else [[int(b)&1 for b in row] for row in mask]
+            try: ok = len(mask) == n3_h2 and (not mask or len(mask[0]) == n2_h2)
+            except Exception: ok = False
+            return [[1]*n2_h2 for _ in range(n3_h2)] if not ok else [[int(b) & 1 for b in row] for row in mask]
         U_mask = _norm(U_mask)
 
         def _count1(M): return sum(int(x & 1) for row in (M or []) for x in row)
@@ -5210,10 +5211,10 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
         with open(fj, "rb") as jf:
             st.download_button("Download fence_stress.json", jf, file_name=fj.name, key=f"dl_fs_json_{fj.stem[-8:]}")
 
-# ── UI: one button, one call
+# ── UI: one button, one call (read-only path)
 with st.container():
     st.markdown("### Reports: Perturbation sanity & Fence stress")
-    c1, c2, c3 = st.columns([1.2,1.2,1])
+    c1, c2, c3 = st.columns([1.2, 1.2, 1])
     with c1:
         ps_max = st.number_input("Max flips (d3 supports)", min_value=1, max_value=500, value=24, step=1, key="ps_max_one")
     with c2:
@@ -5221,7 +5222,7 @@ with st.container():
     with c3:
         run_fence = st.checkbox("Fence (U)", value=True, key="fs_on_one")
 
-    # warn (don’t block) if Π(FILE) invalid — JSON will record N/A
+    # Warn (don’t block) if Π(FILE) invalid — JSON will record N/A
     try:
         rc_now = st.session_state.get("run_ctx") or {}
         if rc_now.get("mode") == "projected(columns@k=3,file)" and file_validation_failed():
@@ -5231,6 +5232,9 @@ with st.container():
 
     if st.button("Run perturbation (+Fence)", key="btn_run_pf_one"):
         run_reports__perturb_and_fence(max_flips=int(ps_max), seed=str(ps_seed), include_fence=bool(run_fence), enable_witness=False)
+
+
+
           
 
 
