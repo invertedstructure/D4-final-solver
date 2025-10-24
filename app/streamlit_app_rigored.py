@@ -4938,7 +4938,7 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
     C3      = (C0.blocks.__root__.get("3") or []) if C0 else []
     H2      = (H0.blocks.__root__.get("2") or []) if H0 else []
     
-    try:
+   try:
         d3 = (B0.blocks.__root__.get("3") or []) if B0 else []
         C3 = (C0.blocks.__root__.get("3") or []) if C0 else []
         H2 = (H0.blocks.__root__.get("2") or []) if H0 else []
