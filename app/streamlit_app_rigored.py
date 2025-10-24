@@ -4608,8 +4608,6 @@ def _force_ssot_fresh_for_reports():
     except Exception:
         # Never block reports
         pass
-# ================= /REPORT PREFLIGHT SSOT FRESHNESS =================
-=
 
 
 
