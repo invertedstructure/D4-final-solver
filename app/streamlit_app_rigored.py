@@ -4938,26 +4938,27 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
     rc["projector_filename"] = rc.get("projector_filename") or _pj_path_from_context_or_fs()
     st.session_state["run_ctx"] = rc
     
-        # make sure H/C/B objects are actually present before shape checks
-    H_used = st.session_state.get("overlap_H") or _load_h_local()
-    
-       # ─── Preflight: load BCH and assert we actually have H2/d3/C3 ───
+            # make sure H/C/B objects are actually present before shape checks
+        H_used = st.session_state.get("overlap_H") or _load_h_local()
+        
+      # ─── Preflight: load BCH and assert we actually have H2/d3/C3 ───
     B0, C0, H0 = _reports_hydrate_BCH()
     try:
-        B0, C0, H0 = _reports_hydrate_BCH()
-        d3 = (B0.blocks.__root__.get("3") or [])
-        C3 = (C0.blocks.__root__.get("3") or [])
-        H2 = (H0.blocks.__root__.get("2") or [])
-        n2, n3 = len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)
-            
-            # if any are empty, stop early
+        d3 = (B0.blocks.__root__.get("3") or []) if B0 else []
+        C3 = (C0.blocks.__root__.get("3") or []) if C0 else []
+        H2 = (H0.blocks.__root__.get("2") or []) if H0 else []
+        n2  = len(d3)
+        n3  = len(d3[0]) if (n2 and d3[0]) else 0
+        # lightweight shape sniff (we don’t multiply; just guard for empties)
         if not (n2 and n3 and H2 and C3):
-            st.error("Reports: missing H2/d3/C3 — run Overlap/Cert once to freeze SSOT.")
-            st.stop()
-            
-        inputs_block, note = _inputs_for_reports(n2, n3, d3)
-        if note:
-            st.caption(f"Reports running in ephemeral mode · {note}")
+            raise RuntimeError("missing")
+    except Exception:
+        st.error("Reports: missing H2/d3/C3 — run Overlap/Cert once to freeze SSOT.")
+        st.stop()
+    
+    # (Optional) tiny debug line so you can see what’s live without a debugger:
+    st.caption(f"Reports inputs live → H2:{len(H2)}×{len(H2[0]) if H2 and H2[0] else 0} · d3:{n2}×{n3} · C3:{len(C3)}×{len(C3[0]) if C3 and C3[0] else 0}")
+
 
        
     
