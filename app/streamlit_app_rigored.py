@@ -1579,16 +1579,7 @@ with tab2:
                 f"got H2({rH}×{cH}), d3({rD}×{cD}), C3({rC}×{cC})"
             )
 
-    def _frozen_inputs_sig_from_ib(ib: dict) -> tuple[str,str,str,str,str]:
-        """Canonical 5-tuple (D,C,H,U,S) from SSOT; supports legacy and nested."""
-        h = (ib.get("hashes") or {})
-        return (
-            str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
-            str(h.get("C_hash",          ib.get("C_hash",""))),
-            str(h.get("H_hash",          ib.get("H_hash",""))),
-            str(h.get("U_hash",          ib.get("U_hash",""))),
-            str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
-        )
+    
 
 
 # ------------------------------ UI: policy + H + projector ------------------------------
@@ -2546,7 +2537,7 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
     except Exception:
         st.info("Preflight: unable to resolve sources yet.")
 
-    # --- Run button (full replacement) ---
+    
 # --- Run button (full replacement) ---
 run_btn = st.button("Run solver (one press → 5 certs; +1 if FILE)", key="btn_svr_run")
 if run_btn:
