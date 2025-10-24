@@ -1750,7 +1750,31 @@ def _resolve_projector(cfg_active: dict, boundaries) -> tuple[list[list[int]], d
     meta.setdefault("projector_consistent_with_d", None)
 
     return P_active, meta
+ef _ab_is_fresh_now(*, rc: dict, ib: dict, ab_payload: dict) -> tuple[bool, str]:
+    """
+    Returns (fresh, reason). `reason` is "" if fresh, otherwise one of:
+    AB_STALE_INPUTS_SIG | AB_STALE_POLICY | AB_STALE_PROJECTOR_HASH | AB_NONE
+    """
+    if not ab_payload:
+        return (False, "AB_NONE")
 
+    frozen = tuple(_frozen_inputs_sig_from_ib(ib))
+    ab_sig = tuple(ab_payload.get("inputs_sig") or ())
+    if ab_sig != frozen:
+        return (False, "AB_STALE_INPUTS_SIG")
+
+    pol_now = _policy_tag_now_from_rc(rc)
+    ab_pol  = str(ab_payload.get("policy_tag",""))
+    if ab_pol != pol_now:
+        return (False, "AB_STALE_POLICY")
+
+    if str(rc.get("mode","")) == "projected(columns@k=3,file)":
+        pj_now = rc.get("projector_hash","") or ""
+        pj_ab  = ((ab_payload.get("projected") or {}).get("projector_hash","") or "")
+        if pj_ab != pj_now:
+            return (False, "AB_STALE_PROJECTOR_HASH")
+
+    return (True, "")
         
 # === BEGIN PATCH: READ-ONLY OVERLAP HYDRATOR (uses frozen SSOT only) ===
 def overlap_ui_from_frozen():
