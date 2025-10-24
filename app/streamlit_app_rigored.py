@@ -5019,14 +5019,24 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
         st.stop()
     
     st.caption(f"Reports inputs live → H2:{len(H2)}×{len(H2[0]) if H2 and H2[0] else 0} · d3:{n2}×{n3} · C3:{len(C3)}×{len(C3[0]) if C3 and C3[0] else 0}")
-    
-    # --- Lane-mask: prefer SSOT pin; else derive from d3 and pin it (copy-only) ---
+        
+       # --- Lane-mask pin & projector diag (final/clean) ---
     rc = st.session_state.get("run_ctx") or {}
     lane_mask = [int(x) & 1 for x in (rc.get("lane_mask_k3") or [])]
     if not lane_mask:
+        # derive from d3 once and pin for downstream consumers
         lane_mask = [1 if any(int(d3_base[i][j]) & 1 for i in range(n2)) else 0 for j in range(n3)]
         rc["lane_mask_k3"] = lane_mask
-        st.session_state["run_ctx"] = rc  # pin for downstream consumers
+        st.session_state["run_ctx"] = rc
+    
+    P_diag = _diag_from_mask_local(lane_mask) if lane_mask else None
+    
+    # Back-compat aliases so older lines won't NameError
+    lanes = lane_mask
+    lane_cols = selected_cols  # some places use 'lane_cols'
+    
+    st.caption(f"Lane mask → {lane_mask} (lanes: {len(selected_cols)}/{n3})")
+
     
     # Build diagonal projector once
     P_diag = _diag_from_mask_local(lane_mask) if lane_mask else None
