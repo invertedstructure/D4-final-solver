@@ -145,6 +145,36 @@ if "_selected_mask_auto" not in globals():
         except Exception:
             return []
 # --- /tiny helpers ---
+# NEW: full-matrix residual helpers (any 1 in a column across all rows)
+if "_svr_mismatch_cols_from_R3" not in globals():
+    def _svr_mismatch_cols_from_R3(R3, selected_mask_bits):
+        try:
+            n3 = len(R3[0]) if (R3 and R3[0]) else 0
+            sel = [(int(x) & 1) for x in (selected_mask_bits or [])]
+            if len(sel) != n3:
+                sel = (sel + [0] * n3)[:n3]
+            out = []
+            for j in range(n3):
+                if sel[j] and any((int(R3[i][j]) & 1) for i in range(len(R3))):
+                    out.append(j)
+            return out
+        except Exception:
+            return []
+
+if "_svr_residual_tag_from_R3" not in globals():
+    def _svr_residual_tag_from_R3(R3, selected_mask_bits):
+        try:
+            n3 = len(R3[0]) if (R3 and R3[0]) else 0
+            sel = [(int(x) & 1) for x in (selected_mask_bits or [])]
+            if len(sel) != n3:
+                sel = (sel + [0] * n3)[:n3]
+            bits = []
+            for j in range(n3):
+                one = (sel[j] and any((int(R3[i][j]) & 1) for i in range(len(R3))))
+                bits.append("1" if one else "0")
+            return "".join(bits)
+        except Exception:
+            return ""
 
 
 
@@ -2537,230 +2567,285 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
     except Exception:
         st.info("Preflight: unable to resolve sources yet.")
 
+     # --- Run button (full replacement) ---
+    run_btn = st.button("Run solver (one press → 5 certs; +1 if FILE)", key="btn_svr_run")
+    if run_btn:
+        ss = st.session_state
+        if ss.get('_solver_busy', False):
+            st.warning('Solver is already running — debounced.')
+        else:
+            ss['_solver_busy'] = True
+            ss['_solver_one_button_active'] = True
+            try:
+                # 1) Freeze SSOT (single source of truth)
+                pb = _svr_resolve_all_to_paths()
+                ib, rc = _svr_freeze_ssot(pb)
+                rc["run_id"] = str(uuid.uuid4())
     
-# --- Run button (full replacement) ---
-run_btn = st.button("Run solver (one press → 5 certs; +1 if FILE)", key="btn_svr_run")
-if run_btn:
-    ss = st.session_state
-    if ss.get('_solver_busy', False):
-        st.warning('Solver is already running — debounced.')
-    else:
-        ss['_solver_busy'] = True
-        ss['_solver_one_button_active'] = True
-        try:
-            # 1) Freeze SSOT
-            pb = _svr_resolve_all_to_paths()
-            ib, rc = _svr_freeze_ssot(pb)
-            rc["run_id"] = str(uuid.uuid4())
-
-            # 2) Strict
-            strict_out = _svr_strict_from_blocks(pb["H"][1], pb["B"][1], pb["C"][1])
-
-            # 3) Projected (AUTO)
-            proj_meta, lanes, projected_out = _svr_projected_auto_from_blocks(pb["H"][1], pb["B"][1], pb["C"][1])
-
-            # 4) Unified embed → embed_sig + sig8 + bundle dir
-            embed_auto, embed_sig_auto = _svr_build_embed(
-                ib,
-                policy="strict__VS__projected(columns@k=3,auto)",
-                lanes=(lanes if not proj_meta.get("na") else None),
-                na_reason=(proj_meta.get("reason") if proj_meta.get("na") else None),
-            )
-            sig8 = (embed_sig_auto or "")[:8]
-            district_id = ib.get("district_id") or ("D" + (ib.get("hashes",{}).get("boundaries_hash","") or "")[:8])
-            _bundle_dir = _svr_bundle_dir(district_id, sig8)
-
-            # Common rows for witnesses
-            H2 = pb["H"][1].get("2") or []
-            d3 = pb["B"][1].get("3") or []
-            C3 = pb["C"][1].get("3") or []
-            I3 = _svr_eye(len(C3)) if (C3 and C3[0] and len(C3) == len(C3[0])) else []
-            R3s = _svr_xor(_svr_mul(H2, d3), _svr_xor(C3, I3)) if I3 else []
-            bH = (_svr_mul(H2, d3)[-1] if (H2 and d3 and _svr_mul(H2, d3)) else [])
-            bCI = ((_svr_xor(C3, I3)[-1]) if I3 else [])
-            sel_mask = [1] * (len(C3[0]) if (C3 and C3[0]) else 0)
-            bR = (R3s[-1] if R3s else [])
-
-            # 5) Write strict cert (+witness)
-            strict_cert = _svr_cert_common(ib, rc, "strict")
-            strict_cert["witness"] = _witness_pack(bH, bCI, lanes=None)
-            strict_cert["results"] = {
-                "out": strict_out,
-                "selected_cols": sel_mask,
-                "mismatch_cols_selected": _svr_mismatch_cols(bR, sel_mask),
-                "residual_tag_selected": _svr_residual_bits(bR, sel_mask),
-                "k2": None,
-                "na_reason_code": (strict_out.get("na_reason_code") if isinstance(strict_out, dict) else None),
-            }
-            _svr_apply_sig8(strict_cert, embed_sig_auto)
-            p_strict = _svr_write_cert_in_bundle(_bundle_dir, _svr_bundle_fname("strict", district_id, sig8), strict_cert)
-
-            # 6) Write projected(auto) cert (+witness)
-            p_cert = _svr_cert_common(ib, rc, "projected(columns@k=3,auto)")
-            if proj_meta.get("na"):
-                p_cert["witness"] = _witness_pack(bH, bCI, lanes=None)
-                p_cert["results"] = {
-                    "out": {"2": {"eq": None}, "3": {"eq": None}},
-                    "na_reason_code": proj_meta["reason"],
-                    "lanes": lanes,
-                    "lane_policy": "C bottom row",
-                    "selected_cols": list(lanes or []),
-                    "mismatch_cols_selected": [],
-                    "residual_tag_selected": "",
-                    "k2": None,
+                # guard: must have complete inputs
+                H2 = pb["H"][1].get("2") or []
+                d3 = pb["B"][1].get("3") or []
+                C3 = pb["C"][1].get("3") or []
+                if not (H2 and d3 and C3 and C3 and C3[0]):
+                    st.warning("Inputs incomplete — upload B/C/H/U and run Overlap first.")
+                    raise RuntimeError("INCOMPLETE_INPUTS")
+    
+                n3 = len(C3[0])
+                I3 = _svr_eye(len(C3)) if (len(C3) == len(C3[0])) else []
+                # residual R3 = H2 d3 ⊕ (C3 ⊕ I3) for witnesses + mismatch cols
+                H2d3 = _svr_mul(H2, d3)
+                C3pI3 = _svr_xor(C3, I3) if I3 else []
+                R3s = _svr_xor(H2d3, C3pI3) if I3 else []
+                bH = (H2d3[-1] if (H2d3 and H2d3[-1] is not None) else [])
+                bCI = (C3pI3[-1] if C3pI3 else [])
+                sel_all = [1] * n3
+    
+                # district + target dir (stable per press)
+                h = ib.get("hashes", {}) or {}
+                district_id = ib.get("district_id") or ("D" + str(h.get("boundaries_hash", ""))[:8])
+    
+                # 2) Strict lap
+                strict_out = _svr_strict_from_blocks(pb["H"][1], pb["B"][1], pb["C"][1])
+                strict_k3 = (strict_out or {}).get("3", {}).get("eq", None)
+                strict_k2 = (strict_out or {}).get("2", {}).get("eq", None)
+    
+                # 3) Projected (AUTO) lap
+                proj_meta, lanes, projected_out = _svr_projected_auto_from_blocks(pb["H"][1], pb["B"][1], pb["C"][1])
+                posed_auto = not bool(proj_meta.get("na"))
+                proj_auto_k3 = (projected_out or {}).get("3", {}).get("eq", None) if posed_auto else None
+                proj_auto_k2 = (projected_out or {}).get("2", {}).get("eq", None) if posed_auto else None
+    
+                # 4) Unified A/B(AUTO) embed → embed_sig + sig8 + bundle dir
+                embed_auto, embed_sig_auto = _svr_build_embed(
+                    ib,
+                    policy="strict__VS__projected(columns@k=3,auto)",
+                    lanes=(lanes if posed_auto else None),
+                    na_reason=(proj_meta.get("reason") if not posed_auto else None),
+                )
+                sig8 = (embed_sig_auto or "")[:8]
+                _bundle_dir = _svr_bundle_dir(district_id, sig8)
+    
+                # ----------------- WRITE CERTS -----------------
+    
+                # Strict cert (+ full-R3 selected mismatch)
+                strict_cert = _svr_cert_common(ib, rc, "strict")
+                strict_cert["witness"] = _witness_pack(bH, bCI, lanes=None)
+                strict_cert["results"] = {
+                    "out": strict_out,
+                    "selected_cols": sel_all,
+                    "mismatch_cols_selected": _svr_mismatch_cols_from_R3(R3s, sel_all),
+                    "residual_tag_selected": _svr_residual_tag_from_R3(R3s, sel_all),
+                    "k2": strict_k2,
+                    "na_reason_code": (strict_out.get("na_reason_code") if isinstance(strict_out, dict) else None),
                 }
-            else:
-                R3s_bot = (R3s[-1] if R3s else [])
-                p_cert["witness"] = _witness_pack(bH, bCI, lanes=lanes)
-                p_cert["results"] = {
-                    "out": projected_out,
-                    "lanes": lanes,
-                    "lane_policy": "C bottom row",
-                    "selected_cols": list(lanes or []),
-                    "mismatch_cols_selected": _svr_mismatch_cols(R3s_bot, lanes),
-                    "residual_tag_selected": _svr_residual_bits(R3s_bot, lanes),
-                    "k2": None,
-                }
-            _svr_apply_sig8(p_cert, embed_sig_auto)
-            p_proj_auto = _svr_write_cert_in_bundle(_bundle_dir, _svr_bundle_fname("projected_auto", district_id, sig8), p_cert)
-
-            # 7) Freezer (always emit freezer cert; and FILE projected when posed)
-            file_na_reason = None
-            projector_hash = ""
-            if proj_meta.get("na"):
-                r = str(proj_meta["reason"])
-                if r == "AUTO_REQUIRES_SQUARE_C3":
-                    file_na_reason = "FREEZER_C3_NOT_SQUARE"
-                elif r == "ZERO_LANE_PROJECTOR":
-                    file_na_reason = "FREEZER_ZERO_LANE_PROJECTOR"
+                _svr_apply_sig8(strict_cert, embed_sig_auto)
+                p_strict = _svr_write_cert_in_bundle(
+                    _bundle_dir, _svr_bundle_fname("strict", district_id, sig8), strict_cert
+                )
+    
+                # Projected(AUTO) cert
+                p_cert = _svr_cert_common(ib, rc, "projected(columns@k=3,auto)")
+                if not posed_auto:
+                    p_cert["witness"] = _witness_pack(bH, bCI, lanes=None)
+                    p_cert["results"] = {
+                        "out": {"2": {"eq": None}, "3": {"eq": None}},
+                        "na_reason_code": proj_meta.get("reason", ""),
+                        "lane_policy": "C bottom row",
+                        "lanes": list(lanes or []),
+                        "selected_cols": list(lanes or []),
+                        "mismatch_cols_selected": [],
+                        "residual_tag_selected": "",
+                        "k2": None,
+                    }
                 else:
-                    file_na_reason = "FREEZER_BAD_SHAPE"
-
-                freezer_cert = _svr_cert_common(ib, rc, "projector_freezer")
-                freezer_cert["freezer"] = {
-                    "status": "N/A",
-                    "lanes": list(lanes or []),
-                    "projector_hash": None,
-                    "na_reason_code": file_na_reason,
-                }
-                _svr_apply_sig8(freezer_cert, embed_sig_auto)
-                p_freezer = _svr_write_cert_in_bundle(_bundle_dir, _svr_bundle_fname("freezer", district_id, sig8), freezer_cert)
+                    p_cert["witness"] = _witness_pack(bH, bCI, lanes=lanes)
+                    p_cert["results"] = {
+                        "out": projected_out,
+                        "lane_policy": "C bottom row",
+                        "lanes": list(lanes or []),
+                        "selected_cols": list(lanes or []),
+                        "mismatch_cols_selected": _svr_mismatch_cols_from_R3(R3s, lanes),
+                        "residual_tag_selected": _svr_residual_tag_from_R3(R3s, lanes),
+                        "k2": proj_auto_k2,
+                    }
+                _svr_apply_sig8(p_cert, embed_sig_auto)
+                p_proj_auto = _svr_write_cert_in_bundle(
+                    _bundle_dir, _svr_bundle_fname("projected_auto", district_id, sig8), p_cert
+                )
+    
+                # Freezer (AUTO → FILE), always attempt
+                file_na_reason = None
+                projector_hash = ""
                 p_proj_file = None
-            else:
-                n3 = len(C3[0]) if (C3 and C3[0]) else 0
-                P = [[1 if (i == j and int(lanes[j]) == 1) else 0 for j in range(n3)] for i in range(n3)] if n3 else []
-                R3pF = _svr_mul(R3s, P) if (R3s and P) else []
-                eq_file = _svr_is_zero(R3pF) if R3pF else None
-                proj_file_out = {"2": {"eq": True if I3 else None}, "3": {"eq": (bool(eq_file) if eq_file is not None else None)}}
-
-                projector_hash = _svr_hash({"diag": list(lanes or [])}) if lanes else ""
-                p_cert_file = _svr_cert_common(ib, rc, "projected(columns@k=3,file)")
-                p_cert_file["results"] = {"out": proj_file_out, "projector_hash": projector_hash, "lanes": list(lanes or [])}
-                _svr_apply_sig8(p_cert_file, embed_sig_auto)
-                p_proj_file = _svr_write_cert_in_bundle(_bundle_dir, _svr_bundle_fname("projected_file", district_id, sig8), p_cert_file)
-
-                auto_k3 = projected_out["3"]["eq"]
-                file_k3 = proj_file_out["3"]["eq"]
-                freezer_status = "OK"
-                if (auto_k3 is True and file_k3 is False) or (auto_k3 is False and file_k3 is True):
-                    freezer_status = "ERROR"
-                    file_na_reason = "FREEZER_ASSERT_MISMATCH"
-
-                freezer_cert = _svr_cert_common(ib, rc, "projector_freezer")
-                freezer_cert["freezer"] = {
-                    "status": freezer_status,
-                    "lanes": list(lanes or []),
-                    "projector_hash": projector_hash,
+                p_cert_file = None
+                proj_file_k3 = None
+                proj_file_k2 = None
+    
+                if not posed_auto:
+                    # N/A freezer
+                    r = str(proj_meta.get("reason") or "")
+                    file_na_reason = (
+                        "FREEZER_C3_NOT_SQUARE" if r == "AUTO_REQUIRES_SQUARE_C3"
+                        else "FREEZER_ZERO_LANE_PROJECTOR" if r == "ZERO_LANE_PROJECTOR"
+                        else "FREEZER_BAD_SHAPE"
+                    )
+                    freezer_cert = _svr_cert_common(ib, rc, "projector_freezer")
+                    freezer_cert["freezer"] = {
+                        "status": "N/A",
+                        "lanes": list(lanes or []),
+                        "projector_hash": None,
+                        "na_reason_code": file_na_reason,
+                    }
+                    _svr_apply_sig8(freezer_cert, embed_sig_auto)
+                    p_freezer = _svr_write_cert_in_bundle(
+                        _bundle_dir, _svr_bundle_fname("freezer", district_id, sig8), freezer_cert
+                    )
+                else:
+                    # Build diagonal Π from lanes
+                    P = [[1 if (i == j and int(lanes[j]) == 1) else 0 for j in range(n3)] for i in range(n3)]
+                    # FILE decision (k3)
+                    R3pF = _svr_mul(R3s, P) if (R3s and P) else []
+                    eq_file_k3 = _svr_is_zero(R3pF) if R3pF else None
+                    proj_file_k3 = bool(eq_file_k3) if eq_file_k3 is not None else None
+                    # k2 passthrough (independent)
+                    proj_file_k2 = proj_auto_k2  # same as AUTO; lanes don't affect k2 in your routine
+    
+                    # FILE projector hash: sha256(JSON({blocks:{3:P}}))
+                    _proj_blob = _json.dumps({"blocks": {"3": P}}, separators=(",", ":"), sort_keys=True).encode("ascii")
+                    projector_hash = "sha256:" + _hashlib.sha256(_proj_blob).hexdigest()
+    
+                    # Write projected(FILE) cert (optional but useful)
+                    p_cert_file = _svr_cert_common(ib, rc, "projected(columns@k=3,file)")
+                    p_cert_file["results"] = {
+                        "out": {"2": {"eq": proj_file_k2}, "3": {"eq": proj_file_k3}},
+                        "projector_hash": projector_hash,
+                        "lanes": list(lanes or []),
+                    }
+                    _svr_apply_sig8(p_cert_file, embed_sig_auto)
+                    p_proj_file = _svr_write_cert_in_bundle(
+                        _bundle_dir, _svr_bundle_fname("projected_file", district_id, sig8), p_cert_file
+                    )
+    
+                    # Freezer status
+                    freezer_status = "OK"
+                    if (proj_auto_k3 is True and proj_file_k3 is False) or (proj_auto_k3 is False and proj_file_k3 is True):
+                        freezer_status = "ERROR"
+                        file_na_reason = "FREEZER_ASSERT_MISMATCH"
+                    freezer_cert = _svr_cert_common(ib, rc, "projector_freezer")
+                    freezer_cert["freezer"] = {
+                        "status": freezer_status,
+                        "lanes": list(lanes or []),
+                        "projector_hash": projector_hash,
+                        "na_reason_code": (file_na_reason or ""),
+                    }
+                    _svr_apply_sig8(freezer_cert, embed_sig_auto)
+                    p_freezer = _svr_write_cert_in_bundle(
+                        _bundle_dir, _svr_bundle_fname("freezer", district_id, sig8), freezer_cert
+                    )
+    
+                # A/B (AUTO) — embed is the authority
+                ab_auto = _svr_cert_common(ib, rc, "A/B")
+                ab_auto["ab_pair"] = {
+                    "pair_tag": "strict__VS__projected(columns@k=3,auto)",
+                    "embed": embed_auto,
+                    "embed_sig": embed_sig_auto,
+                    "pair_vec": {
+                        "k3": [strict_k3, proj_auto_k3],
+                        "k2": [strict_k2, proj_auto_k2],
+                    },
+                    "strict_cert": {"path": str(p_strict), "hash": strict_cert["integrity"]["content_hash"]},
+                    "projected_cert": {"path": str(p_proj_auto), "hash": p_cert["integrity"]["content_hash"]},
+                }
+                _svr_apply_sig8(ab_auto, embed_sig_auto)
+                p_ab_auto = _svr_write_cert_in_bundle(
+                    _bundle_dir, _svr_bundle_fname("ab_auto", district_id, sig8), ab_auto
+                )
+                st.session_state["ab_pin_auto"] = {
+                    "state": "pinned",
+                    "payload": {"embed_sig": embed_sig_auto, "policy_tag": "strict__VS__projected(columns@k=3,auto)"},
+                    "refreshed_at": _svr_now_iso(),
+                }
+                # keep legacy key if your UI reads it
+                st.session_state["ab_pin"] = st.session_state["ab_pin_auto"]
+    
+                # A/B (FILE) — always emit (N/A/ERROR carries reason)
+                embed_file, embed_sig_file = _svr_build_embed(
+                    ib,
+                    policy="strict__VS__projected(columns@k=3,file)",
+                    projector_hash=(projector_hash if not file_na_reason else None),
+                    na_reason=(file_na_reason if file_na_reason else None),
+                )
+                ab_file = _svr_cert_common(ib, rc, "A/B")
+                ab_file["ab_pair"] = {
+                    "pair_tag": "strict__VS__projected(columns@k=3,file)",
+                    "embed": embed_file,
+                    "embed_sig": embed_sig_file,
+                    "pair_vec": {
+                        "k3": [strict_k3, proj_file_k3],
+                        "k2": [strict_k2, proj_file_k2],
+                    },
+                    "strict_cert": {"path": str(p_strict), "hash": strict_cert["integrity"]["content_hash"]},
+                    "projected_cert": ({"path": str(p_proj_file), "hash": p_cert_file["integrity"]["content_hash"]} if p_proj_file else None),
                     "na_reason_code": (file_na_reason or ""),
                 }
-                _svr_apply_sig8(freezer_cert, embed_sig_auto)
-                p_freezer = _svr_write_cert_in_bundle(_bundle_dir, _svr_bundle_fname("freezer", district_id, sig8), freezer_cert)
-
-            # 8) A/B (AUTO)
-            ab_auto = _svr_cert_common(ib, rc, "A/B")
-            ab_auto["ab_pair"] = {
-                "pair_tag": "strict__VS__projected(columns@k=3,auto)",
-                "embed": embed_auto,
-                "embed_sig": embed_sig_auto,
-                "strict_cert": {"path": str(p_strict), "hash": strict_cert["integrity"]["content_hash"]},
-                "projected_cert": {"path": str(p_proj_auto), "hash": p_cert["integrity"]["content_hash"]},
-            }
-            _svr_apply_sig8(ab_auto, embed_sig_auto)
-            p_ab_auto = _svr_write_cert_in_bundle(_bundle_dir, _svr_bundle_fname("ab_auto", district_id, sig8), ab_auto)
-            st.session_state["ab_pin"] = {
-                "state": "pinned",
-                "payload": {"embed_sig": embed_sig_auto, "policy_tag": "projected(columns@k=3,auto)"},
-                "refreshed_at": _svr_now_iso(),
-            }
-
-            # 9) A/B (FILE) — always emit (N/A/ERROR carries na_reason_code)
-            embed_file, embed_sig_file = _svr_build_embed(
-                ib, policy="strict__VS__projected(columns@k=3,file)",
-                projector_hash=(projector_hash if not file_na_reason else None),
-                na_reason=(file_na_reason if file_na_reason else None),
-            )
-            ab_file = _svr_cert_common(ib, rc, "A/B")
-            ab_file["ab_pair"] = {
-                "pair_tag": "strict__VS__projected(columns@k=3,file)",
-                "embed": embed_file,
-                "embed_sig": embed_sig_file,
-                "strict_cert": {"path": str(p_strict), "hash": strict_cert["integrity"]["content_hash"]},
-                "projected_cert": ({"path": str(p_proj_file), "hash": p_cert_file["integrity"]["content_hash"]} if p_proj_file else None),
-                "na_reason_code": (file_na_reason or ""),
-            }
-            _svr_apply_sig8(ab_file, embed_sig_file)
-            p_ab_file = _svr_write_cert_in_bundle(_bundle_dir, _svr_bundle_fname("ab_file", district_id, sig8), ab_file)
-            st.session_state["ab_pin_file"] = {
-                "state": "pinned",
-                "payload": {"embed_sig": embed_sig_file, "policy_tag": "projected(columns@k=3,file)"},
-                "refreshed_at": _svr_now_iso(),
-            }
-
-            # 10) FREEZER pin (for downstream consumers)
-            freezer = (freezer_cert or {}).get("freezer", {})
-            st.session_state["freezer_pin"] = {
-                "state": "pinned",
-                "payload": {
-                    "status": str(freezer.get("status") or ""),                 # "OK" | "N/A" | "ERROR"
-                    "lanes": list(freezer.get("lanes") or []),
-                    "projector_hash": str(freezer.get("projector_hash") or ""), # "" or "sha256:…"
-                    "na_reason_code": str(freezer.get("na_reason_code") or ""),
-                    "inputs_sig_5": list((embed_auto or {}).get("inputs_sig_5") or []),
-                    "n3": int((ib.get("dims") or {}).get("n3") or 0),
-                },
-                "consumed": False,
-                "refreshed_at": st.session_state["ab_pin"]["refreshed_at"],
-            }
-
-            # 11) bundle.json index
-            try:
-                bundle_index = {
-                    "run_id": rc.get("run_id",""),
-                    "sig8": sig8,
-                    "district_id": district_id,
-                    "filenames": [Path(p_strict).name, Path(p_proj_auto).name, Path(p_ab_auto).name, Path(p_freezer).name]
-                                 + ([Path(p_ab_file).name] + ([Path(p_proj_file).name] if p_proj_file else [])),
-                    "timestamps": [strict_cert.get("written_at_utc",""), p_cert.get("written_at_utc",""),
-                                   ab_auto.get("written_at_utc",""), freezer_cert.get("written_at_utc","")]
-                                   + [ab_file.get("written_at_utc","")]
-                                   + ([p_cert_file.get("written_at_utc","")] if p_proj_file else []),
-                    "counts": {"written": (5 if not p_proj_file else 6)},
+                _svr_apply_sig8(ab_file, embed_sig_file)
+                p_ab_file = _svr_write_cert_in_bundle(
+                    _bundle_dir, _svr_bundle_fname("ab_file", district_id, sig8), ab_file
+                )
+                st.session_state["ab_pin_file"] = {
+                    "state": "pinned",
+                    "payload": {"embed_sig": embed_sig_file, "policy_tag": "strict__VS__projected(columns@k=3,file)"},
+                    "refreshed_at": _svr_now_iso(),
                 }
-                _svr_write_cert_in_bundle(_bundle_dir, "bundle.json", bundle_index)
-            except Exception as _be:
-                st.warning(f"bundle.json not written: {_be}")
+    
+                # 5(+1) bundle index
+                try:
+                    fnames = [Path(p_strict).name, Path(p_proj_auto).name, Path(p_ab_auto).name, Path(p_freezer).name, Path(p_ab_file).name]
+                    if p_proj_file: fnames.append(Path(p_proj_file).name)
+                    tstamp = lambda x: (x or {}).get("written_at_utc","")
+                    timestamps = [
+                        tstamp(strict_cert), tstamp(p_cert), tstamp(ab_auto), tstamp(freezer_cert), tstamp(ab_file)
+                    ] + ([tstamp(p_cert_file)] if p_proj_file else [])
+                    _svr_write_cert_in_bundle(
+                        _bundle_dir, "bundle.json",
+                        {
+                            "run_id": rc.get("run_id",""),
+                            "sig8": sig8,
+                            "district_id": district_id,
+                            "filenames": fnames,
+                            "timestamps": timestamps,
+                            "counts": {"written": (5 if not p_proj_file else 6)},
+                        }
+                    )
+                except Exception as _be:
+                    st.warning(f"bundle.json not written: {_be}")
+    
+                # Header line + quick lap/A/B readout (k2/k3)
+                rc["policy_tag"] = "strict"  # stable anchor
+                st.session_state["run_ctx"] = rc
+                st.session_state["last_run_header"] = _svr_header_line(
+                    ib, sig8, (projector_hash if not file_na_reason else None), "strict", rc.get("run_id", "")
+                )
+    
+                # ✳︎ Eyeball summary (k2/k3)
+                def _fmt(x):
+                    return "T" if x is True else ("F" if x is False else "N/A")
+                hdr = (
+                    f"**k3**: strict={_fmt(strict_k3)} · proj_auto={_fmt(proj_auto_k3)} · proj_file={_fmt(proj_file_k3)}  \n"
+                    f"**A/B(auto)**=( {_fmt(strict_k3)} , {_fmt(proj_auto_k3)} )   ·   "
+                    f"**A/B(file)**=( {_fmt(strict_k3)} , {_fmt(proj_file_k3)} ){('  ·  reason: '+file_na_reason) if file_na_reason else ''}  \n"
+                    f"**k2**: strict={_fmt(strict_k2)} · proj_auto={_fmt(proj_auto_k2)} · proj_file={_fmt(proj_file_k2)}"
+                )
+                st.markdown(hdr)
+    
+            except Exception as e:
+                st.error(f"Solver run failed: {e}")
+            finally:
+                ss['_solver_one_button_active'] = False
+                ss['_solver_busy'] = False
+    # --- End run button ---
+   
 
-            # 12) Header (read-only)
-            st.session_state["last_run_header"] = _svr_header_line(
-                ib, sig8, (projector_hash if not file_na_reason else None), "strict", rc.get("run_id","")
-            )
-
-        except Exception as e:
-            st.error(f"Solver run failed: {e}")
-        finally:
-            ss['_solver_one_button_active'] = False
-            ss['_solver_busy'] = False
-# --- End run button ---
 
              # ============================== Cert & Provenance ==============================
 with safe_expander("Cert & provenance (read‑only; solver writes bundles)", expanded=True):
