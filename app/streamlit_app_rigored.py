@@ -4413,6 +4413,42 @@ def _lane_mask_from_d3_matrix(d3: list[list[int]]) -> list[int]:
     rows, n3 = len(d3), len(d3[0])
     return [1 if any(int(d3[i][j]) & 1 for i in range(rows)) else 0 for j in range(n3)]
 
+def _kernel_mask_from_d3(d3):
+    try:
+        n2, n3 = len(d3), (len(d3[0]) if d3 and d3[0] else 0)
+        out = []
+        for j in range(n3):
+            any1 = 0
+            for i in range(n2):
+                any1 |= (int(d3[i][j]) & 1)
+            out.append(0 if any1 else 1)  # 1 → kernel column
+        return out
+    except Exception:
+        return []
+
+def _svr_residual_tag_from_R3(R3, selected_mask_bits, d3=None):
+    # Preserve your current bitstring behavior…
+    try:
+        n3 = len(R3[0]) if (R3 and R3[0]) else 0
+        sel = [(int(x) & 1) for x in (selected_mask_bits or [])]
+        if len(sel) != n3:
+            sel = (sel + [0]*n3)[:n3]
+        mism_cols = []
+        for j in range(n3):
+            if sel[j] and any((int(R3[i][j]) & 1) for i in range(len(R3))):
+                mism_cols.append(j)
+        # …but upgrade with ker-RED when d3 is provided
+        if d3 is not None and mism_cols:
+            ker = _kernel_mask_from_d3(d3)
+            if any(ker[j] for j in mism_cols):
+                return "ker"
+        # else fall back to the columnwise bitstring for transparency
+        bits = ["1" if j in mism_cols else "0" for j in range(n3)]
+        return "".join(bits)
+    except Exception:
+        return ""
+
+
 def _diag_from_mask(lm: list[int]) -> list[list[int]]:
     n = len(lm or [])
     return [[1 if (i == j and int(lm[j]) == 1) else 0 for j in range(n)] for i in range(n)]
@@ -4765,10 +4801,117 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
     with open(jpath, "rb") as jf: st.download_button("Download perturbation_sanity.json", jf, file_name=jname, key=f"dl_ps_json_{jname[-12:]}")
     with open(csv_path, "rb") as cf: st.download_button("Download perturbation_sanity.csv", cf, file_name=csv_path.name, key=f"dl_ps_csv_{csv_path.stem[-8:]}")
 
-    # Fence (optional) — unchanged from your working variant
-    if include_fence:
-        # (reuse your fence code here; it already worked once BCH are hydrated)
-        pass
+    # --- Fence stress (C3-only moves) -------------------------------------------
+# Invariants: lanes from bottom(C3'), AUTO posed iff C3' square & sum(lanes)>0
+# CSV schema: (district, fixture, U_class, pass_vec, note)
+
+from pathlib import Path as _Path
+
+def _svr_is_square(M): 
+    return bool(M and len(M) == len(M[0]))
+
+def _svr_copy(M): 
+    return [row[:] for row in (M or [])]
+
+def _sum_bits(v): 
+    return sum((int(x) & 1) for x in (v or []))
+
+def _lane_mask_from_C3(C3):
+    return (C3[-1] if (C3 and len(C3)) else [])
+
+def _mutate_shrink(C3, hits=1, rng=None):
+    rng = rng or random
+    A = _svr_copy(C3)
+    idxs = [(i, j) for i in range(len(A)) for j in range(len(A[0])) if (A[i][j] & 1)]
+    rng.shuffle(idxs)
+    for (i, j) in idxs[:hits]:
+        A[i][j] ^= 1
+    return A
+
+def _mutate_plus(C3, hits=1, rng=None):
+    rng = rng or random
+    A = _svr_copy(C3)
+    idxs = [(i, j) for i in range(len(A)) for j in range(len(A[0])) if not (A[i][j] & 1)]
+    rng.shuffle(idxs)
+    for (i, j) in idxs[:hits]:
+        A[i][j] ^= 1
+    return A
+
+def _k3_pair_for(C3_prime, H2, d3):
+    # R3' = H2 d3 ⊕ (C3' ⊕ I3)
+    I3p = _svr_eye(len(C3_prime)) if _svr_is_square(C3_prime) else []
+    C3pI = _svr_xor(C3_prime, I3p) if I3p else []
+    H2d3 = _svr_mul(H2, d3) if (H2 and d3) else []
+    R3p  = _svr_xor(H2d3, C3pI) if (H2d3 and C3pI and len(H2d3)==len(C3pI) and len(H2d3[0])==len(C3pI[0])) else []
+
+    # strict.k3
+    strict_k3 = (_svr_is_zero(R3p) if R3p else None)
+
+    # projected(AUTO).k3
+    lanes = _lane_mask_from_C3(C3_prime)
+    posed = (_svr_is_square(C3_prime) and _sum_bits(lanes) > 0)
+    if not posed:
+        proj_k3 = None
+        na_reason = ("AUTO_C3_NONSQUARE" if not _svr_is_square(C3_prime) else "ZERO_LANE_PROJECTOR")
+    else:
+        P = [[1 if (i==j and (lanes[j] & 1)) else 0 for j in range(len(C3_prime))] for i in range(len(C3_prime))]
+        R3P = _svr_mul(R3p, P)
+        proj_k3 = (_svr_is_zero(R3P) if R3P else None)
+        na_reason = ""
+
+    return strict_k3, proj_k3, lanes, na_reason, R3p
+
+def _write_fence_csv(rows):
+    csv_path = REPORTS_DIR / "fence_stress.csv"
+    _atomic_write_csv(
+        csv_path,
+        header=["district","fixture","U_class","pass_vec","note"],
+        rows=rows,
+        meta_lines=[f"schema_version={SCHEMA_VERSION}", f"saved_at={_utc_iso_z()}",
+                    f"run_id={(st.session_state.get('run_ctx') or {}).get('run_id','')}",
+                    f"app_version={APP_VERSION}"],
+    )
+    return csv_path
+
+    # --- run fence over a small, deterministic grid of moves
+    rows_fence = []
+    rng = random.Random(str(seed))
+    pf = _svr_resolve_all_to_paths()
+    B, C, H, U = pf["B"][1], pf["C"][1], pf["H"][1], pf["U"][1]
+    d3, C3, H2 = (B.get("3") or []), (C.get("3") or []), (H.get("2") or [])
+    district = (st.session_state.get("_inputs_block") or {}).get("district_id") or "DUNKNOWN"
+    fixture  = (st.session_state.get("_inputs_block") or {}).get("fixture_label") or ""
+    
+    if not (d3 and C3 and H2):
+        st.warning("Fence stress skipped: blocks not hydrated.")
+    else:
+        # Baseline (helps annotate)
+        base_s, base_p, base_lanes, base_na, _ = _k3_pair_for(C3, H2, d3)
+    
+        # Choose a few targeted mutations
+        plan = []
+        plan += [("U_min", 1), ("U_min", 2), ("U_min", 3)]
+        plan += [("U_plus", 1), ("U_plus", 2), ("U_plus", 3)]
+    
+        for U_class, hits in plan:
+            C3p = _mutate_shrink(C3, hits, rng) if U_class == "U_min" else _mutate_plus(C3, hits, rng)
+            s, p, lanes, na, R3p = _k3_pair_for(C3p, H2, d3)
+            note = ""
+            if na:
+                note = f"N/A:{na}"
+            # Monotonicity note for AUTO lanes under U_min (coverage can only drop or stay)
+            if U_class == "U_min":
+                if _sum_bits(lanes) > _sum_bits(base_lanes):
+                    note = (note + " · " if note else "") + "BUG:Lanes increased under shrink"
+    
+            rows_fence.append([district, fixture, U_class, f"[{('T' if s else 'F') if s is not None else 'NA'},{('T' if p else 'F') if p is not None else 'NA'}]", note])
+    
+    csv_path = _write_fence_csv(rows_fence)
+    st.success(f"Fence stress → {csv_path.name}")
+    with open(csv_path, "rb") as cf:
+        st.download_button("Download fence_stress.csv", cf, file_name=csv_path.name, key="dl_fence_csv")
+# ---------------------------------------------------------------------------
+
 
 # ── UI
 with st.container():
