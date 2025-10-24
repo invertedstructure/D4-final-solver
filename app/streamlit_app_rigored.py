@@ -4559,24 +4559,35 @@ if "set_carrier_mask" not in globals():
         st.session_state["_u_mask_override"] = mask
         return True
 
-# ── Lane-mask helpers used by runner & panels ─────────────────────────────────
-def reports_pin_lane_mask_from_d3(d3: list[list[int]]) -> list[int]:
+
+# -- Lane-mask pin + projector diag (used by runner) --------------------------
+def _pin_lane_mask_and_projector(d3_base, n2, n3):
     """
-    Ensure run_ctx.lane_mask_k3 exists. If missing, derive it from d3 and pin it.
-    Returns the lane mask as 0/1 list of length n3.
+    Return (lane_mask, P_diag, selected_cols) and pin lane_mask_k3 into run_ctx if missing.
+    - lane_mask: list[int] length n3
+    - P_diag: n3×n3 diagonal matrix from lane_mask (or None if empty)
+    - selected_cols: set of j where lane_mask[j] == 1
     """
-    ss = st.session_state
-    rc = ss.get("run_ctx") or {}
+    rc = st.session_state.get("run_ctx") or {}
+
+    # prefer SSOT pin from solver
     lm = rc.get("lane_mask_k3")
-    if isinstance(lm, list) and lm:
-        return [int(x) & 1 for x in lm]
-    if not d3 or not (d3[0] if d3 else []):
-        return []
-    rows, n3 = len(d3), len(d3[0])
-    lm = [1 if any(int(d3[i][j]) & 1 for i in range(rows)) else 0 for j in range(n3)]
-    rc["lane_mask_k3"] = lm
-    ss["run_ctx"] = rc
-    return lm
+    if not isinstance(lm, list) or not lm:
+        if not d3_base or not (n2 and n3):
+            lm = []
+        else:
+            lm = [
+                1 if any(int(d3_base[i][j]) & 1 for i in range(n2)) else 0
+                for j in range(n3)
+            ]
+        rc["lane_mask_k3"] = lm
+        st.session_state["run_ctx"] = rc  # safe: not a widget key
+
+    lm = [int(x) & 1 for x in (lm or [])]
+    P_diag = _diag_from_mask(lm) if lm else None
+    selected_cols = {j for j, b in enumerate(lm) if b == 1}
+    return lm, P_diag, selected_cols
+
 
 def reports_dims_from_d3(d3: list[list[int]]) -> tuple[int, int]:
     return len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)
