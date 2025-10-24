@@ -494,6 +494,48 @@ if "district_from_hash" not in globals():
     def district_from_hash(boundaries_hash: str, prefix: str = "D", size: int = 8) -> str:
         return f"{prefix}{str(boundaries_hash)[:int(size)]}"
 
+# ---------- Frozen inputs signature (SSOT 5-hash) ----------
+def _frozen_inputs_sig_from_ib(ib, as_tuple: bool = True):
+    """
+    Returns the 5-hash SSOT signature from the frozen inputs block `ib`,
+    in this canonical order:
+      (hash_d, hash_U, hash_suppC, hash_suppH, hash_shapes)
+
+    - Accepts common alias keys for backwards compatibility.
+    - Missing fields are returned as "" (empty string), preserving length.
+    - Set as_tuple=False to get a list instead of a tuple.
+    """
+    h = (ib or {}).get("hashes") or {}
+
+    def _pick(*keys):
+        for k in keys:
+            if k in h and h[k]:
+                return str(h[k])
+        return ""
+
+    hash_d       = _pick("hash_d", "d_hash", "boundaries_hash", "B_hash")
+    hash_U       = _pick("hash_U", "U_hash")
+    hash_suppC   = _pick("hash_suppC", "suppC_hash", "C_hash")
+    hash_suppH   = _pick("hash_suppH", "suppH_hash", "H_hash")
+    hash_shapes  = _pick("hash_shapes", "shapes_hash")
+
+    sig5 = (hash_d, hash_U, hash_suppC, hash_suppH, hash_shapes)
+    return sig5 if as_tuple else list(sig5)
+
+# Optional: single hex digest over the 5-hash tuple (stable, canonical JSON)
+def _frozen_inputs_sig5_hex(ib):
+    try:
+        _json  # type: ignore
+    except NameError:
+        import json as _json  # noqa: F401
+    try:
+        _hashlib  # type: ignore
+    except NameError:
+        import hashlib as _hashlib  # noqa: F401
+
+    sig5 = _frozen_inputs_sig_from_ib(ib, as_tuple=False)
+    blob = _json.dumps(sig5, separators=(",", ":"), sort_keys=False).encode("ascii")
+    return _hashlib.sha256(blob).hexdigest()
 
 # --- pin freshness helper ------------------------------------------------------
 def _pin_status_text(pin_obj, expected_sig: str) -> str:
