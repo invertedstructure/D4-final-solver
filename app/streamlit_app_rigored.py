@@ -4880,36 +4880,28 @@ if "set_carrier_mask" not in globals():
         return True
 # ============================================================================== 
 
-# ── Reports: ephemeral SSOT shim (lets you run without a frozen pin) ──
-REPORTS_ALLOW_EPHEMERAL = True
 
-def _inputs_for_reports(n2: int, n3: int, d3: list[list[int]]):
+# --- Reports: single-source BCH resolver (use everywhere in reports) ---
+def _reports_hydrate_BCH():
     ss = st.session_state
-    # If a proper pin exists, use it.
-    pin = (ss.get("_inputs_block") or {})
-    hashes = (pin.get("hashes") or {})
-    have_all = all(hashes.get(k) for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"))
-    if have_all and (pin.get("dims") or {}).get("n2") == n2 and (pin.get("dims") or {}).get("n3") == n3:
-        return pin, None  # (inputs_block, note)
+    # Prefer session-pinned objects, then globals; never construct empties here.
+    B = ss.get("boundaries") or globals().get("boundaries")
+    C = ss.get("cmap")       or globals().get("cmap")
 
-    if not REPORTS_ALLOW_EPHEMERAL:
-        raise RuntimeError("INPUT_HASHES_MISSING")
+    # H has been named a few ways in different paths; check them all.
+    H = (
+        ss.get("overlap_H")
+        or ss.get("H_used")
+        or ss.get("H")                   # some older rigs
+        or globals().get("overlap_H")
+    )
 
-    # Soft block: dims from live d3, lane mask from d3, hashes empty → N/A
-    def _lane_mask_from_d3_matrix(d):
-        if not d or not d[0]: return []
-        rows, cols = len(d), len(d[0])
-        return [1 if any(d[i][j] & 1 for i in range(rows)) else 0 for j in range(cols)]
+    # If we successfully hydrated H but "overlap_H" isn’t set, pin it so any
+    # legacy code that reads st.session_state["overlap_H"] also succeeds.
+    if H is not None and ss.get("overlap_H") is None:
+        ss["overlap_H"] = H
 
-    soft = {
-        "hashes": {k: (hashes.get(k) or "") for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")},
-        "dims":   {"n2": int(n2), "n3": int(n3)},
-        "lane_mask_k3": _lane_mask_from_d3_matrix(d3),
-        "_soft": True,
-        "_soft_reason": "N/A: SSOT not frozen; using live matrices & lane mask derived from d3",
-    }
-    return soft, soft["_soft_reason"]
-
+    return B, C, H
 
 
 
@@ -4943,6 +4935,10 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
 
        # ─── Preflight: load BCH and assert we actually have H2/d3/C3 ───
     B0, C0, H0 = _reports_hydrate_BCH()
+    d3_base = (B0.blocks.__root__.get("3") or []) if B0 else []
+    C3      = (C0.blocks.__root__.get("3") or []) if C0 else []
+    H2      = (H0.blocks.__root__.get("2") or []) if H0 else []
+    )
     try:
         d3 = (B0.blocks.__root__.get("3") or []) if B0 else []
         C3 = (C0.blocks.__root__.get("3") or []) if C0 else []
@@ -4950,11 +4946,10 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
         n2  = len(d3)
         n3  = len(d3[0]) if (n2 and d3[0]) else 0
         # lightweight shape sniff (we don’t multiply; just guard for empties)
-        if not (n2 and n3 and H2 and C3):
-            raise RuntimeError("missing")
-    except Exception:
+    if not (H2 and H2[0] and d3_base and d3_base[0] and C3 and C3[0]):
         st.error("Reports: missing H2/d3/C3 — run Overlap/Cert once to freeze SSOT.")
         st.stop()
+
     
     # (Optional) tiny debug line so you can see what’s live without a debugger:
     st.caption(f"Reports inputs live → H2:{len(H2)}×{len(H2[0]) if H2 and H2[0] else 0} · d3:{n2}×{n3} · C3:{len(C3)}×{len(C3[0]) if C3 and C3[0] else 0}")
