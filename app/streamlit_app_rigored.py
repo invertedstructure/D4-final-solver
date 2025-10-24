@@ -4349,183 +4349,26 @@ def run_perturbation_sanity(*, max_flips: int = 24, seed: str = "ps-seed-1"):
         st.download_button("Download perturbation_sanity.csv", cf, file_name=csv_path.name, key=f"dl_ps_csv_{csv_path.stem[-8:]}")
 
 
-
-def _diag_from_mask__reports(lm: list[int]) -> list[list[int]]:
-    n = len(lm or [])
-    return [[1 if (i==j and int(lm[j])==1) else 0 for j in range(n)] for i in range(n)]
-
-def _cfg_from_policy_safe__reports(mode: str, pj_path: str | None = None) -> dict:
-    if "_cfg_from_policy" in globals() and callable(globals()["_cfg_from_policy"]):
-        return _cfg_from_policy(mode, pj_path)  # type: ignore[name-defined]
-    cfg = {"source": {}, "projector_files": {}}
-    if mode == "projected(columns@k=3,file)":
-        cfg["source"]["3"] = "file"
-        cfg["projector_files"]["3"] = pj_path or ""
-    elif mode == "projected(columns@k=3,auto)":
-        cfg["source"]["3"] = "auto"
-    else:
-        cfg["source"]["3"] = "strict"
-    return cfg
-
-def _pj_path_from_context_or_fs__reports() -> str:
-    ss = st.session_state
-    rc = ss.get("run_ctx") or {}
-    # 1) run_ctx
-    p = (rc.get("projector_filename") or "").strip()
-    if p and Path(p).exists(): return p
-    # 2) last UI path
-    p = (ss.get("ov_last_pj_path") or "").strip()
-    if p and Path(p).exists(): return p
-    # 3) registry by district (last hit wins)
-    try:
-        reg = Path(ss.get("PROJECTORS_DIR","projectors")) / "projector_registry.jsonl"
-        di  = (ss.get("_district_info") or {}).get("district_id","")
-        if reg.exists():
-            latest = ""
-            with open(reg, "r", encoding="utf-8") as f:
-                for ln in f:
-                    try:
-                        row = json.loads(ln)
-                        if not di or row.get("district") == di:
-                            cand = row.get("filename","")
-                            if cand and Path(cand).exists():
-                                latest = cand
-                    except Exception: 
-                        continue
-            if latest: return latest
-    except Exception:
-        pass
-    # 4) newest in projectors/
-    pjdir = Path(st.session_state.get("PROJECTORS_DIR","projectors"))
-    if pjdir.exists():
-        files = sorted(pjdir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if files: return files[0].as_posix()
-    return ""
-
-def file_validation_failed() -> bool:
-    rc = st.session_state.get("run_ctx") or {}
-    if rc.get("mode") != "projected(columns@k=3,file)":
-        return False
-    fn = (rc.get("projector_filename") or "").strip()
-    if not fn:
-        return True
-    try:
-        from pathlib import Path, PurePath
-        p = Path(fn)
-        if not p.exists():
-            return True
-        # hash present or derivable → treat as valid enough for reports UI
-        if rc.get("projector_hash"):
-            return False
-        rc["projector_hash"] = __import__("hashlib").sha256(p.read_bytes()).hexdigest()
-        st.session_state["run_ctx"] = rc
-        return False
-    except Exception:
-        return False  # don't block reports on helper availability
-
-
-def _choose_active_safe__reports(cfg: dict, boundaries_obj):
-    """
-    Always return (P_active, meta). Never throw. Works with or without your internal chooser.
-    """
-    # Preferred path
-    if "projector_choose_active" in globals() and callable(globals()["projector_choose_active"]):
-        try:
-            ret = projector_choose_active(cfg, boundaries_obj)  # type: ignore[name-defined]
-            if isinstance(ret, tuple) and len(ret) == 2:
-                return ret
-            if isinstance(ret, dict):
-                return (ret.get("P_active", []), ret)
-            return (ret, {})
-        except Exception:
-            pass
-
-    # Fallback: load Π directly from file if present
-    pj_path = (cfg.get("projector_files") or {}).get("3", "") or ""
-    P_active = []
-    try:
-        payload = json.loads(Path(pj_path).read_text(encoding="utf-8"))
-        P_active = (payload.get("blocks", {}) or {}).get("3", []) or []
-    except Exception:
-        P_active = []
-
-    d3 = (boundaries_obj.blocks.__root__.get("3") or [])
-    n3 = len(d3[0]) if (d3 and d3[0]) else 0
-    meta = {
-        "mode": "projected(columns@k=3,file)" if pj_path else "projected(columns@k=3,auto)",
-        "projector_filename": pj_path,
-        "projector_hash": (
-            hashlib.sha256(
-                json.dumps({"blocks":{"3":P_active}}, separators=(",",":"), sort_keys=True
-            ).encode("utf-8")).hexdigest() if P_active else ""
-        ),
-        "projector_consistent_with_d": bool(P_active) and (len(P_active)==n3 and (n3==0 or len(P_active[0])==n3)),
-        "d3": d3, "n3": n3, "lane_mask": [
-            1 if any(d3[i][j] & 1 for i in range(len(d3))) else 0 for j in range(n3)
-        ] if n3 else [],
-        "P_active": P_active,
-    }
-    return (P_active, meta)
-
-
-# ==================== /REPORTS shims ====================
-
-# --- Evidence preflight helpers (display-only status + run-time guards) ---
-def _hashes_status():
-    ib = st.session_state.get("_inputs_block") or {}
-    h = [ib.get(k, "") for k in ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")]
-    return "OK" if all(h) else "MISSING"
-
-def _projector_status():
-    rc = st.session_state.get("run_ctx") or {}
-    mode = str(rc.get("mode") or "strict")
-    if mode == "strict":
-        return True, "STRICT_OK"
-    if mode == "projected(columns@k=3,auto)":
-        # allowed for Overlap/A/B; may be disallowed for evidence
-        return True, "AUTO_OK"
-    # projected(columns@k=3,file)
-    bad = file_validation_failed()
-    return (not bad), ("FILE_OK" if not bad else "P3_FILE_INVALID")
-
-def _require_inputs_hashes_strict_for_run():
-    ib = st.session_state.get("_inputs_block") or {}
-    keys = ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")
-    missing = [k for k in keys if not ib.get(k)]
-    if missing:
-        raise RuntimeError(
-            "INPUT_HASHES_MISSING: wire SSOT from Cert/Overlap; backfill disabled "
-            f"(missing: {', '.join(missing)})"
-        )
-    return ib
-
-def _require_lane_mask_for_run():
-    lm = (st.session_state.get("run_ctx") or {}).get("lane_mask_k3") or []
-    if not lm:
-        raise RuntimeError("LANE_MASK_MISSING: run Overlap to stage lane_mask_k3.")
-    return lm
-
-def _require_projected_file_allowed_for_run():
-    ok, tag = _projector_status()
-    if tag == "P3_FILE_INVALID":
-        raise RuntimeError("P3_FILE_INVALID: projector(file) failed validation.")
-    return ok
-
-def _disallow_auto_for_evidence():
-    if (st.session_state.get("run_ctx") or {}).get("mode") == "projected(columns@k=3,auto)":
-        raise RuntimeError("P3_AUTO_DISALLOWED: use strict or projected(columns@k=3,file) for evidence reports.")
-# ==================== PROJECTOR FILE HELPERS (robust fallback) ====================
-
+# === REPORTS helpers (lean, deduped, widget-safe) =============================
 from pathlib import Path
-import json
+import json, hashlib
+import streamlit as st
 
-def _p3_helpers_available() -> bool:
-    return ("projector_choose_active" in globals())
+# -- tiny basics
+def _lane_mask_from_d3_matrix(d3: list[list[int]]) -> list[int]:
+    if not d3 or not d3[0]: return []
+    rows, n3 = len(d3), len(d3[0])
+    return [1 if any(d3[i][j] & 1 for i in range(rows)) else 0 for j in range(n3)]
 
+def _diag_from_mask(lm: list[int]) -> list[list[int]]:
+    n = len(lm or [])
+    return [[1 if (i == j and int(lm[j]) == 1) else 0 for j in range(n)] for i in range(n)]
+
+# Compat alias (if older code calls the __reports name)
+_diag_from_mask__reports = _diag_from_mask
+
+# -- cfg/policy shim (dedup)
 def _cfg_from_policy_safe(mode: str, pj_path: str | None = None) -> dict:
-    """
-    Safe, minimal cfg builder. Use when _cfg_from_policy is not available.
-    """
     if "_cfg_from_policy" in globals() and callable(globals()["_cfg_from_policy"]):
         return _cfg_from_policy(mode, pj_path)  # type: ignore[name-defined]
     cfg = {"source": {}, "projector_files": {}}
@@ -4538,119 +4381,27 @@ def _cfg_from_policy_safe(mode: str, pj_path: str | None = None) -> dict:
         cfg["source"]["3"] = "strict"
     return cfg
 
-def _projector_choose_active_safe(cfg: dict, boundaries_obj):
-    """
-    Return (P_active, meta) no matter what. If your real chooser is missing,
-    we read the JSON file and build meta ourselves.
-    """
-    # Prefer the app's real chooser if present.
-    if "projector_choose_active" in globals() and callable(globals()["projector_choose_active"]):
-        ret = projector_choose_active(cfg, boundaries_obj)  # type: ignore[name-defined]
-        if isinstance(ret, tuple) and len(ret) == 2:
-            return ret
-        # Be forgiving with older returns
-        if isinstance(ret, dict):
-            return (ret.get("P_active", []), ret)
-        return (ret, {})
-    # Fallback: read Π from file
-    pj = (cfg.get("projector_files") or {}).get("3", "")
-    P_active, meta = [], {}
-    try:
-        payload = json.loads(Path(pj).read_text(encoding="utf-8"))
-        P_active = (payload.get("blocks", {}) or {}).get("3", []) or []
-    except Exception:
-        P_active = []
-    # Build minimal meta
-    d3 = (boundaries_obj.blocks.__root__.get("3") or [])
-    n3 = len(d3[0]) if (d3 and d3[0]) else 0
-    lm_truth = [1 if any(d3[i][j] & 1 for i in range(len(d3))) else 0 for j in range(n3)] if n3 else []
-    meta = {
-        "mode": "projected(columns@k=3,file)",
-        "projector_filename": pj,
-        "projector_hash": hashlib.sha256(json.dumps({"blocks":{"3":P_active}},separators=(",",":"),sort_keys=True).encode("utf-8")).hexdigest() if P_active else "",
-        "projector_consistent_with_d": bool(P_active) and (len(P_active)==n3 and len(P_active[0])==n3),
-        "d3": d3, "n3": n3, "lane_mask": lm_truth,
-        "P_active": P_active,
-    }
-    return (P_active, meta)
+_cfg_from_policy_safe__reports = _cfg_from_policy_safe  # compat alias
 
-
-# ================= /PROJECTOR FILE HELPERS =================
-
-# ==================== REPORT PREFLIGHT SSOT FRESHNESS ====================
-
-def _force_ssot_fresh_for_reports():
-    """
-    If SSOT changed, publish it so reports start from a frozen, fresh sig.
-    This mirrors what your cert writer expects and clears the UI warning.
-    """
-    try:
-        # Prefer your v2 freshness detector
-        stale = False
-        if "ssot_is_stale_v2" in globals() and callable(globals()["ssot_is_stale_v2"]):
-            stale = bool(ssot_is_stale_v2())
-        elif "ssot_is_stale" in globals() and callable(globals()["ssot_is_stale"]):
-            stale = bool(ssot_is_stale())
-        if stale:
-            H_local = st.session_state.get("overlap_H") or _load_h_local()
-            d3 = (boundaries.blocks.__root__.get("3") or [])
-            n3 = len(d3[0]) if (d3 and d3[0]) else 0
-            pub = ssot_publish_block(
-                boundaries_obj=boundaries,
-                cmap_obj=cmap,
-                H_obj=H_local,
-                shapes_obj=shapes,
-                n3=n3,
-                projector_filename=(st.session_state.get("run_ctx") or {}).get("projector_filename",""),
-            )
-            # Optional feedback:
-            st.caption(f"SSOT refreshed for reports: {list(pub['before'])} → {list(pub['after'])}")
-    except Exception:
-        # Never block reports
-        pass
-
-
-
-# ==================== REPORTS: robust Π resolver + SSOT freshness ====================
-from pathlib import Path
-import json, hashlib
-
-def p3_helpers_ready() -> bool:  # satisfy old gates
-    return True
-
-def _cfg_from_policy_safe(mode: str, pj_path: str | None = None) -> dict:
-    if "_cfg_from_policy" in globals() and callable(globals()["_cfg_from_policy"]):
-        return _cfg_from_policy(mode, pj_path)  # type: ignore[name-defined]
-    cfg = {"source": {}, "projector_files": {}}
-    if mode == "projected(columns@k=3,file)":
-        cfg["source"]["3"] = "file"
-        cfg["projector_files"]["3"] = pj_path or ""
-    elif mode == "projected(columns@k=3,auto)":
-        cfg["source"]["3"] = "auto"
-    else:
-        cfg["source"]["3"] = "strict"
-    return cfg
-
-def _diag_from_mask(lm: list[int]) -> list[list[int]]:
-    n = len(lm or [])
-    return [[1 if (i==j and int(lm[j])==1) else 0 for j in range(n)] for i in range(n)]
-
+# -- Π path resolver (no writes to widget keys)
 def _pj_path_from_context_or_fs() -> str:
-    """Best-effort FILE Π path: run_ctx → last path → registry → projectors dir."""
     ss = st.session_state
     rc = ss.get("run_ctx") or {}
+
     # 1) run_ctx
     p = (rc.get("projector_filename") or "").strip()
     if p and Path(p).exists():
         return p
-    # 2) last chosen
+
+    # 2) last UI path
     p = (ss.get("ov_last_pj_path") or "").strip()
     if p and Path(p).exists():
         return p
-    # 3) registry (latest matching district)
+
+    # 3) registry (last hit wins; district-aware if available)
     try:
-        reg = Path(ss.get("PROJECTORS_DIR","projectors")) / "projector_registry.jsonl"
-        di  = (ss.get("_district_info") or {}).get("district_id","")
+        reg = Path(ss.get("PROJECTORS_DIR", "projectors")) / "projector_registry.jsonl"
+        di  = (ss.get("_district_info") or {}).get("district_id", "")
         if reg.exists():
             latest = ""
             with open(reg, "r", encoding="utf-8") as f:
@@ -4658,7 +4409,7 @@ def _pj_path_from_context_or_fs() -> str:
                     try:
                         row = json.loads(ln)
                         if not di or row.get("district") == di:
-                            cand = row.get("filename","")
+                            cand = (row.get("filename") or "").strip()
                             if cand and Path(cand).exists():
                                 latest = cand
                     except Exception:
@@ -4667,533 +4418,98 @@ def _pj_path_from_context_or_fs() -> str:
                 return latest
     except Exception:
         pass
-    # 4) projectors/<first.json>
-    pjdir = Path(st.session_state.get("PROJECTORS_DIR","projectors"))
+
+    # 4) newest *.json in PROJECTORS_DIR
+    pjdir = Path(ss.get("PROJECTORS_DIR", "projectors"))
     if pjdir.exists():
         files = sorted(pjdir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
         if files:
             return files[0].as_posix()
     return ""
 
-def _projector_choose_active_safe(cfg: dict, boundaries_obj):
+_pj_path_from_context_or_fs__reports = _pj_path_from_context_or_fs  # compat alias
+
+# -- FILE Π validation (safe: only touches run_ctx, not widget keys)
+def file_validation_failed() -> bool:
+    rc = st.session_state.get("run_ctx") or {}
+    if rc.get("mode") != "projected(columns@k=3,file)":
+        return False
+    fn = (rc.get("projector_filename") or "").strip()
+    if not fn:
+        return True
+    try:
+        p = Path(fn)
+        if not p.exists():
+            return True
+        # hash present or derivable → valid-enough for reports UI
+        if rc.get("projector_hash"):
+            return False
+        rc["projector_hash"] = hashlib.sha256(p.read_bytes()).hexdigest()
+        st.session_state["run_ctx"] = rc  # safe: not a widget key
+        return False
+    except Exception:
+        # don't block reports on helper availability
+        return False
+
+# -- Choose Π (prefer app’s chooser; fallback reads FILE Π only)
+def _choose_active_safe(cfg: dict, boundaries_obj):
+    # Preferred path: app-provided chooser
     if "projector_choose_active" in globals() and callable(globals()["projector_choose_active"]):
-        ret = projector_choose_active(cfg, boundaries_obj)  # type: ignore[name-defined]
-        if isinstance(ret, tuple) and len(ret) == 2:
-            return ret
-        if isinstance(ret, dict):
-            return (ret.get("P_active", []), ret)
-        return (ret, {})
-    # Fallback: read Π from file and synthesize meta
-    pj_path = (cfg.get("projector_files") or {}).get("3", "")
+        try:
+            ret = projector_choose_active(cfg, boundaries_obj)  # type: ignore[name-defined]
+            if isinstance(ret, tuple) and len(ret) == 2:
+                return ret
+            if isinstance(ret, dict):
+                return (ret.get("P_active", []), ret)
+            return (ret, {})
+        except Exception:
+            pass
+
+    # Fallback: read Π from FILE
+    pj_path = (cfg.get("projector_files") or {}).get("3", "") or ""
     P_active = []
     try:
         payload = json.loads(Path(pj_path).read_text(encoding="utf-8"))
         P_active = (payload.get("blocks", {}) or {}).get("3", []) or []
     except Exception:
         P_active = []
+
     d3 = (boundaries_obj.blocks.__root__.get("3") or [])
     n3 = len(d3[0]) if (d3 and d3[0]) else 0
-    lm_truth = [1 if any(d3[i][j] & 1 for i in range(len(d3))) else 0 for j in range(n3)] if n3 else []
+    lm_truth = (
+        [1 if any(d3[i][j] & 1 for i in range(len(d3))) else 0 for j in range(n3)]
+        if n3 else []
+    )
     meta = {
-        "mode": "projected(columns@k=3,file)",
+        "mode": "projected(columns@k=3,file)" if pj_path else "projected(columns@k=3,auto)",
         "projector_filename": pj_path,
         "projector_hash": (
-            hashlib.sha256(json.dumps({"blocks":{"3":P_active}}, separators=(",",":"), sort_keys=True).encode("utf-8")).hexdigest()
-            if P_active else ""
+            hashlib.sha256(
+                json.dumps({"blocks": {"3": P_active}}, separators=(",", ":"), sort_keys=True
+            ).encode("utf-8")).hexdigest() if P_active else ""
         ),
-        "projector_consistent_with_d": bool(P_active) and (len(P_active)==n3 and (n3==0 or len(P_active[0])==n3)),
-        "d3": d3, "n3": n3, "lane_mask": lm_truth,
-        "P_active": P_active,
+        "projector_consistent_with_d": bool(P_active) and (
+            len(P_active) == n3 and (n3 == 0 or len(P_active[0]) == n3)
+        ),
+        "d3": d3, "n3": n3, "lane_mask": lm_truth, "P_active": P_active,
     }
     return (P_active, meta)
 
+_choose_active_safe__reports = _choose_active_safe  # compat alias
 
-
-
-
-
-
-
-# Session guards
-if "require_fresh_run_ctx" not in globals():
-    def require_fresh_run_ctx():
-        rc = st.session_state.get("run_ctx")
-        if not rc:
-            raise RuntimeError("RUN_CTX_MISSING: run Overlap first.")
-        return rc
-
-if "rectify_run_ctx_mask_from_d3" not in globals():
-    def rectify_run_ctx_mask_from_d3():
-        rc = st.session_state.get("run_ctx") or {}
-        try:
-            B = st.session_state.get("boundaries")
-            d3 = (B.blocks.__root__.get("3") or []) if B else []
-            lm = _lane_mask_from_d3_matrix(d3)
-            if lm:
-                rc["lane_mask_k3"] = lm
-                st.session_state["run_ctx"] = rc
-        except Exception:
-            pass
-        return rc
-
-if "file_validation_failed" not in globals():
-    def file_validation_failed() -> bool:
-        # Only disable if projected(columns@k=3,file) is selected but invalid helpers/file
-        rc = st.session_state.get("run_ctx") or {}
-        if rc.get("mode") == "projected(columns@k=3,file)":
-            return not bool(rc.get("projector_filename")) or not bool(rc.get("projector_hash"))
-        return False
-
-# IO helpers
-if "io" not in globals():
-    class _IO_STUB:
-        @staticmethod
-        def parse_cmap(d):      # minimal pydantic-like stub
-            class _X:
-                def __init__(self, d): self.blocks = type("B", (), {"__root__": d.get("blocks", {})})
-                def dict(self): return {"blocks": self.blocks.__root__}
-            return _X(d or {"blocks": {}})
-        @staticmethod
-        def parse_boundaries(d):
-            return _IO_STUB.parse_cmap(d)
-    io = _IO_STUB()
-
-if "_load_h_local" not in globals():
-    def _load_h_local():
-        return st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
-
-# Optional witness appender
-if "append_witness_row" not in globals():
-    def append_witness_row(*args, **kwargs):
-        # no-op when witness system isn’t loaded
-        return False
-
-# Ensure inputs_hashes exists (no recompute; copy from run_ctx/certs)
-if "_ensure_inputs_hashes" not in globals():
-    def _ensure_inputs_hashes():
-        rc = st.session_state.get("run_ctx") or {}
-        ih = st.session_state.get("inputs_hashes") or {}
-        keys = ["boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"]
-        merged = {k: (ih.get(k) or rc.get(k) or st.session_state.get(k) or "") for k in keys}
-        st.session_state["inputs_hashes"] = merged
-        return merged
-_ensure_inputs_hashes()
-
-
-
-# ===== SSOT preflights (copy-only; fail-fast) =====
-def _require_inputs_hashes_strict() -> dict:
-    """
-    Read SSOT input hashes (copy-only). If any are empty → hard fail.
-    Returns the dict so that callers can embed it untouched in JSONs.
-    """
-    ih = (st.session_state.get("inputs_hashes") or {}).copy()
-    keys = ["boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"]
-    # Mirror from run_ctx if present (still copy-only; no recompute)
-    rc = st.session_state.get("run_ctx") or {}
-    for k in keys:
-        ih[k] = ih.get(k) or rc.get(k) or ""
-    if not all(ih.get(k, "") for k in keys):
-        missing = [k for k in keys if not ih.get(k)]
-        raise RuntimeError(
-            "INPUT_HASHES_MISSING: wire SSOT from Cert/Overlap; backfill disabled "
-            f"(missing: {', '.join(missing)})"
-        )
-    # normalize into session so downstream reads are consistent
-    st.session_state["inputs_hashes"] = ih
-    rc.update(ih); st.session_state["run_ctx"] = rc
-    return ih
-
-def _require_lane_mask_ssot() -> list[int]:
-    """
-    Lane mask is computed once (at Overlap/Cert) from the stored d3 snapshot and kept in run_ctx.
-    Here we only read it; we do NOT infer/guess/rectify.
-    """
-    rc = st.session_state.get("run_ctx") or {}
-    lm = rc.get("lane_mask_k3")
-    if not isinstance(lm, list) or any((int(x) & 1) not in (0, 1) for x in (lm or [])):
-        raise RuntimeError("LANE_MASK_MISSING: compute lane_mask_k3 at Cert/Overlap stage and stash in run_ctx.")
-    return [int(x) & 1 for x in lm]
-
-def _require_projector_file_if_needed():
-    """
-    If mode==projected(columns@k=3,file), require projector_filename & projector_hash pre-validated at Cert/Overlap.
-    No AUTO fallback here. If lanes don’t match projector diag, upstream must have blocked with P3_LANE_MISMATCH.
-    """
-    rc = st.session_state.get("run_ctx") or {}
-    m = rc.get("mode", "strict")
-    if m == "projected(columns@k=3,file)":
-        if not rc.get("projector_filename") or not rc.get("projector_hash"):
-            raise RuntimeError("P3_FILE_MISSING: projected(FILE) selected without validated projector.")
-        # We do NOT re-parse or re-validate here. Evidence path is copy-only.
-    elif m == "projected(columns@k=3,auto)":
-        # In strict evidence runs, avoid AUTO. Treat as a configuration error.
-        raise RuntimeError("P3_AUTO_DISALLOWED: projector(auto) not allowed in strict evidence runs. Freeze to FILE or use strict.")
-    # if strict → nothing to enforce here
-    return
-
-# 3) Canonical content hashing (ints not bools; sorted keys; ASCII; no spaces)
-def _deep_intify(o):
-    """Convert True/False to 1/0 recursively so GF(2) matrices hash stably."""
-    if isinstance(o, bool):
-        return 1 if o else 0
-    if isinstance(o, list):
-        return [_deep_intify(x) for x in o]
-    if isinstance(o, dict):
-        return {k: _deep_intify(v) for k, v in o.items()}
-    return o
-
-def _hash_json(obj) -> str:
-    canon = _deep_intify(_copy.deepcopy(obj))
-    s = _json.dumps(canon, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-    return _hash.sha256(s).hexdigest()
-
-def _sha256_hex(b: bytes) -> str:
-    return _hash.sha256(b).hexdigest()
-
-# 4) Atomic writers (JSON + CSV-with-meta)
-def _guarded_atomic_write_json(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        _json.dump(payload, f, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        f.flush(); os.fsync(f.fileno())
-    os.replace(tmp, path)
-
-def _atomic_write_csv(path: Path, header: list[str], rows: list[list], meta_lines: list[str] | None = None) -> None:
-    import csv
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8", newline="") as f:
-        if meta_lines:
-            for line in meta_lines:
-                f.write(f"# {line}\n")
-        w = csv.writer(f); w.writerow(header); w.writerows(rows)
-        f.flush(); os.fsync(f.fileno())
-    os.replace(tmp, path)
-
-# 5) Inputs SSOT (no recompute). Pull exactly what certs/save in run_ctx.
-def _inputs_block_from_session(strict_dims: tuple[int, int] | None = None) -> dict:
-    """
-    Returns:
-      {
-        "hashes": {
-          "boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"
-        },
-        "dims": {"n2": int, "n3": int},
-        "lane_mask_k3": [...]
-      }
-    Dims priority: strict_dims → run_ctx → local safe fallback (0).
-    Lane-mask is taken from run_ctx (rectified earlier) as SSOT.
-    """
-    rc = st.session_state.get("run_ctx") or {}
-    inputs_ssot = st.session_state.get("inputs_hashes") or {}
-
-    def _grab(key: str) -> str:
-        return (
-            inputs_ssot.get(key)
-            or rc.get(key)
-            or st.session_state.get(key)
-            or ""
-        )
-
-    hashes = {
-        "boundaries_hash": _grab("boundaries_hash"),
-        "C_hash":          _grab("C_hash"),
-        "H_hash":          _grab("H_hash"),
-        "U_hash":          _grab("U_hash"),
-        "shapes_hash":     _grab("shapes_hash"),
-    }
-
-    if strict_dims is not None:
-        n2, n3 = int(strict_dims[0]), int(strict_dims[1])
-    else:
-        try:
-            n2 = int(rc.get("n2")) if rc.get("n2") is not None else 0
-            n3 = int(rc.get("n3")) if rc.get("n3") is not None else 0
-        except Exception:
-            n2, n3 = 0, 0
-
-    lane_mask = [int(x) & 1 for x in (rc.get("lane_mask_k3") or [])]
-    return {"hashes": hashes, "dims": {"n2": n2, "n3": n3}, "lane_mask_k3": lane_mask}
-
-# 6) Projector resolution & policy helpers
-def _resolve_projector_from_rc():
-    """
-    Returns: (mode, submode, filename, projector_hash, projector_diag or None)
-    Requires `_path_exists_strict` and `_projector_diag_from_file` when submode=='file'.
-    Raises RuntimeError with a clear message on missing/invalid file mode.
-    """
-    rc = st.session_state.get("run_ctx") or {}
-    m = rc.get("mode", "strict")
-    mode, submode = ("strict", "")
-    if m == "projected(columns@k=3,auto)": mode, submode = ("projected", "auto")
-    elif m == "projected(columns@k=3,file)": mode, submode = ("projected", "file")
-
-    filename = rc.get("projector_filename", "") if (mode == "projected" and submode == "file") else ""
-    pj_hash, pj_diag = "", None
-
-    if mode == "projected" and submode == "file":
-        if ("_path_exists_strict" not in globals()) or ("_projector_diag_from_file" not in globals()):
-            raise RuntimeError("P3_FILE_HELPERS_MISSING: projector helpers not loaded.")
-        if not filename or not _path_exists_strict(filename):
-            raise RuntimeError("P3_FILE_MISSING: projector FILE missing/invalid.")
-        try:
-            pj_hash = _sha256_hex(Path(filename).read_bytes())
-            pj_diag = _projector_diag_from_file(filename)
-            if not isinstance(pj_diag, list) or not pj_diag:
-                raise RuntimeError("P3_FILE_INVALID: empty/bad projector diag.")
-        except Exception as e:
-            raise RuntimeError(f"P3_FILE_INVALID: {e}") from e
-
-    return mode, submode, filename, pj_hash, pj_diag
-
-
-
-def _policy_block_from_run_ctx(rc: dict) -> dict:
-    mode = str(rc.get("mode", "strict"))
-    if mode == "strict":
-        return {
-            "policy_tag": "strict",
-            "projector_mode": "strict",
-            "projector_filename": "",
-            "projector_hash": "",
-        }
-    if mode == "projected(columns@k=3,auto)":
-        diag_hash = _sha256_hex(
-            _json.dumps(rc.get("lane_mask_k3") or [], sort_keys=True, separators=(",", ":")).encode("utf-8")
-        )
-        return {
-            "policy_tag": "projected(columns@k=3,auto)",
-            "projector_mode": "auto",
-            "projector_filename": "",
-            "projector_hash": diag_hash,
-        }
-    # projected(columns@k=3,file)
-    return {
-        "policy_tag": "projected(columns@k=3,file)",
-        "projector_mode": "file",
-        "projector_filename": rc.get("projector_filename", "") or "",
-        "projector_hash": rc.get("projector_hash", "") or "",
-    }
-
-# 7) Guard mapping wrapper (keep enums consistent, tolerant to missing impl)
-def _first_tripped_guard(strict_out: dict) -> str:
-    """
-    Adapter to your existing guard checker. Must return a value in GUARD_ENUM.
-    If no checker available, fall back to simple logic or "none".
-    """
-    if "first_tripped_guard" in globals() and callable(globals()["first_tripped_guard"]):
-        try:
-            g = first_tripped_guard(strict_out)
-            return g if g in GUARD_ENUM else "error"
-        except Exception:
-            return "error"
-    # Minimal fallback: if k3==True → none, else fence
-    try:
-        k3eq = strict_out.get("3", {}).get("eq")
-        if k3eq is True:  return "none"
-        if k3eq is False: return "fence"
-    except Exception:
-        pass
-    return "none"
-
-# 8) Small badge helper (UI polish)
-def _hash_badge(h: str) -> str:
-    return f"wrote CSV + JSON ✓ · hash: {h[:12]}"
-
-# 9) Strict linear algebra (NO fallbacks)
-def _validate_shapes_or_raise(H2, d3, C3):
-    rH, cH = (len(H2), len(H2[0]) if (H2 and H2[0]) else 0)
-    rD, cD = (len(d3), len(d3[0]) if (d3 and d3[0]) else 0)
-    rC, cC = (len(C3), len(C3[0]) if (C3 and C3[0]) else 0)
-    # expected: H2: n3×n2 ; d3: n2×n3 ; C3: n3×n3  (infer n2,n3 from d3)
-    n2, n3 = rD, cD
-    ok = (
-        rH == n3 and cH == n2 and
-        rD == n2 and cD == n3 and
-        rC == n3 and cC == n3
-    )
-    if not ok:
-        raise RuntimeError(
-            f"R3_SHAPE: expected H2({n3}×{n2})·d3({n2}×{n3}) and (C3⊕I3)({n3}×{n3}), "
-            f"got H2({rH}×{cH}), d3({rD}×{cD}), C3({rC}×{cC})"
-        )
-
-def _strict_R3(H2: list[list[int]], d3: list[list[int]], C3: list[list[int]]) -> list[list[int]]:
-    """Compute R3 = (H2 @ d3) XOR (C3 XOR I3). Strict shape checks; no fallbacks."""
-    if not (H2 and d3 and C3):
-        raise RuntimeError("R3_INPUTS_MISSING: require non-empty H2, d3, C3.")
-    _validate_shapes_or_raise(H2, d3, C3)
-    if "mul" not in globals() or not callable(globals()["mul"]):
-        raise RuntimeError("R3_MUL_MISSING: GF(2) mul(H2,d3) not available.")
-    M = mul(H2, d3)  # type: ignore[name-defined]
-    n3 = len(C3)
-    I3 = [[1 if i == j else 0 for j in range(n3)] for i in range(n3)]
-    C3p = [[(C3[i][j] ^ I3[i][j]) & 1 for j in range(n3)] for i in range(n3)]
-    R  = [[(M[i][j] ^ C3p[i][j]) & 1 for j in range(n3)] for i in range(n3)]
-    return R
-
-def _projected_R3(R3_strict: list[list[int]], P_active: list[list[int]] | None):
-    """Multiply R3 by Π when present; strict shape checks."""
-    if not (R3_strict and P_active):
+# -- Optional U hooks (Fence path) — no-op fallbacks if your app doesn’t provide them
+if "get_carrier_mask" not in globals():
+    def get_carrier_mask(U_obj=None):
+        # default: empty means “leave U unchanged”
         return []
-    rR, cR = len(R3_strict), len(R3_strict[0]) if R3_strict and R3_strict[0] else 0
-    rP, cP = len(P_active), len(P_active[0]) if P_active and P_active[0] else 0
-    if "mul" not in globals() or not callable(globals()["mul"]):
-        raise RuntimeError("R3P_MUL_MISSING: GF(2) mul(R3, Π) not available.")
-    if cR != rP:
-        raise RuntimeError(f"R3P_SHAPE: expected R3({rR}×{cR})·Π({rP}×{cP}) with {cR}=={rP}.")
-    return mul(R3_strict, P_active)  # type: ignore[name-defined]
+if "set_carrier_mask" not in globals():
+    def set_carrier_mask(U_obj, mask):
+        st.session_state["_u_mask_override"] = mask  # safe scratch key
+        return True
+# ============================================================================== 
 
-def _lane_mask_from_d3_matrix(d3: list[list[int]]) -> list[int]:
-    if not d3 or not d3[0]:
-        return []
-    rows, n3 = len(d3), len(d3[0])
-    return [1 if any(d3[i][j] & 1 for i in range(rows)) else 0 for j in range(n3)]
 
-def _sig_tag_eq(boundaries_obj, cmap_obj, H_used_obj, P_active=None):
-    """
-    Return (lane_mask, tag_strict, eq3_strict, tag_proj, eq3_proj).
-    Uses optional global residual_tag(R3, lane_mask) if available.
-    """
-    d3 = (boundaries_obj.blocks.__root__.get("3") or [])
-    H2 = (H_used_obj.blocks.__root__.get("2") or [])
-    C3 = (cmap_obj.blocks.__root__.get("3") or [])
-    lm = _lane_mask_from_d3_matrix(d3)
-    R3s = _strict_R3(H2, d3, C3)
 
-    if "residual_tag" in globals() and callable(globals()["residual_tag"]):
-        try:
-            tag_s = residual_tag(R3s, lm)  # type: ignore[name-defined]
-        except Exception:
-            tag_s = "error"
-    else:
-        # Local classifier
-        def _residual_tag_local(R, mask):
-            if not R or not mask: return "none"
-            m = len(R)
-            def _nz(j): return any(R[i][j] & 1 for i in range(m))
-            lanes = any(_nz(j) for j, b in enumerate(mask) if b)
-            ker   = any(_nz(j) for j, b in enumerate(mask) if not b)
-            if lanes and ker: return "mixed"
-            if lanes:         return "lanes"
-            if ker:           return "ker"
-            return "none"
-        tag_s = _residual_tag_local(R3s, lm)
-
-    eq_s = (len(R3s) == 0) or all(all((x & 1) == 0 for x in row) for row in R3s)
-
-    if P_active:
-        R3p   = _projected_R3(R3s, P_active)
-        if "residual_tag" in globals() and callable(globals()["residual_tag"]):
-            try:
-                tag_p = residual_tag(R3p, lm)  # type: ignore[name-defined]
-            except Exception:
-                tag_p = "error"
-        else:
-            tag_p = tag_s
-        eq_p  = (len(R3p) == 0) or all(all((x & 1) == 0 for x in row) for row in R3p)
-    else:
-        tag_p, eq_p = None, None
-
-    return lm, tag_s, bool(eq_s), tag_p, (None if eq_p is None else bool(eq_p))
-
-# ── SSOT freezer (quick wiring) ───────────────────────────────────────────────
-from pathlib import Path
-import json as _json
-
-def _load_json_if(path_str: str | None):
-    try:
-        p = Path(path_str or "")
-        return _json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
-    except Exception:
-        return None
-
-def _find_latest(glob_pat: str):
-    try:
-        files = sorted(Path(".").rglob(glob_pat), key=lambda p: p.stat().st_mtime, reverse=True)
-        return files[0] if files else None
-    except Exception:
-        return None
-
-def freeze_ssot_now():
-    ss = st.session_state
-
-    # 1) keep existing if already wired
-    B = ss.get("boundaries")
-    C = ss.get("cmap")
-    H = ss.get("overlap_H")
-
-    # 2) try filenames you may already store in state
-    fb = ss.get("fname_boundaries"); fc = ss.get("fname_cmap"); fh = ss.get("fname_h"); fu = ss.get("fname_shapes")
-    jb = _load_json_if(fb) or (_load_json_if(fc) and None)  # cheap probe
-    if jb is None:
-        # 3) fall back to “latest matching” on disk (your bundle names will match these)
-        pb = _find_latest("boundaries*.json")
-        pc = _find_latest("cmap*.json")
-        ph = _find_latest("H*.json")
-        pu = _find_latest("shapes*.json")
-        fb = fb or (str(pb) if pb else "")
-        fc = fc or (str(pc) if pc else "")
-        fh = fh or (str(ph) if ph else "")
-        fu = fu or (str(pu) if pu else "")
-
-    # Load JSONs (only if missing in memory)
-    if B is None and fb: 
-        jb = _load_json_if(fb); 
-        if jb: B = io.parse_boundaries(jb)
-    if C is None and fc:
-        jc = _load_json_if(fc)
-        if jc: C = io.parse_cmap(jc)
-    if H is None and fh:
-        jh = _load_json_if(fh)
-        if jh: H = io.parse_cmap(jh)
-    # Shapes are optional for perturbation; needed for Fence U
-    if ss.get("shapes") is None and fu:
-        ju = _load_json_if(fu)
-        if ju: ss["shapes"] = io.parse_cmap(ju)
-
-    # Finalize: stash whatever we got
-    if B: ss["boundaries"] = B
-    if C: ss["cmap"] = C
-    if H: ss["overlap_H"] = H
-
-    # Derive dims + lane mask for downstream
-    try:
-        d3 = (B.blocks.__root__.get("3") or []) if B else []
-        n2 = len(d3); n3 = len(d3[0]) if (d3 and d3[0]) else 0
-        lm = _lane_mask_from_d3_matrix(d3) if d3 else []
-        rc = ss.get("run_ctx") or {}
-        rc.update({"n2": n2, "n3": n3})
-        if lm: rc["lane_mask_k3"] = [int(x)&1 for x in lm]
-        # If projected(file) is selected but no validated hash, fall back to strict to avoid blocking.
-        if rc.get("mode") == "projected(columns@k=3,file)" and not rc.get("projector_hash"):
-            rc["mode"] = "strict"
-        ss["run_ctx"] = rc
-    except Exception:
-        pass
-
-    # Copy input hashes (no recompute)
-    try:
-        _ensure_inputs_hashes()
-    except Exception:
-        pass
-
-    # Quick feedback
-    d3 = (ss.get("boundaries").blocks.__root__.get("3") if ss.get("boundaries") else []) or []
-    C3 = (ss.get("cmap").blocks.__root__.get("3") if ss.get("cmap") else []) or []
-    H2 = (ss.get("overlap_H").blocks.__root__.get("2") if ss.get("overlap_H") else []) or []
-    ready = bool(d3 and d3[0] and C3 and C3[0] and H2 and H2[0])
-    st.caption(f"SSOT freeze: {'OK' if ready else 'incomplete'} · "
-               f"H2={len(H2)}×{(len(H2[0]) if (H2 and H2[0]) else 0)}, "
-               f"d3={len(d3)}×{(len(d3[0]) if (d3 and d3[0]) else 0)}, "
-               f"C3={len(C3)}×{(len(C3[0]) if (C3 and C3[0]) else 0)}")
-
-# Optional: tiny UI
-with st.expander("Freeze SSOT (if reports say H2/d3/C3 missing)"):
-    if st.button("Freeze now"):
-        freeze_ssot_now()
 
 
 
