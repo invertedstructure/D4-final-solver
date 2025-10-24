@@ -4144,6 +4144,53 @@ import random as _random  # harmless; some callers use it
 # 1) Schema/version + field (one source of truth for F1/F2/F3)
 FIELD          = "GF(2)"     # identity.field in all JSON payloads
 
+# === SSOT input block (lean, no widget writes) ================================
+import streamlit as st
+
+def _inputs_block_from_session(strict_dims: tuple[int, int] | None = None) -> dict:
+    """
+    Returns:
+      {
+        "hashes": {"boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"},
+        "dims":   {"n2": int, "n3": int},
+        "lane_mask_k3": [...]
+      }
+    - Hashes are read copy-only from inputs_hashes/run_ctx/session.
+    - Dims come from strict_dims -> run_ctx -> 0.
+    - Lane mask is read from run_ctx (SSOT).
+    """
+    rc = st.session_state.get("run_ctx") or {}
+    ih = st.session_state.get("inputs_hashes") or {}
+
+    def grab(key: str) -> str:
+        return ih.get(key) or rc.get(key) or st.session_state.get(key) or ""
+
+    hashes = {
+        "boundaries_hash": grab("boundaries_hash"),
+        "C_hash":          grab("C_hash"),
+        "H_hash":          grab("H_hash"),
+        "U_hash":          grab("U_hash"),
+        "shapes_hash":     grab("shapes_hash"),
+    }
+
+    if strict_dims is not None:
+        try:
+            n2, n3 = int(strict_dims[0]), int(strict_dims[1])
+        except Exception:
+            n2, n3 = 0, 0
+    else:
+        try:
+            n2 = int(rc.get("n2")) if rc.get("n2") is not None else 0
+            n3 = int(rc.get("n3")) if rc.get("n3") is not None else 0
+        except Exception:
+            n2, n3 = 0, 0
+
+    lane_mask = [int(x) & 1 for x in (rc.get("lane_mask_k3") or [])]
+    return {"hashes": hashes, "dims": {"n2": n2, "n3": n3}, "lane_mask_k3": lane_mask}
+
+# keep older call sites happy
+_inputs_block_from_session_SAFE = _inputs_block_from_session
+# ============================================================================== 
 
 
 # ==================== REPORTS: unified Π resolver + shims (drop-in) ====================
@@ -4197,6 +4244,53 @@ def _deep_intify(o):
     if isinstance(o, list): return [_deep_intify(x) for x in o]
     if isinstance(o, dict): return {k: _deep_intify(v) for k,v in o.items()}
     return o
+# === SSOT input block (lean, no widget writes) ================================
+import streamlit as st
+
+def _inputs_block_from_session(strict_dims: tuple[int, int] | None = None) -> dict:
+    """
+    Returns:
+      {
+        "hashes": {"boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"},
+        "dims":   {"n2": int, "n3": int},
+        "lane_mask_k3": [...]
+      }
+    - Hashes are read copy-only from inputs_hashes/run_ctx/session.
+    - Dims come from strict_dims -> run_ctx -> 0.
+    - Lane mask is read from run_ctx (SSOT).
+    """
+    rc = st.session_state.get("run_ctx") or {}
+    ih = st.session_state.get("inputs_hashes") or {}
+
+    def grab(key: str) -> str:
+        return ih.get(key) or rc.get(key) or st.session_state.get(key) or ""
+
+    hashes = {
+        "boundaries_hash": grab("boundaries_hash"),
+        "C_hash":          grab("C_hash"),
+        "H_hash":          grab("H_hash"),
+        "U_hash":          grab("U_hash"),
+        "shapes_hash":     grab("shapes_hash"),
+    }
+
+    if strict_dims is not None:
+        try:
+            n2, n3 = int(strict_dims[0]), int(strict_dims[1])
+        except Exception:
+            n2, n3 = 0, 0
+    else:
+        try:
+            n2 = int(rc.get("n2")) if rc.get("n2") is not None else 0
+            n3 = int(rc.get("n3")) if rc.get("n3") is not None else 0
+        except Exception:
+            n2, n3 = 0, 0
+
+    lane_mask = [int(x) & 1 for x in (rc.get("lane_mask_k3") or [])]
+    return {"hashes": hashes, "dims": {"n2": n2, "n3": n3}, "lane_mask_k3": lane_mask}
+
+# keep older call sites happy
+_inputs_block_from_session_SAFE = _inputs_block_from_session
+# ============================================================================== 
 
 def _hash_json(obj) -> str:
     canon = _deep_intify(_json.loads(_json.dumps(obj, separators=(",",":"), sort_keys=True)))
@@ -4530,6 +4624,12 @@ def _diag_from_mask_local(mask):
 def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: bool, enable_witness: bool):
     ss = st.session_state
     REPORTS_DIR = Path(ss.get("REPORTS_DIR", "reports")); REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+   
+    rc = (st.session_state.get("run_ctx") or {}).copy()
+    rc["mode"] = rc.get("mode") or "projected(columns@k=3,file)"
+    rc["projector_filename"] = rc.get("projector_filename") or _pj_path_from_context_or_fs()
+    st.session_state["run_ctx"] = rc
+
 
     # Freeze current SSOT (copy-only)
     B0 = boundaries
@@ -4547,6 +4647,15 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
     rc = ss.get("run_ctx") or {}
     lane_mask = [int(x) & 1 for x in (rc.get("lane_mask_k3") or [])]
     P_diag = _diag_from_mask_local(lane_mask) if lane_mask else None
+
+    # quick debug print (safe to run once)
+    B = st.session_state.get("boundaries"); C = st.session_state.get("cmap"); H = st.session_state.get("overlap_H")
+    st.write({
+        "has_B3": bool((getattr(B, "blocks", None) or {}).__dict__.get("__root__", {}).get("3")),
+        "has_C3": bool((getattr(C, "blocks", None) or {}).__dict__.get("__root__", {}).get("3")),
+        "has_H2": bool((getattr(H, "blocks", None) or {}).__dict__.get("__root__", {}).get("2")),
+    })
+
 
     # Projector validation status (copy-only; no recompute)
     proj_status = {"status": "OK", "na_reason_code": ""}
