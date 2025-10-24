@@ -4609,89 +4609,9 @@ def _force_ssot_fresh_for_reports():
         # Never block reports
         pass
 # ================= /REPORT PREFLIGHT SSOT FRESHNESS =================
-# ====================== Reports: unified Π normalizer (helper-agnostic) ======================
-import json
-from pathlib import Path
-from datetime import datetime, timezone
-
-def _rpt_safe_rc():
-    ss = st.session_state
-    return dict(ss.get("run_ctx") or {})
-
-def _rpt_diag_from_mask(lm: list[int]) -> list[list[int]]:
-    n = len(lm or [])
-    return [[1 if (i == j and int(lm[j]) == 1) else 0 for j in range(n)] for i in range(n)]
-
-def _rpt_cfg_from_policy(mode: str, pj_path: str = "") -> dict:
-    if "_cfg_from_policy" in globals():
-        try:
-            return _cfg_from_policy(mode, pj_path)  # type: ignore[name-defined]
-        except Exception:
-            pass
-    if mode == "projected(columns@k=3,file)":
-        return {"source": {"3": "file"}, "projector_files": {"3": pj_path}}
-    if mode == "projected(columns@k=3,auto)":
-        return {"source": {"3": "auto"}}
-    return {}
-
-def _rpt_try_choose_active(cfg_forced: dict) -> tuple[list[list[int]], dict]:
-    """
-    Try projector_choose_active; tolerate any return shape.
-    Returns (P_active, meta). Never raises.
-    """
-    P_active, meta = [], {}
-    try:
-        ret = projector_choose_active(cfg_forced, boundaries)  # type: ignore[name-defined]
-        if isinstance(ret, tuple):
-            if len(ret) == 2:
-                P_active, meta = ret
-            elif len(ret) == 1:
-                x = ret[0]
-                if isinstance(x, dict):
-                    meta = x
-                else:
-                    P_active = x
-        elif isinstance(ret, dict):
-            meta = ret
-            P_active = meta.get("P_active", [])
-    except Exception as e:
-        meta = {"error": "P3_FILE_HELPERS_MISSING", "reason": str(e)}
-    return (P_active or []), (meta or {})
+=
 
 
-
-# --- Compatibility shims so legacy calls don't break ---
-def normalize_P3_for_reports(*, allow_auto_diag: bool = True):  # legacy name
-    return p3_normalize_for_reports(allow_auto_diag=allow_auto_diag)
-
-def P3_normalize_for_reports(*, allow_auto_diag: bool = True):  # legacy name variant
-    return p3_normalize_for_reports(allow_auto_diag=allow_auto_diag)
-
-# --- Once-per-render stale warning (dedup) ---
-def reports_warn_stale_once():
-    ss = st.session_state
-    if ss.get("_reports_warned_stale"): 
-        return
-    try:
-        stale = False
-        if "ssot_is_stale_v2" in globals() and callable(globals()["ssot_is_stale_v2"]):
-            stale = bool(ssot_is_stale_v2())  # type: ignore[name-defined]
-        elif "ssot_is_stale" in globals() and callable(globals()["ssot_is_stale"]):
-            stale = bool(ssot_is_stale())     # type: ignore[name-defined]
-        if stale:
-            st.warning("STALE_RUN_CTX: Inputs changed; please click Run Overlap to refresh.")
-    except Exception:
-        pass
-    ss["_reports_warned_stale"] = True
-# ==================== /Reports Π normalizer ====================
-
-# ==================== CERT POLICY NORMALIZER ====================
-
-def _canon_policy_from_rc(rc: dict) -> str:
-    t = str(rc.get("policy_tag","")).lower()
-    if "strict" in t: return "strict"
-    if "projected" in t and "file" in t: return "projected(columns@k=3,file)"
-    return "projected(columns@k=3,auto)"
 
 # ==================== REPORTS: robust Π resolver + SSOT freshness ====================
 from pathlib import Path
@@ -4794,14 +4714,7 @@ def _projector_choose_active_safe(cfg: dict, boundaries_obj):
 
 
 
-# ===== Minimal safety shims (no-ops when real impls are loaded) =====
-if "APP_VERSION" not in globals():
-    APP_VERSION = "v0.1-core"  # safe default; your app can overwrite
 
-if "_utc_iso_z" not in globals():
-    def _utc_iso_z() -> str:
-        # e.g., 2025-10-13T07:42:12Z
-        return _dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
 
 # Session guards
 if "require_fresh_run_ctx" not in globals():
@@ -4868,8 +4781,7 @@ if "_ensure_inputs_hashes" not in globals():
         return merged
 _ensure_inputs_hashes()
 
-# ===== Strict mode toggles =====
-DEV_ALLOW_INPUT_HASH_BACKFILL = False   # no dev backfill in evidence runs
+
 
 # ===== SSOT preflights (copy-only; fail-fast) =====
 def _require_inputs_hashes_strict() -> dict:
