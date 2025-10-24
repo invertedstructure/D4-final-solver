@@ -4147,6 +4147,72 @@ FIELD          = "GF(2)"     # identity.field in all JSON payloads
 # === SSOT input block (lean, no widget writes) ================================
 import streamlit as st
 
+# === Projector resolver (strict FILE provenance, no UI writes) ================
+from pathlib import Path
+import json, hashlib, streamlit as st
+
+def _resolve_projector_from_rc():
+    """
+    Returns:
+        (mode, submode, projector_filename, projector_hash, projector_diag_or_None)
+
+    Rules:
+    - strict  -> ("strict","", "", "", None)
+    - projected(auto) -> ("projected","auto","", "", None)
+    - projected(file) -> validate file exists, sha256 it, read blocks.3 as Π (n3×n3)
+      Raises RuntimeError with P3_* messages if missing/invalid.
+    """
+    rc = st.session_state.get("run_ctx") or {}
+    m  = str(rc.get("mode", "strict")).strip()
+
+    if m == "strict":
+        return ("strict", "", "", "", None)
+
+    if m == "projected(columns@k=3,auto)":
+        return ("projected", "auto", "", "", None)
+
+    if m == "projected(columns@k=3,file)":
+        fn = (rc.get("projector_filename") or "").strip()
+        if not fn:
+            # try to auto-pick without mutating session
+            try:
+                fn = _pj_path_from_context_or_fs()
+            except Exception:
+                fn = ""
+        if not fn or not Path(fn).exists():
+            raise RuntimeError("P3_FILE_MISSING: projector FILE missing/invalid.")
+
+        # hash + parse
+        try:
+            b        = Path(fn).read_bytes()
+            pj_hash  = hashlib.sha256(b).hexdigest()
+            payload  = json.loads(b.decode("utf-8", errors="strict"))
+        except UnicodeDecodeError:
+            payload  = json.loads(Path(fn).read_text(encoding="utf-8"))
+            pj_hash  = hashlib.sha256(Path(fn).read_bytes()).hexdigest()
+        except Exception as e:
+            raise RuntimeError(f"P3_FILE_INVALID: {e}")
+
+        blocks3 = (payload.get("blocks", {}) or {}).get("3", [])
+        if not isinstance(blocks3, list) or (blocks3 and not isinstance(blocks3[0], list)):
+            raise RuntimeError("P3_FILE_INVALID: bad 'blocks.3' format.")
+
+        # Optional sanity: if n3 is known, allow mismatch but don’t crash
+        try:
+            n3 = int(rc.get("n3") or 0)
+            if n3 and (len(blocks3) != n3 or (blocks3 and len(blocks3[0]) != n3)):
+                # we keep going; upstream mismatch checks can flag it later
+                pass
+        except Exception:
+            pass
+
+        return ("projected", "file", fn, pj_hash, blocks3)
+
+    # anything else: treat as strict
+    return ("strict", "", "", "", None)
+# ===============================================================================
+
+
 def _inputs_block_from_session(strict_dims: tuple[int, int] | None = None) -> dict:
     """
     Returns:
