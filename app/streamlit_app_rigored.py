@@ -3067,167 +3067,167 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
                         _bundle_dir, _svr_bundle_fname("freezer", district_id, sig8), freezer_cert
                     )
                                # A/B (AUTO) — embed is the authority
-            ab_auto = _svr_cert_common(ib, rc, "A/B")
-            ab_auto["ab_pair"] = {
-                "pair_tag": "strict__VS__projected(columns@k=3,auto)",
-                "embed": embed_auto,
-                "embed_sig": embed_sig_auto,
-                "pair_vec": {
-                    "k3": [strict_k3, proj_auto_k3],
-                    "k2": [strict_k2, proj_auto_k2],
-                },
-                "strict_cert": {"path": str(p_strict), "hash": strict_cert["integrity"]["content_hash"]},
-                "projected_cert": {"path": str(p_proj_auto), "hash": p_cert["integrity"]["content_hash"]},
-            }
-            _svr_apply_sig8(ab_auto, embed_sig_auto)
-            p_ab_auto = _svr_write_cert_in_bundle(
-                _bundle_dir, _svr_bundle_fname("ab_auto", district_id, sig8), ab_auto
-            )
-            # Pin AUTO (include inputs_sig_5 for legacy readers)
-            st.session_state["ab_pin_auto"] = {
-                "state": "pinned",
-                "payload": {
-                    "embed_sig": embed_sig_auto,
-                    "policy_tag": "strict__VS__projected(columns@k=3,auto)",
-                    "inputs_sig_5": list((ab_auto["ab_pair"]["embed"] or {}).get("inputs_sig_5") or []),
-                },
-                "refreshed_at": _svr_now_iso(),
-            }
-            # keep legacy key if some UI bits still read it
-            st.session_state["ab_pin"] = st.session_state["ab_pin_auto"]
-
-            # A/B (FILE) — always emit (N/A/ERROR carries reason)
-            embed_file, embed_sig_file = _svr_build_embed(
-                ib,
-                policy="strict__VS__projected(columns@k=3,file)",
-                projector_hash=(projector_hash if not file_na_reason else None),
-                na_reason=(file_na_reason if file_na_reason else None),
-            )
-            ab_file = _svr_cert_common(ib, rc, "A/B")
-            ab_file["ab_pair"] = {
-                "pair_tag": "strict__VS__projected(columns@k=3,file)",
-                "embed": embed_file,
-                "embed_sig": embed_sig_file,
-                "pair_vec": {
-                    "k3": [strict_k3, proj_file_k3],
-                    "k2": [strict_k2, proj_file_k2],
-                },
-                "strict_cert": {"path": str(p_strict), "hash": strict_cert["integrity"]["content_hash"]},
-                "projected_cert": ({"path": str(p_proj_file), "hash": p_cert_file["integrity"]["content_hash"]} if p_proj_file else None),
-                "na_reason_code": (file_na_reason or ""),
-            }
-            _svr_apply_sig8(ab_file, embed_sig_file)
-            p_ab_file = _svr_write_cert_in_bundle(
-                _bundle_dir, _svr_bundle_fname("ab_file", district_id, sig8), ab_file
-            )
-            # Pin FILE (include inputs_sig_5 for legacy readers)
-            st.session_state["ab_pin_file"] = {
-                "state": "pinned",
-                "payload": {
-                    "embed_sig": embed_sig_file,
-                    "policy_tag": "strict__VS__projected(columns@k=3,file)",
-                    "inputs_sig_5": list((ab_file["ab_pair"]["embed"] or {}).get("inputs_sig_5") or []),
-                },
-                "refreshed_at": _svr_now_iso(),
-            }
-
-            # 5(+1) bundle index
-            try:
-                fnames = [Path(p_strict).name, Path(p_proj_auto).name, Path(p_ab_auto).name, Path(p_freezer).name, Path(p_ab_file).name]
-                if p_proj_file: fnames.append(Path(p_proj_file).name)
-                tstamp = lambda x: (x or {}).get("written_at_utc","")
-                timestamps = [
-                    tstamp(strict_cert), tstamp(p_cert), tstamp(ab_auto), tstamp(freezer_cert), tstamp(ab_file)
-                ] + ([tstamp(p_cert_file)] if p_proj_file else [])
-                _svr_write_cert_in_bundle(
-                    _bundle_dir, "bundle.json",
-                    {
-                        "run_id": rc.get("run_id",""),
-                        "sig8": sig8,
-                        "district_id": district_id,
-                        "filenames": fnames,
-                        "timestamps": timestamps,
-                        "counts": {"written": (5 if not p_proj_file else 6)},
+                    ab_auto = _svr_cert_common(ib, rc, "A/B")
+                    ab_auto["ab_pair"] = {
+                        "pair_tag": "strict__VS__projected(columns@k=3,auto)",
+                        "embed": embed_auto,
+                        "embed_sig": embed_sig_auto,
+                        "pair_vec": {
+                            "k3": [strict_k3, proj_auto_k3],
+                            "k2": [strict_k2, proj_auto_k2],
+                        },
+                        "strict_cert": {"path": str(p_strict), "hash": strict_cert["integrity"]["content_hash"]},
+                        "projected_cert": {"path": str(p_proj_auto), "hash": p_cert["integrity"]["content_hash"]},
                     }
-                )
-            except Exception as _be:
-                st.warning(f"bundle.json not written: {_be}")
-
-            # remember paths for sanity panel
-            st.session_state["last_bundle_dir"] = str(_bundle_dir)
-            st.session_state["last_ab_auto_path"] = str(p_ab_auto)
-            st.session_state["last_ab_file_path"] = str(p_ab_file)
-
-            # Header line + quick lap/A/B readout (k2/k3)
-            rc["policy_tag"] = "strict"  # stable anchor
-            st.session_state["run_ctx"] = rc
-            st.session_state["last_run_header"] = _svr_header_line(
-                ib, sig8, (projector_hash if not file_na_reason else None), "strict", rc.get("run_id", "")
-            )
-
-            # ✳︎ Eyeball summary (k2/k3)
-            def _fmt(x): return "T" if x is True else ("F" if x is False else "N/A")
-            hdr = (
-                f"**k3**: strict={_fmt(strict_k3)} · proj_auto={_fmt(proj_auto_k3)} · proj_file={_fmt(proj_file_k3)}  \n"
-                f"**A/B(auto)**=( {_fmt(strict_k3)} , {_fmt(proj_auto_k3)} )   ·   "
-                f"**A/B(file)**=( {_fmt(strict_k3)} , {_fmt(proj_file_k3)} ){('  ·  reason: '+file_na_reason) if file_na_reason else ''}  \n"
-                f"**k2**: strict={_fmt(strict_k2)} · proj_auto={_fmt(proj_auto_k2)} · proj_file={_fmt(proj_file_k2)}"
-            )
-            st.markdown(hdr)
-
-            # ---------------- Mini A/B sanity panel (append below) ----------------
-            try:
-                from pathlib import Path as _Path
-                import json as _json
-            except Exception:
-                pass
-
-            with st.container(border=True):
-                st.caption("Mini A/B Sanity (from latest bundle)")
-                bdir = st.session_state.get("last_bundle_dir") or ""
-                pab_auto = st.session_state.get("last_ab_auto_path") or ""
-                pab_file = st.session_state.get("last_ab_file_path") or ""
-
-                cols = st.columns(3)
-                cols[0].markdown(f"**Bundle:** `{bdir or '—'}`")
-                cols[1].markdown(f"**A/B(auto):** `{(_Path(pab_auto).name if pab_auto else '—')}`")
-                cols[2].markdown(f"**A/B(file):** `{(_Path(pab_file).name if pab_file else '—')}`")
-
-                def _exp_embed_sig(path):
+                    _svr_apply_sig8(ab_auto, embed_sig_auto)
+                    p_ab_auto = _svr_write_cert_in_bundle(
+                        _bundle_dir, _svr_bundle_fname("ab_auto", district_id, sig8), ab_auto
+                    )
+                    # Pin AUTO (include inputs_sig_5 for legacy readers)
+                    st.session_state["ab_pin_auto"] = {
+                        "state": "pinned",
+                        "payload": {
+                            "embed_sig": embed_sig_auto,
+                            "policy_tag": "strict__VS__projected(columns@k=3,auto)",
+                            "inputs_sig_5": list((ab_auto["ab_pair"]["embed"] or {}).get("inputs_sig_5") or []),
+                        },
+                        "refreshed_at": _svr_now_iso(),
+                    }
+                    # keep legacy key if some UI bits still read it
+                    st.session_state["ab_pin"] = st.session_state["ab_pin_auto"]
+        
+                    # A/B (FILE) — always emit (N/A/ERROR carries reason)
+                    embed_file, embed_sig_file = _svr_build_embed(
+                        ib,
+                        policy="strict__VS__projected(columns@k=3,file)",
+                        projector_hash=(projector_hash if not file_na_reason else None),
+                        na_reason=(file_na_reason if file_na_reason else None),
+                    )
+                    ab_file = _svr_cert_common(ib, rc, "A/B")
+                    ab_file["ab_pair"] = {
+                        "pair_tag": "strict__VS__projected(columns@k=3,file)",
+                        "embed": embed_file,
+                        "embed_sig": embed_sig_file,
+                        "pair_vec": {
+                            "k3": [strict_k3, proj_file_k3],
+                            "k2": [strict_k2, proj_file_k2],
+                        },
+                        "strict_cert": {"path": str(p_strict), "hash": strict_cert["integrity"]["content_hash"]},
+                        "projected_cert": ({"path": str(p_proj_file), "hash": p_cert_file["integrity"]["content_hash"]} if p_proj_file else None),
+                        "na_reason_code": (file_na_reason or ""),
+                    }
+                    _svr_apply_sig8(ab_file, embed_sig_file)
+                    p_ab_file = _svr_write_cert_in_bundle(
+                        _bundle_dir, _svr_bundle_fname("ab_file", district_id, sig8), ab_file
+                    )
+                    # Pin FILE (include inputs_sig_5 for legacy readers)
+                    st.session_state["ab_pin_file"] = {
+                        "state": "pinned",
+                        "payload": {
+                            "embed_sig": embed_sig_file,
+                            "policy_tag": "strict__VS__projected(columns@k=3,file)",
+                            "inputs_sig_5": list((ab_file["ab_pair"]["embed"] or {}).get("inputs_sig_5") or []),
+                        },
+                        "refreshed_at": _svr_now_iso(),
+                    }
+        
+                    # 5(+1) bundle index
                     try:
-                        j = _json.loads(_Path(path).read_text(encoding="utf-8"))
-                        return str(((j or {}).get("ab_pair") or {}).get("embed_sig") or ""), (j or {})
-                    except Exception:
-                        return "", {}
-
-                exp_auto, j_auto = _exp_embed_sig(pab_auto) if pab_auto else ("", {})
-                exp_file, j_file = _exp_embed_sig(pab_file) if pab_file else ("", {})
-
-                # Pick pins safely (prefer specific pins, fallback to legacy)
-                pin_auto = st.session_state.get("ab_pin_auto") or st.session_state.get("ab_pin") or {}
-                pin_file = st.session_state.get("ab_pin_file") or st.session_state.get("ab_pin") or {}
-
-                fresh_auto, reason_auto = _ab_is_fresh_now(pin_auto, expected_embed_sig=(exp_auto or ""))
-                fresh_file, reason_file = _ab_is_fresh_now(pin_file, expected_embed_sig=(exp_file or ""))
-
-                ta = "✅ Fresh" if fresh_auto else f"⚠️ Stale ({reason_auto})"
-                tf = "✅ Fresh" if fresh_file else f"⚠️ Stale ({reason_file})"
-                st.write(f"**A/B(auto)** → {ta}  ·  **A/B(file)** → {tf}")
-
-                # Quick vectors at a glance
-                vec_auto = ((j_auto.get("ab_pair") or {}).get("pair_vec") or {})
-                vec_file = ((j_file.get("ab_pair") or {}).get("pair_vec") or {})
-                rows = []
-                if vec_auto:
-                    rows.append({"pair": "A/B(auto)", "k3": str(vec_auto.get("k3")), "k2": str(vec_auto.get("k2")), "embed_sig8": (exp_auto or "")[:8]})
-                if vec_file:
-                    rows.append({"pair": "A/B(file)", "k3": str(vec_file.get("k3")), "k2": str(vec_file.get("k2")), "embed_sig8": (exp_file or "")[:8]})
-                if rows:
+                        fnames = [Path(p_strict).name, Path(p_proj_auto).name, Path(p_ab_auto).name, Path(p_freezer).name, Path(p_ab_file).name]
+                        if p_proj_file: fnames.append(Path(p_proj_file).name)
+                        tstamp = lambda x: (x or {}).get("written_at_utc","")
+                        timestamps = [
+                            tstamp(strict_cert), tstamp(p_cert), tstamp(ab_auto), tstamp(freezer_cert), tstamp(ab_file)
+                        ] + ([tstamp(p_cert_file)] if p_proj_file else [])
+                        _svr_write_cert_in_bundle(
+                            _bundle_dir, "bundle.json",
+                            {
+                                "run_id": rc.get("run_id",""),
+                                "sig8": sig8,
+                                "district_id": district_id,
+                                "filenames": fnames,
+                                "timestamps": timestamps,
+                                "counts": {"written": (5 if not p_proj_file else 6)},
+                            }
+                        )
+                    except Exception as _be:
+                        st.warning(f"bundle.json not written: {_be}")
+        
+                    # remember paths for sanity panel
+                    st.session_state["last_bundle_dir"] = str(_bundle_dir)
+                    st.session_state["last_ab_auto_path"] = str(p_ab_auto)
+                    st.session_state["last_ab_file_path"] = str(p_ab_file)
+        
+                    # Header line + quick lap/A/B readout (k2/k3)
+                    rc["policy_tag"] = "strict"  # stable anchor
+                    st.session_state["run_ctx"] = rc
+                    st.session_state["last_run_header"] = _svr_header_line(
+                        ib, sig8, (projector_hash if not file_na_reason else None), "strict", rc.get("run_id", "")
+                    )
+        
+                    # ✳︎ Eyeball summary (k2/k3)
+                    def _fmt(x): return "T" if x is True else ("F" if x is False else "N/A")
+                    hdr = (
+                        f"**k3**: strict={_fmt(strict_k3)} · proj_auto={_fmt(proj_auto_k3)} · proj_file={_fmt(proj_file_k3)}  \n"
+                        f"**A/B(auto)**=( {_fmt(strict_k3)} , {_fmt(proj_auto_k3)} )   ·   "
+                        f"**A/B(file)**=( {_fmt(strict_k3)} , {_fmt(proj_file_k3)} ){('  ·  reason: '+file_na_reason) if file_na_reason else ''}  \n"
+                        f"**k2**: strict={_fmt(strict_k2)} · proj_auto={_fmt(proj_auto_k2)} · proj_file={_fmt(proj_file_k2)}"
+                    )
+                    st.markdown(hdr)
+        
+                    # ---------------- Mini A/B sanity panel (append below) ----------------
                     try:
-                        import pandas as _pd
-                        st.dataframe(_pd.DataFrame(rows), use_container_width=True)
+                        from pathlib import Path as _Path
+                        import json as _json
                     except Exception:
-                        st.table(rows)
+                        pass
+        
+                    with st.container(border=True):
+                        st.caption("Mini A/B Sanity (from latest bundle)")
+                        bdir = st.session_state.get("last_bundle_dir") or ""
+                        pab_auto = st.session_state.get("last_ab_auto_path") or ""
+                        pab_file = st.session_state.get("last_ab_file_path") or ""
+        
+                        cols = st.columns(3)
+                        cols[0].markdown(f"**Bundle:** `{bdir or '—'}`")
+                        cols[1].markdown(f"**A/B(auto):** `{(_Path(pab_auto).name if pab_auto else '—')}`")
+                        cols[2].markdown(f"**A/B(file):** `{(_Path(pab_file).name if pab_file else '—')}`")
+        
+                        def _exp_embed_sig(path):
+                            try:
+                                j = _json.loads(_Path(path).read_text(encoding="utf-8"))
+                                return str(((j or {}).get("ab_pair") or {}).get("embed_sig") or ""), (j or {})
+                            except Exception:
+                                return "", {}
+        
+                        exp_auto, j_auto = _exp_embed_sig(pab_auto) if pab_auto else ("", {})
+                        exp_file, j_file = _exp_embed_sig(pab_file) if pab_file else ("", {})
+        
+                        # Pick pins safely (prefer specific pins, fallback to legacy)
+                        pin_auto = st.session_state.get("ab_pin_auto") or st.session_state.get("ab_pin") or {}
+                        pin_file = st.session_state.get("ab_pin_file") or st.session_state.get("ab_pin") or {}
+        
+                        fresh_auto, reason_auto = _ab_is_fresh_now(pin_auto, expected_embed_sig=(exp_auto or ""))
+                        fresh_file, reason_file = _ab_is_fresh_now(pin_file, expected_embed_sig=(exp_file or ""))
+        
+                        ta = "✅ Fresh" if fresh_auto else f"⚠️ Stale ({reason_auto})"
+                        tf = "✅ Fresh" if fresh_file else f"⚠️ Stale ({reason_file})"
+                        st.write(f"**A/B(auto)** → {ta}  ·  **A/B(file)** → {tf}")
+        
+                        # Quick vectors at a glance
+                        vec_auto = ((j_auto.get("ab_pair") or {}).get("pair_vec") or {})
+                        vec_file = ((j_file.get("ab_pair") or {}).get("pair_vec") or {})
+                        rows = []
+                        if vec_auto:
+                            rows.append({"pair": "A/B(auto)", "k3": str(vec_auto.get("k3")), "k2": str(vec_auto.get("k2")), "embed_sig8": (exp_auto or "")[:8]})
+                        if vec_file:
+                            rows.append({"pair": "A/B(file)", "k3": str(vec_file.get("k3")), "k2": str(vec_file.get("k2")), "embed_sig8": (exp_file or "")[:8]})
+                        if rows:
+                            try:
+                                import pandas as _pd
+                                st.dataframe(_pd.DataFrame(rows), use_container_width=True)
+                            except Exception:
+                                st.table(rows)
 
 
     
