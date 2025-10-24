@@ -1808,122 +1808,7 @@ def overlap_ui_from_frozen():
     
 
 
-# -------------------- Health checks + compact, non-duplicated UI --------------------
-import hashlib, json
 
-# --- tiny utils used here ---
-def _deep_intify(o):
-    if isinstance(o, bool): return 1 if o else 0
-    if isinstance(o, list): return [_deep_intify(x) for x in o]
-    if isinstance(o, dict): return {k: _deep_intify(v) for k, v in o.items()}
-    return o
-
-def _stable_blocks_sha(obj) -> str:
-    try:
-        data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (obj if isinstance(obj, dict) else {"blocks": {}})
-        s = json.dumps(_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-        return hashlib.sha256(s).hexdigest()
-    except Exception:
-        return ""
-
-def _canon_policy(label_raw: str) -> str:
-        t = (label_raw or "").lower()
-        if "strict" in t: return "strict"
-        if "projected" in t and "file" in t: return "projected:file"
-        return "projected:auto"
-
-def _policy_tag_now_from_rc(rc: dict) -> str:
-    """Prefer stamped label; otherwise derive from rc['mode']."""
-    pol = (rc or {}).get("policy_tag")
-    if pol:
-        return str(pol)
-    mode = str((rc or {}).get("mode",""))
-    if mode == "strict":            return "strict"
-    if mode == "projected(columns@k=3,file)":   return "projected(columns@k=3,file)"
-    if mode == "projected(columns@k=3,auto)":   return "projected(columns@k=3,auto)"
-    return "projected(columns@k=3,auto)"
-
-def _frozen_inputs_sig_from_ib(ib: dict) -> tuple[str,str,str,str,str]:
-    """Canonical 5-tuple (D,C,H,U,S) from SSOT; supports legacy and nested."""
-    h = (ib.get("hashes") or {})
-    return (
-        str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
-        str(h.get("C_hash",          ib.get("C_hash",""))),
-        str(h.get("H_hash",          ib.get("H_hash",""))),
-        str(h.get("U_hash",          ib.get("U_hash",""))),
-        str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
-    )
-
-def _ab_is_fresh_now(*, rc: dict, ib: dict, ab_payload: dict) -> tuple[bool, str]:
-    """
-    Returns (fresh, reason). `reason` is "" if fresh, otherwise one of:
-    AB_STALE_INPUTS_SIG | AB_STALE_POLICY | AB_STALE_PROJECTOR_HASH | AB_NONE
-    """
-    if not ab_payload:
-        return (False, "AB_NONE")
-
-    frozen = tuple(_frozen_inputs_sig_from_ib(ib))
-    ab_sig = tuple(ab_payload.get("inputs_sig") or ())
-    if ab_sig != frozen:
-        return (False, "AB_STALE_INPUTS_SIG")
-
-    pol_now = _policy_tag_now_from_rc(rc)
-    ab_pol  = str(ab_payload.get("policy_tag",""))
-    if ab_pol != pol_now:
-        return (False, "AB_STALE_POLICY")
-
-    if str(rc.get("mode","")) == "projected(columns@k=3,file)":
-        pj_now = rc.get("projector_hash","") or ""
-        pj_ab  = ((ab_payload.get("projected") or {}).get("projector_hash","") or "")
-        if pj_ab != pj_now:
-            return (False, "AB_STALE_PROJECTOR_HASH")
-
-    return (True, "")
-
-
-# --- Self-tests (startup-friendly, minimal) -----------------------------------
-def run_self_tests():
-    failures, warnings = [], []
-    ss = st.session_state
-    ib = ss.get("_inputs_block") or {}
-    rc = ss.get("run_ctx") or {}
-    out = ss.get("overlap_out") or {}
-
-    # 1) SSOT completeness (support nested hashes)
-    h = ib.get("hashes") or {}
-    for k in ("boundaries_hash","C_hash","H_hash","U_hash"):
-        if not (ib.get(k) or h.get(k)):
-            warnings.append(f"SSOT: missing {k}")
-
-    # 2) Freshness (only after publish)
-    try:
-        if ss.get("_has_overlap"):
-            if "ssot_is_stale_v2" in globals() and callable(globals()["ssot_is_stale_v2"]):
-                if ssot_is_stale_v2():  # type: ignore[name-defined]
-                    warnings.append("SSOT_STALE: live inputs changed; run Overlap to refresh SSOT")
-            elif "ssot_is_stale" in globals() and callable(globals()["ssot_is_stale"]):
-                if ssot_is_stale():     # type: ignore[name-defined]
-                    warnings.append("SSOT_STALE: live inputs changed; run Overlap to refresh SSOT")
-    except Exception as e:
-        warnings.append(f"SSOT_STALE_CHECK: {e}")
-
-    # 3) Mode sanity
-    mode = str(rc.get("mode",""))
-    if mode == "projected(columns@k=3,file)":
-        if not bool(rc.get("projector_consistent_with_d", False)):
-            failures.append("FILE_OK: projected(columns@k=3,file) not consistent with d3")
-    elif mode == "projected(columns@k=3,auto)":
-        if "3" not in (out or {}):
-            warnings.append("AUTO_OK: no overlap_out present yet")
-
-    # 4) A/B snapshot freshness (only warn if snapshot exists)
-    ab = ss.get("ab_compare") or {}
-    if ab:
-        fresh, _reason = _ab_is_fresh_now(rc=rc, ib=ib, ab_payload=ab)
-        if not fresh:
-            warnings.append("AB_FRESH: A/B snapshot is stale (won’t embed)")
-
-    return failures, warnings
 
 # --- Policy pill + run stamp (single rendering) --------------------------------
 _rc = st.session_state.get("run_ctx") or {}
@@ -1960,76 +1845,8 @@ if ab_pin.get("state") == "pinned":
 else:
     st.caption("A/B: —")
 
-# --- Run self-tests and render banner -----------------------------------------
-_fail, _warn = run_self_tests()
-if _fail:
-    st.error("🚨 Plumbing not healthy — fix before exploration.")
-    with st.expander("Self-tests details"):
-        if _fail:
-            st.markdown("**Failures:**")
-            for f in _fail: st.write(f"- {f}")
-        if _warn:
-            st.markdown("**Warnings:**")
-            for w in _warn: st.write(f"- {w}")
-else:
-    if not (_ib.get("hashes") or _ib.get("boundaries_hash")):
-        st.info("Awaiting first Overlap run…")
-    else:
-        st.success("🟢 Self-tests passed.")
-        if _warn:
-            st.info("Notes:")
-            for w in _warn: st.write(f"- {w}")
-# --- add this helper near your AB helpers (top-level once) -------------------
-from pathlib import Path
-import json as _json, hashlib as _hashlib
 
-def abx_is_uploaded_file(x):
-    # duck-type Streamlit's UploadedFile
-    return hasattr(x, "getvalue") and hasattr(x, "name")
 
-def abx_read_json_any(x, *, kind: str) -> tuple[dict, str, str]:
-    """
-    Accepts a path string/Path, a Streamlit UploadedFile, or a plain dict.
-    Returns (json_obj, canonical_path, origin_tag).
-      origin_tag ∈ {"file","upload","dict",""}
-    For uploads, writes a stable copy under logs/_uploads and returns that path.
-    """
-    if not x:
-        return {}, "", ""
-    # 1) path-like
-    try:
-        if isinstance(x, (str, Path)):
-            p = Path(x)
-            if p.exists():
-                try:
-                    return _json.loads(p.read_text(encoding="utf-8")), str(p), "file"
-                except Exception:
-                    return {}, "", ""
-    except Exception:
-        pass
-    # 2) UploadedFile
-    if abx_is_uploaded_file(x):
-        try:
-            raw  = x.getvalue()
-            text = raw.decode("utf-8")
-            j    = _json.loads(text)
-        except Exception:
-            return {}, "", ""
-        uploads_dir = Path(st.session_state.get("LOGS_DIR", "logs")) / "_uploads"
-        uploads_dir.mkdir(parents=True, exist_ok=True)
-        h12  = _hashlib.sha256(raw).hexdigest()[:12]
-        base = Path(getattr(x, "name", f"{kind}.json")).name
-        outp = uploads_dir / f"{kind}__{h12}__{base}"
-        try:
-            outp.write_text(text, encoding="utf-8")
-        except Exception:
-            # even if persisting fails, still return the parsed JSON
-            pass
-        return j, str(outp), "upload"
-    # 3) already-parsed dict
-    if isinstance(x, dict):
-        return x, "", "dict"
-    return {}, "", ""
 
 # ---------- A/B canonical helpers (drop-in) ----------
 
@@ -2054,9 +1871,7 @@ def _ab_frozen_inputs_sig_list() -> list[str]:
         str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
     ]
 
-def _ab_embed_sig() -> str:
-    """One-line canonical embed sig for A/B pins and embed consumer."""
-    return "|".join(_ab_frozen_inputs_sig_list())
+
 
 def _ab_load_h_latest():
     """
