@@ -297,6 +297,76 @@ DISTRICT_MAP: dict[str, str] = {
     "28f8db2a822cb765e841a35c2850a745c667f4228e782d0cfdbcb710fd4fecb9": "D3",
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
+def _lane_mask_from_d3(*args):
+    """
+    Flexible helper (compat shim).
+
+    Accepts any of:
+      1) _lane_mask_from_d3(C3)
+      2) _lane_mask_from_d3(d3, C3)
+      3) _lane_mask_from_d3(blocks_dict)         # where blocks_dict.get("3") is C3
+      4) _lane_mask_from_d3(d3_blocks, c3_blocks) # dicts with .get("3")
+
+    Returns:
+      list[int] of length n3 with bits from bottom row of C3 when square.
+      If C3 is missing/non-square, returns [0]*n3 inferred from d3, or [] if n3 unknown.
+    """
+    C3 = None
+    d3 = None
+
+    # Unpack positional forms
+    if len(args) == 1:
+        x = args[0]
+        if isinstance(x, dict):          # blocks dict
+            C3 = x.get("3") or None
+        else:                             # assume it's already C3 matrix
+            C3 = x
+    elif len(args) >= 2:
+        a, b = args[0], args[1]
+        # Accept dicts or raw matrices in either position
+        d3 = (a.get("3") if isinstance(a, dict) else a)
+        C3 = (b.get("3") if isinstance(b, dict) else b)
+
+    # If we have a square C3, use its bottom row
+    try:
+        if C3 and isinstance(C3, list) and C3 and isinstance(C3[0], list):
+            n_rows = len(C3)
+            n_cols = len(C3[0]) if C3[0] is not None else 0
+            if n_rows == n_cols and n_cols > 0:
+                bottom = C3[-1] or []
+                return [int(x) & 1 for x in bottom[:n_cols]]
+    except Exception:
+        pass
+
+    # Fallback: infer n3 from d3 (columns) → zero mask (AUTO → N/A later)
+    try:
+        if d3 and isinstance(d3, list) and d3 and isinstance(d3[0], list):
+            n3 = len(d3[0]) if d3[0] is not None else 0
+            return [0] * n3
+    except Exception:
+        pass
+
+    # Unknown shape
+    return []
+    if "_lane_mask_from_d3" not in globals():
+    def _lane_mask_from_d3(*args):
+        # Prefer C3 if present
+        C3 = None
+        if len(args) == 1 and isinstance(args[0], dict):
+            C3 = args[0].get("3")
+        elif len(args) == 1:
+            C3 = args[0]
+        elif len(args) >= 2:
+            C3 = (args[1].get("3") if isinstance(args[1], dict) else args[1])
+        if C3 and isinstance(C3, list) and C3 and len(C3) == len(C3[0]):
+            return [int(x) & 1 for x in (C3[-1] or [])]
+        # fallback: zero mask from d3 width
+        d3 = (args[0].get("3") if len(args) >= 1 and isinstance(args[0], dict) else (args[0] if len(args)>=1 else None))
+        n3 = (len(d3[0]) if d3 and d3 and isinstance(d3[0], list) else 0)
+        return [0]*n3 if n3 else []
+
+
+
 # --- pin freshness helper ------------------------------------------------------
 def _pin_status_text(pin_obj, expected_sig: str) -> str:
     """Return a short freshness badge given a pin object and the expected embed_sig."""
