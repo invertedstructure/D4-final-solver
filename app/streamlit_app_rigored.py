@@ -365,6 +365,57 @@ if "_lane_mask_from_d3" not in globals():
         n3 = (len(d3[0]) if d3 and d3 and isinstance(d3[0], list) else 0)
         return [0]*n3 if n3 else []
 
+def _svr_header_line(ib, sig8, projector_hash=None, policy_tag="strict", run_id=""):
+    """
+    Render a compact, one-line header for the last solver press.
+
+    Fields shown:
+      {policy_tag} | n3={n3} | B={b8} C={c8} H={h8} U={u8} S={sig8} | P={p8 or —} | D={district} | run={run8}
+
+    Inputs:
+      ib: SSOT inputs block (expects ib["hashes"], ib["dims"], optional ib["district_id"])
+      sig8: first 8 hex chars of the A/B embed_sig (string, may be empty)
+      projector_hash: either None, "" or "sha256:<hex>" (we show first 8 hex of the hash if present)
+      policy_tag: display tag ("strict", "strict__VS__projected(columns@k=3,auto)", etc.)
+      run_id: UUID string (we show first 8 non-dash chars)
+
+    Returns:
+      A single formatted string.
+    """
+    def _short(x, n=8):
+        if not x:
+            return ""
+        s = str(x)
+        if s.startswith("sha256:"):
+            s = s.split("sha256:", 1)[1]
+        s = s.replace("-", "")
+        return s[:n]
+
+    h = (ib or {}).get("hashes") or {}
+    dims = (ib or {}).get("dims") or {}
+    n3 = int(dims.get("n3") or 0)
+
+    # Try a few common key variants to be forgiving
+    b8 = _short(h.get("hash_d") or h.get("d_hash") or h.get("boundaries_hash") or h.get("B_hash"))
+    c8 = _short(h.get("hash_suppC") or h.get("suppC_hash") or h.get("C_hash"))
+    h8 = _short(h.get("hash_suppH") or h.get("suppH_hash") or h.get("H_hash"))
+    u8 = _short(h.get("hash_U") or h.get("U_hash"))
+
+    s8 = (sig8 or "")[:8]
+    p8 = _short(projector_hash) if projector_hash else "—"
+    run8 = _short(run_id)
+
+    district = (ib or {}).get("district_id")
+    if not district:
+        # Fallback to D + boundaries hash if present
+        bh = h.get("boundaries_hash") or ""
+        district = ("D" + _short(bh)) if bh else "DUNKNOWN"
+
+    return (
+        f"{policy_tag} | n3={n3} | "
+        f"B={b8 or '—'} C={c8 or '—'} H={h8 or '—'} U={u8 or '—'} S={s8 or '—'} | "
+        f"P={p8} | D={district} | run={run8 or '—'}"
+    )
 
 # ---- District signature helper (robust, deterministic) ----
 def _district_signature(*args, prefix: str = "D", size: int = 8, return_hash: bool = False):
