@@ -2930,16 +2930,20 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
     # Preflight (read-only)
     try:
         pf = _svr_resolve_all_to_paths()
-        pB,pC,pH,pU = Path(pf["B"][0]).name, Path(pf["C"][0]).name, Path(pf["H"][0]).name, Path(pf["U"][0]).name
+        pB, pC, pH, pU = Path(pf["B"][0]).name, Path(pf["C"][0]).name, Path(pf["H"][0]).name, Path(pf["U"][0]).name
         st.caption(f"Sources → B:{pB} · C:{pC} · H:{pH} · U:{pU}")
 
-        d3pf = pf["B"][1].get("3") or []; C3pf = pf["C"][1].get("3") or []; H2pf = pf["H"][1].get("2") or []
+        d3pf = pf["B"][1].get("3") or []
+        C3pf = pf["C"][1].get("3") or []
+        H2pf = pf["H"][1].get("2") or []
+
         n2p, n3p = len(d3pf), (len(d3pf[0]) if (d3pf and d3pf[0]) else 0)
+
         if n2p and n3p:
-            I3pf = _svr_eye(len(C3pf)) if (C3pf and len(C3pf)==len(C3pf[0])) else []
+            I3pf = _svr_eye(len(C3pf)) if (C3pf and len(C3pf) == len(C3pf[0])) else []
             C3pIpf = _svr_xor(C3pf, I3pf) if I3pf else []
-            bottom_H  = (_svr_mul(H2pf, d3pf)[-1] if (H2pf and d3pf and _svr_mul(H2pf, d3pf)) else [])
-            bottom_C  = (C3pf[-1] if C3pf else [])
+            bottom_H = (_svr_mul(H2pf, d3pf)[-1] if (H2pf and d3pf and _svr_mul(H2pf, d3pf)) else [])
+            bottom_C = (C3pf[-1] if C3pf else [])
             bottom_CI = (C3pIpf[-1] if C3pIpf else [])
             st.caption(f"Preflight — n₂×n₃ = {n2p}×{n3p} · (H2·d3)_bottom={bottom_H} · C3_bottom={bottom_C} · (C3⊕I3)_bottom={bottom_CI}")
         else:
@@ -2947,16 +2951,23 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
     except Exception:
         st.info("Preflight: unable to resolve sources yet.")
 
-        # --- Run button (full replacement) ---
-        run_btn = st.button("Run solver (one press → 5 certs; +1 if FILE)", key="btn_svr_run")
-        if run_btn:
-            ss = st.session_state
-            if ss.get('_solver_busy', False):
-                st.warning('Solver is already running — debounced.')
-            else:
-                ss['_solver_busy'] = True
-                ss['_solver_one_button_active'] = True
-                try:
+    # Add a divider before the button for visual separation
+    st.divider()
+
+    # Single run button
+    run_btn = st.button("Run solver (one press → 5 certs; +1 if FILE)", key="btn_svr_run")
+    if run_btn:
+        ss = st.session_state
+        if ss.get('_solver_busy', False):
+            st.warning('Solver is already running — debounced.')
+        else:
+            ss['_solver_busy'] = True
+            ss['_solver_one_button_active'] = True
+            try:
+                # Your solver execution logic here
+                pass
+            except Exception as e:
+                st.error(f"Error running solver: {e}")
                     # 1) Freeze SSOT (single source of truth)
                     pb = _svr_resolve_all_to_paths()
                     ib, rc = _svr_freeze_ssot(pb)
