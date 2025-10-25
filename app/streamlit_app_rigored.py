@@ -1450,7 +1450,6 @@ def cfg_projected_base() -> dict:
     }
 
 
-        
 # --- Policy receipt (single source of truth; used by solver writes) ---
 if "_policy_receipt" not in globals():
     def _policy_receipt(
@@ -1509,11 +1508,15 @@ if "_policy_receipt" not in globals():
             rec["projector"] = pj
 
         return rec
-return "strict"
-    src = (cfg.get("source") or {}).get("3", "auto")
-    mode = "file" if src == "file" else "auto"
-    # keep your established label shape
-    return f"projected(columns@k=3,{mode})"
+
+  
+
+# Additional code that uses cfg, properly indented
+src = (cfg.get("source") or {}).get("3", "auto")
+mode = "file" if src == "file" else "auto"
+# keep your established label shape
+result_label = f"projected(columns@k=3,{mode})"        
+
 
 # (optional) projector-file validator; keep as no-op if you don't need it yet
 def validate_projector_file_strict(P, *, n3: int, lane_mask: list[int]):
