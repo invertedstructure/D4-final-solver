@@ -189,6 +189,15 @@ from pathlib import Path as __Path
 import json as __json
 import math as __math
 
+# Ensure base dirs exist before deriving paths
+if "REPORTS_DIR" not in globals():
+    REPORTS_DIR = __Path("reports")
+    REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+if "CONFIGS_DIR" not in globals():
+    CONFIGS_DIR = __Path("configs")
+CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
+
 # Paths
 if "CONFIGS_DIR" not in globals():
     CONFIGS_DIR = __Path("configs")
