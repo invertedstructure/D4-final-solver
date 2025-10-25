@@ -3347,7 +3347,7 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
                     )
                     st.markdown(hdr)
 
-                    # Mini A/B Sanity (from latest bundle)
+                    # Mini A/B SanBity (from latest bundle)
                     def _exp_embed_sig(path: str):
                         try:
                             j = _json.loads(Path(path).read_text(encoding="utf-8"))
