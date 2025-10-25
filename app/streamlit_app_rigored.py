@@ -4256,7 +4256,7 @@ def _svr_apply_sig8(cert: dict, embed_sig: str) -> None:
 # small witness helper
 def _bottom_row(M): return M[-1] if (M and len(M)) else []
 
-# ---------- UI ----------
+# This expander now ONLY contains the setup and the run button
 with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded=False):
     # small local helper for FILE embed sig (kept local to avoid name collisions)
     def _svr_embed_sig_file(inputs_sig, projector_hash: str):
@@ -4269,7 +4269,6 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
         return _hashlib.sha256(_json.dumps(blob, separators=(",", ":"), sort_keys=True).encode("ascii")).hexdigest()
 
     # Preflight (read-only): show sources & bottom-row quick sanity
-    from pathlib import Path
     pref_ok = False
     try:
         pf = _svr_resolve_all_to_paths()
@@ -4283,10 +4282,10 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
         n2p = len(d3pf)
         n3p = (len(d3pf[0]) if (d3pf and d3pf[0]) else 0)
         if n2p and n3p:
-            I3pf   = _svr_eye(len(C3pf)) if (C3pf and len(C3pf) == len(C3pf[0])) else []
+            I3pf = _svr_eye(len(C3pf)) if (C3pf and len(C3pf) == len(C3pf[0])) else []
             C3pIpf = _svr_xor(C3pf, I3pf) if I3pf else []
-            bottom_H  = (_svr_mul(H2pf, d3pf)[-1] if (H2pf and d3pf and _svr_mul(H2pf, d3pf)) else [])
-            bottom_C  = (C3pf[-1] if C3pf else [])
+            bottom_H = (_svr_mul(H2pf, d3pf)[-1] if (H2pf and d3pf and _svr_mul(H2pf, d3pf)) else [])
+            bottom_C = (C3pf[-1] if C3pf else [])
             bottom_CI = (C3pIpf[-1] if C3pIpf else [])
             st.caption(f"Preflight — n₂×n₃ = {n2p}×{n3p} · (H2·d3)_bottom={bottom_H} · C3_bottom={bottom_C} · (C3⊕I3)_bottom={bottom_CI}")
             pref_ok = True
@@ -4305,55 +4304,58 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
         lr = st.session_state.get("last_solver_result") or {}
         st.success(f"Solver wrote {lr.get('count', 0)} certs.")
 
-    # Minimal cert tail view (bundle-first fallback to latest overlap__*.json)
-    import json
-    cert_dir = Path(DIRS.get("certs", "logs/certs"))
-    with st.expander("Latest solver results (tail view)", expanded=True):
-        if not cert_dir.exists():
-            st.info("No cert directory yet — press Run solver above.")
-        else:
-            bundle_candidates = sorted(cert_dir.glob("bundle*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-            bundle = {}
-            if bundle_candidates:
-                try:
-                    bundle = json.loads(bundle_candidates[0].read_text(encoding="utf-8"))
-                except Exception:
-                    bundle = {}
-            files = list(bundle.get("files") or [])
-            if not files:
-                certs = sorted(cert_dir.glob("overlap__*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:6]
-                files = [c.name for c in certs]
-            if not files:
-                st.info("No certs yet.")
-            else:
-                for fname in files:
-                    p = cert_dir / fname
-                    if p.exists():
-                        with st.expander(fname, expanded=False):
-                            st.code(p.read_text(encoding="utf-8")[:20000], language="json")
-                    else:
-                        st.warning(f"Missing: {fname}")
-# ---------- End A/B UI ----------
-    # -- record a small banner for UI tails --
-    try:
-        import streamlit as _st, json as _json
-        from pathlib import Path as _Path
-        _ss = _st.session_state
-        cert_dir = _Path(DIRS.get("certs", "logs/certs"))
+# --- End of first expander ---
+
+# --- This block is now UN-INDENTED, making it a separate expander ---
+# Minimal cert tail view (bundle-first fallback to latest overlap__*.json)
+cert_dir = Path(DIRS.get("certs", "logs/certs"))
+with st.expander("Latest solver results (tail view)", expanded=True):
+    if not cert_dir.exists():
+        st.info("No cert directory yet — press Run solver above.")
+    else:
+        bundle_candidates = sorted(cert_dir.glob("bundle*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
         bundle = {}
-        try:
-            bundles = sorted(cert_dir.glob("bundle*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-            if bundles:
-                bundle = _json.loads(bundles[0].read_text(encoding="utf-8"))
-        except Exception:
-            pass
+        if bundle_candidates:
+            try:
+                bundle = json.loads(bundle_candidates[0].read_text(encoding="utf-8"))
+            except Exception:
+                bundle = {}
         files = list(bundle.get("files") or [])
         if not files:
             certs = sorted(cert_dir.glob("overlap__*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:6]
             files = [c.name for c in certs]
-        _ss["last_solver_result"] = {"count": len(files), "files": files}
+        if not files:
+            st.info("No certs yet.")
+        else:
+            for fname in files:
+                p = cert_dir / fname
+                if p.exists():
+                    # This nesting (expander-in-expander) is allowed
+                    with st.expander(fname, expanded=False):
+                        st.code(p.read_text(encoding="utf-8")[:20000], language="json")
+                else:
+                    st.warning(f"Missing: {fname}")
+
+# ---------- End A/B UI ----------
+# -- record a small banner for UI tails --
+# This code was already outside the expander and remains as-is
+try:
+    _ss = st.session_state
+    cert_dir = Path(DIRS.get("certs", "logs/certs"))
+    bundle = {}
+    try:
+        bundles = sorted(cert_dir.glob("bundle*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        if bundles:
+            bundle = json.loads(bundles[0].read_text(encoding="utf-8"))
     except Exception:
         pass
+    files = list(bundle.get("files") or [])
+    if not files:
+        certs = sorted(cert_dir.glob("overlap__*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:6]
+        files = [c.name for c in certs]
+    _ss["last_solver_result"] = {"count": len(files), "files": files}
+except Exception:
+    pass
 
 
 def _sha256_text(s: str) -> str:
