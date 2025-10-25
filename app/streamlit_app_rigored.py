@@ -3255,83 +3255,83 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
                 )
                 sig8 = (embed_sig_auto or "")[:8]
                 _bundle_dir = _svr_bundle_dir(district_id, sig8)
-                # === C1: compute σ from d3, label membership, append coverage JSONL ===
-            try:
-                d3_mat = pb["B"][1].get("3") or []
-                n2_now = len(d3_mat)
-                n3_now = len(d3_mat[0]) if (d3_mat and d3_mat[0]) else 0
-                sig, sig_err = compute_signature_from_d3(d3_mat, n2_now, n3_now)
-                if sig_err:
-                    mem = {"status":"NA","proximity":"","sig_str":""}
-                else:
-                    mem = c1_membership(sig)
-            
-                # diagnostics/rates
-                L = [int(x) & 1 for x in (lanes or [])]
-                sel_sum = sum(L)
-                # selected / off-row mismatch columns under strict residual R3s
-                sel_mis  = _svr_mismatch_cols_from_R3(R3s, L) if (R3s and L) else []
-                off_mask = [(1 - b) for b in L] if L else [0]*n3_now
-                off_mis  = _svr_mismatch_cols_from_R3(R3s, off_mask) if (R3s and off_mask) else []
-                selected_mismatch_rate = (len(sel_mis) / max(1, sel_sum)) if L else 0.0
-                offrow_mismatch_rate   = (len(off_mis) / max(1, n3_now - sel_sum)) if n3_now else 0.0
-            
-                # ker columns (d3·e_j = 0 ⇔ entire column zero)
-                ker_cols = []
-                if d3_mat and n3_now:
-                    for j in range(n3_now):
-                        ker_cols.append(1 if all((int(d3_mat[i][j]) & 1) == 0 for i in range(n2_now)) else 0)
-                # ker-RED: strict fails and some failing column is ker
-                failing_cols = []
-                if R3s:
-                    for j in range(n3_now):
-                        if any((int(R3s[i][j]) & 1) for i in range(len(R3s))):
-                            failing_cols.append(j)
-                ker_red = (strict_k3 is False) and any(ker_cols[j] == 1 for j in failing_cols)
-            
-                # contradictory lane rate (cheap guard; aligns with your doc “use mismatch cols / sum(lanes)”)
-                contradictory_lane_rate = (len(sel_mis) / max(1, sel_sum)) if L else 0.0
-            
-                # policy receipt (AUTO; posed iff meta.na==False)
-                posed_auto = not bool(proj_meta.get("na"))
-                policy_receipt = _policy_receipt(
-                    mode="projected:auto",
-                    posed=posed_auto,
-                    lane_policy="C bottom row",
-                    lanes=L,
-                    n3=n3_now
-                )
-            
-                # overlay block
-                lane_density = (sel_sum / n3_now) if n3_now else 0.0
-            
-                coverage_row = {
-                    "written_at_utc": _svr_now_iso(),
-                    "district_id": ib.get("district_id") or "DUNKNOWN",
-                    "signature": sig,
-                    "membership": { "status": mem["status"], "proximity": mem["proximity"], "sig_str": mem["sig_str"] },
-                    "policy": policy_receipt,
-                    "checks": {
-                        "strict_k3": strict_k3,
-                        "projected_k3": (proj_auto_k3 if posed_auto else None),
-                        "projected_k3_file": proj_file_k3,
-                        "k2_strict": strict_k2,
-                        "k2_projected": (proj_auto_k2 if posed_auto else None),
-                    },
-                    "overlay": {
-                        "lane_density": lane_density,
-                        "selected_mismatch_rate": selected_mismatch_rate,
-                        "offrow_mismatch_rate":   offrow_mismatch_rate,
-                        "ker_columns": ker_cols,
-                        "ker_red": bool(ker_red),
-                        "contradictory_lane_rate": contradictory_lane_rate,
-                    },
-                    "na_reason_code": (proj_meta.get("reason") if not posed_auto else ""),
-                }
-                _atomic_append_jsonl(COVERAGE_JSONL, coverage_row)
-                st.caption(f"Coverage row appended · σ={mem.get('sig_str','')} · {mem.get('status')} / {mem.get('proximity')}")
-            except Exception as _c1e:
-                st.warning(f"C1 coverage row not appended: {_c1e}")
+                    # === C1: compute σ from d3, label membership, append coverage JSONL ===
+                try:
+                    d3_mat = pb["B"][1].get("3") or []
+                    n2_now = len(d3_mat)
+                    n3_now = len(d3_mat[0]) if (d3_mat and d3_mat[0]) else 0
+                    sig, sig_err = compute_signature_from_d3(d3_mat, n2_now, n3_now)
+                    if sig_err:
+                        mem = {"status":"NA","proximity":"","sig_str":""}
+                    else:
+                        mem = c1_membership(sig)
+                
+                    # diagnostics/rates
+                    L = [int(x) & 1 for x in (lanes or [])]
+                    sel_sum = sum(L)
+                    # selected / off-row mismatch columns under strict residual R3s
+                    sel_mis  = _svr_mismatch_cols_from_R3(R3s, L) if (R3s and L) else []
+                    off_mask = [(1 - b) for b in L] if L else [0]*n3_now
+                    off_mis  = _svr_mismatch_cols_from_R3(R3s, off_mask) if (R3s and off_mask) else []
+                    selected_mismatch_rate = (len(sel_mis) / max(1, sel_sum)) if L else 0.0
+                    offrow_mismatch_rate   = (len(off_mis) / max(1, n3_now - sel_sum)) if n3_now else 0.0
+                
+                    # ker columns (d3·e_j = 0 ⇔ entire column zero)
+                    ker_cols = []
+                    if d3_mat and n3_now:
+                        for j in range(n3_now):
+                            ker_cols.append(1 if all((int(d3_mat[i][j]) & 1) == 0 for i in range(n2_now)) else 0)
+                    # ker-RED: strict fails and some failing column is ker
+                    failing_cols = []
+                    if R3s:
+                        for j in range(n3_now):
+                            if any((int(R3s[i][j]) & 1) for i in range(len(R3s))):
+                                failing_cols.append(j)
+                    ker_red = (strict_k3 is False) and any(ker_cols[j] == 1 for j in failing_cols)
+                
+                    # contradictory lane rate (cheap guard; aligns with your doc “use mismatch cols / sum(lanes)”)
+                    contradictory_lane_rate = (len(sel_mis) / max(1, sel_sum)) if L else 0.0
+                
+                    # policy receipt (AUTO; posed iff meta.na==False)
+                    posed_auto = not bool(proj_meta.get("na"))
+                    policy_receipt = _policy_receipt(
+                        mode="projected:auto",
+                        posed=posed_auto,
+                        lane_policy="C bottom row",
+                        lanes=L,
+                        n3=n3_now
+                    )
+                
+                    # overlay block
+                    lane_density = (sel_sum / n3_now) if n3_now else 0.0
+                
+                    coverage_row = {
+                        "written_at_utc": _svr_now_iso(),
+                        "district_id": ib.get("district_id") or "DUNKNOWN",
+                        "signature": sig,
+                        "membership": { "status": mem["status"], "proximity": mem["proximity"], "sig_str": mem["sig_str"] },
+                        "policy": policy_receipt,
+                        "checks": {
+                            "strict_k3": strict_k3,
+                            "projected_k3": (proj_auto_k3 if posed_auto else None),
+                            "projected_k3_file": proj_file_k3,
+                            "k2_strict": strict_k2,
+                            "k2_projected": (proj_auto_k2 if posed_auto else None),
+                        },
+                        "overlay": {
+                            "lane_density": lane_density,
+                            "selected_mismatch_rate": selected_mismatch_rate,
+                            "offrow_mismatch_rate":   offrow_mismatch_rate,
+                            "ker_columns": ker_cols,
+                            "ker_red": bool(ker_red),
+                            "contradictory_lane_rate": contradictory_lane_rate,
+                        },
+                        "na_reason_code": (proj_meta.get("reason") if not posed_auto else ""),
+                    }
+                    _atomic_append_jsonl(COVERAGE_JSONL, coverage_row)
+                    st.caption(f"Coverage row appended · σ={mem.get('sig_str','')} · {mem.get('status')} / {mem.get('proximity')}")
+                except Exception as _c1e:
+                    st.warning(f"C1 coverage row not appended: {_c1e}")
             
                 
                 # ----------------- WRITE CERTS -----------------
