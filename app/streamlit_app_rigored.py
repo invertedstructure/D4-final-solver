@@ -1426,7 +1426,9 @@ def safe_expander(label: str, expanded: bool = False):
         def _noop():
             yield
         return _noop()
-
+        
+def policy_label_from_cfg(cfg: dict) -> str:
+    if not cfg or not cfg.get("enabled_layers"):
 # ---- Policy/config helpers (minimal, canonical) ----
 def cfg_strict() -> dict:
     return {
@@ -1442,8 +1444,7 @@ def cfg_projected_base() -> dict:
         "projector_files": {},      # filled only for 'file'
     }
 
-def policy_label_from_cfg(cfg: dict) -> str:
-    if not cfg or not cfg.get("enabled_layers"):
+
         
 # --- Policy receipt (single source of truth; used by solver writes) ---
 if "_policy_receipt" not in globals():
