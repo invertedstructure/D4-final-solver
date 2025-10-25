@@ -4260,6 +4260,7 @@ def _bottom_row(M): return M[-1] if (M and len(M)) else []
 with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded=False):
     # small local helper for FILE embed sig (kept local to avoid name collisions)
     def _svr_embed_sig_file(inputs_sig, projector_hash: str):
+        import hashlib as _hashlib, json as _json
         blob = {
             "inputs": list(inputs_sig),
             "policy": "projected(columns@k=3,file)",
@@ -4267,30 +4268,93 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
         }
         return _hashlib.sha256(_json.dumps(blob, separators=(",", ":"), sort_keys=True).encode("ascii")).hexdigest()
 
-    # Preflight (read-only)
+    # Preflight (read-only): show sources & bottom-row quick sanity
+    from pathlib import Path
+    pref_ok = False
     try:
         pf = _svr_resolve_all_to_paths()
-        pB,pC,pH,pU = Path(pf["B"][0]).name, Path(pf["C"][0]).name, Path(pf["H"][0]).name, Path(pf["U"][0]).name
+        pB, pC, pH, pU = Path(pf["B"][0]).name, Path(pf["C"][0]).name, Path(pf["H"][0]).name, Path(pf["U"][0]).name
         st.caption(f"Sources → B:{pB} · C:{pC} · H:{pH} · U:{pU}")
 
-        d3pf = pf["B"][1].get("3") or []; C3pf = pf["C"][1].get("3") or []; H2pf = pf["H"][1].get("2") or []
-        n2p, n3p = len(d3pf), (len(d3pf[0]) if (d3pf and d3pf[0]) else 0)
+        d3pf = pf["B"][1].get("3") or []
+        C3pf = pf["C"][1].get("3") or []
+        H2pf = pf["H"][1].get("2") or []
+
+        n2p = len(d3pf)
+        n3p = (len(d3pf[0]) if (d3pf and d3pf[0]) else 0)
         if n2p and n3p:
-            I3pf = _svr_eye(len(C3pf)) if (C3pf and len(C3pf)==len(C3pf[0])) else []
+            I3pf   = _svr_eye(len(C3pf)) if (C3pf and len(C3pf) == len(C3pf[0])) else []
             C3pIpf = _svr_xor(C3pf, I3pf) if I3pf else []
             bottom_H  = (_svr_mul(H2pf, d3pf)[-1] if (H2pf and d3pf and _svr_mul(H2pf, d3pf)) else [])
             bottom_C  = (C3pf[-1] if C3pf else [])
             bottom_CI = (C3pIpf[-1] if C3pIpf else [])
             st.caption(f"Preflight — n₂×n₃ = {n2p}×{n3p} · (H2·d3)_bottom={bottom_H} · C3_bottom={bottom_C} · (C3⊕I3)_bottom={bottom_CI}")
+            pref_ok = True
         else:
             st.info("Preflight: upload B/C/H/U to run.")
-    except Exception:
+    except Exception as e:
         st.info("Preflight: unable to resolve sources yet.")
+        st.caption(f"{e}")
 
-        # --- Run button (full replacement) ---
-        run_btn = st.button("Run solver (one press → 5 certs; +1 if FILE)", key="btn_svr_run")
-        if run_btn:
-            _svr_run()
+    st.divider()
+
+    # Always-visible Run button (separate key to avoid collisions)
+    run_btn_ab = st.button("Run solver (one press → 5 certs; +1 if FILE)", key="btn_svr_run_ab")
+    if run_btn_ab:
+        _svr_run()
+        lr = st.session_state.get("last_solver_result") or {}
+        st.success(f"Solver wrote {lr.get('count', 0)} certs.")
+
+    # Minimal cert tail view (bundle-first fallback to latest overlap__*.json)
+    import json
+    cert_dir = Path(DIRS.get("certs", "logs/certs"))
+    with st.expander("Latest solver results (tail view)", expanded=True):
+        if not cert_dir.exists():
+            st.info("No cert directory yet — press Run solver above.")
+        else:
+            bundle_candidates = sorted(cert_dir.glob("bundle*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+            bundle = {}
+            if bundle_candidates:
+                try:
+                    bundle = json.loads(bundle_candidates[0].read_text(encoding="utf-8"))
+                except Exception:
+                    bundle = {}
+            files = list(bundle.get("files") or [])
+            if not files:
+                certs = sorted(cert_dir.glob("overlap__*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:6]
+                files = [c.name for c in certs]
+            if not files:
+                st.info("No certs yet.")
+            else:
+                for fname in files:
+                    p = cert_dir / fname
+                    if p.exists():
+                        with st.expander(fname, expanded=False):
+                            st.code(p.read_text(encoding="utf-8")[:20000], language="json")
+                    else:
+                        st.warning(f"Missing: {fname}")
+# ---------- End A/B UI ----------
+    # -- record a small banner for UI tails --
+    try:
+        import streamlit as _st, json as _json
+        from pathlib import Path as _Path
+        _ss = _st.session_state
+        cert_dir = _Path(DIRS.get("certs", "logs/certs"))
+        bundle = {}
+        try:
+            bundles = sorted(cert_dir.glob("bundle*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+            if bundles:
+                bundle = _json.loads(bundles[0].read_text(encoding="utf-8"))
+        except Exception:
+            pass
+        files = list(bundle.get("files") or [])
+        if not files:
+            certs = sorted(cert_dir.glob("overlap__*.json"), key=lambda p: p.stat().st_mtime, reverse=True)[:6]
+            files = [c.name for c in certs]
+        _ss["last_solver_result"] = {"count": len(files), "files": files}
+    except Exception:
+        pass
+
 
 def _sha256_text(s: str) -> str:
     import hashlib
