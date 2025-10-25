@@ -3402,6 +3402,17 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
                     ss['_solver_busy'] = False
         # --- End run button ---
 
+# ────────────────── Single, always-visible solver button ──────────────────
+st.divider()
+run_btn_ab = st.button(
+    "Run solver (one press → 5 certs; +1 if FILE)",
+    key="btn_svr_run_global"
+)
+if run_btn_ab:
+    _svr_run()
+    lr = st.session_state.get("last_solver_result") or {}
+    st.success(f"Solver wrote {lr.get('count', 0)} certs.")
+# ──────────────────────────────────────────────────────────────────────────
 
 
     
