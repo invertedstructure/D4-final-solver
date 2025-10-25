@@ -184,6 +184,306 @@ if "_svr_residual_tag_from_R3" not in globals():
             return ""
 
 
+# =============================== C1 / Baseline (pattern-only) ===============================
+from pathlib import Path as __Path
+import json as __json
+import math as __math
+
+# Paths
+if "CONFIGS_DIR" not in globals():
+    CONFIGS_DIR = __Path("configs")
+if "BASELINE_SIG_PATH" not in globals():
+    BASELINE_SIG_PATH = CONFIGS_DIR / "baseline_signatures.json"
+if "COVERAGE_JSONL" not in globals():
+    COVERAGE_JSONL = REPORTS_DIR / "coverage_sampling.jsonl"
+if "COVERAGE_CSV" not in globals():
+    COVERAGE_CSV = REPORTS_DIR / "coverage_sampling_summary.csv"
+
+# ---------- C1: signature (σ) ----------
+if "compute_signature_from_d3" not in globals():
+    def compute_signature_from_d3(d3: list[list[int]] | None, n2: int | None = None, n3: int | None = None) -> tuple[list[str], str | None]:
+        """
+        Build σ as a list of length-n2 bitstrings, one per column (length n3).
+        Row 0 is the top (most significant) bit; column order is preserved.
+
+        Returns (sig_list, err_code or None).
+        err_code ∈ {"SIG_SHAPE","SIG_NON_BOOL"} when present.
+        """
+        if not d3 or not isinstance(d3, list) or not d3 or not isinstance(d3[0], list) or not d3[0]:
+            return [], "SIG_SHAPE"
+
+        rows = len(d3)
+        cols = len(d3[0])
+        # All rows must have equal length
+        for r in d3:
+            if not isinstance(r, list) or len(r) != cols:
+                return [], "SIG_SHAPE"
+
+        # If expectations given, enforce
+        if n2 is not None and rows != int(n2): return [], "SIG_SHAPE"
+        if n3 is not None and cols != int(n3): return [], "SIG_SHAPE"
+
+        # Strict boolean normalization (only 0/1 accepted)
+        ok = {"0", "1"}
+        for i in range(rows):
+            for j in range(cols):
+                v = d3[i][j]
+                s = ""
+                try:
+                    # only accept the literal 0/1 (int) or "0"/"1" (str)
+                    if isinstance(v, bool):
+                        v = 1 if v else 0
+                    if isinstance(v, (int,)):
+                        if v not in (0, 1):
+                            return [], "SIG_NON_BOOL"
+                        continue
+                    s = str(v)
+                    if s not in ok:
+                        return [], "SIG_NON_BOOL"
+                except Exception:
+                    return [], "SIG_NON_BOOL"
+
+        # Build σ
+        sig: list[str] = []
+        for j in range(cols):
+            bits = []
+            for i in range(rows):
+                v = d3[i][j]
+                bit = (int(v) & 1)
+                bits.append("1" if bit else "0")
+            sig.append("".join(bits))  # row0..row(n2-1)
+        return sig, None
+
+if "signature_key" not in globals():
+    def signature_key(sig: list[str]) -> str:
+        """Canonical byte-accurate key used for membership."""
+        return "[" + ",".join(sig) + "]"
+
+# ---------- Baseline S loader ----------
+if "load_baseline_S" not in globals():
+    def load_baseline_S() -> set[str] | None:
+        """
+        Load configs/baseline_signatures.json:
+        { "signatures": [ ["00","01","10"], ... ] }
+
+        Returns a set of canonical string keys or None if file missing.
+        Caches in st.session_state["_baseline_S"].
+        """
+        ss = st.session_state
+        if "_baseline_S" in ss:
+            return ss["_baseline_S"]
+        p = BASELINE_SIG_PATH
+        if not p.exists():
+            ss["_baseline_S"] = None
+            return None
+        try:
+            data = __json.loads(p.read_text(encoding="utf-8"))
+            S = set()
+            for entry in (data.get("signatures") or []):
+                if (isinstance(entry, list)
+                    and all(isinstance(x, str) for x in entry)):
+                    S.add(signature_key(entry))
+            ss["_baseline_S"] = S
+            return S
+        except Exception:
+            ss["_baseline_S"] = None
+            return None
+
+# ---------- Proximity (min Hamming flips over bits) ----------
+if "min_flip_distance_to_S" not in globals():
+    def min_flip_distance_to_S(sig: list[str], S: set[str] | None) -> int | None:
+        """
+        Returns 0 (IN), 1 (NEAR_OUT), 2 (FAR_OUT or greater) or None if S missing.
+        We stop early at distance 0 or 1; 2 means "≥2".
+        """
+        if not S:
+            return None
+        key = signature_key(sig)
+        if key in S:
+            return 0
+        # pre-parse S entries once
+        import json as _json
+        best = 10**9
+        for s_key in S:
+            try:
+                s_list = _json.loads(s_key)
+            except Exception:
+                continue
+            if len(s_list) != len(sig):
+                continue
+            # bit-by-bit Hamming
+            d = 0
+            for a, b in zip(sig, s_list):
+                if len(a) != len(b):  # n2 mismatch: skip
+                    d = 10**6; break
+                for ca, cb in zip(a, b):
+                    if ca != cb:
+                        d += 1
+                        if d >= 2:
+                            break
+                if d >= 2:
+                    break
+            if d < best:
+                best = d
+                if best == 0:
+                    return 0
+                if best == 1:
+                    return 1
+        return 2 if best >= 2 else best
+
+if "c1_membership" not in globals():
+    def c1_membership(sig: list[str]) -> dict:
+        """
+        Returns:
+        {
+          "status": "IN"|"OUT"|"NA",
+          "proximity": "IN"|"NEAR_OUT"|"FAR_OUT"|"",
+          "sig_str": "[...]"   # canonical string
+        }
+        """
+        S = load_baseline_S()
+        key = signature_key(sig)
+        if S is None:  # no baseline file → NA
+            return {"status":"NA", "proximity":"", "sig_str": key}
+        d = min_flip_distance_to_S(sig, S)
+        if d is None:  # safety
+            return {"status":"NA", "proximity":"", "sig_str": key}
+        if d == 0:
+            return {"status":"IN", "proximity":"IN", "sig_str": key}
+        if d == 1:
+            return {"status":"OUT", "proximity":"NEAR_OUT", "sig_str": key}
+        return {"status":"OUT", "proximity":"FAR_OUT", "sig_str": key}
+
+# ---------- Policy receipt (strict / projected AUTO/FILE) ----------
+if "_policy_receipt" not in globals():
+    def _policy_receipt(*, mode: str, posed: bool, lane_policy: str = "", lanes: list[int] | None = None,
+                        projector_source: str = "", projector_hash: str | None = None,
+                        n3: int | None = None) -> dict:
+        canon = (
+            "strict" if mode.startswith("strict")
+            else "projected(columns@k=3,auto)" if "auto" in mode
+            else "projected(columns@k=3,file)"
+        )
+        L = [int(x) & 1 for x in (lanes or [])]
+        k = sum(L)
+        n3v = int(n3 if n3 is not None else (len(L) if L else 0))
+        density = (k / n3v) if (n3v > 0) else 0.0
+        rec = {
+            "canon": canon,
+            "posed": bool(posed),
+            "lane_policy": lane_policy or ("file projector" if "file" in canon else ("C bottom row" if "auto" in canon else "")),
+            "lanes": L,
+            "lane_sum": k,
+            "lane_density": density,
+        }
+        if "file" in canon:
+            pj = {}
+            if projector_hash:
+                pj["source"] = "file"
+                pj["hash"]   = str(projector_hash)
+                pj["shape"]  = [n3v, n3v] if n3v else [0, 0]
+                pj["idempotent"] = True  # diagonal boolean Π → idempotent over 𝔽₂
+            rec["projector"] = pj
+        return rec
+
+# ---------- Health ping (windowed) ----------
+if "health_ping_from_jsonl" not in globals():
+    def health_ping_from_jsonl(path: __Path, window: int = 200) -> dict:
+        import math as _m
+        rows = _read_jsonl_tail(path, N=window)
+        if not rows:
+            return {"has_data": False}
+        # lane density (rolling)
+        dens = [float((r.get("overlay") or {}).get("lane_density", 0.0)) for r in rows if (r.get("overlay") or {}).get("lane_density") is not None]
+        dens = [x for x in dens if isinstance(x, (int, float))]
+        mean_density = (sum(dens)/len(dens)) if dens else 0.0
+
+        # contradiction rate (rolling)
+        cr = [float(r.get("overlay", {}).get("contradictory_lane_rate", 0.0)) for r in rows if "overlay" in r]
+        cr = [x for x in cr if isinstance(x, (int, float))]
+        mean_contra = (sum(cr)/len(cr)) if cr else 0.0
+        last = rows[-1]
+        last_density = float((last.get("overlay") or {}).get("lane_density", 0.0))
+        last_contra  = float((last.get("overlay") or {}).get("contradictory_lane_rate", 0.0))
+
+        # per-lane entropy (over window)
+        lane_lists = []
+        for r in rows:
+            L = ((r.get("policy") or {}).get("lanes") or [])
+            if L:
+                lane_lists.append([1 if int(x) & 1 else 0 for x in L])
+        flagged = []
+        if lane_lists:
+            m = max(len(L) for L in lane_lists)
+            # pad
+            for i in range(len(lane_lists)):
+                lane_lists[i] = (lane_lists[i] + [0]*m)[:m]
+            ent = []
+            for j in range(m):
+                pj = sum(L[j] for L in lane_lists) / len(lane_lists)
+                if pj in (0.0, 1.0):
+                    Hj = 0.0
+                else:
+                    Hj = -(pj*__math.log2(pj) + (1-pj)*__math.log2(1-pj))
+                ent.append(Hj)
+            flagged = [j for j,Hj in enumerate(ent) if Hj < 0.05]
+
+        return {
+            "has_data": True,
+            "lane_density": {"last": last_density, "rolling_mean": mean_density},
+            "contradictory_lane_rate": {"last": last_contra, "rolling_mean": mean_contra},
+            "low_entropy_lanes": flagged,
+        }
+
+# ---------- CSV roll-up ----------
+if "coverage_rollup_to_csv" not in globals():
+    def coverage_rollup_to_csv(jsonl_path: __Path, csv_path: __Path, baseline_S: set[str] | None):
+        import csv as _csv
+        rows = []
+        if jsonl_path.exists():
+            with open(jsonl_path, "r", encoding="utf-8") as f:
+                for ln in f:
+                    try:
+                        rows.append(__json.loads(ln))
+                    except Exception:
+                        continue
+        # group by signature
+        from collections import defaultdict
+        G = defaultdict(list)
+        for r in rows:
+            key = (r.get("membership") or {}).get("sig_str") or signature_key(r.get("signature") or [])
+            G[key].append(r)
+
+        def _mean(xs):
+            xs = [x for x in xs if isinstance(x, (int, float))]
+            return (sum(xs)/len(xs)) if xs else 0.0
+
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            w = _csv.writer(f)
+            w.writerow(["signature","count","IN","NEAR_OUT","FAR_OUT","mean_lane_density","mean_contradictory_rate","mean_k3_strict","mean_k3_auto","mean_k3_file"])
+            for sig_key, grp in G.items():
+                # proximity buckets
+                pin = pnear = pfar = 0
+                k3s = []; k3a = []; k3f = []
+                dens = []; contra = []
+                for r in grp:
+                    prox = ((r.get("membership") or {}).get("proximity") or "")
+                    if prox == "IN": pin += 1
+                    elif prox == "NEAR_OUT": pnear += 1
+                    elif prox == "FAR_OUT": pfar += 1
+                    # densities
+                    dens.append(float((r.get("overlay") or {}).get("lane_density", 0.0)))
+                    contra.append(float((r.get("overlay") or {}).get("contradictory_lane_rate", 0.0)))
+                    # k3s
+                    ck = (r.get("checks") or {})
+                    def _b(x):
+                        return None if x is None else (1.0 if bool(x) else 0.0)
+                    k3s.append(_b(ck.get("strict_k3")))
+                    k3a.append(_b(ck.get("projected_k3")))
+                    k3f.append(_b(ck.get("projected_k3_file")))
+                w.writerow([sig_key, len(grp), pin, pnear, pfar, _mean(dens), _mean(contra), _mean([x for x in k3s if x is not None]), _mean([x for x in k3a if x is not None]), _mean([x for x in k3f if x is not None])])
+        return csv_path
+# ============================ /C1 Baseline helpers ============================
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -2955,7 +3255,85 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
                 )
                 sig8 = (embed_sig_auto or "")[:8]
                 _bundle_dir = _svr_bundle_dir(district_id, sig8)
-    
+                # === C1: compute σ from d3, label membership, append coverage JSONL ===
+            try:
+                d3_mat = pb["B"][1].get("3") or []
+                n2_now = len(d3_mat)
+                n3_now = len(d3_mat[0]) if (d3_mat and d3_mat[0]) else 0
+                sig, sig_err = compute_signature_from_d3(d3_mat, n2_now, n3_now)
+                if sig_err:
+                    mem = {"status":"NA","proximity":"","sig_str":""}
+                else:
+                    mem = c1_membership(sig)
+            
+                # diagnostics/rates
+                L = [int(x) & 1 for x in (lanes or [])]
+                sel_sum = sum(L)
+                # selected / off-row mismatch columns under strict residual R3s
+                sel_mis  = _svr_mismatch_cols_from_R3(R3s, L) if (R3s and L) else []
+                off_mask = [(1 - b) for b in L] if L else [0]*n3_now
+                off_mis  = _svr_mismatch_cols_from_R3(R3s, off_mask) if (R3s and off_mask) else []
+                selected_mismatch_rate = (len(sel_mis) / max(1, sel_sum)) if L else 0.0
+                offrow_mismatch_rate   = (len(off_mis) / max(1, n3_now - sel_sum)) if n3_now else 0.0
+            
+                # ker columns (d3·e_j = 0 ⇔ entire column zero)
+                ker_cols = []
+                if d3_mat and n3_now:
+                    for j in range(n3_now):
+                        ker_cols.append(1 if all((int(d3_mat[i][j]) & 1) == 0 for i in range(n2_now)) else 0)
+                # ker-RED: strict fails and some failing column is ker
+                failing_cols = []
+                if R3s:
+                    for j in range(n3_now):
+                        if any((int(R3s[i][j]) & 1) for i in range(len(R3s))):
+                            failing_cols.append(j)
+                ker_red = (strict_k3 is False) and any(ker_cols[j] == 1 for j in failing_cols)
+            
+                # contradictory lane rate (cheap guard; aligns with your doc “use mismatch cols / sum(lanes)”)
+                contradictory_lane_rate = (len(sel_mis) / max(1, sel_sum)) if L else 0.0
+            
+                # policy receipt (AUTO; posed iff meta.na==False)
+                posed_auto = not bool(proj_meta.get("na"))
+                policy_receipt = _policy_receipt(
+                    mode="projected:auto",
+                    posed=posed_auto,
+                    lane_policy="C bottom row",
+                    lanes=L,
+                    n3=n3_now
+                )
+            
+                # overlay block
+                lane_density = (sel_sum / n3_now) if n3_now else 0.0
+            
+                coverage_row = {
+                    "written_at_utc": _svr_now_iso(),
+                    "district_id": ib.get("district_id") or "DUNKNOWN",
+                    "signature": sig,
+                    "membership": { "status": mem["status"], "proximity": mem["proximity"], "sig_str": mem["sig_str"] },
+                    "policy": policy_receipt,
+                    "checks": {
+                        "strict_k3": strict_k3,
+                        "projected_k3": (proj_auto_k3 if posed_auto else None),
+                        "projected_k3_file": proj_file_k3,
+                        "k2_strict": strict_k2,
+                        "k2_projected": (proj_auto_k2 if posed_auto else None),
+                    },
+                    "overlay": {
+                        "lane_density": lane_density,
+                        "selected_mismatch_rate": selected_mismatch_rate,
+                        "offrow_mismatch_rate":   offrow_mismatch_rate,
+                        "ker_columns": ker_cols,
+                        "ker_red": bool(ker_red),
+                        "contradictory_lane_rate": contradictory_lane_rate,
+                    },
+                    "na_reason_code": (proj_meta.get("reason") if not posed_auto else ""),
+                }
+                _atomic_append_jsonl(COVERAGE_JSONL, coverage_row)
+                st.caption(f"Coverage row appended · σ={mem.get('sig_str','')} · {mem.get('status')} / {mem.get('proximity')}")
+            except Exception as _c1e:
+                st.warning(f"C1 coverage row not appended: {_c1e}")
+            
+                
                 # ----------------- WRITE CERTS -----------------
     
                 # Strict cert (+ full-R3 selected mismatch)
@@ -4237,6 +4615,8 @@ def _atomic_write_csv(path: Path, header: list[str], rows: list[list], meta_line
         w = _csv.writer(f); w.writerow(header); w.writerows(rows)
         f.flush(); os.fsync(f.fileno())
     os.replace(tmp, path)
+
+
 
 # ── Projector path + rc normalizers (pure read; no recompute) ─────────────────
 def _pj_path_from_context_or_fs() -> str:
@@ -7801,6 +8181,38 @@ with safe_expander("Exports", expanded=False):
             except Exception as e:
                 st.error(f"Flush failed: {e}")
 
+with st.expander("C1 · Health & Roll-up", expanded=False):
+    cols = st.columns([2,1,1])
+    with cols[0]:
+        hp = health_ping_from_jsonl(COVERAGE_JSONL, window=200)
+        if not hp.get("has_data"):
+            st.info("No coverage_sampling.jsonl yet – run the solver once.")
+        else:
+            st.write(f"Lane density: last **{hp['lane_density']['last']:.3f}** · mean **{hp['lane_density']['rolling_mean']:.3f}**")
+            st.write(f"Contradiction: last **{hp['contradictory_lane_rate']['last']:.3f}** · mean **{hp['contradictory_lane_rate']['rolling_mean']:.3f}**")
+            flagged = hp.get("low_entropy_lanes") or []
+            if flagged:
+                st.warning(f"Low-entropy lanes (H<0.05): {flagged}")
+            else:
+                st.success("No low-entropy lanes flagged in window.")
+    with cols[1]:
+        if st.button("Build CSV roll-up"):
+            S = load_baseline_S()
+            out_csv = coverage_rollup_to_csv(COVERAGE_JSONL, COVERAGE_CSV, S)
+            st.success(f"Wrote {out_csv}")
+            try:
+                with open(out_csv, "rb") as fz:
+                    st.download_button("Download coverage_summary.csv", fz, file_name="coverage_summary.csv")
+            except Exception:
+                pass
+    with cols[2]:
+        if BASELINE_SIG_PATH.exists():
+            st.caption(f"Baseline S: `{BASELINE_SIG_PATH}`")
+        else:
+            st.warning("Baseline signatures file not found. See template below.")
+
+    with st.expander("Baseline file template (configs/baseline_signatures.json)", expanded=False):
+        st.code('{\n  "signatures": [\n    ["00","01","10"]\n  ]\n}\n', language="json")
 
 
 
