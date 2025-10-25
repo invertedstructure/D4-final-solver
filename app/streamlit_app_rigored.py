@@ -3112,28 +3112,28 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
                     
                     # add policy receipt as a separate top-level field
                     p_cert_file["policy"] = 
-# ---------- NA reason canonicalizer (C) ----------
-if "_canonicalize_na_reason" not in globals():
-    def _canonicalize_na_reason(reason: str | None) -> str:
-        if not reason:
-            return ""
-        r = str(reason).upper()
-        # AUTO
-        if "NON_SQUARE" in r or "REQUIRES_SQUARE" in r or "NOT_SQUARE" in r:
-            return "NON_SQUARE"
-        if "LANE_ZERO" in r or "ZERO_LANE" in r or ("AUTO" in r and "ZERO" in r):
-            return "LANE_ZERO"
-        # FILE
-        if "FILE_SHAPE" in r or ("FILE" in r and "SHAPE" in r):
-            return "FILE_SHAPE"
-        if "FILE_NON_BOOL" in r or ("FILE" in r and "NON_BOOL" in r) or ("FILE" in r and "NONBOOL" in r):
-            return "FILE_NON_BOOL"
-        if "FILE_NOT_DIAG" in r or ("FILE" in r and "NOT_DIAG" in r) or ("FILE" in r and "NODIAG" in r):
-            return "FILE_NOT_DIAG"
-        if "FILE_ZERO" in r or ("FILE" in r and "ZERO" in r):
-            return "FILE_ZERO"
-        return r
-p_cert_file["policy"] = _policy_receipt(
+                # ---------- NA reason canonicalizer (C) ----------
+                if "_canonicalize_na_reason" not in globals():
+                    def _canonicalize_na_reason(reason: str | None) -> str:
+                        if not reason:
+                            return ""
+                        r = str(reason).upper()
+                        # AUTO
+                        if "NON_SQUARE" in r or "REQUIRES_SQUARE" in r or "NOT_SQUARE" in r:
+                            return "NON_SQUARE"
+                        if "LANE_ZERO" in r or "ZERO_LANE" in r or ("AUTO" in r and "ZERO" in r):
+                            return "LANE_ZERO"
+                        # FILE
+                        if "FILE_SHAPE" in r or ("FILE" in r and "SHAPE" in r):
+                            return "FILE_SHAPE"
+                        if "FILE_NON_BOOL" in r or ("FILE" in r and "NON_BOOL" in r) or ("FILE" in r and "NONBOOL" in r):
+                            return "FILE_NON_BOOL"
+                        if "FILE_NOT_DIAG" in r or ("FILE" in r and "NOT_DIAG" in r) or ("FILE" in r and "NODIAG" in r):
+                            return "FILE_NOT_DIAG"
+                        if "FILE_ZERO" in r or ("FILE" in r and "ZERO" in r):
+                            return "FILE_ZERO"
+                        return r
+                p_cert_file["policy"] = _policy_receipt(
                         mode="projected:file",
                         posed=True,
                         lane_policy="file projector",
