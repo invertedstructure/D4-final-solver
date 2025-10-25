@@ -3405,24 +3405,45 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
 
 
 
+
     
                                   
                     
 
-
-
-
 # ────────────────── Single, always-visible solver button ──────────────────
 st.divider()
+
+# init debounce flag once
+if "_solver_busy" not in st.session_state:
+    st.session_state["_solver_busy"] = False
+
 run_btn_ab = st.button(
     "Run solver (one press → 5 certs; +1 if FILE)",
-    key="btn_svr_run_global"
+    key="btn_svr_run_global",
+    disabled=st.session_state["_solver_busy"],
+    help="Writes strict, projected(auto/file), freezer, and A/B certs into the current bundle."
 )
+
 if run_btn_ab:
-    _svr_run()
-    lr = st.session_state.get("last_solver_result") or {}
-    st.success(f"Solver wrote {lr.get('count', 0)} certs.")
+    if st.session_state["_solver_busy"]:
+        st.info("Solver is already running — debounced.")
+    else:
+        st.session_state["_solver_busy"] = True
+        try:
+            if "_svr_run" in globals():
+                _svr_run()
+                lr = st.session_state.get("last_solver_result") or {}
+                st.success(f"Solver wrote {lr.get('count', 0)} certs.")
+            else:
+                st.error("`_svr_run()` is not defined in this scope.")
+        except Exception as e:
+            st.error(f"Solver run failed: {e}")
+        finally:
+            st.session_state["_solver_busy"] = False
 # ──────────────────────────────────────────────────────────────────────────
+
+
+
 
 
 
