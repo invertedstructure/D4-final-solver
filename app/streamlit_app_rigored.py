@@ -8336,6 +8336,7 @@ with safe_expander("Exports", expanded=False):
             except Exception as e:
                 st.error(f"Flush failed: {e}")
 
+# Instead of nesting, just keep a single expander
 with st.expander("C1 · Health & Roll-up", expanded=False):
     cols = st.columns([2,1,1])
     with cols[0]:
@@ -8366,8 +8367,9 @@ with st.expander("C1 · Health & Roll-up", expanded=False):
         else:
             st.warning("Baseline signatures file not found. See template below.")
 
-    with st.expander("Baseline file template (configs/baseline_signatures.json)", expanded=False):
-        st.code('{\n  "signatures": [\n    ["00","01","10"]\n  ]\n}\n', language="json")
+# Only keep the inner expander if needed
+with st.expander("Baseline file template (configs/baseline_signatures.json)", expanded=False):
+    st.code('{\n  "signatures": [\n    ["00","01","10"]\n  ]\n}\n', language="json")
 
 
 
