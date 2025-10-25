@@ -1427,28 +1427,49 @@ def safe_expander(label: str, expanded: bool = False):
             yield
         return _noop()
         
-def policy_label_from_cfg(cfg: dict) -> str:
-    if not cfg or not cfg.get("enabled_layers"):
-        # Add some default return or action here
-        return "default_policy"
-    # Rest of your function logic
-    # For example:
-    return "some_policy_label"
 # ---- Policy/config helpers (minimal, canonical) ----
-def cfg_strict() -> dict:
+from typing import Dict, List, Optional, Tuple
+
+def cfg_strict() -> Dict:
+    """Strict mode: no projected layers."""
     return {
-        "enabled_layers": [],
-        "source": {},               # no layer sources in strict
+        "enabled_layers": [],       # no projected layers
+        "source": {},               # no projector sources
         "projector_files": {},      # none
     }
 
-def cfg_projected_base() -> dict:
+def cfg_projected_base() -> Dict:
+    """Projected@k=3 (AUTO) base config."""
     return {
         "enabled_layers": [3],      # we project layer 3
-        "source": {"3": "auto"},    # default projector source
-        "projector_files": {},      # filled only for 'file'
+        "source": {"3": "auto"},    # projector source for k=3
+        "projector_files": {},      # filled only when source=='file'
     }
 
+def policy_label_from_cfg(cfg: Dict, *, n3: Optional[int] = None) -> str:
+    """
+    Canonical string label for current policy.
+    Returns one of:
+      - "strict"
+      - "projected(columns@k=3,auto)"
+      - "projected(columns@k=3,file)"
+    Falls back to "default_policy" if cfg is malformed.
+    """
+    if not isinstance(cfg, dict):
+        return "default_policy"
+
+    enabled = cfg.get("enabled_layers") or []
+    if 3 not in enabled:
+        return "strict"
+
+    src_map = cfg.get("source") or {}
+    src = (src_map.get("3") or "auto").strip().lower()
+    if src == "file":
+        return "projected(columns@k=3,file)"
+    if src == "auto":
+        return "projected(columns@k=3,auto)"
+    # unknown source → still projected, but mark as default
+    return "projected(columns@k=3,auto)"
 
 # --- Policy receipt (single source of truth; used by solver writes) ---
 if "_policy_receipt" not in globals():
@@ -1457,26 +1478,28 @@ if "_policy_receipt" not in globals():
         mode: str = "strict",
         posed: bool = True,
         lane_policy: str = "",
-        lanes: list | None = None,
-        projector_source: str | None = None,
-        projector_hash: str | None = None,
-        projector_shape: tuple | list | None = None,
-        projector_idempotent: bool | None = None,
-        n3: int | None = None
-    ) -> dict:
-        # Build a minimal, auditable policy receipt. Intentionally light-touch
-        # and backwards compatible with previous cert expectations.
+        lanes: Optional[List[int]] = None,
+        projector_source: Optional[str] = None,
+        projector_hash: Optional[str] = None,
+        projector_shape: Optional[Tuple[int, int]] = None,
+        projector_idempotent: Optional[bool] = None,
+        n3: Optional[int] = None
+    ) -> Dict:
+        """
+        Build a minimal, auditable policy receipt.
+        Backwards compatible with existing certs.
+        """
         mode_l = (mode or "").lower()
-        if "projected" in mode_l and "file" in mode_l:
+        if ("projected" in mode_l) and ("file" in mode_l):
             canon = "projected(columns@k=3,file)"
         elif "projected" in mode_l:
             canon = "projected(columns@k=3,auto)"
         else:
             canon = "strict"
 
-        rec = {
-            "canon": canon,              # canonical policy label
-            "posed": bool(posed),        # whether projector decision was actually evaluated
+        rec: Dict = {
+            "canon": canon,           # canonical policy label
+            "posed": bool(posed),     # projector decision actually evaluated?
         }
 
         # Lane policy + lanes (normalized to {0,1})
@@ -1490,17 +1513,19 @@ if "_policy_receipt" not in globals():
             rec["lanes"] = lm
             if n3 is None:
                 n3 = len(lm)
-            # Light diagnostics (useful in coverage sampling)
-            rec["lane_sum"] = int(sum(lm))
-            rec["lane_density"] = (float(sum(lm)) / float(n3)) if (n3 and n3 > 0) else 0.0
+            # lightweight diagnostics
+            lane_sum = int(sum(lm))
+            rec["lane_sum"] = lane_sum
+            rec["lane_density"] = (float(lane_sum) / float(n3)) if (n3 and n3 > 0) else 0.0
+            rec["lanes_str"] = "".join("1" if b else "0" for b in lm)
 
         # Projector (FILE) metadata
         if "file" in canon:
-            pj = {"source": str(projector_source or "file")}
+            pj: Dict = {"source": str(projector_source or "file")}
             if projector_hash:
                 pj["hash"] = str(projector_hash)
             if projector_shape:
-                pj["shape"] = list(projector_shape) if not isinstance(projector_shape, (list, tuple)) else list(projector_shape)
+                pj["shape"] = [int(projector_shape[0]), int(projector_shape[1])]
             elif n3 is not None and n3 >= 0:
                 pj["shape"] = [int(n3), int(n3)]
             if projector_idempotent is not None:
@@ -1509,18 +1534,61 @@ if "_policy_receipt" not in globals():
 
         return rec
 
-  
+# (optional) projector-file validator; safe no-op defaults removed
+def validate_projector_file_strict(P: List[List[int]], *, n3: int) -> Dict:
+    """
+    Validate FILE projector Π for projected@k=3 semantics:
+      - shape n3 x n3
+      - boolean entries {0,1}
+      - diagonal-only (Π == diag(diag(Π)))
+      - idempotent over F2 (Π^2 == Π)
+      - non-trivial (sum(diag) > 0)
+    Returns a report dict with 'ok' and reasons, plus derived lanes.
+    """
+    report: Dict = {"ok": False, "reasons": [], "lanes": []}
 
-# Additional code that uses cfg, properly indented
-src = (cfg.get("source") or {}).get("3", "auto")
-mode = "file" if src == "file" else "auto"
-# keep your established label shape
-result_label = f"projected(columns@k=3,{mode})"        
+    # shape
+    if not isinstance(P, list) or len(P) != n3 or any(not isinstance(row, list) or len(row) != n3 for row in P):
+        report["reasons"].append("SHAPE_BAD")
+        return report
+
+    # boolean + collect diag
+    diag_bits: List[int] = []
+    for i in range(n3):
+        row_ok = True
+        for j in range(n3):
+            v = P[i][j]
+            if int(v) not in (0, 1):
+                report["reasons"].append("NON_BOOLEAN_ENTRY")
+                row_ok = False
+                break
+            # non-diagonal check
+            if i != j and int(v) != 0:
+                report["reasons"].append("NON_DIAGONAL")
+                row_ok = False
+                break
+        if not row_ok:
+            return report
+        diag_bits.append(int(P[i][i]))
+
+    # idempotent (diag projector is idempotent iff entries are 0/1)
+    # but we check explicitly anyway (Π^2 over F2)
+    # For diagonal, Π^2 == diag(diag_bits^2) == diag(diag_bits)
+    # So this holds automatically if boolean and diagonal.
+    # Still keep a flag for clarity:
+    idempotent = True
+    report["idempotent"] = idempotent
+
+    # non-trivial projector
+    if sum(diag_bits) == 0:
+        report["reasons"].append("ZERO_PROJECTOR")
+        return report
+
+    report["lanes"] = [int(b) & 1 for b in diag_bits]
+    report["ok"] = (len(report["reasons"]) == 0)
+    return report
 
 
-# (optional) projector-file validator; keep as no-op if you don't need it yet
-def validate_projector_file_strict(P, *, n3: int, lane_mask: list[int]):
-    return  # implement later if you want strict checks for Π
 
 # ---- compat adapter for current_inputs_sig (handles 0-arg & 1-arg versions) ----
 def _current_inputs_sig_compat(*args, **kwargs):
