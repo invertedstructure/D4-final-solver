@@ -3051,18 +3051,31 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
     
                     # Write projected(FILE) cert (optional but useful)
                     p_cert_file = _svr_cert_common(ib, rc, "projected(columns@k=3,file)")
+                    
+                    # results payload first
                     p_cert_file["results"] = {
-                        # policy receipt for FILE projector
-                        p_cert_file["policy"] = _policy_receipt(mode="projected:file", posed=True, lane_policy="file projector", lanes=lanes, projector_source="file", projector_hash=projector_hash)
-                        
                         "out": {"2": {"eq": proj_file_k2}, "3": {"eq": proj_file_k3}},
                         "projector_hash": projector_hash,
                         "lanes": list(lanes or []),
                     }
+                    
+                    # add policy receipt as a separate top-level field
+                    p_cert_file["policy"] = _policy_receipt(
+                        mode="projected:file",
+                        posed=True,
+                        lane_policy="file projector",
+                        lanes=lanes,
+                        projector_source="file",
+                        projector_hash=projector_hash,
+                    )
+                    
                     _svr_apply_sig8(p_cert_file, embed_sig_auto)
                     p_proj_file = _svr_write_cert_in_bundle(
-                        _bundle_dir, _svr_bundle_fname("projected_file", district_id, sig8), p_cert_file
+                        _bundle_dir,
+                        _svr_bundle_fname("projected_file", district_id, sig8),
+                        p_cert_file,
                     )
+
     
                     # Freezer status
                     freezer_status = "OK"
