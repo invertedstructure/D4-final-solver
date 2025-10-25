@@ -101,6 +101,167 @@ def _guarded_guarded_atomic_write_json(path: Path, payload: dict) -> None:
     os.replace(tmp, path)
 
 # === /canonical block ===
+# ───────────────────────────── C1: Coverage rollup + Health ping ─────────────────────────────
+# Helpers are namespaced with _c1_ to avoid collisions.
+
+
+def _c1_paths():
+    """Return (coverage.jsonl, rollup.csv). Creates logs/reports/ if needed."""
+    base = _Path("logs") / "reports"
+    base.mkdir(parents=True, exist_ok=True)
+    return (base / "coverage.jsonl", base / "coverage_rollup.csv")
+
+def _c1_iter_jsonl(p: _Path):
+    """Yield JSON objects from a JSONL file, skipping bad lines."""
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield _json.loads(line)
+                except Exception:
+                    # ignore malformed line
+                    continue
+    except FileNotFoundError:
+        return
+
+def _c1_rollup_rows(jsonl_path: _Path):
+    """
+    Aggregate coverage.jsonl by prox_label, computing counts and mean numeric metrics.
+    Numeric keys are optional; missing values are ignored.
+    """
+    buckets = {}
+    num_keys = ("sel_mismatch_rate", "offrow_mismatch_rate", "ker_mismatch_rate", "contradiction_rate")
+    for rec in _c1_iter_jsonl(jsonl_path):
+        label = (rec.get("prox_label") or "UNKNOWN")
+        b = buckets.setdefault(label, {"_n": 0})
+        b["_n"] += 1
+        for k in num_keys:
+            v = rec.get(k, None)
+            if isinstance(v, (int, float)):
+                b[k] = b.get(k, 0.0) + float(v)
+
+    rows = []
+    for label, b in buckets.items():
+        n = b.pop("_n", 0)
+        def mean_for(k):
+            return (b.get(k, None) / n) if (n and (k in b)) else None
+        rows.append({
+            "prox_label": label,
+            "count": n,
+            "mean_sel_mismatch_rate": mean_for("sel_mismatch_rate"),
+            "mean_offrow_mismatch_rate": mean_for("offrow_mismatch_rate"),
+            "mean_ker_mismatch_rate": mean_for("ker_mismatch_rate"),
+            "mean_contradiction_rate": mean_for("contradiction_rate"),
+        })
+    rows.sort(key=lambda r: r["prox_label"])
+    return rows
+
+def _c1_write_rollup_csv(rows, out_path: _Path):
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    hdr = [
+        "prox_label", "count",
+        "mean_sel_mismatch_rate", "mean_offrow_mismatch_rate",
+        "mean_ker_mismatch_rate", "mean_contradiction_rate"
+    ]
+    # atomic-ish write
+    tmp = out_path.with_suffix(out_path.suffix + ".tmp")
+    with open(tmp, "w", newline="", encoding="utf-8") as f:
+        w = _csv.DictWriter(f, fieldnames=hdr)
+        w.writeheader()
+        for r in rows:
+            w.writerow({k: r.get(k) if r.get(k) is not None else "" for k in hdr})
+    tmp.replace(out_path)
+
+def _c1_health_ping(jsonl_path: _Path, tail: int = 50):
+    """
+    Compute mean mismatch rates over the last `tail` events in coverage.jsonl.
+    Returns dict or None if no data.
+    """
+    buf = []
+    for rec in _c1_iter_jsonl(jsonl_path):
+        buf.append(rec)
+        if len(buf) > tail:
+            buf.pop(0)
+    if not buf:
+        return None
+
+    def avg(key):
+        vals = [float(x.get(key)) for x in buf if isinstance(x.get(key), (int, float))]
+        return (sum(vals) / len(vals)) if vals else None
+
+    return {
+        "tail": len(buf),
+        "mean_sel_mismatch_rate": avg("sel_mismatch_rate"),
+        "mean_offrow_mismatch_rate": avg("offrow_mismatch_rate"),
+        "mean_ker_mismatch_rate": avg("ker_mismatch_rate"),
+        "mean_contradiction_rate": avg("contradiction_rate"),
+    }
+
+def _c1_badge(hp: dict):
+    """
+    Tiny UI chip classifier. Thresholds are conservative and easy to tweak.
+    Returns (emoji, label, color_name).
+    """
+    s = hp.get("mean_sel_mismatch_rate") or 0.0
+    o = hp.get("mean_offrow_mismatch_rate") or 0.0
+    k = hp.get("mean_ker_mismatch_rate") or 0.0
+    worst = max(s, o, k)
+    if worst <= 0.05:
+        return "✅", "Healthy", "green"
+    if worst <= 0.12:
+        return "🟨", "Watch", "orange"
+    return "🟥", "Alert", "red"
+
+# ── UI: Coverage rollup + Health ping ──
+with st.expander("C1 — Coverage rollup & health ping", expanded=False):
+    cov_path, csv_out = _c1_paths()
+    st.caption(f"Source: {cov_path} · Output: {csv_out}")
+
+    # Health chip (tail window)
+    hp = _c1_health_ping(cov_path, tail=50)
+    if hp is None:
+        st.info("coverage.jsonl not found yet — run the solver to produce coverage events.")
+    else:
+        emoji, label, _ = _c1_badge(hp)
+        def fmt(x): 
+            return "—" if x is None else f"{x:.3f}"
+        st.markdown(
+            f"**C1 Health** {emoji} {label} · tail={hp['tail']} · "
+            f"sel={fmt(hp.get('mean_sel_mismatch_rate'))} · "
+            f"off={fmt(hp.get('mean_offrow_mismatch_rate'))} · "
+            f"ker={fmt(hp.get('mean_ker_mismatch_rate'))} · "
+            f"ctr={fmt(hp.get('mean_contradiction_rate'))}"
+        )
+
+    # Rollup button
+    if cov_path.exists():
+        if st.button("Build rollup CSV (group by prox_label)", key="btn_c1_rollup"):
+            rows = _c1_rollup_rows(cov_path)
+            if not rows:
+                st.warning("No rows parsed from coverage.jsonl.")
+            else:
+                _c1_write_rollup_csv(rows, csv_out)
+                st.success(f"Wrote {len(rows)} rows → {csv_out}")
+                # Show a small table without requiring pandas
+                st.table([{k: (None if v is None else (round(v, 6) if isinstance(v, float) else v))
+                           for k, v in r.items()} for r in rows])
+                try:
+                    # Optional: download
+                    st.download_button(
+                        "Download rollup.csv",
+                        data=open(csv_out, "rb").read(),
+                        file_name="coverage_rollup.csv",
+                        mime="text/csv",
+                        key="btn_c1_download_rollup",
+                    )
+                except Exception:
+                    pass
+# ─────────────────────────────────────────────────────────────────────────────────────────────
+
+
 # ---------- Policy receipt (B) ----------
 def _policy_receipt(*, mode: str, posed: bool, lane_policy: str = "", lanes: list[int] | None = None,
                     projector_source: str = "", projector_hash: str | None = None,
