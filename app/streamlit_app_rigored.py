@@ -3085,11 +3085,11 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
                          }
 
                          # COVERAGE_JSONL fallback if not declared globally
-                         _COV_JSONL = COVERAGE_JSONL if "COVERAGE_JSONL" in globals() else (Path("reports") / "coverage_sampling.jsonl")
-                         _atomic_append_jsonl(_COV_JSONL, coverage_row)
-                         st.caption(f"Coverage row appended · σ={mem.get('sig_str','')} · {mem.get('status')} / {mem.get('proximity')}")
-                     except Exception as _c1e:
-                         st.warning(f"C1 coverage row not appended: {_c1e}")
+                        _COV_JSONL = COVERAGE_JSONL if "COVERAGE_JSONL" in globals() else (Path("reports") / "coverage_sampling.jsonl")
+                        _atomic_append_jsonl(_COV_JSONL, coverage_row)
+                        st.caption(f"Coverage row appended · σ={mem.get('sig_str','')} · {mem.get('status')} / {mem.get('proximity')}")
+                    except Exception as _c1e:
+                        st.warning(f"C1 coverage row not appended: {_c1e}")
 
                      # ----------------- WRITE CERTS -----------------
 
