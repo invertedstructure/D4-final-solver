@@ -1429,6 +1429,11 @@ def safe_expander(label: str, expanded: bool = False):
         
 def policy_label_from_cfg(cfg: dict) -> str:
     if not cfg or not cfg.get("enabled_layers"):
+        # Add some default return or action here
+        return "default_policy"
+    # Rest of your function logic
+    # For example:
+    return "some_policy_label"
 # ---- Policy/config helpers (minimal, canonical) ----
 def cfg_strict() -> dict:
     return {
