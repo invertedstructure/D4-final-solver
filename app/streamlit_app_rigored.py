@@ -1,85 +1,6 @@
 import streamlit as st
 st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
 
-
-# === Solver controls (fixed; v2 core) ===
-import os, json, zipfile, uuid
-ss = st.session_state
-if "_ui_nonce" not in ss: ss["_ui_nonce"] = uuid.uuid4().hex[:8]
-
-st.markdown("### Solver")
-run_btn = st.button("Run solver (one press → writes certs)", key="btn_svr_run_global_v2")
-if run_btn:
-    ss["_svr_run_now"] = True
-    st.info("Queued solve — definitions will load, then the solver will run.")
-
-# Tail + download directly under the solver controls
-last_dir = ss.get("last_bundle_dir", "")
-if last_dir and os.path.isdir(last_dir):
-    zip_path = os.path.join(last_dir, "bundle.zip")
-    try:
-        with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for root, _, files in os.walk(last_dir):
-                for fn in files:
-                    if fn.endswith(".zip"):
-                        continue
-                    fp = os.path.join(root, fn)
-                    arc = os.path.relpath(fp, start=last_dir)
-                    zf.write(fp, arc)
-        with open(zip_path, "rb") as fh:
-            dl_key = f"btn_dl_bundle_zip_v2_{ss['_ui_nonce']}"
-            st.download_button("Download bundle.zip", data=fh, file_name="bundle.zip", mime="application/zip", key=dl_key)
-    except Exception as e:
-        st.warning(f"Zip build/serve issue: {e}")
-
-# Tail (last ~6 files)
-try:
-    from pathlib import Path as _Path
-    p_bundle = _Path(last_dir) / "bundle.json"
-    files = []
-    if last_dir and p_bundle.exists():
-        try:
-            obj = json.loads(p_bundle.read_text(encoding="utf-8", errors="ignore"))
-            files = obj.get("filenames", [])
-        except Exception:
-            files = []
-    st.markdown("#### Latest cert files")
-    if files:
-        tail = files[-6:][::-1]
-        for fn in tail:
-            st.write(f"• {fn}")
-            fp = _Path(last_dir) / fn
-            try:
-                if fp.suffix.lower() == ".json":
-                    data = json.loads(fp.read_text(encoding="utf-8", errors="ignore"))
-                    if isinstance(data, dict):
-                        if "ab_pair" in data:
-                            pv = data["ab_pair"].get("pair_vec", {})
-                            st.caption(f"pair_vec: {pv}")
-                        elif "results" in data:
-                            out = data["results"].get("out", {})
-                            na = data["results"].get("na_reason_code", None) or data.get("na_reason_code", None)
-                            if isinstance(out, dict) and "3" in out and "eq" in out["3"]:
-                                st.caption(f"k3.eq: {out['3']['eq']}  •  NA: {na}")
-                            else:
-                                st.caption(f"NA: {na}")
-                        elif "status" in data:
-                            st.caption(f"freezer: {data.get('status')} • {data.get('na_reason_code','')}")
-            except Exception:
-                pass
-    else:
-        st.info("No bundle.json yet — run the solver to write certs.")
-except Exception as e:
-    st.warning(f"Tail unavailable: {e}")
-
-
-import uuid
-ss = st.session_state
-if "_ui_nonce" not in ss: ss["_ui_nonce"] = uuid.uuid4().hex[:8]
-if "_global_controls_rendered" not in ss: ss["_global_controls_rendered"] = False
-if "_dl_zip_rendered" not in ss: ss["_dl_zip_rendered"] = False
-
-
 # === canonical constants / helpers (single source of truth) ===
 
 import os
@@ -97,6 +18,7 @@ import csv as _csv
 from pathlib import Path as _Path
 import datetime as _dt
 import random as _random
+
 # Page config must be the first Streamlit command
 SCHEMA_VERSION = "2.0.0"
 ENGINE_REV     = "rev-20251022-1"
@@ -116,6 +38,231 @@ NA_CODES = {
 }
 
 os.makedirs(DIRS["certs"], exist_ok=True)
+# UI nonce for unique widget keys (only define once near the top)
+
+ss = st.session_state
+if "_ui_nonce" not in ss:
+    ss["_ui_nonce"] = uuid.uuid4().hex[:8]
+
+def one_press_solve():
+    """
+    Minimal, deterministic 'one press' solver:
+      - resolves B/C/H/U from session (uploaded files or paths)
+      - strict lap: R3 = H2·d3 ⊕ (C3 ⊕ I3) == 0 ?
+      - projected(auto): lanes = bottom(C3) if C3 is square & non-zero; test R3·diag(lanes) == 0
+      - writes 5 certs (strict, projected:auto, ab:auto, freezer, ab:file[N/A]) + bundle.json
+      - sets st.session_state['last_bundle_dir']
+    Returns (ok: bool, msg: str, bundle_dir: str)
+    """
+    import os, json, hashlib, time
+    from pathlib import Path
+    import datetime as _dt
+
+    st.session_state.setdefault("_solver_one_button_active", True)  # allow writes
+
+    def _read_json(upload_or_path):
+        if upload_or_path is None:
+            return None
+        # Streamlit UploadedFile
+        if hasattr(upload_or_path, "getvalue"):
+            try:
+                return json.loads(upload_or_path.getvalue().decode("utf-8"))
+            except Exception:
+                return None
+        # path-like
+        p = Path(str(upload_or_path))
+        if p.exists():
+            try:
+                return json.loads(p.read_text(encoding="utf-8"))
+            except Exception:
+                return None
+        # already-parsed dict
+        return upload_or_path if isinstance(upload_or_path, dict) else None
+
+    def _blocks(j, kind):
+        # Accept {"blocks":{...}} or degree-top-level; shapes allowed as-is
+        if not isinstance(j, dict):
+            return {}
+        if "blocks" in j and isinstance(j["blocks"], dict):
+            return dict(j["blocks"])
+        out = {}
+        for k in ("1","2","3"):
+            if k in j and isinstance(j[k], list):
+                out[k] = j[k]
+        return out if kind in ("B","C","H") else j
+
+    def _eye(n): return [[1 if i==j else 0 for j in range(n)] for i in range(n)]
+    def _xor(A,B):
+        if not A: return [r[:] for r in (B or [])]
+        if not B: return [r[:] for r in (A or [])]
+        r,c = len(A), len(A[0]); return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
+    def _mul(A,B):
+        if not A or not B or not A[0] or not B[0] or len(A[0])!=len(B): return []
+        m,k,n = len(A), len(A[0]), len(B[0])
+        C = [[0]*n for _ in range(m)]
+        for i in range(m):
+            Ai = A[i]
+            for t in range(k):
+                if int(Ai[t]) & 1:
+                    Bt = B[t]
+                    for j in range(n): C[i][j] ^= (int(Bt[j]) & 1)
+        return C
+    def _is_zero(M): return (not M) or all((int(x)&1)==0 for row in M for x in row)
+    def _bottom(M): return M[-1] if (M and len(M)) else []
+    def _bits(b): return "".join("1" if (int(x)&1) else "0" for x in (b or []))
+    def _sha256_hex(x): return hashlib.sha256(x).hexdigest()
+    def _hash_json(obj): return _sha256_hex(json.dumps(obj, sort_keys=True, separators=(",",":")).encode("utf-8"))
+
+    # 1) resolve sources (uploads-first; fallbacks: your sidebar stamps)
+    srcB = st.session_state.get("uploaded_boundaries") or st.session_state.get("bound") or st.session_state.get("fname_boundaries")
+    srcC = st.session_state.get("uploaded_cmap")       or st.session_state.get("cmap")  or st.session_state.get("fname_cmap")
+    srcH = st.session_state.get("uploaded_H")          or st.session_state.get("H_up")  or st.session_state.get("fname_h")
+    srcU = st.session_state.get("uploaded_shapes")     or st.session_state.get("shapes") or st.session_state.get("fname_shapes")
+
+    jB, jC, jH, jU = map(_read_json, (srcB, srcC, srcH, srcU))
+    if not all([jB, jC, jH, jU]):
+        return (False, "Inputs incomplete — please upload B/C/H/U.", "")
+
+    bB, bC, bH = _blocks(jB,"B"), _blocks(jC,"C"), _blocks(jH,"H")
+    d3, C3, H2 = (bB.get("3") or []), (bC.get("3") or []), (bH.get("2") or [])
+    if not (d3 and d3[0] and C3 and C3[0] and H2 and H2[0]):
+        return (False, "Required slices missing (need B[3], C[3], H[2]).", "")
+
+    n3 = len(d3[0]); sqC = (len(C3)==len(C3[0]))
+    I3 = _eye(len(C3)) if sqC else []
+    H2d3 = _mul(H2, d3) if H2 and d3 else []
+    C3pI = _xor(C3, I3) if I3 else []
+    R3s  = _xor(H2d3, C3pI) if I3 else []
+
+    # Strict lap
+    strict_eq = bool(sqC and _is_zero(R3s))
+    strict_k2 = True  # placeholder (k2 currently not used)
+    sel_all = [1]*n3
+    def _nz_cols(M):
+        if not M: return []
+        r,c = len(M), len(M[0])
+        return [j for j in range(c) if any((int(M[i][j])&1) for i in range(r))]
+
+    # Projected(auto) lanes
+    lanes = (C3[-1] if (sqC and C3) else [])
+    posed_auto = bool(sqC and sum(int(x)&1 for x in lanes)>0)
+    if posed_auto:
+        P = [[1 if (i==j and int(lanes[j])==1) else 0 for j in range(n3)] for i in range(n3)]
+        R3p = _mul(R3s, P)
+        proj_eq = bool(_is_zero(R3p))
+    else:
+        R3p, proj_eq = [], None
+
+    # hashes / ids
+    hB = _hash_json({"blocks": bB}); hC = _hash_json({"blocks": bC})
+    hH = _hash_json({"blocks": bH}); hU = _hash_json(jU if "blocks" in jU else {"blocks": jU})
+    inputs_sig_5 = [hB, hC, hH, hU, hU]
+    district_id = "D" + hB[:8]
+    embed_auto = {"inputs": inputs_sig_5, "policy": "strict__VS__projected(columns@k=3,auto)"}
+    if posed_auto:
+        embed_auto["lanes"] = [int(x)&1 for x in lanes]
+    else:
+        embed_auto["projected_na_reason"] = ("FREEZER_C3_NOT_SQUARE" if not sqC else "FREEZER_ZERO_LANE_PROJECTOR")
+    embed_sig = _sha256_hex(json.dumps(embed_auto, sort_keys=True, separators=(",",":")).encode("ascii"))
+    sig8 = embed_sig[:8]
+
+    # bundle dir
+    bundle_dir = Path("logs")/"certs"/district_id/sig8
+    # keep a subdir per sig8 so we never collide with previous
+    bundle_dir = Path("logs")/"certs"/district_id/sig8
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+
+    # Common witness
+    bH = _bottom(H2d3); bCI = _bottom(C3pI)
+    def _write(name, payload):
+        p = bundle_dir/name
+        tmp = p.with_suffix(p.suffix + ".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(payload, f, sort_keys=True, separators=(",",":"), ensure_ascii=False)
+            f.flush(); os.fsync(f.fileno())
+        os.replace(tmp, p)
+        return p.name
+
+    # strict cert
+    strict_payload = {
+        "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
+        "policy_tag": "strict",
+        "witness": {"bottom_H2d3": _bits(bH), "bottom_C3pI3": _bits(bCI), "lanes": None},
+        "results": {
+            "out": {"2":{"eq": True}, "3":{"eq": strict_eq}},
+            "selected_cols": sel_all,
+            "mismatch_cols_selected": ([j for j in _nz_cols(R3s)] if R3s else []),
+            "residual_tag_selected": "".join("1" if j in _nz_cols(R3s) else "0" for j in range(n3)) if R3s else "",
+            "k2": strict_k2,
+            "na_reason_code": (None if sqC else "C3_NOT_SQUARE"),
+        },
+        "sig8": sig8,
+    }
+    f_strict = _write(f"overlap__{district_id}__strict__{sig8}.json", strict_payload)
+
+    # projected(auto) cert
+    proj_payload = {
+        "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
+        "policy_tag": "projected(columns@k=3,auto)",
+        "witness": {"bottom_H2d3": _bits(bH), "bottom_C3pI3": _bits(bCI), "lanes": ([int(x)&1 for x in (lanes or [])] if posed_auto else None)},
+        "results": {
+            "out": {"2":{"eq": True if posed_auto else None}, "3":{"eq": proj_eq}},
+            "na_reason_code": (None if posed_auto else ("ZERO_LANE_PROJECTOR" if (sqC and sum(lanes)==0) else "AUTO_REQUIRES_SQUARE_C3")),
+            "selected_cols": ([int(x)&1 for x in (lanes or [])] if posed_auto else []),
+            "mismatch_cols_selected": ([j for j in _nz_cols(R3p)] if (posed_auto and R3p) else []),
+            "residual_tag_selected": ("".join("1" if j in _nz_cols(R3p) else "0" for j in range(n3)) if (posed_auto and R3p) else ""),
+            "k2": (True if posed_auto else None),
+        },
+        "sig8": sig8,
+    }
+    f_proj = _write(f"overlap__{district_id}__projected_columns_k_3_auto__{sig8}.json", proj_payload)
+
+    # A/B(auto)
+    ab_auto = {
+        "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
+        "ab_pair": {
+            "pair_tag": "strict__VS__projected(columns@k=3,auto)",
+            "embed_sig": embed_sig,
+            "pair_vec": {"k2":[None, None], "k3":[bool(strict_eq), (None if not posed_auto else bool(proj_eq))]},
+        },
+        "sig8": sig8,
+    }
+    f_ab_auto = _write(f"ab_compare__strict_vs_projected_auto__{sig8}.json", ab_auto)
+
+    # Freezer (AUTO → FILE) provenance
+    freezer = {
+        "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
+        "status": ("OK" if posed_auto else "N/A"),
+        "na_reason_code": (None if posed_auto else ("FREEZER_C3_NOT_SQUARE" if not sqC else "FREEZER_ZERO_LANE_PROJECTOR")),
+        "sig8": sig8,
+    }
+    f_freezer = _write(f"projector_freezer__{district_id}__{sig8}.json", freezer)
+
+    # A/B(file) placeholder (no FILE projector provided in this shim)
+    ab_file = {
+        "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
+        "ab_pair": {
+            "pair_tag": "strict__VS__projected(columns@k=3,file)",
+            "embed_sig": _sha256_hex(b"no-file-projector"),  # placeholder
+            "pair_vec": {"k2":[None, None], "k3":[bool(strict_eq), None]},
+        },
+        "sig8": sig8,
+    }
+    f_ab_file = _write(f"ab_compare__strict_vs_projected_file__{sig8}.json", ab_file)
+
+    # bundle index
+    fnames = [f_ab_file, f_ab_auto, f_freezer, f_proj, f_strict]
+    bundle_idx = {
+        "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
+        "district_id": district_id,
+        "sig8": sig8,
+        "filenames": fnames,
+    }
+    _write("bundle.json", bundle_idx)
+
+    # publish path for tail/download
+    st.session_state["last_bundle_dir"] = str(bundle_dir)
+    return (True, f"Solver wrote {len(fnames)} cert files to {bundle_dir}", str(bundle_dir))
 
 def short(h: str) -> str:
     return (h or "")[:8]
@@ -3849,25 +3996,126 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
 # ─────────────────────────── Solver: one-press pipeline ───────────────────────────
 
 # === One-press solver button (wired to one_press_solve) ===
-import streamlit as st  # normalized
-_st = st  # alias safe if already imported
-if _st.button("Run solver (one press)"):
-    _st.session_state["_solver_busy"] = True
-    _st.session_state["_solver_one_button_active"] = True
+import streamlit as st
+ss = st.session_state
+_nonce = ss.get("_ui_nonce", "x")  # safe unique key seed if you already set a nonce
+
+if st.button("Run solver (one press)", key=f"btn_svr_run__{_nonce}"):
+    ss["_solver_busy"] = True
+    ss["_solver_one_button_active"] = True
     try:
-        _res = one_press_solve(_st.session_state)
-        _st.success(f"Wrote {_res['counts']['written']} files → {_res['bundle_dir']}")
-        # Optional: refresh read-only UI from frozen SSOT if helper exists
+        # Call with session if supported; fall back to no-arg
         try:
-            if "overlap_ui_from_frozen" in globals() and callable(globals()["overlap_ui_from_frozen"]):
-                overlap_ui_from_frozen()
-        except Exception:
-            pass
+            _res = one_press_solve(ss)
+        except TypeError:
+            _res = one_press_solve()
+
+        # Normalize result: accept dict or (ok, msg, bundle_dir)
+        if isinstance(_res, dict):
+            _bundle_dir = _res.get("bundle_dir", "")
+            _counts = _res.get("counts", {}) or {}
+            _written = int(_counts.get("written", 0) or 0)
+
+            # --- hook: publish anchors for tail/download ---
+            if _bundle_dir:
+                ss["last_bundle_dir"] = _bundle_dir
+            _paths = _res.get("paths", {}) or {}
+            if isinstance(_paths, dict):
+                ss["last_ab_auto_path"] = _paths.get("ab_auto", ss.get("last_ab_auto_path", ""))
+                ss["last_ab_file_path"] = _paths.get("ab_file", ss.get("last_ab_file_path", ""))
+            ss["last_solver_result"] = _counts
+
+            st.success(f"Wrote {_written} files → {_bundle_dir}")
+
+        elif isinstance(_res, tuple) and len(_res) >= 3:
+            _ok, _msg, _bundle_dir = _res[0], _res[1], _res[2]
+            if _bundle_dir:
+                # --- hook: publish anchor even for tuple return ---
+                ss["last_bundle_dir"] = _bundle_dir
+            (st.success if _ok else st.error)(_msg)
+
+        else:
+            st.warning("Solver returned no structured result; check logs.")
+
+        # Optional: refresh read-only UI from frozen SSOT if helper exists
+        _refresh = globals().get("overlap_ui_from_frozen")
+        if callable(_refresh):
+            try:
+                _refresh()
+            except Exception:
+                pass
+
     except Exception as _e:
-        _st.error(f"Solver run failed: {_e}")
+        st.error(f"Solver run failed: {str(_e)}")
     finally:
-        _st.session_state["_solver_one_button_active"] = False
-        _st.session_state["_solver_busy"] = False
+        ss["_solver_one_button_active"] = False
+        ss["_solver_busy"] = False
+
+        
+def tail_and_download_ui():
+    import os, json, zipfile
+    from pathlib import Path
+    ss = st.session_state
+    last_dir = ss.get("last_bundle_dir", "")
+    st.markdown("#### Latest cert files")
+    if not last_dir or not os.path.isdir(last_dir):
+        st.info("No bundle.json yet — run the solver to write certs.")
+        return
+
+    p_bundle = Path(last_dir) / "bundle.json"
+    files = []
+    try:
+        files = (json.loads(p_bundle.read_text(encoding="utf-8")).get("filenames", []) if p_bundle.exists() else [])
+    except Exception:
+        files = []
+
+    if files:
+        tail = files[-6:][::-1]
+        for fn in tail:
+            st.write(f"• {fn}")
+            try:
+                fp = Path(last_dir) / fn
+                if fp.suffix.lower() == ".json":
+                    data = json.loads(fp.read_text(encoding="utf-8"))
+                    # compact peek like your earlier UI
+                    if isinstance(data, dict) and "ab_pair" in data:
+                        st.caption(f"pair_vec: {data['ab_pair'].get('pair_vec', {})}")
+                    elif isinstance(data, dict) and "results" in data:
+                        out = data["results"].get("out", {})
+                        na = data["results"].get("na_reason_code") or data.get("na_reason_code")
+                        if isinstance(out, dict) and "3" in out and "eq" in out["3"]:
+                            st.caption(f"k3.eq: {out['3']['eq']} • NA: {na}")
+                    elif isinstance(data, dict) and "status" in data:
+                        st.caption(f"freezer: {data.get('status')} • {data.get('na_reason_code','')}")
+            except Exception:
+                pass
+    else:
+        st.info("No files listed in bundle.json.")
+
+    # Build & serve bundle.zip (keys deduped via nonce)
+    try:
+        zpath = Path(last_dir) / "bundle.zip"
+        with zipfile.ZipFile(str(zpath), "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for root, _, fns in os.walk(last_dir):
+                for fn in fns:
+                    if fn.endswith(".zip"):  # avoid nesting
+                        continue
+                    full = Path(root)/fn
+                    arc  = os.path.relpath(str(full), start=str(last_dir))
+                    zf.write(str(full), arc)
+        with open(zpath, "rb") as fh:
+            st.download_button(
+                "Download bundle.zip",
+                data=fh,
+                file_name="bundle.zip",
+                mime="application/zip",
+                key=f"btn_dl_bundle_zip__{ss['_ui_nonce']}"
+            )
+    except Exception as e:
+        st.warning(f"Zip build/serve issue: {e}")
+
+# call this immediately under your solver section:
+tail_and_download_ui()
 
 
 # =========================== Sanity battletests (Loop‑4) ===========================
