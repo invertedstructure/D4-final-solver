@@ -1135,14 +1135,7 @@ LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 
-# =============================== TOP HELPERS — CANONICAL ===============================
-# This block replaces the previous duplicate helpers. Single Source of Truth (SSOT).
 
-# --- Imports expected to be available ---
-# import os, json, time, uuid, shutil, tempfile, hashlib
-# from pathlib import Path
-# import streamlit as st
-# from datetime import datetime, timezone
 
 # ------------------------- Hashing Helpers -------------------------
 def _deep_intify(o):
