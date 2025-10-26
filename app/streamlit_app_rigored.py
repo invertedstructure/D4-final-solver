@@ -1696,14 +1696,6 @@ def _current_inputs_sig_compat(*args, **kwargs):
 
 
 
-# ───────────────────────── Tabs — create once, early ─────────────────────────
-if not all(n in globals() for n in ("tab1","tab2","tab3","tab4","tab5")):
-    try:
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(["Unit", "Overlap", "Triangle", "Towers", "Export"])
-    except Exception as _e:
-        st.error("Tab construction failed.")
-        st.exception(_e)
-        st.stop()
 
 # ───────────────────────────────── SIDEBAR ───────────────────────────────────
 with st.sidebar:
@@ -1861,9 +1853,6 @@ def file_validation_failed() -> bool:
     """Convenience predicate: returns True if last attempt to use FILE Π failed validation."""
     return bool(st.session_state.get("_file_mode_error"))
 
-# --- ensure tabs exist even if earlier branches ran before creating them
-if "tab2" not in globals():
-    tab2
 
 
 
@@ -3752,14 +3741,29 @@ def _svr_run():
 
 
 
-             # ============================== Cert & Provenance ==============================
-with safe_expander("Cert & provenance (read‑only; solver writes bundles)", expanded=True):
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ============================== Cert & Provenance (lean, SSOT-aligned) ==============================
+with safe_expander("Cert & provenance (read-only; solver writes bundles)", expanded=True):
     import os, json, hashlib, platform, time
     from pathlib import Path
     from datetime import datetime
 
     # ---------- constants ----------
-    APP_VERSION    = globals().get("APP_VERSION", "v0.1-core")
+    SCHEMA_VERSION = globals().get("SCHEMA_VERSION", "2.0.0")
+    APP_VERSION    = globals().get("APP_VERSION",    "v0.1-core")
 
     class REASON:
         WROTE_CERT                      = "WROTE_CERT"
@@ -3797,15 +3801,14 @@ with safe_expander("Cert & provenance (read‑only; solver writes bundles)", exp
         return f"python-{platform.python_version()}"
 
     def _write_json_atomic(path: Path, obj: dict) -> None:
-        pass
-
+        """
+        single-writer discipline: only write when the solver one-button sets the flag.
+        outside that path, this becomes a no-op (read-only panel).
+        """
         try:
-            import streamlit as _st
-            if not _st.session_state.get('_solver_one_button_active', False):
-                # Read-only outside solver: drop the write
-                return
+            if not st.session_state.get('_solver_one_button_active', False):
+                return  # read-only outside solver
         except Exception:
-            # In non-Streamlit contexts, fall back to a direct atomic write
             pass
         path.parent.mkdir(parents=True, exist_ok=True)
         blob = json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -3823,59 +3826,7 @@ with safe_expander("Cert & provenance (read‑only; solver writes bundles)", exp
         except Exception:
             pass
 
-    # Safe debug writer (avoid DeltaGenerator in st.write payloads)
-    def _safe_write_json(obj, *, label: str | None = None):
-        def _coerce(x):
-            try:
-                json.dumps(x); return x
-            except Exception:
-                return str(x)
-        def _walk(v):
-            if isinstance(v, dict):
-                return {k: _walk(vv) for k, vv in v.items()}
-            if isinstance(v, (list, tuple)):
-                return [_walk(vv) for vv in v]
-            return _coerce(v)
-        safe = _walk(obj)
-        if label:
-            st.caption(label)
-        st.code(json.dumps(safe, ensure_ascii=False, indent=2))
-
-    # ---------- UI helpers ----------
-    def _chip(label: str, value: str, *, short=8):
-        vshort = (value or "")[:short]
-        st.markdown(
-            f"<span style='display:inline-block;padding:2px 6px;border-radius:8px;"
-            f"border:1px solid #ddd;font-size:12px;white-space:nowrap;"
-            f"margin-right:6px;background:#fafafa'>{label}: <b>{vshort}</b></span>",
-            unsafe_allow_html=True
-        )
-        return None
-
-    def _copybox(value: str, key: str):
-        st.text_input(label="copy", value=value or "", key=key,
-                      label_visibility="collapsed", disabled=True)
-        return None
-
-    def _delta_line(last_key, write_key):
-        if not last_key:
-            return "Δ first-write"
-        (li, lp, lv, lpj) = last_key
-        (ci, cp, cv, cpj) = write_key
-        parts = []
-        if lp != cp:
-            parts.append(f"Δ policy: {lp}→{cp}")
-        if lv != cv:
-            parts.append(f"Δ pass: {int(lv[0])}{int(lv[1])}→{int(cv[0])}{int(cv[1])}")
-        names = ["b_hash","C_hash","H_hash","U_hash","S_hash"]
-        for idx, (a,b) in enumerate(zip(li, ci)):
-            if a != b:
-                parts.append(f"Δ {names[idx]}")
-        if lpj != cpj and (cp == "projected:file" or lp == "projected:file"):
-            parts.append("Δ projector_hash")
-        return "; ".join(parts) or "Δ —"
-
-    # ---------- freeze snapshot (single read; SSOT-only) ----------
+    # ---------- SSOT snapshot (single read; no recompute) ----------
     ss  = st.session_state
     rc  = dict(ss.get("run_ctx") or {})
     out = dict(ss.get("overlap_out") or {})
@@ -3889,91 +3840,81 @@ with safe_expander("Cert & provenance (read‑only; solver writes bundles)", exp
         C_obj = io.parse_cmap({"blocks": {}})
     ib    = dict(ss.get("_inputs_block") or {})
 
-    # Freshness gate (SSOT-only)
-    stale = ssot_is_stale()
-    _toggle_key = ensure_unique_widget_key("allow_stale_ssot__cert")
-    allow_stale = False  # panel is read-only; writes only from solver press
-    if stale and not allow_stale:
-        st.warning("Inputs changed since last Overlap — run Overlap to refresh SSOT before writing or reporting.")
-        # Don’t stop; we only disable the write later.
+    # Freshness (never blocks UI; only influences write decision)
+    stale = False
+    if "ssot_is_stale" in globals() and callable(globals()["ssot_is_stale"]):
+        try: stale = bool(ssot_is_stale())
+        except Exception: stale = False
 
-    # Canonical, frozen sig + view
-    inputs_sig = current_inputs_sig(_ib=ib)
-
-    # Try to publish from pending once if IB was blank
-    def _publish_inputs_block_from_pending() -> bool:
-        ph = ss.get("_inputs_hashes_pending") or {}
-        pd = ss.get("_dims_pending") or {}
-        pf = ss.get("_filenames_pending") or {}
-        if not ph or not pd:
-            return False
-        ss["_inputs_block"] = {
-            "hashes": dict(ph),
-            "dims":   dict(pd),
-            "filenames": dict(pf),
-            # legacy top-level keys:
-            "boundaries_hash": ph.get("boundaries_hash",""),
-            "C_hash":          ph.get("C_hash",""),
-            "H_hash":          ph.get("H_hash",""),
-            "U_hash":          ph.get("U_hash",""),
-            "shapes_hash":     ph.get("shapes_hash",""),
-        }
-        return True
-
-        if (not ib) or (not ib.get("hashes") and not ib.get("boundaries_hash")):
-            if _publish_inputs_block_from_pending():
-                ib = dict(ss.get("_inputs_block") or {})
-                inputs_sig = current_inputs_sig(_ib=ib)
-    
-        # Raw SSOT toggle (debug)
-        pass  # raw SSOT debug removed
-    
-
-    # ---------- FILE Π validity & inputs completeness ----------
-    file_pi_valid   = bool(ss.get("file_pi_valid", True))
-    file_pi_reasons = list(ss.get("file_pi_reasons", []) or [])
- # --- derive 5-hash inputs_sig safely (used only for completeness gating) ---
-    ib = ss.get("_inputs_block") or {}
+    # derive inputs_sig safely from SSOT (U optional)
     h  = (ib.get("hashes") or {})
     inputs_sig = [
-    str(h.get("hash_d") or h.get("boundaries_hash") or h.get("B_hash") or ""),
-    str(h.get("hash_suppC") or h.get("C_hash") or ""),
-    str(h.get("hash_suppH") or h.get("H_hash") or ""),
-    str(h.get("hash_U") or h.get("U_hash") or ""),
-    str(h.get("hash_shapes") or h.get("S_hash") or h.get("shapes_hash") or ""),
-        ]
+        str(h.get("boundaries_hash") or h.get("B_hash") or ""),
+        str(h.get("C_hash") or ""),
+        str(h.get("H_hash") or ""),
+        str(h.get("U_hash") or ""),
+        str(h.get("shapes_hash") or h.get("S_hash") or ""),
+    ]
     inputs_complete = all(isinstance(x, str) and x for x in (inputs_sig[0], inputs_sig[1], inputs_sig[2], inputs_sig[4]))
 
-    # --- derive policy + pass_vec safely (self-contained) ---
-    policy_raw   = rc.get("policy_tag") or ss.get("overlap_policy_label") or ""
+    # policy + pass_vec (self-contained)
+    policy_raw   = rc.get("policy_tag") or ss.get("overlap_policy_label") or "strict"
     policy_canon = _canon_policy(policy_raw)
     proj_hash    = rc.get("projector_hash", "") if policy_canon == "projected:file" else ""
     eq2 = bool(((out.get("2") or {}).get("eq", False)))
     eq3 = bool(((out.get("3") or {}).get("eq", False)))
     pass_vec = (eq2, eq3)
 
-    # ---------- A/B one-shot ticket state ----------
-    ab_pin                 = dict(ss.get("ab_pin") or {"state":"idle","payload":None,"consumed":False})
-    is_ab_pinned           = (ab_pin.get("state") == "pinned")
+    # file Π validity (soft gate)
+    file_pi_valid   = bool(ss.get("file_pi_valid", True))
+    file_pi_reasons = list(ss.get("file_pi_reasons", []) or [])
+
+    # A/B ticket / pin status (freshness checked against embed_sig when available)
+    ab_pin = dict(ss.get("ab_pin") or {"state":"idle","payload":None,"consumed":False})
+    is_ab_pinned = (ab_pin.get("state") == "pinned")
+
+    def _current_embed_sig_fallback() -> str:
+        # prefer helper if present
+        if "_ab_embed_sig" in globals() and callable(globals()["_ab_embed_sig"]):
+            try: return str(_ab_embed_sig())
+            except Exception: pass
+        # fallback: 5-hash + policy label + projector hash
+        return "|".join([*inputs_sig, policy_canon, proj_hash])
+
+    ab_status = REASON.AB_NONE
+    ab_fresh  = False
+    if is_ab_pinned:
+        payload = ab_pin.get("payload") or {}
+        pin_sig = str(payload.get("embed_sig") or (payload.get("payload") or {}).get("embed_sig", ""))
+        cur_sig = _current_embed_sig_fallback()
+        if pin_sig and (pin_sig != cur_sig):
+            ab_status = REASON.AB_STALE_INPUTS_SIG
+        elif _canon_policy(payload.get("policy_tag","")) != policy_canon:
+            ab_status = REASON.AB_STALE_POLICY
+        elif policy_canon == "projected:file" and (payload.get("projected",{}) or {}).get("projector_hash","") != proj_hash:
+            ab_status = REASON.AB_STALE_PROJECTOR_HASH
+        else:
+            ab_fresh  = True
+            ab_status = REASON.AB_EMBEDDED
+
+    # A/B one-shot ticket override for stale SSOT
     ab_ticket_pending      = ss.get("_ab_ticket_pending")
     last_ab_ticket_written = ss.get("_last_ab_ticket_written")
-    ticket_required        = bool(is_ab_pinned and (ab_ticket_pending is not None) and (ab_ticket_pending != last_ab_ticket_written))
+    ticket_required = bool(is_ab_pinned and ab_fresh and (ab_ticket_pending is not None) and (ab_ticket_pending != last_ab_ticket_written))
 
+    # write arming comes from the solver button
     write_armed  = bool(ss.get("write_armed", False))
 
-    # ---------- dedupe key (single write gate) ----------
-    write_key = (inputs_sig, policy_canon, pass_vec, proj_hash)
+    # dedupe key for single-write gate
+    write_key = (tuple(inputs_sig), policy_canon, pass_vec, proj_hash)
     last_key  = ss.get("_last_cert_write_key")
 
-    # ---------- header strip (live debugger) ----------
+    # ---------- header strip (compact) ----------
     c1, c2, c3, c4 = st.columns([2,2,3,3])
     with c1:
         if inputs_complete:
             st.success("Inputs OK")
-            _chip("b", inputs_sig[0]); _chip("C", inputs_sig[1])
-            _chip("H", inputs_sig[2]); _chip("U", inputs_sig[3]); _chip("S", inputs_sig[4])
-            if st.checkbox("Show copyable hashes", value=False, key="copy_hashes_toggle"):
-                _copybox(",".join(inputs_sig), key="copy_inputs_sig")
+            st.caption(f"b/C/H/U/S = {', '.join(_short(x) or '∅' for x in inputs_sig)}")
         else:
             missing = [k for k,v in zip(("b","C","H","S"), [inputs_sig[0],inputs_sig[1],inputs_sig[2],inputs_sig[4]]) if not v]
             st.error(f"Inputs MISSING · {','.join(missing)}")
@@ -3989,150 +3930,87 @@ with safe_expander("Cert & provenance (read‑only; solver writes bundles)", exp
         else:
             st.info("Mode: STRICT")
     with c3:
-        ab_p = ss.get("ab_pin") or {}
-        if ab_p.get("state") == "pinned":
-            ab = ab_p.get("payload") or {}
-            stale_ab = None
-            if str((ab.get('embed_sig') or (ab.get('payload') or {}).get('embed_sig',''))) != str(_ab_embed_sig()):
-                stale_ab = REASON.AB_STALE_INPUTS_SIG
-            elif _canon_policy(ab.get("policy_tag","")) != policy_canon:
-                stale_ab = REASON.AB_STALE_POLICY
-            elif policy_canon == "projected:file" and (ab.get("projected",{}) or {}).get("projector_hash","") != proj_hash:
-                stale_ab = REASON.AB_STALE_PROJECTOR_HASH
-            if not stale_ab:
-                st.success("A/B: Pinned · Fresh")
-            else:
-                st.warning(f"A/B: Pinned · Stale ({stale_ab})")
-    with c4:
-        if not write_armed:
-            st.caption("Write: Idle")
+        if is_ab_pinned:
+            st.caption(f"A/B: {'Fresh' if ab_fresh else 'Stale'}{(' · '+ab_status) if not ab_fresh else ''}")
         else:
-            st.success("Write: Armed (1×)" if (last_key != write_key) or ticket_required else "Write: Armed (but no change)")
-    if write_armed:
-        st.caption(_delta_line(last_key, write_key))
+            st.caption("A/B: None")
+    with c4:
+        st.caption(
+            "Write: {}"
+            .format("Armed" if write_armed else "Idle")
+        )
+        if write_armed and last_key:
+            li, lp, lv, lpj = last_key
+            ci, cp, cv, cpj = write_key
+            # tiny delta hint
+            delta_bits = []
+            if lp != cp: delta_bits.append("policy")
+            if lv != cv: delta_bits.append("k")
+            if lpj != cpj and ("file" in (lp+cp)): delta_bits.append("Π")
+            if li != ci: delta_bits.append("hashes")
+            if delta_bits:
+                st.caption("Δ " + ",".join(delta_bits))
 
-    # ---------- decisions & witnesses ----------
-    # Non-blocking gates: never st.stop() the app; only disable the write.
+    # ---------- decisions (N/A + reason; never st.stop the app) ----------
     write_enabled = True
 
-    # 1) completeness (U optional)
     if not inputs_complete:
         write_enabled = False
         _append_witness({
-            "ts": _utc_now_z(),
-            "outcome": REASON.SKIP_INPUTS_INCOMPLETE,
-            "armed": write_armed,
-            "armed_by": ss.get("armed_by",""),
-            "key": {
-                "inputs": _sha256_hex(":".join(inputs_sig).encode())[:8],
-                "pol": policy_canon, "pv": f"{int(pass_vec[0])}{int(pass_vec[1])}", "pj": _short(proj_hash)
-            },
+            "ts": _utc_now_z(), "outcome": REASON.SKIP_INPUTS_INCOMPLETE,
+            "armed": write_armed, "armed_by": ss.get("armed_by",""),
+            "key": {"inputs": _sha256_hex(":".join(inputs_sig).encode())[:8],
+                    "pol": policy_canon, "pv": f"{int(pass_vec[0])}{int(pass_vec[1])}", "pj": _short(proj_hash)},
             "ab": ("PINNED" if is_ab_pinned else "NONE"),
-            "file_pi": {"mode": ("file" if policy_canon=="projected:file" else policy_canon), "valid": file_pi_valid, "reasons": file_pi_reasons[:3]}
+            "file_pi": {"mode": ("file" if policy_canon=="projected:file" else policy_canon),
+                        "valid": file_pi_valid, "reasons": file_pi_reasons[:3]}
         })
-        st.caption("Inputs incomplete — write disabled (you can still view A/B + gallery).")
+        st.caption("Inputs incomplete — write disabled (A/B & gallery remain viewable).")
 
-        # 2) stale SSOT — allow A/B ticket to override (non-blocking)
-    if write_enabled and stale and not allow_stale:
-        # re-evaluate ticket freshness here (embed_sig-based)
-        ab_pin                 = ss.get("ab_pin") or {}
-        is_ab_pinned           = (ab_pin.get("state") == "pinned")
-        payload                = ab_pin.get("payload") or {}
-        current_embed_sig      = _ab_embed_sig()  # ← from the helpers I gave you
-        ab_sig_ok              = bool(is_ab_pinned and (payload.get("embed_sig","") == current_embed_sig))
-    
-        ab_ticket_pending      = ss.get("_ab_ticket_pending")
-        last_ab_ticket_written = ss.get("_last_ab_ticket_written")
-    
-        # one-shot override only if the pin is fresh (sig match) AND ticket advanced
-        ticket_required = bool(
-            ab_sig_ok and
-            (ab_ticket_pending is not None) and
-            (ab_ticket_pending != last_ab_ticket_written)
-        )
-    
-        if not ticket_required:
-            write_enabled = False
-            _append_witness({
-                "ts": _utc_now_z(),
-                "outcome": REASON.SKIP_SSOT_STALE,
-                "armed": write_armed,
-                "armed_by": ss.get("armed_by",""),
-                "key": {
-                    "inputs": _sha256_hex(":".join(inputs_sig).encode())[:8],
-                    "pol": policy_canon,
-                    "pv": f"{int(pass_vec[0])}{int(pass_vec[1])}",
-                    "pj": _short(proj_hash),
-                },
-                "ab": ("PINNED" if is_ab_pinned else "NONE"),
-                "ab_sig_ok": bool(ab_sig_ok),
-                "ab_ticket": {
-                    "pending": ab_ticket_pending,
-                    "last_written": last_ab_ticket_written,
-                },
-                "file_pi": {
-                    "mode": ("file" if policy_canon=="projected:file" else policy_canon),
-                    "valid": file_pi_valid,
-                    "reasons": file_pi_reasons[:3],
-                },
-            })
-            st.warning("SSOT stale — write disabled. Run Overlap to refresh or enable the 'Allow writing with stale SSOT' toggle.")
-            st.caption("Rendering continues so you can inspect A/B & gallery.")
-        else:
-            st.info("SSOT is stale, but proceeding due to A/B one-shot ticket override (fresh embed_sig).")
-            if not write_armed:
-                ss["write_armed"] = True
-                ss["armed_by"] = ss.get("armed_by","") or "ab_pinned_catchup"
-                write_armed = True
+    if write_enabled and stale and (not ticket_required):
+        write_enabled = False
+        _append_witness({
+            "ts": _utc_now_z(), "outcome": REASON.SKIP_SSOT_STALE,
+            "armed": write_armed, "armed_by": ss.get("armed_by",""),
+            "key": {"inputs": _sha256_hex(":".join(inputs_sig).encode())[:8],
+                    "pol": policy_canon, "pv": f"{int(pass_vec[0])}{int(pass_vec[1])}", "pj": _short(proj_hash)},
+            "ab": ("PINNED" if is_ab_pinned else "NONE"),
+            "ab_ticket": {"pending": ab_ticket_pending, "last_written": last_ab_ticket_written},
+        })
+        st.warning("SSOT is stale — run Overlap to refresh, or use A/B one-shot ticket (fresh) to override.")
 
-
-    # 3) file Π validity (FILE mode only)
     if write_enabled and (policy_canon == "projected:file") and (not file_pi_valid):
         write_enabled = False
         _append_witness({
-            "ts": _utc_now_z(),
-            "outcome": REASON.SKIP_FILE_PI_INVALID,
-            "armed": write_armed,
-            "armed_by": ss.get("armed_by",""),
-            "key": {
-                "inputs": _sha256_hex(":".join(inputs_sig).encode())[:8],
-                "pol": policy_canon, "pv": f"{int(pass_vec[0])}{int(pass_vec[1])}", "pj": _short(proj_hash)
-            },
+            "ts": _utc_now_z(), "outcome": REASON.SKIP_FILE_PI_INVALID,
+            "armed": write_armed, "armed_by": ss.get("armed_by",""),
+            "key": {"inputs": _sha256_hex(":".join(inputs_sig).encode())[:8],
+                    "pol": policy_canon, "pv": f"{int(pass_vec[0])}{int(pass_vec[1])}", "pj": _short(proj_hash)},
             "ab": ("PINNED" if is_ab_pinned else "NONE"),
-            "file_pi": {"mode": "file", "valid": False, "reasons": file_pi_reasons[:3]}
+            "file_pi": {"mode": "file", "valid": False, "reasons": file_pi_reasons[:3]},
         })
         st.caption("FILE Π invalid — write disabled (fix Π or re-freeze from AUTO).")
 
-        # 4) final “should write?” decision
     should_write = write_enabled and write_armed and ((write_key != last_key) or ticket_required)
-    
+
     if not should_write:
         skip_reason = REASON.SKIP_NO_MATERIAL_CHANGE
         if write_enabled and is_ab_pinned and (ab_ticket_pending == last_ab_ticket_written):
             skip_reason = REASON.SKIP_AB_TICKET_ALREADY_WRITTEN
-    
         _append_witness({
-            "ts": _utc_now_z(),
-            "outcome": skip_reason,
-            "armed": write_armed,
-            "armed_by": ss.get("armed_by",""),
-            "key": {
-                "inputs": _sha256_hex(":".join(inputs_sig).encode())[:8],
-                "pol": policy_canon, "pv": f"{int(pass_vec[0])}{int(pass_vec[1])}", "pj": _short(proj_hash)
-            },
+            "ts": _utc_now_z(), "outcome": skip_reason,
+            "armed": write_armed, "armed_by": ss.get("armed_by",""),
+            "key": {"inputs": _sha256_hex(":".join(inputs_sig).encode())[:8],
+                    "pol": policy_canon, "pv": f"{int(pass_vec[0])}{int(pass_vec[1])}", "pj": _short(proj_hash)},
             "ab": ("PINNED" if is_ab_pinned else "NONE"),
             "file_pi": {"mode": ("file" if policy_canon=="projected:file" else policy_canon),
-                        "valid": file_pi_valid,
-                        "reasons": ([] if write_enabled else file_pi_reasons[:3])}
+                        "valid": file_pi_valid, "reasons": ([] if write_enabled else file_pi_reasons[:3])},
         })
-    
-        if write_enabled:
-            st.caption("Cert unchanged — skipping rewrite.")
-        wrote_cert = False  # mark path and fall through (do not write)
+        st.caption("Cert unchanged — skipping rewrite." if write_enabled else "Write disabled.")
+        wrote_cert = False
     else:
         wrote_cert = True
-    
-        # ----- stable run_id per inputs_sig -----
+        # stable run_id per inputs_sig (bumps on change)
         if ss.get("_last_inputs_sig") != inputs_sig:
             seed = _sha256_hex((":".join(inputs_sig) + f"|{int(time.time())}").encode())[:8]
             ss["_last_inputs_sig"] = inputs_sig
@@ -4140,134 +4018,119 @@ with safe_expander("Cert & provenance (read‑only; solver writes bundles)", exp
             ss["run_idx"] = 0
         ss["run_idx"] = int(ss.get("run_idx", 0)) + 1
 
-
-
-
-    # ----- assemble cert payload (strict schema) -----
+    # ---------- assemble cert (strict schema) ----------
     district_id = (ss.get("_district_info") or {}).get("district_id", ss.get("district_id","UNKNOWN"))
     n2 = int((ib.get("dims") or {}).get("n2") or rc.get("n2") or 0)
     n3 = int((ib.get("dims") or {}).get("n3") or rc.get("n3") or 0)
     lane_mask = list(rc.get("lane_mask_k3") or [])
 
-    # ---------- GF(2) diagnostics (guarded shapes; self-contained) ----------
-    def _bottom_row(M): 
-        return M[-1] if (M and len(M)) else []
+    # GF(2) diagnostics (lane-masked bottom rows) — shape-safe, no solver calls
     def _xor(A, B):
         if not A: return [r[:] for r in (B or [])]
         if not B: return [r[:] for r in (A or [])]
         r, c = len(A), len(A[0])
         return [[(A[i][j] ^ B[i][j]) & 1 for j in range(c)] for i in range(r)]
-    def _mask_row(row, lm):
-        L = min(len(row or []), len(lm or []))
-        return [int(row[j]) if int(lm[j]) else 0 for j in range(L)]
+
+    def _gf2_mul_local(A, B):
+        if "_gf2_mul" in globals() and callable(globals()["_gf2_mul"]):
+            return _gf2_mul(A, B)  # type: ignore[name-defined]
+        if not A or not B: return []
+        m, k, n = len(A), len(A[0]), len(B[0])
+        C = [[0]*n for _ in range(m)]
+        for i in range(m):
+            Ai = A[i]
+            for t in range(k):
+                if Ai[t] & 1:
+                    Bt = B[t]
+                    for j in range(n):
+                        C[i][j] ^= (Bt[j] & 1)
+        return C
 
     H2 = (getattr(H_obj, "blocks", None).__root__.get("2") if getattr(H_obj, "blocks", None) else []) or []
     d3 = rc.get("d3") or []
     C3 = (getattr(C_obj, "blocks", None).__root__.get("3") if getattr(C_obj, "blocks", None) else []) or []
     I3 = [[1 if i == j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
 
-    if H2 and d3 and H2[0] and d3[0] and (len(H2[0]) == len(d3)):
-        H2d3 = [
-            [sum((H2[i][k] & d3[k][j]) & 1 for k in range(len(d3))) & 1 for j in range(len(d3[0]))]
-            for i in range(len(H2))
-        ]
-    else:
-        H2d3 = []
+    H2d3 = _gf2_mul_local(H2, d3) if (H2 and d3 and H2[0] and d3[0] and len(H2[0]) == len(d3)) else []
     C3pI3 = _xor(C3, I3) if C3 else []
 
-    lane_vec_H2d3  = _mask_row(_bottom_row(H2d3), lane_mask)
-    lane_vec_C3pI3 = _mask_row(_bottom_row(C3pI3), lane_mask)
+    def _bottom_masked_row(M, lm):
+        if not M or not lm: return []
+        row = M[-1]
+        L = min(len(row), len(lm))
+        return [int(row[j]) if int(lm[j]) else 0 for j in range(L)]
 
-    # A/B freshness helpers
-    def _ab_is_fresh(ab_snap: dict, *, rc: dict, ib: dict) -> bool:
+    lane_vec_H2d3  = _bottom_masked_row(H2d3, lane_mask)
+    lane_vec_C3pI3 = _bottom_masked_row(C3pI3, lane_mask)
+
+    # A/B embed snapshot (prefer rich, fallback to pin payload)
+    def _ab_is_fresh(ab_snap: dict, rc_now: dict, ib_now: dict) -> bool:
         try:
-            if tuple(ab_snap.get("inputs_sig") or ()) != tuple(current_inputs_sig(_ib=ib)):
+            cur_inputs = tuple(inputs_sig)  # already derived
+            snap_inputs = tuple(ab_snap.get("inputs_sig") or ())
+            if snap_inputs and (snap_inputs != cur_inputs): return False
+            if _canon_policy(ab_snap.get("policy_tag","")) != _canon_policy(rc_now.get("policy_tag","")):
                 return False
-            if _canon_policy(ab_snap.get("policy_tag","")) != _canon_policy(rc.get("policy_tag","")):
-                return False
-            if _canon_policy(rc.get("policy_tag","")) == "projected:file":
-                pj_now = rc.get("projector_hash","")
+            if _canon_policy(rc_now.get("policy_tag","")) == "projected:file":
+                pj_now = rc_now.get("projector_hash","")
                 pj_ab  = ((ab_snap.get("projected") or {}).get("projector_hash",""))
                 return str(pj_now) == str(pj_ab)
             return True
         except Exception:
             return False
 
-    # A/B freshness
-    ab_status = REASON.AB_NONE
-    ab_fresh = False
-    if is_ab_pinned:
-        ab = ab_pin.get("payload") or {}
-        if str((ab.get('embed_sig') or (ab.get('payload') or {}).get('embed_sig',''))) != str(_ab_embed_sig()):
-            ab_status = REASON.AB_STALE_INPUTS_SIG
-        elif _canon_policy(ab.get("policy_tag","")) != policy_canon:
-            ab_status = REASON.AB_STALE_POLICY
-        elif policy_canon == "projected:file" and (ab.get("projected",{}) or {}).get("projector_hash","") != proj_hash:
-            ab_status = REASON.AB_STALE_PROJECTOR_HASH
-        else:
-            ab_fresh = True
-            ab_status = REASON.AB_EMBEDDED
-                    # --- Auto-label on write (runs only if fixture_label isn't set yet) ---
-    try:
-        if not st.session_state.get("fixture_label"):
-            rc = st.session_state.get("run_ctx") or {}
-            di = st.session_state.get("_district_info") or {}
-            district_id = di.get("district_id", "UNKNOWN")
-    
-            # Prefer your canonical policy helper if present
-            if "_policy_tag_now_from_rc" in globals() and callable(globals()["_policy_tag_now_from_rc"]):
-                policy_canon = _policy_tag_now_from_rc(rc)
-            else:
-                policy_canon = str(rc.get("policy_tag","strict"))
-    
-            # Masked diagnostics on the lanes (shape-safe)
-            lane_mask = list(rc.get("lane_mask_k3") or [])
-    
-            H_used = st.session_state.get("overlap_H") or _load_h_local()
-            d3     = rc.get("d3") or []
-            C3     = (cmap.blocks.__root__.get("3") or [])
-            H2     = (H_used.blocks.__root__.get("2") or [])
-            I3     = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))] if C3 else []
-    
-            def _shape_ok(A,B): return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
-            def _xor(A,B):
-                if not A: return [r[:] for r in (B or [])]
-                if not B: return [r[:] for r in (A or [])]
-                r,c = len(A), len(A[0]); return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
-    
-            H2d3  = mul(H2, d3) if _shape_ok(H2, d3) else []
-            C3pI3 = _xor(C3, I3) if (C3 and C3[0]) else []
-    
-            bottom_H2d3  = (H2d3[-1]  if (H2d3  and len(H2d3))  else [])
-            bottom_C3pI3 = (C3pI3[-1] if (C3pI3 and len(C3pI3)) else [])
-            idx = [j for j,m in enumerate(lane_mask or []) if m]
-            lane_vec_H2d3  = [bottom_H2d3[j]  for j in idx] if (bottom_H2d3 and idx) else []
-            lane_vec_C3pI3 = [bottom_C3pI3[j] for j in idx] if (bottom_C3pI3 and idx) else []
-    
-            out = st.session_state.get("overlap_out") or {}
-            strict_eq3 = bool(((out.get("3") or {}).get("eq", False)))  # optional in registry
-    
-            snapshot_for_fixture = {
-                "identity": {"district_id": district_id},
-                "policy":   {"canon": policy_canon},
-                "inputs":   {"lane_mask_k3": lane_mask},
-                "diagnostics": {
-                    "lane_vec_H2@d3": lane_vec_H2d3,
-                    "lane_vec_C3+I3": lane_vec_C3pI3,
-                },
-                "checks":   {"k": {"3": {"eq": strict_eq3}}},
-                "growth":   {"growth_bumps": int(st.session_state.get("growth_bumps", 0) or 0)},
-            }
-    
-            fx = match_fixture_from_snapshot(snapshot_for_fixture)
-            apply_fixture_to_session(fx)
-    except Exception:
-        # Never block a cert write on labeling
-        pass
+    ab_embed = {"fresh": bool(False)}
+    ab_rich = ss.get("ab_compare") or {}
+    use_rich = bool(is_ab_pinned and ab_fresh and _ab_is_fresh(ab_rich, rc_now=rc, ib_now=ib))
+    ab_src = ab_rich if use_rich else (ab_pin.get("payload") or {})
 
+    strict_block = ab_src.get("strict") or {}
+    if not strict_block:
+        strict_block = {"out": (ab_src.get("strict") or {}).get("out", {})}
 
+    # projector hash “now” (for AUTO we use lanes hash; for STRICT empty)
+    if policy_canon == "projected:file":
+        proj_hash_now = rc.get("projector_hash","") or proj_hash
+    elif policy_canon == "projected:auto":
+        proj_hash_now = hashlib.sha256(json.dumps(rc.get("lane_mask_k3") or [], sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    else:
+        proj_hash_now = ""
 
-    # ---------------- Identity (includes fixture fields) ----------------
+    proj_src = ab_src.get("projected") or {}
+    proj_out = proj_src.get("out") or {}
+    projected_block = {
+        "label":      proj_src.get("label", policy_canon),
+        "policy_tag": proj_src.get("policy_tag", policy_canon),
+        "out":        proj_out,
+        "lane_vec_H2d3":      list(proj_src.get("lane_vec_H2d3") or []),
+        "lane_vec_C3plusI3":  list(proj_src.get("lane_vec_C3plusI3") or []),
+        "pass_vec":           list(proj_src.get("pass_vec") or []),
+        "projector_filename": str(proj_src.get("projector_filename") or rc.get("projector_filename") or ""),
+        "projector_hash":     str(proj_src.get("projector_hash") or proj_hash_now),
+        "projector_consistent_with_d": bool(proj_src.get("projector_consistent_with_d", rc.get("projector_consistent_with_d", True))),
+    }
+
+    ab_embed.update({
+        "pair_tag":     ab_src.get("pair_tag", f"strict__VS__{policy_canon}"),
+        "inputs_sig":   list(ab_src.get("inputs_sig") or inputs_sig),
+        "lane_mask_k3": list(ab_src.get("lane_mask_k3") or lane_mask[:]),
+        "strict":       strict_block,
+        "projected":    projected_block,
+        "fresh":        bool(is_ab_pinned and ab_fresh),
+    })
+    if is_ab_pinned and not ab_fresh:
+        ab_embed["stale_reason"] = ab_status
+
+    # Growth / Gallery (kept minimal; no side effects)
+    growth  = {"growth_bumps": int(ss.get("growth_bumps", 0)), "H_diff": ss.get("H_diff","")}
+    gallery = {
+        "projected_green": bool(ss.get("projected_green", pass_vec[1])),
+        "tag": ss.get("gallery_tag",""),
+        "strictify": ss.get("gallery_strictify","tbd"),
+    }
+
+    # Identity / Policy / Inputs
+    district_id = (ss.get("_district_info") or {}).get("district_id", ss.get("district_id","UNKNOWN"))
     identity = {
         "district_id":   district_id,
         "run_id":        ss.get("last_run_id","00000000"),
@@ -4277,8 +4140,6 @@ with safe_expander("Cert & provenance (read‑only; solver writes bundles)", exp
         "fixture_code":  (ss.get("run_ctx") or {}).get("fixture_code",""),
         "fixture_nonce": ss.get("_fixture_nonce", 0),
     }
-
-    # ---------------- Policy ----------------
     policy = {
         "label_raw":      policy_raw,
         "canon":          policy_canon,
@@ -4287,7 +4148,6 @@ with safe_expander("Cert & provenance (read‑only; solver writes bundles)", exp
     if policy_canon == "projected:file":
         policy["projector_hash"] = proj_hash
 
-    # ---------------- Inputs + filenames ----------------
     filenames = dict((ib.get("filenames") or {}))
     filenames.setdefault("boundaries", ss.get("fname_boundaries","boundaries.json"))
     filenames.setdefault("shapes",     ss.get("fname_shapes","shapes.json"))
@@ -4310,8 +4170,6 @@ with safe_expander("Cert & provenance (read‑only; solver writes bundles)", exp
         },
         "inputs_sig": list(inputs_sig),
     }
-
-    # ---- Registry provenance (fixtures.json) ----
     fx_cache = ss.get("_fixtures_cache") or {}
     inputs["registry"] = {
         "fixtures_version": fx_cache.get("version",""),
@@ -4320,7 +4178,6 @@ with safe_expander("Cert & provenance (read‑only; solver writes bundles)", exp
         "ordering":         list(fx_cache.get("ordering") or []),
     }
 
-    # ---------------- Checks / Diagnostics ----------------
     checks = {
         "k": {"2": {"eq": pass_vec[0]}, "3": {"eq": pass_vec[1]}},
         "grid":  bool(out.get("grid", True)),
@@ -4334,56 +4191,6 @@ with safe_expander("Cert & provenance (read‑only; solver writes bundles)", exp
         "residual_tag": (ss.get("residual_tags", {}) or {}).get(policy_canon.split(":")[0], "none"),
     }
 
-    # ---------------- A/B embed snapshot ----------------
-    ab_embed = {"fresh": bool(ab_fresh)}
-    ab_rich = st.session_state.get("ab_compare") or {}
-    use_rich = bool(ab_fresh and _ab_is_fresh(ab_rich, rc=rc, ib=ib))
-    ab_src = ab_rich if use_rich else (ab_pin.get("payload") or {})
-
-    strict_block = ab_src.get("strict") or {}
-    if not strict_block:
-        strict_block = {"out": (ab_src.get("strict") or {}).get("out", {})}
-
-    mode_now = str((rc or {}).get("mode", ""))
-    proj_hash_now = (
-        (rc.get("projector_hash") or "")
-        if mode_now == "projected(columns@k=3,file)"
-        else (_auto_pj_hash_from_rc(rc or {}) if mode_now == "projected(columns@k=3,auto)" else "")
-    )
-
-    proj_src = ab_src.get("projected") or {}
-    proj_out = proj_src.get("out") or {}
-    projected_block = {
-        "label":      proj_src.get("label", policy_canon),
-        "policy_tag": proj_src.get("policy_tag", policy_canon),
-        "out":        proj_out,
-        "lane_vec_H2d3":      list(proj_src.get("lane_vec_H2d3") or []),
-        "lane_vec_C3plusI3":  list(proj_src.get("lane_vec_C3plusI3") or []),
-        "pass_vec":           list(proj_src.get("pass_vec") or []),
-        "projector_filename": str(proj_src.get("projector_filename") or rc.get("projector_filename") or ""),
-        "projector_hash":     str(proj_src.get("projector_hash") or proj_hash_now),
-        "projector_consistent_with_d": bool(proj_src.get("projector_consistent_with_d", rc.get("projector_consistent_with_d", True))),
-    }
-
-    ab_embed.update({
-        "pair_tag":     ab_src.get("pair_tag", f"strict__VS__{policy_canon}"),
-        "inputs_sig":   list(ab_src.get("inputs_sig") or inputs_sig),
-        "lane_mask_k3": list(ab_src.get("lane_mask_k3") or lane_mask[:]),
-        "strict":       strict_block,
-        "projected":    projected_block,
-    })
-    if not ab_fresh and is_ab_pinned:
-        ab_embed["stale_reason"] = ab_status
-
-    # ---------------- Growth / Gallery ----------------
-    growth  = {"growth_bumps": int(ss.get("growth_bumps", 0)), "H_diff": ss.get("H_diff","")}
-    gallery = {
-        "projected_green": bool(ss.get("projected_green", pass_vec[1])),
-        "tag": ss.get("gallery_tag",""),
-        "strictify": ss.get("gallery_strictify","tbd"),
-    }
-
-    # ---------------- Assemble cert ----------------
     cert = {
         "schema_version": SCHEMA_VERSION,
         "app_version":    APP_VERSION,
@@ -4398,13 +4205,11 @@ with safe_expander("Cert & provenance (read‑only; solver writes bundles)", exp
         "gallery":    gallery,
         "hashes":     {},
     }
-
     warns = []
     if len(lane_mask) != max(n3,0): warns.append("CERT_INVAR_WARN: lane_mask_k3 length != n3")
     if policy_canon == "projected:file" and not proj_hash: warns.append("CERT_INVAR_WARN: projector_hash missing for projected:file")
     if warns: cert["_warnings"] = warns
 
-    # UTC stamp & strict JSON hash (timestamp NOT in dedupe key)
     cert["written_at_utc"] = _utc_now_z()
     cert_blob = json.dumps(cert, sort_keys=True, separators=(",", ":")).encode("utf-8")
     cert["hashes"]["content_hash"] = _sha256_hex(cert_blob)
@@ -4425,52 +4230,36 @@ with safe_expander("Cert & provenance (read‑only; solver writes bundles)", exp
     ss["cert_payload"]   = cert
     ss["write_armed"]    = False
 
-    # mark A/B ticket as used to prevent duplicate embedded writes on reruns
+    # one-shot ticket bookkeeping
     if is_ab_pinned and (ab_ticket_pending is not None):
         ss["_last_ab_ticket_written"] = ss.get("_ab_ticket_pending")
-
-    # clear pin only if we actually embedded this write
     if ab_fresh and is_ab_pinned:
         ss["ab_pin"] = {"state":"idle","payload":None,"consumed":True}
 
-    # witness (write)
+    # witness
     _append_witness({
         "ts": cert["written_at_utc"],
-        "outcome": REASON.WROTE_CERT,
+        "outcome": REASON.WROTE_CERT if wrote_cert else REASON.SKIP_NO_MATERIAL_CHANGE,
         "armed": True,
         "armed_by": ss.get("armed_by",""),
-        "key": {
-            "inputs": _sha256_hex(":".join(inputs_sig).encode())[:8],
-            "pol": policy_canon, "pv": f"{int(pass_vec[0])}{int(pass_vec[1])}", "pj": _short(proj_hash)
-        },
-        "ab": (REASON.AB_EMBEDDED if ab_fresh else (REASON.AB_NONE if not is_ab_pinned else ab_status)),
-        "file_pi": {"mode": ("file" if policy_canon=="projected:file" else policy_canon), "valid": True, "reasons": []},
+        "key": {"inputs": _sha256_hex(":".join(inputs_sig).encode())[:8],
+                "pol": policy_canon, "pv": f"{int(pass_vec[0])}{int(pass_vec[1])}", "pj": _short(proj_hash)},
+        "ab": (REASON.AB_EMBEDDED if (is_ab_pinned and ab_fresh) else (REASON.AB_NONE if not is_ab_pinned else ab_status)),
+        "file_pi": {"mode": ("file" if policy_canon=="projected:file" else policy_canon),
+                    "valid": True, "reasons": []},
         "path": fpath.as_posix()
     })
 
-    # prevent fixture carry-over into the next unrelated cert
+    # clear transient fixture mirrors (prevent carry-over)
     for _k in ("fixture_label","gallery_tag","gallery_strictify"):
         ss[_k] = ""
     _rc_tmp = ss.get("run_ctx") or {}
-    if "fixture_label" in _rc_tmp or "fixture_code" in _rc_tmp:
-        _rc_tmp.pop("fixture_label", None)
-        _rc_tmp.pop("fixture_code", None)
-        ss["run_ctx"] = _rc_tmp
+    _rc_tmp.pop("fixture_label", None)
+    _rc_tmp.pop("fixture_code", None)
+    ss["run_ctx"] = _rc_tmp
 
-    # UI receipt
-    st.success(f"Cert written → `{fpath.as_posix()}` · {content12}")
-    if st.checkbox("Show copyable path", value=False, key="copy_cert_path_toggle"):
-        _copybox(fpath.as_posix(), key="copy_cert_path")
-
-    # optional: auto-build B2 gallery (debounced inside)
-    try:
-        if "build_b2_gallery" in globals():
-            build_b2_gallery(debounce=True)
-    except Exception as e:
-        st.info(f"(B2 gallery build skipped: {e})")
-
-
-
+    # receipt
+    st.success(f"Cert → {fpath.name} · dir={base_dir.as_posix()} · {content12}")
 
     # ---------- tail (read-only, compact) ----------
     with st.container():
@@ -4497,658 +4286,179 @@ with safe_expander("Cert & provenance (read‑only; solver writes bundles)", exp
                 k3 = bool(((checks.get("k") or {}).get("3") or {}).get("eq", False))
                 ts = info.get("written_at_utc","")
                 flag = " · [A/B]" if has_ab else ""
-                st.write(
-                    f"• {ts} · {ident.get('district_id','?')} · {policy.get('label_raw','?')} · "
-                    f"k2/k3={int(k2)}/{int(k3)} · {p.name}{flag}"
-                )
+                st.write(f"• {ts} · {ident.get('district_id','?')} · {policy.get('label_raw','?')} · k2/k3={int(k2)}/{int(k3)} · {p.name}{flag}")
                 shown += 1
             if shown == 0:
                 st.caption("No certs to show with current filter.")
         except Exception as e:
             st.warning(f"Tail listing failed: {e}")
-# ============================== CERT BLOCK ==============================
+# ============================== /Cert & Provenance ==============================
+
+
+
+        
 
 
 
 
 
 
-# ---------------- Fixture registry (cache + matcher) ----------------
-_FIXTURE_CACHE = {"hash":"", "data":None}
 
-def _sha256_text(s: str) -> str:
-    import hashlib
-    return hashlib.sha256(s.encode("utf-8")).hexdigest()
+# ---------------- Fixture registry (lean, SSOT-aligned) ----------------
+from pathlib import Path
+import json as _json
+import hashlib as _hashlib
+import streamlit as st
+
+# Cache keyed by file sig (mtime:size:sha12) so reruns are cheap
+_FIXTURE_CACHE = {"sig": "", "data": {"version": "", "ordering": [], "fixtures": []}}
+
+def _file_sig(p: Path) -> str:
+    try:
+        st_ = p.stat()
+        return f"{int(st_.st_mtime)}:{st_.st_size}:{_hashlib.sha256(p.read_bytes()).hexdigest()[:12]}"
+    except Exception:
+        return ""
 
 def _load_fixtures_json() -> tuple[dict, str]:
-    """Load configs/fixtures.json (or return empty), with hash for cache-busting."""
+    """Load configs/fixtures.json (or empty), returning (data, file_sig)."""
     p = Path("configs/fixtures.json")
     if not p.exists():
-        return {"version":"","ordering":[],"fixtures":[]}, ""
-    txt = p.read_text(encoding="utf-8")
-    h   = _sha256_text(txt)
+        return {"version": "", "ordering": [], "fixtures": []}, ""
     try:
-        data = json.loads(txt)
+        data = _json.loads(p.read_text(encoding="utf-8"))
+        sig  = _file_sig(p)
     except Exception:
-        data = {"version":"","ordering":[],"fixtures":[]}
-    return data, h
+        data, sig = {"version": "", "ordering": [], "fixtures": []}, ""
+    return data, sig
 
 def _get_fixtures_cached() -> dict:
-    data, h = _load_fixtures_json()
-    if h and _FIXTURE_CACHE["hash"] == h and _FIXTURE_CACHE["data"] is not None:
+    data, sig = _load_fixtures_json()
+    if sig and _FIXTURE_CACHE.get("sig") == sig and _FIXTURE_CACHE.get("data") is not None:
         return _FIXTURE_CACHE["data"]
-    _FIXTURE_CACHE["hash"] = h
-    _FIXTURE_CACHE["data"] = data
+    _FIXTURE_CACHE["sig"], _FIXTURE_CACHE["data"] = sig, data
+    # provenance (optional)
+    st.session_state["_fixtures_bytes_hash"] = (sig.split(":")[-1] if sig else "")
+    st.session_state["_fixtures_cache"] = data
     return data
 
 def _vec_eq(a, b) -> bool:
-    aa = [int(x) for x in (a or [])]
-    bb = [int(x) for x in (b or [])]
-    return (len(aa) == len(bb)) and (aa == bb)
+    try:
+        aa = [int(x) for x in (a or [])]
+        bb = [int(x) for x in (b or [])]
+        return len(aa) == len(bb) and aa == bb
+    except Exception:
+        return False
 
-def _apply_fixture_after_overlap(*, rc: dict, diag: dict) -> dict:
+def _policy_canon_from_rc(rc: dict) -> str:
+    pol = str(rc.get("policy_tag") or rc.get("mode") or "strict").lower()
+    return pol.replace("  ", " ")
+
+def _apply_fixture_after_overlap(*, rc: dict, diag: dict, commit: bool = True) -> dict:
     """
-    Decide fixture from registry and stamp session + rc.
-    Returns the small fixture dict used by cert/gallery.
+    Decide fixture from registry using SSOT-only predicates and return the chosen dict.
+    If commit=True, minimally stamp run_ctx (fixture_label/code) + legacy mirrors.
     """
     ss = st.session_state
     reg = _get_fixtures_cached() or {}
     ordering = list(reg.get("ordering") or [])
     fixtures = list(reg.get("fixtures") or [])
 
-    district = (ss.get("_district_info") or {}).get("district_id", rc.get("district_id","UNKNOWN"))
-    policy_canon = str(rc.get("policy_tag") or "strict").lower()
+    district     = (ss.get("_district_info") or {}).get("district_id") or rc.get("district_id") or "UNKNOWN"
+    policy_canon = _policy_canon_from_rc(rc)
 
-    lane_mask      = list(rc.get("lane_mask_k3") or [])
-    lane_vec_H2    = list(diag.get("lane_vec_H2@d3") or [])
-    lane_vec_C3pI3 = list(diag.get("lane_vec_C3+I3") or [])
+    # Pull vectors strictly from existing state (no recompute)
+    lane_mask      = list(rc.get("lane_mask_k3") or diag.get("lane_mask") or [])
+    lane_vec_H2    = list(diag.get("lane_vec_H2@d3") or diag.get("H_bottom") or [])
+    lane_vec_C3pI3 = list(diag.get("lane_vec_C3+I3") or diag.get("C3_plus_I3_bottom") or [])
 
-    # Build a lookup by code in declared order
-    code_to_fixture = {fx.get("code"): fx for fx in fixtures}
-    ordered = [code_to_fixture[c] for c in ordering if c in code_to_fixture] + [fx for fx in fixtures if fx.get("code") not in ordering]
+    # Order fixtures: declared 'ordering' first, then any extras
+    by_code = {fx.get("code"): fx for fx in fixtures}
+    ordered = [by_code[c] for c in ordering if c in by_code] + [fx for fx in fixtures if fx.get("code") not in by_code]
 
-    chosen = {}
+    chosen: dict = {}
     for fx in ordered:
         m = fx.get("match") or {}
-        # district
         if m.get("district") and str(m["district"]) != str(district):
             continue
-        # policy set (if provided)
         pol_any = [str(x).lower() for x in (m.get("policy_canon_any") or [])]
         if pol_any and (policy_canon not in pol_any):
             continue
-        # vectors
         if "lanes" in m and not _vec_eq(m["lanes"], lane_mask):
             continue
         if "H_bottom" in m and not _vec_eq(m["H_bottom"], lane_vec_H2):
             continue
         if "C3_plus_I3_bottom" in m and not _vec_eq(m["C3_plus_I3_bottom"], lane_vec_C3pI3):
             continue
-        # boolean strict eq (optional)
-        if "strict_eq3" in m:
-            # use any strict tag you computed, or recompute eq3_strict if you expose it here
-            pass  # optional in this minimal matcher
+        if "strict_eq3" in m and isinstance(rc.get("eq3_strict"), bool):
+            if bool(m["strict_eq3"]) != bool(rc.get("eq3_strict")):
+                continue
+
         chosen = {
-            "fixture_code":  fx.get("code",""),
-            "fixture_label": fx.get("label",""),
-            "tag":           fx.get("tag",""),
-            "strictify":     fx.get("strictify","tbd"),
-            "growth_bumps":  int(fx.get("growth_bumps", 0)),
+            "fixture_code":  fx.get("code", ""),
+            "fixture_label": fx.get("label", ""),
+            "tag":           fx.get("tag", ""),
+            "strictify":     fx.get("strictify", "tbd"),
+            "growth_bumps":  int(fx.get("growth_bumps", 0) or 0),
         }
         break
 
-    # Fallback (never block)
+    # Fallback (never blocks)
     if not chosen:
         chosen = {
             "fixture_code":  "",
             "fixture_label": f"{district} • lanes={lane_mask} • H={lane_vec_H2} • C+I={lane_vec_C3pI3}",
             "tag":           "novelty",
             "strictify":     "tbd",
-            "growth_bumps":  int(st.session_state.get("growth_bumps", 0) or 0),
+            "growth_bumps":  int(ss.get("growth_bumps", 0) or 0),
         }
 
-    # Stamp into session + rc for cert/gallery
-    ss["fixture_label"]   = chosen["fixture_label"]
-    ss["gallery_tag"]     = chosen["tag"]
-    ss["gallery_strictify"]= chosen["strictify"]
-    ss["growth_bumps"]    = chosen["growth_bumps"]
+    if commit:
+        rc2 = dict(rc)
+        rc2["fixture_label"] = chosen["fixture_label"]
+        rc2["fixture_code"]  = chosen["fixture_code"]
+        st.session_state["run_ctx"] = rc2
+        # legacy mirrors (harmless if unused)
+        ss["fixture_label"]     = chosen["fixture_label"]
+        ss["gallery_tag"]       = chosen["tag"]
+        ss["gallery_strictify"] = chosen["strictify"]
+        ss["growth_bumps"]      = chosen["growth_bumps"]
 
-    rc2 = dict(rc)
-    rc2["fixture_label"]  = chosen["fixture_label"]
-    rc2["fixture_code"]   = chosen["fixture_code"]
-    st.session_state["run_ctx"] = rc2
-
-    # Registry provenance into inputs (cert will copy from here)
-    fx = _get_fixtures_cached()
-    fxh = _FIXTURE_CACHE["hash"] or ""
-    ss.setdefault("_fixtures_cache", fx)
-    ss["_fixtures_bytes_hash"] = fxh
     return chosen
 
 
 
 
 
-
-
-
-
-# ===================== Reports: unified helpers (final) ======================
-from pathlib import Path
-import os, json as _json, hashlib as _hash, csv as _csv
-from datetime import datetime as _dt
-import streamlit as st
-
-# ── Safe “io” stub (only if your real one isn’t loaded) ───────────────────────
-if "io" not in globals():
-    class _IO_STUB:
-        @staticmethod
-        def parse_cmap(d):
-            class _X:
-                def __init__(self, d):
-                    self.blocks = type("B", (), {"__root__": d.get("blocks", {})})
-                def dict(self): return {"blocks": self.blocks.__root__}
-            return _X(d or {"blocks": {}})
-        @staticmethod
-        def parse_boundaries(d): return _IO_STUB.parse_cmap(d)
-    io = _IO_STUB()
-
-# ── Tiny utils: time + hashing + atomic writers ───────────────────────────────
-def _utc_iso_z() -> str:
-    try:
-        return _dt.utcnow().replace(microsecond=0).isoformat() + "Z"
-    except Exception:
-        return _dt.utcnow().replace(microsecond=0).isoformat() + "Z"
-
-def _deep_intify(o):
-    if isinstance(o, bool): return 1 if o else 0
-    if isinstance(o, list): return [_deep_intify(x) for x in o]
-    if isinstance(o, dict): return {k: _deep_intify(v) for k, v in o.items()}
-    return o
-
-def _hash_json(obj) -> str:
-    canon = _deep_intify(obj)
-    b = _json.dumps(canon, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
-    return _hash.sha256(b).hexdigest()
-
-def _guarded_atomic_write_json(path: Path, payload: dict) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        _json.dump(payload, f, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        f.flush(); os.fsync(f.fileno())
-    os.replace(tmp, path)
-
-def _atomic_write_csv(path: Path, header: list[str], rows: list[list], meta_lines: list[str] | None = None) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8", newline="") as f:
-        if meta_lines:
-            for line in meta_lines:
-                f.write(f"# {line}\n")
-        w = _csv.writer(f); w.writerow(header); w.writerows(rows)
-        f.flush(); os.fsync(f.fileno())
-    os.replace(tmp, path)
-
-# ── Projector path + rc normalizers (pure read; no recompute) ─────────────────
-def _pj_path_from_context_or_fs() -> str:
-    ss = st.session_state
-    rc = ss.get("run_ctx") or {}
-    # 1) run_ctx choice
-    p = (rc.get("projector_filename") or "").strip()
-    if p and Path(p).exists(): return p
-    # 2) last UI pick
-    p = (ss.get("ov_last_pj_path") or "").strip()
-    if p and Path(p).exists(): return p
-    # 3) registry by district (last hit wins)
-    try:
-        reg = Path(ss.get("PROJECTORS_DIR","projectors")) / "projector_registry.jsonl"
-        di  = (ss.get("_district_info") or {}).get("district_id","")
-        if reg.exists():
-            latest = ""
-            with open(reg, "r", encoding="utf-8") as f:
-                for ln in f:
-                    try:
-                        row = _json.loads(ln)
-                        if not di or row.get("district") == di:
-                            cand = (row.get("filename") or "").strip()
-                            if cand and Path(cand).exists():
-                                latest = cand
-                    except Exception:
-                        continue
-            if latest: return latest
-    except Exception:
-        pass
-    # 4) newest in projectors/
-    pjdir = Path(ss.get("PROJECTORS_DIR","projectors"))
-    if pjdir.exists():
-        files = sorted(pjdir.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
-        if files: return files[0].as_posix()
-    return ""
-
-def _normalize_projector_in_run_ctx():
-    """Idempotent fill for FILE mode: filename/hash if missing (no recompute)."""
-    ss = st.session_state
-    rc = ss.get("run_ctx") or {}
-    m  = str(rc.get("mode","strict"))
-    if m.startswith("projected(") and "file" in m:
-        fn = (rc.get("projector_filename") or "").strip() or _pj_path_from_context_or_fs()
-        if fn and Path(fn).exists():
-            rc.setdefault("projector_filename", fn)
-            try:
-                rc.setdefault("projector_hash", _hash.sha256(Path(fn).read_bytes()).hexdigest())
-            except Exception:
-                pass
-    ss["run_ctx"] = rc
-    return rc
-
-def _resolve_projector_from_rc():
-    """
-    Returns: (mode, submode, filename, projector_hash, projector_diag_or_None)
-    Never writes widgets; diag is None here (runner uses lane-mask diag).
-    """
-    rc = st.session_state.get("run_ctx") or {}
-    m  = str(rc.get("mode", "strict")).strip()
-    if m == "strict":                          return ("strict", "",   "", "", "")
-    if m == "projected(columns@k=3,auto)":     return ("projected","auto","", "", "")
-    if m == "projected(columns@k=3,file)":
-        fn = (rc.get("projector_filename") or "").strip() or _pj_path_from_context_or_fs()
-        pj_hash = rc.get("projector_hash","")
-        return ("projected","file", fn, pj_hash, "")
-    return ("strict", "", "", "", "")
-
-def _ab_unify_pin():
-    """Make sure everyone reads the same key; mirror known variants."""
-    ss = st.session_state
-    pin = ss.get("ab_pin") or ss.get("ab_pin_file") or ss.get("ab_pin_auto") or {}
-    if pin and not ss.get("ab_pin"):
-        ss["ab_pin"] = pin
-    return ss.get("ab_pin") or {}
-
-# ── Input SSOT block (copy-only; no recompute) ─────────────────────────────────
-def _inputs_block_from_session(strict_dims: tuple[int, int] | None = None) -> dict:
-    """
-    Returns:
-      {
-        "hashes": {"boundaries_hash","C_hash","H_hash","U_hash","shapes_hash"},
-        "dims":   {"n2": int, "n3": int},
-        "lane_mask_k3": [...]
-      }
-    """
-    rc = st.session_state.get("run_ctx") or {}
-    ih = st.session_state.get("inputs_hashes") or {}
-
-    def _grab(k: str) -> str:
-        return ih.get(k) or rc.get(k) or st.session_state.get(k) or ""
-
-    hashes = {
-        "boundaries_hash": _grab("boundaries_hash"),
-        "C_hash":          _grab("C_hash"),
-        "H_hash":          _grab("H_hash"),
-        "U_hash":          _grab("U_hash"),
-        "shapes_hash":     _grab("shapes_hash"),
-    }
-
-    if strict_dims is not None:
-        try:
-            n2, n3 = int(strict_dims[0]), int(strict_dims[1])
-        except Exception:
-            n2, n3 = 0, 0
-    else:
-        try:
-            n2 = int(rc.get("n2")) if rc.get("n2") is not None else 0
-            n3 = int(rc.get("n3")) if rc.get("n3") is not None else 0
-        except Exception:
-            n2, n3 = 0, 0
-
-    lane_mask = [int(x) & 1 for x in (rc.get("lane_mask_k3") or [])]
-    return {"hashes": hashes, "dims": {"n2": n2, "n3": n3}, "lane_mask_k3": lane_mask}
-
-# Back-compat alias some older names if they’re missing
-_inputs_block_from_session_SAFE = _inputs_block_from_session
-
-# ── Hydrate B/C/H from session (NEVER writes widget keys) ─────────────────────
-def _reports_hydrate_BCH():
-    ss = st.session_state
-    # Prefer module-level objects left by A/B path
-    B = globals().get("boundaries_obj") or globals().get("boundaries")
-    C = globals().get("cmap_obj")       or globals().get("cmap")
-    H = globals().get("overlap_H")
-    # Safe session copies (avoid widget keys like 'cmap'/'boundaries')
-    B = B or ss.get("B_obj") or ss.get("_B_obj")
-    C = C or ss.get("C_obj") or ss.get("_C_obj")
-    H = H or ss.get("overlap_H") or ss.get("H_obj") or ss.get("_H_obj")
-
-    # Parse from pinned filenames shown in UI if needed
-    files = (ss.get("_inputs_block") or {}).get("filenames") or {}
-    b_path = ss.get("fname_boundaries") or files.get("boundaries")
-    c_path = ss.get("fname_cmap")      or files.get("C")
-    h_path = ss.get("fname_h")         or files.get("H")
-
-    def _read_json(path):
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return _json.load(f)
-        except Exception:
-            return None
-
-    if B is None and b_path:
-        data = _read_json(b_path)
-        if data is not None: B = io.parse_boundaries(data)
-    if C is None and c_path:
-        data = _read_json(c_path)
-        if data is not None: C = io.parse_cmap(data)
-    if H is None and h_path:
-        data = _read_json(h_path)
-        if data is not None: H = io.parse_cmap(data)  # H shares the same schema
-
-    return B, C, H
-
-# ── Math: GF(2) helpers (strict) ──────────────────────────────────────────────
-def _gf2_mul(A, B):
-    """Pure-Python GF(2) matmul (uses mul/_svr_mul if app already provided)."""
-    if "_svr_mul" in globals() and callable(globals()["_svr_mul"]):
-        return _svr_mul(A, B)  # type: ignore[name-defined]
-    if "mul" in globals() and callable(globals()["mul"]):
-        return mul(A, B)       # type: ignore[name-defined]
-    if not A or not B: return []
-    m, k, n = len(A), len(A[0]), len(B[0])
-    C = [[0]*n for _ in range(m)]
-    for i in range(m):
-        Ai = A[i]
-        for t in range(k):
-            if Ai[t] & 1:
-                Bt = B[t]
-                for j in range(n):
-                    C[i][j] ^= (Bt[j] & 1)
-    return C
-
-def _strict_R3(H2: list[list[int]], d3: list[list[int]], C3: list[list[int]]) -> list[list[int]]:
-    """R3 = (H2 @ d3) XOR (C3 XOR I3). Raises if shapes empty/incompatible."""
-    if not (H2 and d3 and C3 and C3[0]): 
-        raise RuntimeError("R3_INPUTS_MISSING: need non-empty H2/d3/C3.")
-    n3 = len(C3)
-    I3 = [[1 if i==j else 0 for j in range(n3)] for i in range(n3)]
-    H2d3 = _gf2_mul(H2, d3)
-    if not H2d3 or len(H2d3[0]) != n3:
-        raise RuntimeError("R3_SHAPE: mul(H2,d3) incompatible with C3.")
-    C3pI = [[(C3[i][j]^I3[i][j]) & 1 for j in range(n3)] for i in range(n3)]
-    return [[(H2d3[i][j]^C3pI[i][j]) & 1 for j in range(n3)] for i in range(n3)]
-
-def _projected_R3(R3: list[list[int]], P: list[list[int]] | None):
-    if not (R3 and P): return []
-    if len(R3[0]) != len(P):
-        raise RuntimeError(f"R3P_SHAPE: expected R3(*,{len(R3[0])})·Π({len(P)},{len(P[0])}).")
-    return _gf2_mul(R3, P)
-
-def _lane_mask_from_d3_matrix(d3: list[list[int]]) -> list[int]:
-    if not d3 or not (d3[0] if d3 else []): return []
-    rows, n3 = len(d3), len(d3[0])
-    return [1 if any(int(d3[i][j]) & 1 for i in range(rows)) else 0 for j in range(n3)]
-
-def _diag_from_mask(lm: list[int]) -> list[list[int]]:
-    n = len(lm or [])
-    return [[1 if (i == j and int(lm[j]) == 1) else 0 for j in range(n)] for i in range(n)]
-
-# Compat aliases some panels still reference
-_diag_from_mask__reports = _diag_from_mask
-_diag_from_mask_local    = _diag_from_mask  # older name
-_eq_zero                 = lambda M: (not M) or all((x & 1) == 0 for row in M for x in row)
-_eq_zero_local           = _eq_zero
-_strict_R3_local         = _strict_R3
-
-def _first_tripped_guard(strict_out: dict) -> str:
-    """Adapter: if app defines first_tripped_guard, use it; else eq→none/fence."""
-    if "first_tripped_guard" in globals() and callable(globals()["first_tripped_guard"]):
-        try:
-            g = first_tripped_guard(strict_out)
-            return g if isinstance(g, str) else "error"
-        except Exception:
-            return "error"
-    k3eq = (strict_out or {}).get("3", {}).get("eq", None)
-    if k3eq is True:  return "none"
-    if k3eq is False: return "fence"
-    return "none"
-
-def _sig_tag_eq(B0, C0, H0, P_active=None):
-    """
-    Return (lane_mask, tag_strict, eq3_strict, tag_proj, eq3_proj).
-    Uses app's residual_tag if available; otherwise classifies locally.
-    """
-    d3 = (B0.blocks.__root__.get("3") or [])
-    H2 = (H0.blocks.__root__.get("2") or [])
-    C3 = (C0.blocks.__root__.get("3") or [])
-    lm = _lane_mask_from_d3_matrix(d3)
-    R3s = _strict_R3(H2, d3, C3)
-
-    def _local_tag(R, mask):
-        if not R or not mask: return "none"
-        m = len(R)
-        def _nz(j): return any(R[i][j] & 1 for i in range(m))
-        lanes = any(_nz(j) for j, b in enumerate(mask) if b)
-        ker   = any(_nz(j) for j, b in enumerate(mask) if not b)
-        if lanes and ker: return "mixed"
-        if lanes:         return "lanes"
-        if ker:           return "ker"
-        return "none"
-
-    if "residual_tag" in globals() and callable(globals()["residual_tag"]):
-        try:    tag_s = residual_tag(R3s, lm)  # type: ignore[name-defined]
-        except Exception: tag_s = "error"
-    else:
-        tag_s = _local_tag(R3s, lm)
-
-    eq_s = _eq_zero(R3s)
-
-    if P_active:
-        R3p = _projected_R3(R3s, P_active)
-        if "residual_tag" in globals() and callable(globals()["residual_tag"]):
-            try:    tag_p = residual_tag(R3p, lm)  # type: ignore[name-defined]
-            except Exception: tag_p = "error"
-        else:
-            tag_p = _local_tag(R3p, lm)
-        eq_p = _eq_zero(R3p)
-    else:
-        tag_p, eq_p = None, None
-
-    return lm, tag_s, bool(eq_s), tag_p, (None if eq_p is None else bool(eq_p))
-
-# ── Policy + validation shims (copy-only) ─────────────────────────────────────
-if "SCHEMA_VERSION" not in globals(): SCHEMA_VERSION = "1.1.0"
-if "FIELD" not in globals():           FIELD          = "GF(2)"
-if "APP_VERSION" not in globals():     APP_VERSION    = "v0.1-core"
-
-def _policy_block_from_run_ctx(rc: dict) -> dict:
-    mode = str(rc.get("mode", "strict"))
-    if mode == "strict":
-        return {"policy_tag":"strict","projector_mode":"strict","projector_filename":"","projector_hash":""}
-    if mode == "projected(columns@k=3,auto)":
-        diag_hash = _hash.sha256(
-            _json.dumps(rc.get("lane_mask_k3") or [], separators=(",", ":"), sort_keys=True).encode("utf-8")
-        ).hexdigest()
-        return {"policy_tag":"projected(columns@k=3,auto)","projector_mode":"auto","projector_filename":"","projector_hash":diag_hash}
-    return {
-        "policy_tag":"projected(columns@k=3,file)","projector_mode":"file",
-        "projector_filename": rc.get("projector_filename","") or "",
-        "projector_hash": rc.get("projector_hash","") or "",
-    }
-
-def file_validation_failed() -> bool:
-    """Soft gate used for UI hints; never blocks runner."""
-    rc = st.session_state.get("run_ctx") or {}
-    if rc.get("mode") != "projected(columns@k=3,file)": return False
-    fn = (rc.get("projector_filename") or "").strip()
-    if not fn or not Path(fn).exists(): return True
-    try:
-        if rc.get("projector_hash"): return False
-        st.session_state["run_ctx"]["projector_hash"] = _hash.sha256(Path(fn).read_bytes()).hexdigest()
-        return False
-    except Exception:
-        return False
-
-# ── Π chooser (prefer app; fallback FILE) ─────────────────────────────────────
-def _choose_active_safe(cfg: dict, boundaries_obj):
-    if "projector_choose_active" in globals() and callable(globals()["projector_choose_active"]):
-        try:
-            ret = projector_choose_active(cfg, boundaries_obj)  # type: ignore[name-defined]
-            if isinstance(ret, tuple) and len(ret) == 2: return ret
-            if isinstance(ret, dict): return (ret.get("P_active", []), ret)
-            return (ret, {})
-        except Exception:
-            pass
-
-    pj_path = (cfg.get("projector_files") or {}).get("3", "") or ""
-    P_active = []
-    try:
-        payload = _json.loads(Path(pj_path).read_text(encoding="utf-8"))
-        P_active = (payload.get("blocks", {}) or {}).get("3", []) or []
-    except Exception:
-        P_active = []
-
-    d3 = (boundaries_obj.blocks.__root__.get("3") or [])
-    n3 = len(d3[0]) if (d3 and d3[0]) else 0
-    lm_truth = [1 if any(d3[i][j] & 1 for i in range(len(d3))) else 0 for j in range(n3)] if n3 else []
-    meta = {
-        "mode": "projected(columns@k=3,file)" if pj_path else "projected(columns@k=3,auto)",
-        "projector_filename": pj_path,
-        "projector_hash": (_hash.sha256(_json.dumps({"blocks":{"3":P_active}}, separators=(",",":"), sort_keys=True).encode("utf-8")).hexdigest()
-                           if P_active else ""),
-        "projector_consistent_with_d": bool(P_active) and (len(P_active)==n3 and (n3==0 or len(P_active[0])==n3)),
-        "d3": d3, "n3": n3, "lane_mask": lm_truth, "P_active": P_active,
-    }
-    return (P_active, meta)
-
-# Back-compat aliases
-_cfg_from_policy_safe__reports = lambda mode, pj=None: {"source":{"3":"file" if "file" in mode else ("auto" if "auto" in mode else "strict")},
-                                                        "projector_files":{"3": (pj or "")}}
-_pj_path_from_context_or_fs__reports = _pj_path_from_context_or_fs
-_choose_active_safe__reports        = _choose_active_safe
-
-# ── Optional U hooks (Fence path) — no-op fallbacks if app doesn’t provide them
-if "get_carrier_mask" not in globals():
-    def get_carrier_mask(U_obj=None): return []
-if "set_carrier_mask" not in globals():
-    def set_carrier_mask(U_obj, mask):
-        st.session_state["_u_mask_override"] = mask
-        return True
-
-
-# -- Lane-mask pin + projector diag (used by runner) --------------------------
-def _pin_lane_mask_and_projector(d3_base, n2, n3):
-    """
-    Return (lane_mask, P_diag, selected_cols) and pin lane_mask_k3 into run_ctx if missing.
-    - lane_mask: list[int] length n3
-    - P_diag: n3×n3 diagonal matrix from lane_mask (or None if empty)
-    - selected_cols: set of j where lane_mask[j] == 1
-    """
-    rc = st.session_state.get("run_ctx") or {}
-
-    # prefer SSOT pin from solver
-    lm = rc.get("lane_mask_k3")
-    if not isinstance(lm, list) or not lm:
-        if not d3_base or not (n2 and n3):
-            lm = []
-        else:
-            lm = [
-                1 if any(int(d3_base[i][j]) & 1 for i in range(n2)) else 0
-                for j in range(n3)
-            ]
-        rc["lane_mask_k3"] = lm
-        st.session_state["run_ctx"] = rc  # safe: not a widget key
-
-    lm = [int(x) & 1 for x in (lm or [])]
-    P_diag = _diag_from_mask(lm) if lm else None
-    selected_cols = {j for j, b in enumerate(lm) if b == 1}
-    return lm, P_diag, selected_cols
-
-
-def reports_dims_from_d3(d3: list[list[int]]) -> tuple[int, int]:
-    return len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)
-
-# ── One-time normalizers (safe to call at panel import) ───────────────────────
-_normalize_projector_in_run_ctx()
-_ab_unify_pin()
-# =================== /Reports: unified helpers (final) ======================
-
-
-
-# ──────────────────────────────────────────────────────────────────────────────
-# Reports: Perturbation sanity (d3 flips, lanes-only) + optional Fence stress
-# ──────────────────────────────────────────────────────────────────────────────
-from pathlib import Path
-import os, json as _json, io as _io, csv as _csv
-from datetime import datetime as _dt
-import hashlib as _hash
-
-def _eq_zero_local(M): 
-    return (not M) or all((x & 1) == 0 for row in M for x in row)
-
-def _diag_from_mask_local(mask):
-    n = len(mask or [])
-    return [[1 if (i==j and int(mask[j])==1) else 0 for j in range(n)] for i in range(n)]
-
+# ───────────────────────── Reports: Perturbation sanity (lanes-only) ──────────────────────
 def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: bool, enable_witness: bool):
+    """
+    Lanes-only flips over d3; writes:
+      - reports/perturbation_sanity.csv
+      - reports/perturbation_sanity__<hash12>.json
+    Reads SSOT (B/C/H, run_ctx, lane_mask_k3). No “repair” mechanics. N/A + reason only.
+    """
     ss = st.session_state
     REPORTS_DIR = Path(ss.get("REPORTS_DIR", "reports")); REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Ensure run_ctx has a mode + projector filename (copy-only)
-    rc = (ss.get("run_ctx") or {}).copy()
-    rc["mode"] = rc.get("mode") or "projected(columns@k=3,file)"
-    rc["projector_filename"] = rc.get("projector_filename") or _pj_path_from_context_or_fs()
-    ss["run_ctx"] = rc
-
-        # ─── Preflight: hydrate B/C/H and assert H2/d3/C3 exist ───
+    # Preflight: hydrate B/C/H
     B0, C0, H0 = _reports_hydrate_BCH()
-    
-    # Pull blocks once
     d3_base = (B0.blocks.__root__.get("3") or []) if B0 else []
     C3      = (C0.blocks.__root__.get("3") or []) if C0 else []
     H2      = (H0.blocks.__root__.get("2") or []) if H0 else []
-    
-    # Presence/shape sniff only (no matmul here)
+
     n2 = len(d3_base)
     n3 = len(d3_base[0]) if (n2 and d3_base[0]) else 0
     if not (n2 and n3 and H2 and (H2[0] if H2 else []) and C3 and (C3[0] if C3 else [])):
-        st.error("Reports: missing H2/d3/C3 — run Overlap/Cert once to freeze SSOT.")
+        st.error("N/A (reason: missing H2/d3/C3). Run Overlap/Cert once to freeze SSOT.")
         st.stop()
-    
-    st.caption(f"Reports inputs live → H2:{len(H2)}×{len(H2[0]) if H2 and H2[0] else 0} · d3:{n2}×{n3} · C3:{len(C3)}×{len(C3[0]) if C3 and C3[0] else 0}")
-        
-      # --- Lane-mask pin & projector diag (final/clean) ---
-    rc = st.session_state.get("run_ctx") or {}
-    
-    lane_mask = [int(x) & 1 for x in (rc.get("lane_mask_k3") or [])]
-    if not lane_mask:
-        # derive from d3 once and pin for downstream consumers
-        lane_mask = [1 if any(int(d3_base[i][j]) & 1 for i in range(n2)) else 0 for j in range(n3)]
-        rc["lane_mask_k3"] = lane_mask
-        st.session_state["run_ctx"] = rc
-    
-    P_diag = _diag_from_mask_local(lane_mask) if lane_mask else None
-    
-    # compute set FIRST
-    selected_cols = {j for j, b in enumerate(lane_mask) if b == 1}
-    
-    # then aliases (for older code paths)
+
+    # Lane mask & projector
     lane_mask, P_diag, selected_cols = _pin_lane_mask_and_projector(d3_base, n2, n3)
-    lanes = lane_mask          # back-compat
-    lane_cols = selected_cols  # back-compat
-    
     st.caption(f"Lane mask → {lane_mask} (lanes: {len(selected_cols)}/{n3})")
 
-
-    
-    # Build diagonal projector once
-    P_diag = _diag_from_mask_local(lane_mask) if lane_mask else None
-    
-    # Flip domain = lanes-only
-    selected_cols = {j for j, b in enumerate(lane_mask) if b == 1}
-    
-    # Tiny visibility so you can sanity check quickly
-    st.caption(f"Lane mask → {lane_mask} (lanes: {len(selected_cols)}/{n3})")
-
-
-    # Projector validation tag (copy-only)
+    # Projector FILE validation hint (does not block)
+    rc = ss.get("run_ctx") or {}
     proj_status = {"status": "OK", "na_reason_code": ""}
     try:
         if rc.get("mode") == "projected(columns@k=3,file)" and file_validation_failed():
@@ -5156,13 +4466,12 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
     except Exception:
         pass
 
-    # Baseline
-    R3_base = _strict_R3(H2, d3, C3)
-    k3_strict_base = _eq_zero_local(R3_base)
-    k3_proj_base   = (_eq_zero_local(_projected_R3(R3_base, P_diag)) if P_diag else None)
+    # Baseline checks
+    R3_base = _strict_R3(H2, d3_base, C3)
+    k3_strict_base = _eq_zero(R3_base)
+    k3_proj_base   = (_eq_zero(_projected_R3(R3_base, P_diag)) if P_diag else None)
 
-    # Flip domain: lanes-only
-    lane_cols = {j for j,b in enumerate(lanes) if b==1}
+    # Flip generator (deterministic from seed)
     h = int(_hash.sha256(str(seed).encode("utf-8")).hexdigest(), 16)
     def _flip_targets(n2_, n3_, budget):
         i = (h % max(1, n2_)) if n2_ else 0
@@ -5172,23 +4481,31 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
             i = (i + 1 + (h % 3)) % (n2_ or 1)
             j = (j + 2 + ((h >> 5) % 5)) % (n3_ or 1)
 
+    # Walk flips: lanes-only domain
     rows_csv, results_json = [], []
     total_flips = in_domain_flips = 0
     for (r, c, k) in _flip_targets(n2, n3, max_flips):
-        if c not in lane_cols:
+        if c not in selected_cols:
             total_flips += 1
             rows_csv.append([k, "none", "none", "off-domain (ker column)"])
-            results_json.append({"flip_id":int(k),"flip":{"row":int(r),"col":int(c),"lane_col":False,"skip_reason":"off-domain"},
-                                 "baseline":{"k3_strict":bool(k3_strict_base),"k3_projected":(None if k3_proj_base is None else bool(k3_proj_base))}})
+            results_json.append({
+                "flip_id": int(k),
+                "flip": {"row": int(r), "col": int(c), "lane_col": False, "skip_reason": "off-domain"},
+                "baseline": {"k3_strict": bool(k3_strict_base), "k3_projected": (None if k3_proj_base is None else bool(k3_proj_base))}
+            })
             continue
+
         total_flips += 1; in_domain_flips += 1
-        d3_mut = [row[:] for row in d3]; d3_mut[r][c] ^= 1
-        dB = B0.dict() if hasattr(B0, "dict") else {"blocks": {}}; dB = _json.loads(_json.dumps(dB))
+        # mutate a copy of d3
+        d3_mut = [row[:] for row in d3_base]; d3_mut[r][c] ^= 1
+        dB = B0.dict() if hasattr(B0, "dict") else {"blocks": {}}
+        dB = _json.loads(_json.dumps(dB))  # deep-copy
         dB.setdefault("blocks", {})["3"] = d3_mut
         Bk = io.parse_boundaries(dB)
 
         _, tag_sK, eq_sK, _, eq_pK = _sig_tag_eq(Bk, C0, H0, P_diag)
         guard = _first_tripped_guard({"3": {"eq": bool(eq_sK)}})
+
         rows_csv.append([k, guard, guard, ""])
         results_json.append({
             "flip_id": int(k),
@@ -5205,28 +4522,32 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
         csv_path,
         header=["flip_id","guard_tripped","expected_guard","note"],
         rows=rows_csv,
-        meta_lines=[f"schema_version={SCHEMA_VERSION}", f"saved_at={_utc_iso_z()}",
-                    f"run_id={(ss.get('run_ctx') or {}).get('run_id','')}", f"app_version={APP_VERSION}",
-                    f"seed={seed}", f"n2={n2}", f"n3={n3}"],
+        meta_lines=[
+            f"schema_version={SCHEMA_VERSION}", f"saved_at={_utc_iso_z()}",
+            f"run_id={(rc or {}).get('run_id','')}", f"app_version={APP_VERSION}",
+            f"seed={seed}", f"n2={n2}", f"n3={n3}"
+        ],
     )
 
-    # JSON (copy-only: policy + inputs)
+    # JSON payload
     policy_block = _policy_block_from_run_ctx(rc)
     inputs_block = _inputs_block_from_session(strict_dims=(n2, n3))
     need = ("boundaries_hash","C_hash","H_hash","U_hash","shapes_hash")
     if not all((inputs_block.get("hashes") or {}).get(k, "") for k in need):
-        st.error("INPUT_HASHES_MISSING: wire SSOT from Cert/Overlap; backfill disabled.")
+        st.error("N/A (reason: INPUT_HASHES_MISSING). Wire SSOT from Cert/Overlap; backfill disabled.")
         st.stop()
 
     payload = {
-        "schema_version": SCHEMA_VERSION, "written_at_utc": _utc_iso_z(), "app_version": APP_VERSION, "field": FIELD,
+        "schema_version": SCHEMA_VERSION, "written_at_utc": _utc_iso_z(),
+        "app_version": APP_VERSION, "field": FIELD,
         "identity": {"run_id": rc.get("run_id",""), "district_id": rc.get("district_id",""), "fixture_nonce": rc.get("fixture_nonce","")},
         "projector_validation": proj_status,
         "projected_check": {"enabled": bool(P_diag), "na_reason_code": ("" if P_diag else "LANE_MASK_MISSING")},
         "policy": policy_block, "inputs": inputs_block,
         "baseline": {"k3_strict": bool(k3_strict_base), "k3_projected": (None if k3_proj_base is None else bool(k3_proj_base))},
         "run": {"max_flips": int(max_flips), "domain": "d3_supports", "lanes_only": True, "seed": str(seed)},
-        "results": results_json, "summary": {"flips": int(total_flips), "in_domain_flips": int(in_domain_flips)},
+        "results": results_json,
+        "summary": {"flips": int(total_flips), "in_domain_flips": int(in_domain_flips)},
         "integrity": {"content_hash": ""},
     }
     payload["integrity"]["content_hash"] = _hash_json(payload)
@@ -5235,617 +4556,203 @@ def run_reports__perturb_and_fence(*, max_flips: int, seed: str, include_fence: 
     _guarded_atomic_write_json(jpath, payload)
 
     st.success(f"Perturbation sanity → {csv_path.name} + {jname}")
-    with open(jpath, "rb") as jf: st.download_button("Download perturbation_sanity.json", jf, file_name=jname, key=f"dl_ps_json_{jname[-12:]}")
-    with open(csv_path, "rb") as cf: st.download_button("Download perturbation_sanity.csv", cf, file_name=csv_path.name, key=f"dl_ps_csv_{csv_path.stem[-8:]}")
+    with open(jpath, "rb") as jf:
+        st.download_button("Download perturbation_sanity.json", jf, file_name=jname, key=f"dl_ps_json_{jname[-12:]}")
+    with open(csv_path, "rb") as cf:
+        st.download_button("Download perturbation_sanity.csv", cf, file_name=csv_path.name, key=f"dl_ps_csv_{csv_path.stem[-8:]}")
 
-    # Fence (optional) — unchanged from your working variant
+    # Fence (optional) — placeholder (your working fence runner can be called here)
     if include_fence:
-        # (reuse your fence code here; it already worked once BCH are hydrated)
+        # e.g., run_reports__fence_stress(...)  # keep your existing implementation
         pass
-
-
-
-
-          
-
+# ───────────────────────── /Reports: Perturbation sanity ─────────────────────
 
 
 
 
 
+# ============================== Coverage (lean, SSOT-aligned) ==============================
+# Goal: keep a tiny baseline registry for patterns; delegate health/rollup to the existing C1 block.
 
+import json as _json
+import re as _re
+from pathlib import Path as _Path
 
+import streamlit as st
 
+# ---------- Tiny helpers: tokens & normalization ----------
+_PAT_RE = _re.compile(r"pattern=\[\s*(.*?)\s*\]")
 
+def _extract_pattern_tokens(sig: str) -> list[str]:
+    """Return list of bit-strings found inside pattern=[...]."""
+    m = _PAT_RE.search(sig or "")
+    if not m:
+        return []
+    inner = m.group(1)
+    toks = []
+    for raw in inner.split(","):
+        s = "".join(ch for ch in raw.strip() if ch in "01")
+        if s:
+            toks.append(s)
+    return toks
 
+def _rebuild_signature_with_tokens(sig: str, tokens: list[str]) -> str:
+    """Replace/insert pattern=[...] in sig with given tokens."""
+    if "pattern=[" not in sig:
+        return f"pattern=[{','.join(tokens)}]"
+    return _re.sub(r"pattern=\[[^\]]*\]", f"pattern=[{','.join(tokens)}]", sig)
 
-
-# ================================== Coverage · Helpers (idempotent) ==================================
-import random as _random
-
-# ---------- Coverage bootstrap (place ABOVE self-test & expanders) ----------
-if "_cov_baseline_open" not in st.session_state:
-    st.session_state["_cov_baseline_open"] = True
-if "_cov_sampling_open" not in st.session_state:
-    st.session_state["_cov_sampling_open"] = True
-if "_cov_defaults" not in st.session_state:
-    st.session_state["_cov_defaults"] = {
-        "random_seed": 1337,
-        "bit_density": 0.40,
-        "sample_count": 200,
-    }
-st.session_state.setdefault("normalizer_ok", True)
-
-if "_rand_gf2_matrix" not in globals():
-    def _rand_gf2_matrix(rows: int, cols: int, density: float, rng: _random.Random) -> list[list[int]]:
-        density = max(0.0, min(1.0, float(density)))
-        return [[1 if rng.random() < density else 0 for _ in range(int(cols))] for _ in range(int(rows))]
-
-if "_gf2_rank" not in globals():
-    def _gf2_rank(M: list[list[int]]) -> int:
-        if not M: return 0
-        A = [row[:] for row in M]
-        m, n = len(A), len(A[0])
-        r = c = 0
-        while r < m and c < n:
-            pivot = next((i for i in range(r, m) if A[i][c] & 1), None)
-            if pivot is None:
-                c += 1
-                continue
-            if pivot != r:
-                A[r], A[pivot] = A[pivot], A[r]
-            for i in range(r + 1, m):
-                if A[i][c] & 1:
-                    A[i] = [(A[i][j] ^ A[r][j]) for j in range(n)]
-            r += 1; c += 1
-        return r
-
-def _cov_keep_open_sampling():
-    st.session_state["_cov_sampling_open"] = True
-
-def _cov_keep_open_baseline():
-    st.session_state["_cov_baseline_open"] = True
-
-
-if "_col_support_pattern" not in globals():
-    def _col_support_pattern(M: list[list[int]]) -> list[str]:
-        if not M: return []
-        rows, cols = len(M), len(M[0])
-        cols_bits = []
-        for j in range(cols):
-            bits = ''.join('1' if (M[i][j] & 1) else '0' for i in range(rows))
-            cols_bits.append(bits)
-        cols_bits.sort()
-        return cols_bits
-
-if "_coverage_signature" not in globals():
-    def _coverage_signature(d_k1: list[list[int]], n_k: int) -> str:
-        rk = _gf2_rank(d_k1)
-        ker = max(0, int(n_k) - rk)
-        patt = _col_support_pattern(d_k1)  # columns, top→bottom; lexicographically sorted
-        return f"rk={rk};ker={ker};pattern=[{','.join(patt)}]"
-
-# ---------- Baseline normalization helpers ----------
-if "_extract_pattern_tokens" not in globals():
-    import re as _re
-    _PAT_RE = _re.compile(r"pattern=\[\s*(.*?)\s*\]")
-    def _extract_pattern_tokens(sig: str) -> list[str]:
-        m = _PAT_RE.search(sig or "")
-        if not m:
-            return []
-        inner = m.group(1)
-        toks = []
-        for raw in inner.split(","):
-            s = "".join(ch for ch in raw.strip() if ch in "01")
-            if s != "":
-                toks.append(s)
-        return toks
-
-if "_rebuild_signature_with_tokens" not in globals():
-    import re as _re
-    def _rebuild_signature_with_tokens(sig: str, tokens: list[str]) -> str:
-        if "pattern=[" not in sig:
-            return f"pattern=[{','.join(tokens)}]"
-        return _re.sub(r"pattern=\[[^\]]*\]", f"pattern=[{','.join(tokens)}]", sig)
-
-if "_normalize_signature_line_to_n2" not in globals():
-    def _normalize_signature_line_to_n2(sig: str, *, n2: int, n3: int) -> tuple[str, str]:
-        """
-        Convert pattern=[t1,t2,t3] to n3 tokens, each exactly n2 bits (top-to-bottom).
-        - If token len > n2: keep TOP n2 bits (leftmost).
-        - If token len < n2: left-pad with '0' to n2.
-        - If token count != n3: pad/truncate with '0'*n2 to exactly n3 tokens.
-        Returns (full_signature_norm, pattern_only_norm).
-        """
-        toks = _extract_pattern_tokens(sig) or []
-        norm = []
-        for t in toks:
-            bits = "".join(ch for ch in t if ch in "01")
-            if len(bits) >= n2:
-                norm.append(bits[:n2])
-            else:
-                norm.append(("0"*(n2 - len(bits))) + bits)
-        while len(norm) < n3:
-            norm.append("0"*n2)
-        if len(norm) > n3:
-            norm = norm[:n3]
-        patt_norm = f"pattern=[{','.join(norm)}]"
-        full_norm = _rebuild_signature_with_tokens(sig, norm)
-        return full_norm, patt_norm
-
-if "_dedupe_keep_order" not in globals():
-    def _dedupe_keep_order(items: list[str]) -> list[str]:
-        seen, out = set(), []
-        for s in items:
-            if s not in seen:
-                seen.add(s); out.append(s)
-        return out
-
-# Optional: infer n2/n3 when demo-baseline is used without a fixture
-if "_autofill_dims_from_session" not in globals():
-    def _autofill_dims_from_session():
-        rc = st.session_state.get("run_ctx") or {}
-        n2 = int(rc.get("n2") or 0); n3 = int(rc.get("n3") or 0)
-        if n2 > 0 and n3 > 0:
-            return n2, n3
-        # try boundaries
-        B = st.session_state.get("boundaries")
-        try:
-            if B and hasattr(B, "blocks"):
-                blocks = getattr(B.blocks, "__root__", {}) or {}
-                d3 = blocks.get("3") or []
-                if d3:
-                    n2_ = len(d3); n3_ = len(d3[0]) if d3 and d3[0] else 0
-                    if n2_ and n3_:
-                        rc["n2"], rc["n3"] = int(n2_), int(n3_); st.session_state["run_ctx"] = rc
-                        return rc["n2"], rc["n3"]
-        except Exception:
-            pass
-        return 0, 0
-        
-
-# ----- Helpers: add pattern(s) to baseline, normalized & dedup -----
-def _ensure_dims_or_seed_demo():
-    """Returns (n2, n3); seeds demo dims (2,3) if absent so UI flows even with no fixture."""
+def _ensure_dims_or_seed_demo() -> tuple[int, int]:
+    """Always return (n2,n3). Seed 2×3 once if missing so UI can flow."""
     rc = st.session_state.get("run_ctx") or {}
     n2 = int(rc.get("n2") or 0)
     n3 = int(rc.get("n3") or 0)
     if n2 <= 0 or n3 <= 0:
-        n2, n3 = 2, 3  # safe demo defaults
+        n2, n3 = 2, 3
         rc["n2"], rc["n3"] = n2, n3
         st.session_state["run_ctx"] = rc
     return n2, n3
 
-def _add_normalized_pattern_to_baseline(pattern_str: str, rk: str|None=None, ker: str|None=None):
+def _normalize_signature_line_to_n2(sig: str, *, n2: int, n3: int) -> tuple[str, str]:
     """
-    pattern_str must look like 'pattern=[..,..,..]'. We normalize to n2×n3, then
-    insert a full signature string into known_signatures, and just pattern into
-    known_signatures_patterns. Dedup, keep order.
+    Convert pattern=[t1,t2,...] to exactly n3 tokens, each exactly n2 bits.
+    - Truncate from the top if longer; left-pad with '0' if shorter.
+    Returns (full_signature_norm, pattern_only_norm).
     """
-    if not pattern_str.startswith("pattern=["):
-        # allow raw tokens ['00','01','11'] too
-        toks = [t.strip() for t in pattern_str.split(",") if t.strip()]
-        pattern_str = f"pattern=[{','.join(toks)}]"
+    toks = _extract_pattern_tokens(sig) or []
+    norm = []
+    for t in toks:
+        bits = "".join(ch for ch in t if ch in "01")
+        if len(bits) >= n2:
+            norm.append(bits[:n2])
+        else:
+            norm.append(("0"*(n2 - len(bits))) + bits)
+    while len(norm) < n3:
+        norm.append("0"*n2)
+    if len(norm) > n3:
+        norm = norm[:n3]
+    patt_norm = f"pattern=[{','.join(norm)}]"
+    full_norm = _rebuild_signature_with_tokens(sig, norm)
+    return full_norm, patt_norm
+
+def _dedupe_keep_order(items: list[str]) -> list[str]:
+    seen, out = set(), []
+    for s in items:
+        if s not in seen:
+            seen.add(s); out.append(s)
+    return out
+
+# ---------- Baseline registry (no UI buttons; callable from elsewhere) ----------
+def add_patterns_to_baseline(lines: list[str], *, normalize: bool = True):
+    """
+    Accepts a list of signature strings or raw tokens (e.g. '00,11,10').
+    Normalizes to current (n2,n3) and stores:
+      - run_ctx.known_signatures            → list[str] (full, deduped, in order)
+      - run_ctx.known_signatures_patterns  → sorted list[str] of 'pattern=[...]'
+    """
+    if not lines:
+        return {"ok": False, "reason": "EMPTY_INPUT"}
 
     n2, n3 = _ensure_dims_or_seed_demo()
 
-    # Build a minimal full signature (rk/ker optional, you can overwrite later)
-    prefix = []
-    if rk is not None:  prefix.append(f"rk={rk}")
-    if ker is not None: prefix.append(f"ker={ker}")
-    base_sig = (";".join(prefix) + ";" if prefix else "") + pattern_str
+    full_norm, patt_norm = [], []
+    for s in lines:
+        s = s.strip()
+        if not s:
+            continue
+        # allow raw tokens like "00,01,11"
+        if not s.startswith("pattern=["):
+            toks = [t.strip() for t in s.split(",") if t.strip()]
+            s = f"pattern=[{','.join(toks)}]"
+        f, p = _normalize_signature_line_to_n2(s, n2=n2, n3=n3) if normalize else (s, s)
+        full_norm.append(f); patt_norm.append(p)
 
-    # Normalize full + pattern to n2×n3
-    full_norm, patt_norm = _normalize_signature_line_to_n2(base_sig, n2=n2, n3=n3)
+    rc = st.session_state.get("run_ctx") or {}
+    rc["known_signatures"] = _dedupe_keep_order(full_norm)
+    rc["known_signatures_patterns"] = sorted(set(patt_norm))
+    st.session_state["run_ctx"] = rc
 
-    rc0 = st.session_state.get("run_ctx") or {}
-    # full list (for human provenance)
-    sigs_full = list(rc0.get("known_signatures") or [])
-    if full_norm not in sigs_full:
-        sigs_full.append(full_norm)
-    rc0["known_signatures"] = sigs_full
+    return {
+        "ok": True,
+        "count_full": len(rc["known_signatures"]),
+        "count_patterns": len(rc["known_signatures_patterns"]),
+        "n2": n2, "n3": n3,
+    }
 
-    # patterns-only set (for O(1) membership in the sampler)
-    patt_only = set(rc0.get("known_signatures_patterns") or [])
-    patt_only.add(patt_norm)
-    rc0["known_signatures_patterns"] = sorted(patt_only)
+# ---------- Health & rollup: thin adapter to the existing C1 helpers ----------
+def render_coverage_health_and_rollup():
+    """
+    Uses the already-defined C1 helpers in this app:
+      - _c1_paths() → (coverage.jsonl, coverage_rollup.csv)
+      - _c1_health_ping(jsonl_path, tail=50)
+      - _c1_rollup_rows(jsonl_path)
+      - _c1_write_rollup_csv(rows, out_path)
+    If any are missing, we degrade gracefully.
+    """
+    # Prefer the SSOT C1 paths if available; else default to logs/reports/coverage.jsonl
+    if "_c1_paths" in globals():
+        jsonl_path, csv_path = _c1_paths()  # type: ignore[name-defined]
+    else:
+        base = _Path("logs") / "reports"; base.mkdir(parents=True, exist_ok=True)
+        jsonl_path, csv_path = (base / "coverage.jsonl"), (base / "coverage_rollup.csv")
 
-    st.session_state["run_ctx"] = rc0
-    return full_norm, patt_norm
-  
- 
+    st.caption(f"Source: {jsonl_path} · Output: {csv_path}")
 
-# ============================== Coverage · Bootstrap & Helpers ==============================
-# Keep these idempotent (safe to re-run)
-if "_cov_baseline_open" not in st.session_state:
-    st.session_state["_cov_baseline_open"] = True
-if "_cov_sampling_open" not in st.session_state:
-    st.session_state["_cov_sampling_open"] = True
-if "_cov_defaults" not in st.session_state:
-    st.session_state["_cov_defaults"] = {"random_seed": 1337, "bit_density": 0.40, "sample_count": 200}
-st.session_state.setdefault("normalizer_ok", True)
-st.session_state.setdefault("_cov_snapshots", {})  # key -> snapshot dict
-
-# no-op keep-open for any button inside the expander
-if "_cov_keep_open_sampling" not in globals():
-    def _cov_keep_open_sampling():
-        st.session_state["_cov_sampling_open"] = True
-
-# Small utils
-import datetime as _dt, hashlib as _hashlib, json as _json
-from io import StringIO as _StringIO
-import pandas as _pd
-
-def _now_utc_iso_Z():
-    return _dt.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
-
-def _sha256_bytes(b: bytes) -> str:
-    return _hashlib.sha256(b).hexdigest()
-
-def _sha256_json(o: dict) -> str:
-    s = _json.dumps(o, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    return _sha256_bytes(s)
-
-def _cov_key(n2,n3,seed,density,count,policy):
-    k = _json.dumps({"n2":int(n2),"n3":int(n3),"seed":int(seed),"density":float(density),
-                     "count":int(count),"policy":str(policy)}, sort_keys=True,
-                     separators=(",",":")).encode("utf-8")
-    return _hashlib.sha256(k).hexdigest()[:12]
-
-def _disable_with(msg: str):
-    st.info(msg)
-    return True
-
-# ================================== Coverage Baseline (load + normalize) ==================================
-with st.expander("Coverage Baseline (load + normalize to n₂-bit columns)",
-                 expanded=st.session_state.get("_cov_baseline_open", True)):
-    st.session_state["_cov_baseline_open"] = True
-
-    n2_active, n3_active = _autofill_dims_from_session()
-    st.caption(f"Active fixture dims → n₂={n2_active}, n₃={n3_active}")
-
-    up = st.file_uploader("Upload baseline (.json / .jsonl)", type=["json", "jsonl"], key="cov_baseline_up")
-    pasted = st.text_area("Or paste signatures (JSON list or one-per-line)", value="", key="cov_baseline_paste")
-    norm_on = st.checkbox("Normalize to n₂-bit columns on load", value=True, key="cov_norm_on")
-
-    DEMO_BASELINE = [
-        "rk=2;ker=1;pattern=[110,110,000]",
-        "rk=2;ker=1;pattern=[101,101,000]",
-        "rk=2;ker=1;pattern=[011,011,000]",
-        "rk=3;ker=0;pattern=[111,111,111]",
-        "rk=1;ker=2;pattern=[100,000,000]",
-    ]
-    CANONICAL_D2D3 = [
-        "rk=2;ker=1;pattern=[11,11,00]",
-        "rk=2;ker=1;pattern=[10,10,00]",
-        "rk=2;ker=1;pattern=[01,01,00]",
-        "rk=2;ker=1;pattern=[00,01,11]",
-        "rk=2;ker=1;pattern=[01,11,10]",
-        "rk=2;ker=1;pattern=[11,10,01]",
-        "rk=3;ker=0;pattern=[11,11,11]",
-        "rk=1;ker=2;pattern=[11,00,00]",
-        "rk=1;ker=2;pattern=[00,11,00]",
-        "rk=1;ker=2;pattern=[00,00,11]",
-    ]
-
-    def _parse_json_baseline(bytes_data: bytes, name: str) -> list[str]:
-        try:
-            txt = bytes_data.decode("utf-8", errors="ignore")
-        except Exception:
-            return []
-        sigs = []
-        try:
-            if name.lower().endswith(".jsonl"):
-                for line in txt.splitlines():
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        obj = _json.loads(line)
-                        if isinstance(obj, str):
-                            sigs.append(obj.strip())
-                        elif isinstance(obj, dict) and "signature" in obj:
-                            sigs.append(str(obj["signature"]).strip())
-                    except Exception:
-                        if "pattern=[" in line:
-                            sigs.append(line)
-            else:
-                obj = _json.loads(txt)
-                if isinstance(obj, list):
-                    for v in obj:
-                        if isinstance(v, str):
-                            sigs.append(v.strip())
-                        elif isinstance(v, dict) and "signature" in v:
-                            sigs.append(str(v["signature"]).strip())
-                elif isinstance(obj, dict) and isinstance(obj.get("signatures"), list):
-                    for v in obj["signatures"]:
-                        if isinstance(v, str):
-                            sigs.append(v.strip())
-                        elif isinstance(v, dict) and "signature" in v:
-                            sigs.append(str(v["signature"]).strip())
-        except Exception:
-            pass
-        return [s for s in sigs if "pattern=[" in s]
-
-    def _parse_pasted_any(p: str) -> list[str]:
-        try:
-            maybe = _json.loads(p or "")
-            if isinstance(maybe, list):
-                out = []
-                for v in maybe:
-                    if isinstance(v, str) and "pattern=[" in v:
-                        out.append(v.strip())
-                if out:
-                    return out
-        except Exception:
-            pass
-        out = []
-        for line in (p or "").splitlines():
-            s = line.strip()
-            if s and "pattern=[" in s:
-                out.append(s)
-        return out
-
-    def _save_baseline_lines(lines: list[str], *, norm: bool):
-        # Seed demo dims if needed so loader never hard-stops UI
-        n2, n3 = _autofill_dims_from_session()
-        if (n2 <= 0 or n3 <= 0) and norm:
-            rc_seed = st.session_state.get("run_ctx") or {}
-            rc_seed["n2"], rc_seed["n3"] = 2, 3
-            st.session_state["run_ctx"] = rc_seed
-            n2, n3 = 2, 3
-
-        if norm:
-            norm_full, norm_patt = [], []
-            for s in lines:
-                f, p = _normalize_signature_line_to_n2(s, n2=int(n2), n3=int(n3))
-                norm_full.append(f); norm_patt.append(p)
-            lines = _dedupe_keep_order(norm_full)
-            patt_only = set(norm_patt)
+    # Health
+    if "_c1_health_ping" in globals():
+        hp = _c1_health_ping(jsonl_path, tail=50)  # type: ignore[name-defined]
+        if hp is None:
+            st.info("No coverage.jsonl yet — run the solver to produce coverage events.")
         else:
-            patt_only = set()
-            for s in lines:
-                toks = _extract_pattern_tokens(s)
-                if toks:
-                    patt_only.add(f"pattern=[{','.join(toks)}]")
+            def fmt(x): return "—" if x is None else f"{x:.3f}"
+            st.markdown(
+                f"**C1 Health** tail={hp['tail']} · "
+                f"sel={fmt(hp.get('mean_sel_mismatch_rate'))} · "
+                f"off={fmt(hp.get('mean_offrow_mismatch_rate'))} · "
+                f"ker={fmt(hp.get('mean_ker_mismatch_rate'))} · "
+                f"ctr={fmt(hp.get('mean_contradiction_rate'))}"
+            )
+    else:
+        st.info("C1 health helpers not loaded; skip health summary.")
 
-        if not patt_only:
-            st.warning("No usable patterns found after parsing/normalize.")
-            return
-
-        rc0 = st.session_state.get("run_ctx") or {}
-        rc0["known_signatures"] = list(lines)
-        rc0["known_signatures_patterns"] = sorted(patt_only)
-        st.session_state["run_ctx"] = rc0
-        st.success(f"Loaded baseline ({len(lines)} signatures; normalized={norm}).")
-        st.caption(f"Baseline now has {len(patt_only)} patterns.")
-
-    cols = st.columns(4)
-    if cols[0].button("Load from upload / paste", key="cov_btn_load",
-                      on_click=lambda: st.session_state.update(_cov_baseline_open=True)):
-        loaded = []
-        if up is not None:
-            loaded.extend(_parse_json_baseline(up.getvalue(), up.name))
-        loaded.extend(_parse_pasted_any(pasted))
-        loaded = [s for s in loaded if s]
-        if not loaded:
-            st.error("No valid signatures found.")
+    # Rollup
+    col = st.columns(2)[0]
+    if col.button("Build rollup CSV", key="btn_cov_rollup"):
+        if all(n in globals() for n in ("_c1_rollup_rows", "_c1_write_rollup_csv")):
+            rows = _c1_rollup_rows(jsonl_path)         # type: ignore[name-defined]
+            _c1_write_rollup_csv(rows, csv_path)       # type: ignore[name-defined]
+            st.success(f"Wrote {len(rows)} rows → {csv_path}")
+            try:
+                import pandas as _pd
+                st.dataframe(_pd.DataFrame(rows), use_container_width=True)
+            except Exception:
+                st.table(rows)
         else:
-            _save_baseline_lines(loaded, norm=norm_on)
+            st.warning("C1 rollup helpers not loaded; cannot build rollup.")
 
-    if cols[1].button("Load canonical D2/D3 list", key="cov_btn_canonical",
-                      on_click=lambda: st.session_state.update(_cov_baseline_open=True)):
-        _save_baseline_lines(CANONICAL_D2D3[:], norm=True)
+# ---------- Minimal UI wrapper (optional) ----------
+with st.expander("Coverage (baseline cache · health & rollup)", expanded=False):
+    st.caption("Lean coverage utilities; baseline is optional, sampling uses C1.")
+    # Paste-or-upload baseline patterns here if you still need them:
+    pasted = st.text_area("Paste signatures or raw tokens (one per line, optional)", value="", key="cov_min_paste")
+    if st.button("Add to baseline (normalize to current n₂×n₃)", key="cov_min_add"):
+        lines = [ln for ln in (pasted or "").splitlines() if ln.strip()]
+        res = add_patterns_to_baseline(lines, normalize=True)
+        if res.get("ok"):
+            rc = st.session_state.get("run_ctx") or {}
+            st.success(f"Baseline now has {len(rc.get('known_signatures_patterns') or [])} patterns @ n₂={res['n2']} n₃={res['n3']}.")
+        else:
+            st.warning(res.get("reason", "Nothing added."))
 
-    if cols[2].button("Use demo baseline (legacy → normalize)", key="cov_btn_demo",
-                      on_click=lambda: st.session_state.update(_cov_baseline_open=True)):
-        _save_baseline_lines(DEMO_BASELINE[:], norm=True)
-
-    if cols[3].button("Clear baseline", key="cov_btn_clear",
-                      on_click=lambda: st.session_state.update(_cov_baseline_open=True)):
-        rc0 = st.session_state.get("run_ctx") or {}
-        rc0["known_signatures"] = []
-        rc0["known_signatures_patterns"] = []
-        st.session_state["run_ctx"] = rc0
-        st.info("Cleared baseline.")
-
-    # Preview
+    # Preview (lightweight)
     rc_view = st.session_state.get("run_ctx") or {}
     ks = list(rc_view.get("known_signatures") or [])
     if ks:
-        st.caption(f"Baseline active: {len(ks)} signatures. Showing up to 5:")
+        st.caption(f"Baseline: {len(ks)} signatures (showing up to 5):")
         st.code("\n".join(ks[:5] + (["…"] if len(ks) > 5 else [])), language="text")
     else:
-        st.caption("Baseline inactive (known_signatures is empty).")
+        st.caption("Baseline empty (optional).")
 
-
-
-
-# ===================== /Coverage Sampling =================        
-                           
-
-
-# === Coverage sampling — health ping & rollup helpers ===
-import math, csv, statistics
-from pathlib import Path as _Path
-
-def _bit_entropy(p: float) -> float:
-    if p <= 0.0 or p >= 1.0: return 0.0
-    q = 1.0 - p
-    return -(p*math.log2(p) + q*math.log2(q))
-
-def _read_jsonl_tail(path: _Path, N: int = 1000):
-    try:
-        if not path.exists(): return []
-        lines = path.read_text(encoding="utf-8").splitlines()
-        rows = []
-        for ln in lines[-N:]:
-            ln = ln.strip()
-            if not ln: continue
-            try:
-                rows.append(_json.loads(ln))
-            except Exception:
-                pass
-        return rows
-    except Exception:
-        return []
-
-def _coverage_health_ping() -> dict:
-    """Best-effort: prefer JSONL if present; otherwise summarize CSV."""
-    jsonl = REPORTS_DIR / "coverage_sampling.jsonl"
-    csvp  = REPORTS_DIR / "coverage_sampling.csv"
-    out = {"ok": False}
-
-    if jsonl.exists():
-        rows = _read_jsonl_tail(jsonl, N=2000)
-        if not rows:
-            return {"ok": False, "reason": "NO_JSONL_ROWS"}
-        lane_vecs = []
-        verdict_pairs = []
-        for r in rows:
-            pol = r.get("policy") or {}
-            lm = pol.get("lanes") or (r.get("overlay") or {}).get("lanes")
-            if isinstance(lm, list) and lm:
-                lane_vecs.append([1 if (int(x) & 1) else 0 for x in lm])
-            k = r.get("checks") or {}
-            strict_k3 = k.get("strict_k3")
-            proj_k3   = k.get("projected_k3")
-            if isinstance(strict_k3, bool) and isinstance(proj_k3, bool):
-                verdict_pairs.append((strict_k3, proj_k3))
-
-        n = max((len(v) for v in lane_vecs), default=0)
-        if n > 0 and lane_vecs:
-            L = [[(v[j] if j < len(v) else 0) for j in range(n)] for v in lane_vecs]
-            col_means = [statistics.fmean(col) for col in zip(*L)]
-            entropies = [_bit_entropy(p) for p in col_means]
-            lane_density = statistics.fmean(col_means)
-        else:
-            entropies = []
-            lane_density = 0.0
-
-        posed = [(a,b) for (a,b) in verdict_pairs if isinstance(a,bool) and isinstance(b,bool)]
-        contradictory_lane_rate = (sum(int(a!=b) for a,b in posed)/len(posed)) if posed else 0.0
-
-        flags = []
-        if entropies and max(entropies) < 0.05: flags.append("entropy≈0 (over-masked projector)")
-        if contradictory_lane_rate > 0.10: flags.append(f"contradictions high ({contradictory_lane_rate:.2%})")
-
-        out.update({
-            "ok": True,
-            "source": "jsonl",
-            "lane_density": lane_density,
-            "entropy_mean": (statistics.fmean(entropies) if entropies else 0.0),
-            "entropy_min": (min(entropies) if entropies else 0.0),
-            "entropy_max": (max(entropies) if entropies else 0.0),
-            "contradictory_lane_rate": contradictory_lane_rate,
-            "flags": flags,
-            "rows": len(rows),
-            "width": n,
-        })
-        return out
-
-    if csvp.exists():
-        try:
-            rows = []
-            with open(csvp, "r", encoding="utf-8") as fh:
-                r = csv.DictReader(fh)
-                for row in r:
-                    rows.append(row)
-            total = len(rows)
-            in_rows = sum(1 for r in rows if str(r.get("in_district","")).strip().upper()=="TRUE")
-            out_rows = total - in_rows
-            out.update({
-                "ok": True,
-                "source": "csv",
-                "total": total,
-                "in_rows": in_rows,
-                "out_rows": out_rows,
-                "coverage_rate": (in_rows/max(1,total)),
-                "flags": [],
-            })
-            return out
-        except Exception:
-            return {"ok": False, "reason": "CSV_PARSE_FAIL"}
-
-    return {"ok": False, "reason": "NO_SAMPLING_FILES"}
-
-def _coverage_rollup_to_csv() -> dict:
-    """Prefer JSONL rollup; if absent, rollup CSV by in_district and write summary."""
-    jsonl = REPORTS_DIR / "coverage_sampling.jsonl"
-    csvp  = REPORTS_DIR / "coverage_sampling.csv"
-    outp  = REPORTS_DIR / "coverage_sampling_summary.csv"
-
-    if jsonl.exists():
-        rows = _read_jsonl_tail(jsonl, N=100000)
-        if not rows:
-            return {"ok": False, "reason": "NO_JSONL_ROWS"}
-        from collections import defaultdict
-        grp = defaultdict(lambda: {"IN":0,"NEAR_OUT":0,"FAR_OUT":0,"NA":0,"overlay":[]})
-        for r in rows:
-            pol = (r.get("policy") or r.get("policy_tag") or "")
-            zone = (r.get("zone") or "").upper()
-            if not zone:
-                m = r.get("membership") or {}
-                st = (m.get("status") or "").upper()
-                if st == "IN": zone = "IN"
-                elif st == "NA": zone = "NA"
-                else: zone = "FAR_OUT"
-            if zone not in grp[pol]: grp[pol][zone]=0
-            grp[pol][zone]+=1
-            ov = r.get("overlay_rate")
-            if isinstance(ov,(int,float)): grp[pol]["overlay"].append(float(ov))
-
-        lines = [["policy","IN","NEAR_OUT","FAR_OUT","NA","mean_overlay_rate"]]
-        for pol, v in grp.items():
-            ov = v.get("overlay") or []
-            mean_ov = (sum(ov)/len(ov)) if ov else ""
-            lines.append([pol, v.get("IN",0), v.get("NEAR_OUT",0), v.get("FAR_OUT",0), v.get("NA",0), mean_ov])
-        outp.parent.mkdir(parents=True, exist_ok=True)
-        with open(outp, "w", encoding="utf-8", newline="") as fh:
-            w = csv.writer(fh); w.writerows(lines)
-        return {"ok": True, "out": str(outp), "mode":"jsonl"}
-
-    if csvp.exists():
-        try:
-            rows = []
-            with open(csvp, "r", encoding="utf-8") as fh:
-                r = csv.DictReader(fh)
-                for row in r: rows.append(row)
-            total = len(rows)
-            in_rows = sum(1 for r in rows if str(r.get("in_district","")).strip().upper()=="TRUE")
-            out_rows = total - in_rows
-            lines = [["policy","IN","OUT","total","coverage_rate"],
-                     ["strict", in_rows, out_rows, total, (in_rows/max(1,total))]]
-            outp.parent.mkdir(parents=True, exist_ok=True)
-            with open(outp, "w", encoding="utf-8", newline="") as fh:
-                w = csv.writer(fh); w.writerows(lines)
-            return {"ok": True, "out": str(outp), "mode":"csv"}
-        except Exception:
-            return {"ok": False, "reason": "CSV_PARSE_FAIL"}
-
-    return {"ok": False, "reason": "NO_SAMPLING_FILES"}
-
-def _render_coverage_health_and_rollup():
-    hp = _coverage_health_ping()
-    if not hp.get("ok"):
-        st.caption("Coverage sampling: no recent rows.")
-    else:
-        if hp.get("source") == "jsonl":
-            st.code(
-                "HEALTH  lane_density={:.3f}  H̄={:.3f}  Hmin={:.3f}  Hmax={:.3f}  contradictions={:.2%}  rows={}  k={}\n{}"
-                .format(hp.get("lane_density",0.0), hp.get("entropy_mean",0.0),
-                        hp.get("entropy_min",0.0), hp.get("entropy_max",0.0),
-                        hp.get("contradictory_lane_rate",0.0),
-                        hp.get("rows",0), hp.get("width",0),
-                        ("⚠ " + " · ".join(hp.get("flags") or [])) if hp.get("flags") else "OK"),
-                language="text",
-            )
-        else:
-            st.code(
-                "HEALTH  coverage_rate={:.3f}  rows={}".format(hp.get("coverage_rate",0.0), hp.get("total",0)),
-                language="text",
-            )
-    res = _coverage_rollup_to_csv()
-    if res.get("ok"):
-        st.caption(f"CSV rollup → {res['out']}")
-# === /Coverage sampling — health ping & rollup helpers ===
+    st.divider()
+    render_coverage_health_and_rollup()
+# ============================ /Coverage (lean) ============================
