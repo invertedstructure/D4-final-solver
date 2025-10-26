@@ -1,4 +1,183 @@
 import streamlit as st
+
+# === Solver entrypoint (pure-ish): resolve → freeze → strict → projected(auto) → freezer → projected(file) → A/Bs → bundle ===
+def one_press_solve(ss):
+    """
+    Run the full solver lap and write bundle artifacts.
+    Returns a small receipt dict and updates session anchors.
+    This wrapper relies on the canonical _svr_* helpers already present.
+    """
+    # Resolve inputs & freeze SSOT
+    pf = _svr_resolve_all_to_paths()   # {"B": (path, blocks), "C": ..., "H": ..., "U": ...}
+    (pB, bB), (pC, bC), (pH, bH), (pU, bU) = pf["B"], pf["C"], pf["H"], pf["U"]
+    ib_rc = _svr_freeze_ssot(pf)
+    if isinstance(ib_rc, tuple):
+        ib = ib_rc[0] or {}
+        rc = ib_rc[1] if (len(ib_rc) > 1 and isinstance(ib_rc[1], dict)) else {}
+    else:
+        ib = ib_rc or {}
+        rc = {}
+
+    # Dimensions & district
+    H2 = bH.get("2") or []
+    d3 = bB.get("3") or []
+    C3 = bC.get("3") or []
+    n3 = len(C3[0]) if (C3 and C3[0]) else 0
+    # district_id from frozen IB if present
+    h = ib.get("hashes", {}) or {}
+    district_id = ib.get("district_id") or ("D" + str(h.get("boundaries_hash", ""))[:8])
+
+    # Residuals R3 = H2·d3 ⊕ (C3 ⊕ I3)
+    I3 = _svr_eye(len(C3)) if (C3 and len(C3) == len(C3[0])) else []
+    H2d3 = _svr_mul(H2, d3) if (H2 and d3) else []
+    C3pI3 = _svr_xor(C3, I3) if I3 else []
+    R3s = _svr_xor(H2d3, C3pI3) if I3 else []
+
+    # Strict & Projected(auto)
+    strict_out = _svr_strict_from_blocks(bH, bB, bC)
+    proj_meta, lanes, proj_out = _svr_projected_auto_from_blocks(bH, bB, bC)
+    na_reason = (proj_meta.get("reason") if (proj_meta and proj_meta.get("na")) else None)
+
+    # Build embed for AUTO A/B; derive sig8 + bundle dir
+    embed_auto, embed_sig_auto = _svr_build_embed(
+        ib, "strict__VS__projected(columns@k=3,auto)",
+        lanes=(lanes if lanes else None),
+        na_reason=na_reason,
+    )
+    sig8 = (embed_sig_auto or "")[:8]
+    _bundle_dir = _svr_bundle_dir(district_id, sig8)
+
+    # ---------- Write STRICT ----------
+    strict_cert = _svr_cert_common(ib, rc, "strict")
+    strict_cert["policy"] = _policy_receipt(mode="strict", posed=True, n3=n3)
+    strict_cert["results"] = {"out": dict(strict_out or {})}
+    _svr_apply_sig8(strict_cert, embed_sig_auto)
+    p_strict = _svr_write_cert_in_bundle(_bundle_dir, _svr_bundle_fname("strict", district_id, sig8), strict_cert)
+
+    # ---------- Write PROJECTED(AUTO) ----------
+    p_cert = _svr_cert_common(ib, rc, "projected(columns@k=3,auto)")
+    p_cert["policy"] = _policy_receipt(
+        mode="projected:auto", posed=(not bool(proj_meta.get("na"))) if proj_meta else True,
+        lane_policy="C bottom row", lanes=list(lanes or []), projector_source="auto", n3=n3
+    )
+    p_cert["results"] = {"out": dict(proj_out or {}), "lanes": list(lanes or [])}
+    _svr_apply_sig8(p_cert, embed_sig_auto)
+    p_proj_auto = _svr_write_cert_in_bundle(_bundle_dir, _svr_bundle_fname("projected_auto", district_id, sig8), p_cert)
+
+    # ---------- Write A/B (AUTO) ----------
+    ab_auto = _svr_cert_common(ib, rc, "strict__VS__projected(columns@k=3,auto)")
+    ab_auto["ab_pair"] = {
+        "embed": (embed_auto or {}),
+        "embed_sig": str(embed_sig_auto or ""),
+        "left":  {"policy": "strict", "out": strict_out},
+        "right": {"policy": "projected(columns@k=3,auto)", "lanes": list(lanes or []), "out": proj_out},
+    }
+    _svr_apply_sig8(ab_auto, embed_sig_auto)
+    p_ab_auto = _svr_write_cert_in_bundle(_bundle_dir, _svr_bundle_fname("ab_auto", district_id, sig8), ab_auto)
+
+    # ---------- FILE projector from lanes (if possible) ----------
+    projector_hash = None
+    proj_file_k3 = None
+    proj_file_k2 = None
+    p_proj_file = None
+    p_ab_file = None
+
+    if lanes and n3 and R3s:
+        L = [int(x) & 1 for x in lanes]
+        P = [[1 if (i == j and L[j] == 1) else 0 for j in range(n3)] for i in range(n3)]
+        R3pF = _svr_mul(R3s, P) if (R3s and P) else []
+        eq_file_k3 = _svr_is_zero(R3pF) if R3pF else None
+        proj_file_k3 = bool(eq_file_k3) if eq_file_k3 is not None else None
+        proj_file_k2 = (proj_out or {}).get("2", {}).get("eq", None)
+
+        _proj_blob = _json.dumps({"blocks": {"3": P}}, separators=(",", ":"), sort_keys=True).encode("ascii")
+        projector_hash = "sha256:" + _hashlib.sha256(_proj_blob).hexdigest()
+
+        # projected(FILE)
+        p_cert_file = _svr_cert_common(ib, rc, "projected(columns@k=3,file)")
+        p_cert_file["policy"] = _policy_receipt(
+            mode="projected:file", posed=True, lane_policy="file projector",
+            lanes=list(L), projector_source="file", projector_hash=projector_hash, n3=n3
+        )
+        p_cert_file["results"] = {"out": {"2": {"eq": proj_file_k2}, "3": {"eq": proj_file_k3}},
+                                  "projector_hash": projector_hash, "lanes": list(L)}
+        _svr_apply_sig8(p_cert_file, embed_sig_auto)
+        p_proj_file = _svr_write_cert_in_bundle(_bundle_dir, _svr_bundle_fname("projected_file", district_id, sig8), p_cert_file)
+
+        # A/B (FILE)
+        embed_file, embed_sig_file = _svr_build_embed(
+            ib, "strict__VS__projected(columns@k=3,file)", lanes=list(L), projector_hash=projector_hash
+        )
+        ab_file = _svr_cert_common(ib, rc, "strict__VS__projected(columns@k=3,file)")
+        ab_file["ab_pair"] = {
+            "embed": (embed_file or {}), "embed_sig": str(embed_sig_file or ""),
+            "left": {"policy": "strict", "out": strict_out},
+            "right": {"policy": "projected(columns@k=3,file)", "lanes": list(L),
+                      "out": {"2": {"eq": proj_file_k2}, "3": {"eq": proj_file_k3}}},
+        }
+        _svr_apply_sig8(ab_file, embed_sig_file)
+        p_ab_file = _svr_write_cert_in_bundle(_bundle_dir, _svr_bundle_fname("ab_file", district_id, sig8), ab_file)
+
+        # Freezer
+        freezer_status = "OK"
+        if ((proj_out or {}).get("3", {}).get("eq") is True and proj_file_k3 is False) or \
+           ((proj_out or {}).get("3", {}).get("eq") is False and proj_file_k3 is True):
+            freezer_status = "ERROR"
+        freezer_cert = _svr_cert_common(ib, rc, "projector_freezer")
+        freezer_cert["freezer"] = {
+            "status": freezer_status, "lanes": list(L),
+            "projector_hash": projector_hash, "na_reason_code": None if freezer_status=="OK" else "FREEZER_ASSERT_MISMATCH",
+        }
+        _svr_apply_sig8(freezer_cert, embed_sig_auto)
+        p_freezer = _svr_write_cert_in_bundle(_bundle_dir, _svr_bundle_fname("freezer", district_id, sig8), freezer_cert)
+    else:
+        # Freezer N/A + minimal AB(file)
+        L = list(lanes or [])
+        na_reason = "FREEZER_BAD_SHAPE" if not R3s else ("FREEZER_ZERO_LANE_PROJECTOR" if not any(L) else "FREEZER_C3_NOT_SQUARE")
+        freezer_cert = _svr_cert_common(ib, rc, "projector_freezer")
+        freezer_cert["freezer"] = {"status": "N/A", "lanes": list(L), "projector_hash": None, "na_reason_code": na_reason}
+        _svr_apply_sig8(freezer_cert, embed_sig_auto)
+        p_freezer = _svr_write_cert_in_bundle(_bundle_dir, _svr_bundle_fname("freezer", district_id, sig8), freezer_cert)
+
+        ab_file = _svr_cert_common(ib, rc, "strict__VS__projected(columns@k=3,file)")
+        ab_file["ab_pair"] = {
+            "embed": {"policy": "strict__VS__projected(columns@k=3,file)",
+                      "projection_context": {"na_reason_code": na_reason, "lanes": list(L)}},
+            "embed_sig": "",
+            "left": {"policy": "strict", "out": strict_out},
+            "right": {"policy": "projected(columns@k=3,file)", "lanes": list(L), "out": {}},
+        }
+        _svr_apply_sig8(ab_file, embed_sig_auto)
+        p_ab_file = _svr_write_cert_in_bundle(_bundle_dir, _svr_bundle_fname("ab_file", district_id, sig8), ab_file)
+
+    # ---------- Bundle index ----------
+    fnames = []
+    try:
+        names = ["strict","projected_auto","ab_auto","freezer","ab_file","projected_file"]
+        for k in names:
+            pp = _bundle_dir / _svr_bundle_fname(k, district_id, sig8)
+            if pp.exists(): fnames.append(pp.name)
+        _svr_write_cert_in_bundle(_bundle_dir, "bundle.json", {
+            "run_id": rc.get("run_id",""), "sig8": sig8, "district_id": district_id,
+            "filenames": fnames, "counts": {"written": len(fnames)}
+        })
+    except Exception:
+        pass
+
+    # Publish session anchors
+    ss["last_bundle_dir"]   = str(_bundle_dir)
+    ss["last_ab_auto_path"] = str(_bundle_dir / _svr_bundle_fname("ab_auto", district_id, sig8))
+    ss["last_ab_file_path"] = str(_bundle_dir / _svr_bundle_fname("ab_file", district_id, sig8))
+    ss["last_solver_result"] = {"count": len(fnames)}
+    return {"bundle_dir": str(_bundle_dir), "sig8": sig8, "counts": {"written": len(fnames)} , "paths": {
+        "strict": str(_bundle_dir / _svr_bundle_fname("strict", district_id, sig8)),
+        "projected_auto": str(_bundle_dir / _svr_bundle_fname("projected_auto", district_id, sig8)),
+        "ab_auto": str(_bundle_dir / _svr_bundle_fname("ab_auto", district_id, sig8)),
+        "freezer": str(_bundle_dir / _svr_bundle_fname("freezer", district_id, sig8)),
+        "projected_file": str(_bundle_dir / _svr_bundle_fname("projected_file", district_id, sig8)),
+        "ab_file": str(_bundle_dir / _svr_bundle_fname("ab_file", district_id, sig8)),
+    }}
+
 st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
 
 # === canonical constants / helpers (single source of truth) ===
@@ -3113,20 +3292,17 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
         # --- Run button (full replacement) ---
         run_btn = st.button("Run solver (one press → 5 certs; +1 if FILE)", key="btn_svr_run")
         if run_btn:
-            st.session_state['_solver_busy'] = True
-            st.session_state['_solver_one_button_active'] = True
-            try:
-                res = one_press_solve(st.session_state)
-                st.success(f"Wrote {res.get('counts',{}).get('written',0)} files → {res.get('bundle_dir','')}")
+            ss = st.session_state
+            if ss.get('_solver_busy', False):
+                st.warning('Solver is already running — debounced.')
+            else:
+                ss['_solver_busy'] = True
+                ss['_solver_one_button_active'] = True
                 try:
-                    overlap_ui_from_frozen()
-                except Exception:
-                    pass
-            except Exception as e:
-                st.error('Solver run failed: ' + str(e))
-            finally:
-                st.session_state['_solver_one_button_active'] = False
-                st.session_state['_solver_busy'] = False
+                    # 1) Freeze SSOT (single source of truth)
+                    pb = _svr_resolve_all_to_paths()
+                    ib, rc = _svr_freeze_ssot(pb)
+                    rc["run_id"] = str(uuid.uuid4())
 
                     # guard: must have complete inputs
                     H2 = pb["H"][1].get("2") or []
