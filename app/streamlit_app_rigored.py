@@ -3171,7 +3171,453 @@ if "_svr_embed_sig" not in globals():
         except Exception:
             # fail-safe: still return a stable-ish value to avoid crashes
             return _hashlib.sha256(b"svr-embed-sig-fallback").hexdigest()
+# ========================= Solver entrypoint (pure-ish) =========================
+def one_press_solve(ss):
+    """
+    Pure-ish entrypoint used by the global 'Run solver (one press)' button.
+    Minimal compliant implementation:
+      • Resolves inputs and freezes SSOT (no UI)
+      • Computes strict + projected(auto) summaries (no UI)
+      • Builds a canonical embed_sig and derives sig8
+      • Writes a tiny bundle.json so the UI has an anchor
+      • Publishes session anchors and returns a small receipt
+    This version intentionally avoids panel rendering and heavy cert writing.
+    """
+    import json as _json
+    from pathlib import Path as _Path
 
+    # --- Resolve inputs and freeze SSOT ---
+    pf = _svr_resolve_all_to_paths()   # {"B": (path, blocks), "C": ..., "H": ..., "U": ...}
+    (pB, bB), (pC, bC), (pH, bH), (pU, bU) = pf["B"], pf["C"], pf["H"], pf["U"]
+    ib_rc = _svr_freeze_ssot(pf)
+    if isinstance(ib_rc, tuple):
+        ib = ib_rc[0] or {}
+        rc = ib_rc[1] if (len(ib_rc) > 1 and isinstance(ib_rc[1], dict)) else {}
+    else:
+        ib = ib_rc or {}
+        rc = {}
+
+    # --- District + shapes ---
+    C3 = bC.get("3") or []
+    n3 = len(C3[0]) if (C3 and C3[0]) else 0
+    district_id = str(ib.get("district_id") or "DUNKNOWN")
+
+    # --- Strict / Projected(auto) summaries (shape-safe) ---
+    strict_out = _svr_strict_from_blocks(bH, bB, bC)
+    proj_meta, lanes, proj_out = _svr_projected_auto_from_blocks(bH, bB, bC)
+
+    # --- Embed signature for AUTO pair ---
+    na_reason = (proj_meta.get("reason") if (proj_meta and proj_meta.get("na")) else None)
+    embed_auto, embed_sig_auto = _svr_build_embed(
+        ib, "strict__VS__projected(columns@k=3,auto)",
+        lanes=(lanes if lanes else None),
+        na_reason=na_reason,
+    )
+    sig8 = (embed_sig_auto or "")[:8] if embed_sig_auto else "00000000"
+
+    # --- Bundle dir + tiny index (guarded) ---
+    bundle_dir = _Path("logs") / "certs" / district_id / sig8
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+    bundle_idx = {
+        "run_id": rc.get("run_id",""),
+        "sig8": sig8,
+        "district_id": district_id,
+        "filenames": [],
+        "counts": {"written": 0}
+    }
+    _svr_guarded_atomic_write_json(bundle_dir / "bundle.json", bundle_idx)
+
+    # --- Publish anchors expected by UI ---
+    ss["last_bundle_dir"]   = str(bundle_dir)
+    ss["last_ab_auto_path"] = str(bundle_dir / f"ab_auto__{district_id}__{sig8}.json")
+    ss["last_ab_file_path"] = str(bundle_dir / f"ab_file__{district_id}__{sig8}.json")
+    ss["last_solver_result"] = {"count": 0}
+
+    return {"bundle_dir": str(bundle_dir), "sig8": sig8, "counts": {"written": 0}, "paths": {
+        "ab_auto": ss["last_ab_auto_path"],
+        "ab_file": ss["last_ab_file_path"],
+        "bundle": str(bundle_dir / "bundle.json"),
+    }}
+# ======================= /Solver entrypoint (pure-ish) ========================
+
+
+# ========================= v2 FINAL OVERRIDE (A→G) ==========================
+# This override keeps v2 surface 4D-pure (no v3 leakage). It:
+# - computes strict + AUTO + optional FILE (column-mask only)
+# - writes the 5 core certs (+ FILE cert iff posed)
+# - writes sidecars: snapshot.json, monotonicity.json, no_trivial_pass.json (always)
+# - appends coverage.jsonl (frozen schema)
+# - updates bundle.json with sidecars
+# Assumes _svr_* helpers and SCHEMA_VERSION/ENGINE_REV exist in app.
+
+import datetime as _dt
+import json as _json
+import hashlib as _hashlib
+from pathlib import Path as _Path
+import os as _os
+
+# Canonical NA codes (frozen-6)
+NA_CODES = {"C3_NOT_SQUARE":1,"ZERO_LANES":1,"FILE_MISSING":1,"FILE_BAD_SHAPE":1,"FILE_INCONSISTENT":1,"IO_ERROR":1}
+
+def _v2_eye(n): return [[1 if i==j else 0 for j in range(n)] for i in range(n)]
+def _v2_is_zero(M): return (not M) or all((int(x)&1)==0 for row in M for x in row)
+def _v2_shape_ok(A,B): 
+    try: return bool(A and B and A[0] and B[0] and len(A[0])==len(B))
+    except Exception: return False
+def _v2_mm(A,B):
+    if not _v2_shape_ok(A,B): return []
+    m,k,n = len(A), len(A[0]), len(B[0])
+    C = [[0]*n for _ in range(m)]
+    for i in range(m):
+        Ai=A[i]
+        for t in range(k):
+            if int(Ai[t])&1:
+                Bt=B[t]
+                for j in range(n): C[i][j]^=(int(Bt[j])&1)
+    return C
+def _v2_xor(A,B):
+    if not A: return [row[:] for row in (B or [])]
+    if not B: return [row[:] for row in (A or [])]
+    r,c=len(A),len(A[0])
+    return [[(int(A[i][j])^int(B[i][j]))&1 for j in range(c)] for i in range(r)]
+def _v2_nz_cols(M):
+    if not M: return []
+    r,c=len(M),len(M[0])
+    return [j for j in range(c) if any((int(M[i][j])&1) for i in range(r))]
+
+# GF(2) rank and tau4
+def _v2_rank_gf2(M):
+    if not M: return 0
+    A=[row[:] for row in M]
+    m=len(A); n=len(A[0]) if m else 0
+    i=j=rank=0
+    while i<m and j<n:
+        piv=None
+        for k in range(i,m):
+            if A[k][j]&1: piv=k; break
+        if piv is None: j+=1; continue
+        if piv!=i: A[i],A[piv]=A[piv],A[i]
+        for k in range(m):
+            if k!=i and (A[k][j]&1):
+                A[k]=[a^b for a,b in zip(A[k],A[i])]
+        i+=1; j+=1; rank+=1
+    return rank
+def _v2_tau4(R3, sel_mask):
+    if not R3: return None
+    n3=len(R3[0])
+    S=[int(x)&1 for x in (sel_mask or [])]
+    if len(S)!=n3: S=(S+[0]*n3)[:n3]
+    mism=[j for j in range(n3) if S[j] and any((int(R3[i][j])&1) for i in range(len(R3)))]
+    return (len(mism)&1)
+
+def _v2_write_json(path, payload):
+    path=_Path(path); path.parent.mkdir(parents=True, exist_ok=True)
+    tmp=path.with_suffix(path.suffix+".tmp")
+    with open(tmp,"w",encoding="utf-8") as f:
+        _json.dump(payload,f,ensure_ascii=False,sort_keys=True,separators=(",",":"))
+        f.flush()
+    _os.replace(tmp, path)
+
+def _v2_append_jsonl(path, row):
+    path=_Path(path); path.parent.mkdir(parents=True, exist_ok=True)
+    line=_json.dumps(row,ensure_ascii=False,sort_keys=True,separators=(",",":"))+"\n"
+    with open(path,"a",encoding="utf-8") as f: f.write(line)
+def one_press_solve():
+    import streamlit as st
+    # Resolve inputs
+    try:
+        pb = _svr_resolve_all_to_paths()
+    except Exception as e:
+        return (False, f"Inputs incomplete — upload B/C/H/U. ({e})", "")
+    ib, rc = _svr_freeze_ssot(pb)
+
+    bB, bC, bH = pb["B"][1], pb["C"][1], pb["H"][1]
+    d3, C3, H2 = (bB.get("3") or []), (bC.get("3") or []), (bH.get("2") or [])
+    n3 = len(d3[0]) if (d3 and d3[0]) else 0
+    n2 = len(d3) if d3 else 0
+
+    # Preflight shapes for left multiply
+    if not(_v2_shape_ok(H2, d3)):
+        # Hard IO error: cannot form R3 at all
+        return (False, "IO_ERROR: H2 and d3 shapes incompatible (need H2(n3×n2), d3(n2×n3)).", "")
+
+    sqC = bool(C3 and C3[0] and len(C3)==len(C3[0])==n3)
+    I3 = _v2_eye(n3) if sqC else []
+    H2d3 = _v2_mm(H2, d3)
+    C3pI = _v2_xor(C3, I3) if sqC else None
+    R3s  = _v2_xor(H2d3, C3pI) if sqC else None
+
+    # strict
+    if sqC and R3s is not None:
+        strict_eq = _v2_is_zero(R3s)
+        strict_na = None
+    else:
+        strict_eq = None
+        strict_na = "C3_NOT_SQUARE"
+
+    # AUTO
+    lanes = (C3[-1] if sqC and C3 else [])
+    lane_size = int(sum(int(x)&1 for x in (lanes or []))) if lanes else 0
+    posed_auto = bool(sqC and lane_size>0)
+    if posed_auto:
+        P = [[1 if (i==j and (int(lanes[j])&1)) else 0 for j in range(n3)] for i in range(n3)]
+        R3p = _v2_mm(R3s, P)
+        proj_eq = _v2_is_zero(R3p)
+        auto_na = None
+    else:
+        R3p=None; proj_eq=None
+        auto_na = ("ZERO_LANES" if (sqC and lane_size==0) else "C3_NOT_SQUARE")
+
+    # FILE (column-mask only, optional)
+    # Try to get P from SSOT; app convention: pb["P"] optional, or advanced upload block in ib.
+    P_file = None
+    file_detail = None
+    file_na = None
+    lanes_file = None
+    file_eq = None
+    posed_file = False
+
+    try:
+        # Pull from SSOT if present
+        bP = pb.get("P", [None, {}])[1]
+        P_file = bP.get("3") or bP.get("P") or None
+    except Exception:
+        P_file = None
+
+    if P_file is None:
+        file_na = "FILE_MISSING"
+    else:
+        # Guards: square, idempotent, diagonal mask, non-empty
+        ok_shape = bool(P_file and P_file[0] and len(P_file)==len(P_file[0])==n3)
+        if not ok_shape:
+            file_na = "FILE_BAD_SHAPE"; file_detail="not_square"
+        else:
+            # Idempotent
+            P2 = _v2_mm(P_file, P_file)
+            if P2!=P_file:
+                file_na = "FILE_INCONSISTENT"; file_detail="not_idempotent"
+            else:
+                # diagonal mask
+                off_diag_bad = any( (j!=i and (int(P_file[i][j])&1)) for i in range(n3) for j in range(n3) )
+                if off_diag_bad:
+                    file_na = "FILE_INCONSISTENT"; file_detail="not_column_mask"
+                else:
+                    lanes_file = [int(P_file[i][i])&1 for i in range(n3)]
+                    if sum(lanes_file)==0:
+                        file_na = "ZERO_LANES"
+                    else:
+                        posed_file = True
+                        R3f = _v2_mm(R3s, P_file) if (sqC and R3s is not None) else None
+                        file_eq = (_v2_is_zero(R3f) if R3f is not None else None)
+                        if file_eq is None and not sqC:
+                            file_na = "C3_NOT_SQUARE"
+
+    # embed + bundle dir
+    try:
+        _payload, embed_sig = _svr_build_embed(
+            ib,
+            policy="strict__VS__projected(columns@k=3,auto)",
+            lanes=(list(lanes) if posed_auto else None),
+            na_reason=(None if posed_auto else auto_na),
+        )
+    except Exception:
+        blob = {"inputs": ib.get("hashes", {}), "policy":"strict__VS__projected(columns@k=3,auto)"}
+        if posed_auto: blob["lanes"]= [int(x)&1 for x in lanes]
+        else: blob["projected_na_reason"]=auto_na
+        embed_sig = _hashlib.sha256(_json.dumps(blob,sort_keys=True,separators=(",",":")).encode("utf-8")).hexdigest()
+
+    sig8 = (embed_sig or "")[:8]
+    district_id = ib.get("district_id") or "DUNKNOWN"
+    bundle_dir = _svr_bundle_dir(district_id, sig8)
+
+    # Witness rows
+    bH = (H2d3[-1] if H2d3 else [])
+    bCI = (C3pI[-1] if (C3pI is not None and C3pI) else [])
+
+    # --- Core certs ---
+    # strict cert
+    strict_payload = {
+        "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
+        "policy_tag": "strict",
+        "witness": {
+            "bottom_H2d3": "".join("1" if int(x)&1 else "0" for x in (bH or [])),
+            "bottom_C3pI3": "".join("1" if int(x)&1 else "0" for x in (bCI or [])),
+            "lanes": None
+        },
+        "results": {
+            "out": {"2":{"eq": True}, "3":{"eq": strict_eq}},
+            "selected_cols": [1]*n3,
+            "mismatch_cols_selected": (_v2_nz_cols(R3s) if (sqC and R3s is not None) else []),
+            "residual_tag_selected": ("".join("1" if j in _v2_nz_cols(R3s) else "0" for j in range(n3)) if (sqC and R3s is not None) else ""),
+            "k2": True if sqC else None,
+            "na_reason_code": strict_na
+        },
+        "sig8": sig8,
+    }
+    f_strict = _svr_write_cert_in_bundle(bundle_dir, _svr_bundle_fname("strict", district_id, sig8), strict_payload)
+
+    # projected auto
+    proj_payload = {
+        "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
+        "policy_tag": "projected(columns@k=3,auto)",
+        "witness": {
+            "bottom_H2d3": "".join("1" if int(x)&1 else "0" for x in (bH or [])),
+            "bottom_C3pI3": "".join("1" if int(x)&1 else "0" for x in (bCI or [])),
+            "lanes": ([int(x)&1 for x in (lanes or [])] if posed_auto else None)
+        },
+        "results": {
+            "out": {"2":{"eq": True}, "3":{"eq": proj_eq}} if posed_auto else {"2":{"eq": None}, "3":{"eq": None}},
+            "na_reason_code": (None if posed_auto else auto_na),
+            "selected_cols": ([int(x)&1 for x in (lanes or [])] if posed_auto else []),
+            "mismatch_cols_selected": (_v2_nz_cols(R3p) if (posed_auto and R3p is not None) else []),
+            "residual_tag_selected": ("".join("1" if j in _v2_nz_cols(R3p) else "0" for j in range(n3)) if (posed_auto and R3p is not None) else ""),
+            "k2": True if posed_auto else None
+        },
+        "sig8": sig8,
+    }
+    f_proj = _svr_write_cert_in_bundle(bundle_dir, _svr_bundle_fname("projected_auto", district_id, sig8), proj_payload)
+
+    # A/B auto (k2 tidy → [true,true] when posed)
+    ab_auto = {
+        "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
+        "ab_pair": {
+            "pair_tag": "strict__VS__projected(columns@k=3,auto)",
+            "embed_sig": embed_sig,
+            "pair_vec": {
+                "k2":[(True if sqC else None), (True if posed_auto else None)],
+                "k3":[(bool(strict_eq) if sqC else None), (bool(proj_eq) if posed_auto else None)]
+            },
+        },
+        "sig8": sig8,
+    }
+    f_ab_auto = _svr_write_cert_in_bundle(bundle_dir, _svr_bundle_fname("ab_auto", district_id, sig8), ab_auto)
+
+    # Freezer
+    freezer = {
+        "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
+        "status": ("OK" if posed_auto else "N/A"),
+        "na_reason_code": (None if posed_auto else auto_na),
+        "sig8": sig8,
+    }
+    f_freezer = _svr_write_cert_in_bundle(bundle_dir, _svr_bundle_fname("freezer", district_id, sig8), freezer)
+
+    # A/B file (second slot mirrors posed/NA)
+    ab_file = {
+        "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
+        "ab_pair": {
+            "pair_tag": "strict__VS__projected(columns@k=3,file)",
+            "embed_sig": _hashlib.sha256(b"file-proj-embed").hexdigest(),
+            "pair_vec": {
+                "k2":[(True if sqC else None), (True if posed_file else None)],
+                "k3":[(bool(strict_eq) if sqC else None), (bool(file_eq) if posed_file else None)]
+            },
+        },
+        "sig8": sig8,
+    }
+    f_ab_file = _svr_write_cert_in_bundle(bundle_dir, _svr_bundle_fname("ab_file", district_id, sig8), ab_file)
+
+    # Optional FILE cert
+    if posed_file:
+        proj_file_payload = {
+            "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
+            "policy_tag": "projected(columns@k=3,file)",
+            "witness": { "lanes": lanes_file },
+            "results": {
+                "out": {"2":{"eq": True}, "3":{"eq": file_eq}},
+                "na_reason_code": None,
+                "selected_cols": lanes_file,
+                "mismatch_cols_selected": (_v2_nz_cols(_v2_mm(R3s, [[1 if (i==j and lanes_file[j]) else 0 for j in range(n3)] for i in range(n3)])) if (sqC and R3s is not None) else []),
+                "residual_tag_selected": "",
+                "k2": True
+            },
+            "sig8": sig8,
+        }
+        f_proj_file = _svr_write_cert_in_bundle(bundle_dir, _svr_bundle_fname("projected_file", district_id, sig8), proj_file_payload)
+    else:
+        f_proj_file = None
+
+    # Sidecars: snapshot, monotonicity, no_trivial_pass (always)
+    tau_strict = (_v2_tau4(R3s, [1]*n3) if (sqC and R3s is not None) else None)
+    rho_strict = (_v2_rank_gf2(R3s) if (sqC and R3s is not None) else None)
+    tau_auto = (_v2_tau4(R3s, lanes) if posed_auto else None)
+    rho_auto = (_v2_rank_gf2(_v2_mm(R3s, [[1 if (i==j and (int(lanes[j])&1)) else 0 for j in range(n3)] for i in range(n3)])) if posed_auto else None)
+    tau_file = (_v2_tau4(R3s, lanes_file) if posed_file else None)
+    rho_file = (_v2_rank_gf2(_v2_mm(R3s, [[1 if (i==j and lanes_file[j]) else 0 for j in range(n3)] for i in range(n3)])) if posed_file else None)
+
+    snap = {
+        "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
+        "strict": { "posed": bool(sqC), "na_reason_code": (None if sqC else "C3_NOT_SQUARE"),
+                    "tau4": tau_strict, "rho4": rho_strict, "sel_size": n3, 
+                    "mismatch_cols": (_v2_nz_cols(R3s) if (sqC and R3s is not None) else []) },
+        "auto":   { "posed": bool(posed_auto), "na_reason_code": (None if posed_auto else auto_na),
+                    "tau4": tau_auto, "rho4": rho_auto,
+                    "sel_size": (lane_size if posed_auto else None),
+                    "mismatch_cols": (_v2_nz_cols(R3p) if (posed_auto and R3p is not None) else None) },
+        "file":   { "posed": bool(posed_file), "na_reason_code": (None if posed_file else file_na),
+                    "tau4": tau_file, "rho4": rho_file,
+                    "sel_size": (sum(lanes_file) if posed_file else None),
+                    "mismatch_cols": (_v2_nz_cols(_v2_mm(R3s, [[1 if (i==j and lanes_file[j]) else 0 for j in range(n3)] for i in range(n3)])) if posed_file else None) }
+    }
+    _v2_write_json(bundle_dir / "snapshot.json", snap)
+
+    mono_auto_holds = (None if not posed_auto else (True if ((not strict_eq) or bool(proj_eq)) else False))
+    mono_file_holds = (None if not posed_file else (True if ((not strict_eq) or bool(file_eq)) else False))
+    monotonicity = {
+        "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
+        "strict_to_auto": { "posed": bool(posed_auto), "holds": mono_auto_holds, "na_reason_code": (None if posed_auto else auto_na) },
+        "strict_to_file": { "posed": bool(posed_file), "holds": mono_file_holds, "na_reason_code": (None if posed_file else file_na) }
+    }
+    _v2_write_json(bundle_dir / "monotonicity.json", monotonicity)
+
+    no_trivial = {
+        "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
+        "auto": { "lanes_size": lane_size, "lanes_zero_vector": (lane_size==0), "c3_square": bool(sqC),
+                  "projected_posed": bool(posed_auto), "na_reason_code": (None if posed_auto else auto_na) },
+        "file": { "lanes_size": (sum(lanes_file) if posed_file else None),
+                  "lanes_zero_vector": (sum(lanes_file)==0 if posed_file else None),
+                  "projected_posed": bool(posed_file), "na_reason_code": (None if posed_file else file_na) }
+    }
+    _v2_write_json(bundle_dir / "no_trivial_pass.json", no_trivial)
+
+    # Coverage JSONL (frozen schema)
+    cov = {
+        "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
+        "district_id": district_id, "sig8": sig8, "n2": int(n2), "n3": int(n3),
+        "strict_k3_eq": (bool(strict_eq) if strict_eq is not None else None),
+        "mismatch_count_strict": (len(_v2_nz_cols(R3s)) if (sqC and R3s is not None) else None),
+        "tau4_strict": (int(tau_strict) if tau_strict is not None else None),
+        "rho4_strict": (int(rho_strict) if rho_strict is not None else None),
+        "auto_posed": bool(posed_auto),
+        "proj_auto_eq": (bool(proj_eq) if posed_auto else None),
+        "mismatch_count_auto": (len(_v2_nz_cols(R3p)) if (posed_auto and R3p is not None) else None),
+        "tau4_auto": (int(tau_auto) if tau_auto is not None else None),
+        "rho4_auto": (int(rho_auto) if rho_auto is not None else None),
+        "auto_na_reason_code": (None if posed_auto else auto_na),
+        "file_posed": bool(posed_file),
+        "proj_file_eq": (bool(file_eq) if posed_file else None),
+        "mismatch_count_file": (len(_v2_nz_cols(_v2_mm(R3s, [[1 if (i==j and lanes_file[j]) else 0 for j in range(n3)] for i in range(n3)])) ) if posed_file else None),
+        "tau4_file": (int(tau_file) if tau_file is not None else None),
+        "rho4_file": (int(rho_file) if rho_file is not None else None),
+        "file_na_reason_code": (None if posed_file else file_na),
+        "lane_size_auto": (lane_size if posed_auto else None),
+        "lane_frac_auto": ( (lane_size/n3) if (posed_auto and n3) else None ),
+        "lane_size_file": (sum(lanes_file) if posed_file else None),
+        "lane_frac_file": ( (sum(lanes_file)/n3) if (posed_file and n3) else None ),
+        "sources": (ib.get("hashes") or {})
+    }
+    _v2_append_jsonl(_Path("logs")/"reports"/"coverage.jsonl", cov)
+
+    # bundle index
+    fnames = [f_strict, f_proj, f_ab_auto, f_freezer, f_ab_file]
+    if f_proj_file: fnames.append(f_proj_file)
+    sidecars = ["snapshot.json","monotonicity.json","no_trivial_pass.json"]
+    bundle_index = {"written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
+                    "filenames": [str(_Path(f).name) for f in fnames if f],
+                    "sidecars": sidecars}
+    _v2_write_json(bundle_dir/"bundle.json", bundle_index)
+
+    st.session_state["last_bundle_dir"] = str(bundle_dir)
+    return (True, f"Solver wrote {len(fnames)} cert files to {bundle_dir}", str(bundle_dir))
 # === SINGLE-BUTTON SOLVER — strict → projected(columns@k=3,auto) → A/B(auto) → freezer → A/B(file) ===
 import os, json as _json, hashlib as _hashlib
 from pathlib import Path
@@ -4342,451 +4788,5 @@ with _st.expander("Sanity battletests (Loop‑4)", expanded=False):
 
 
 
-# ========================= Solver entrypoint (pure-ish) =========================
-def one_press_solve(ss):
-    """
-    Pure-ish entrypoint used by the global 'Run solver (one press)' button.
-    Minimal compliant implementation:
-      • Resolves inputs and freezes SSOT (no UI)
-      • Computes strict + projected(auto) summaries (no UI)
-      • Builds a canonical embed_sig and derives sig8
-      • Writes a tiny bundle.json so the UI has an anchor
-      • Publishes session anchors and returns a small receipt
-    This version intentionally avoids panel rendering and heavy cert writing.
-    """
-    import json as _json
-    from pathlib import Path as _Path
 
-    # --- Resolve inputs and freeze SSOT ---
-    pf = _svr_resolve_all_to_paths()   # {"B": (path, blocks), "C": ..., "H": ..., "U": ...}
-    (pB, bB), (pC, bC), (pH, bH), (pU, bU) = pf["B"], pf["C"], pf["H"], pf["U"]
-    ib_rc = _svr_freeze_ssot(pf)
-    if isinstance(ib_rc, tuple):
-        ib = ib_rc[0] or {}
-        rc = ib_rc[1] if (len(ib_rc) > 1 and isinstance(ib_rc[1], dict)) else {}
-    else:
-        ib = ib_rc or {}
-        rc = {}
-
-    # --- District + shapes ---
-    C3 = bC.get("3") or []
-    n3 = len(C3[0]) if (C3 and C3[0]) else 0
-    district_id = str(ib.get("district_id") or "DUNKNOWN")
-
-    # --- Strict / Projected(auto) summaries (shape-safe) ---
-    strict_out = _svr_strict_from_blocks(bH, bB, bC)
-    proj_meta, lanes, proj_out = _svr_projected_auto_from_blocks(bH, bB, bC)
-
-    # --- Embed signature for AUTO pair ---
-    na_reason = (proj_meta.get("reason") if (proj_meta and proj_meta.get("na")) else None)
-    embed_auto, embed_sig_auto = _svr_build_embed(
-        ib, "strict__VS__projected(columns@k=3,auto)",
-        lanes=(lanes if lanes else None),
-        na_reason=na_reason,
-    )
-    sig8 = (embed_sig_auto or "")[:8] if embed_sig_auto else "00000000"
-
-    # --- Bundle dir + tiny index (guarded) ---
-    bundle_dir = _Path("logs") / "certs" / district_id / sig8
-    bundle_dir.mkdir(parents=True, exist_ok=True)
-    bundle_idx = {
-        "run_id": rc.get("run_id",""),
-        "sig8": sig8,
-        "district_id": district_id,
-        "filenames": [],
-        "counts": {"written": 0}
-    }
-    _svr_guarded_atomic_write_json(bundle_dir / "bundle.json", bundle_idx)
-
-    # --- Publish anchors expected by UI ---
-    ss["last_bundle_dir"]   = str(bundle_dir)
-    ss["last_ab_auto_path"] = str(bundle_dir / f"ab_auto__{district_id}__{sig8}.json")
-    ss["last_ab_file_path"] = str(bundle_dir / f"ab_file__{district_id}__{sig8}.json")
-    ss["last_solver_result"] = {"count": 0}
-
-    return {"bundle_dir": str(bundle_dir), "sig8": sig8, "counts": {"written": 0}, "paths": {
-        "ab_auto": ss["last_ab_auto_path"],
-        "ab_file": ss["last_ab_file_path"],
-        "bundle": str(bundle_dir / "bundle.json"),
-    }}
-# ======================= /Solver entrypoint (pure-ish) ========================
-
-
-# ========================= v2 FINAL OVERRIDE (A→G) ==========================
-# This override keeps v2 surface 4D-pure (no v3 leakage). It:
-# - computes strict + AUTO + optional FILE (column-mask only)
-# - writes the 5 core certs (+ FILE cert iff posed)
-# - writes sidecars: snapshot.json, monotonicity.json, no_trivial_pass.json (always)
-# - appends coverage.jsonl (frozen schema)
-# - updates bundle.json with sidecars
-# Assumes _svr_* helpers and SCHEMA_VERSION/ENGINE_REV exist in app.
-
-import datetime as _dt
-import json as _json
-import hashlib as _hashlib
-from pathlib import Path as _Path
-import os as _os
-
-# Canonical NA codes (frozen-6)
-NA_CODES = {"C3_NOT_SQUARE":1,"ZERO_LANES":1,"FILE_MISSING":1,"FILE_BAD_SHAPE":1,"FILE_INCONSISTENT":1,"IO_ERROR":1}
-
-def _v2_eye(n): return [[1 if i==j else 0 for j in range(n)] for i in range(n)]
-def _v2_is_zero(M): return (not M) or all((int(x)&1)==0 for row in M for x in row)
-def _v2_shape_ok(A,B): 
-    try: return bool(A and B and A[0] and B[0] and len(A[0])==len(B))
-    except Exception: return False
-def _v2_mm(A,B):
-    if not _v2_shape_ok(A,B): return []
-    m,k,n = len(A), len(A[0]), len(B[0])
-    C = [[0]*n for _ in range(m)]
-    for i in range(m):
-        Ai=A[i]
-        for t in range(k):
-            if int(Ai[t])&1:
-                Bt=B[t]
-                for j in range(n): C[i][j]^=(int(Bt[j])&1)
-    return C
-def _v2_xor(A,B):
-    if not A: return [row[:] for row in (B or [])]
-    if not B: return [row[:] for row in (A or [])]
-    r,c=len(A),len(A[0])
-    return [[(int(A[i][j])^int(B[i][j]))&1 for j in range(c)] for i in range(r)]
-def _v2_nz_cols(M):
-    if not M: return []
-    r,c=len(M),len(M[0])
-    return [j for j in range(c) if any((int(M[i][j])&1) for i in range(r))]
-
-# GF(2) rank and tau4
-def _v2_rank_gf2(M):
-    if not M: return 0
-    A=[row[:] for row in M]
-    m=len(A); n=len(A[0]) if m else 0
-    i=j=rank=0
-    while i<m and j<n:
-        piv=None
-        for k in range(i,m):
-            if A[k][j]&1: piv=k; break
-        if piv is None: j+=1; continue
-        if piv!=i: A[i],A[piv]=A[piv],A[i]
-        for k in range(m):
-            if k!=i and (A[k][j]&1):
-                A[k]=[a^b for a,b in zip(A[k],A[i])]
-        i+=1; j+=1; rank+=1
-    return rank
-def _v2_tau4(R3, sel_mask):
-    if not R3: return None
-    n3=len(R3[0])
-    S=[int(x)&1 for x in (sel_mask or [])]
-    if len(S)!=n3: S=(S+[0]*n3)[:n3]
-    mism=[j for j in range(n3) if S[j] and any((int(R3[i][j])&1) for i in range(len(R3)))]
-    return (len(mism)&1)
-
-def _v2_write_json(path, payload):
-    path=_Path(path); path.parent.mkdir(parents=True, exist_ok=True)
-    tmp=path.with_suffix(path.suffix+".tmp")
-    with open(tmp,"w",encoding="utf-8") as f:
-        _json.dump(payload,f,ensure_ascii=False,sort_keys=True,separators=(",",":"))
-        f.flush()
-    _os.replace(tmp, path)
-
-def _v2_append_jsonl(path, row):
-    path=_Path(path); path.parent.mkdir(parents=True, exist_ok=True)
-    line=_json.dumps(row,ensure_ascii=False,sort_keys=True,separators=(",",":"))+"\n"
-    with open(path,"a",encoding="utf-8") as f: f.write(line)
-def one_press_solve():
-    import streamlit as st
-    # Resolve inputs
-    try:
-        pb = _svr_resolve_all_to_paths()
-    except Exception as e:
-        return (False, f"Inputs incomplete — upload B/C/H/U. ({e})", "")
-    ib, rc = _svr_freeze_ssot(pb)
-
-    bB, bC, bH = pb["B"][1], pb["C"][1], pb["H"][1]
-    d3, C3, H2 = (bB.get("3") or []), (bC.get("3") or []), (bH.get("2") or [])
-    n3 = len(d3[0]) if (d3 and d3[0]) else 0
-    n2 = len(d3) if d3 else 0
-
-    # Preflight shapes for left multiply
-    if not(_v2_shape_ok(H2, d3)):
-        # Hard IO error: cannot form R3 at all
-        return (False, "IO_ERROR: H2 and d3 shapes incompatible (need H2(n3×n2), d3(n2×n3)).", "")
-
-    sqC = bool(C3 and C3[0] and len(C3)==len(C3[0])==n3)
-    I3 = _v2_eye(n3) if sqC else []
-    H2d3 = _v2_mm(H2, d3)
-    C3pI = _v2_xor(C3, I3) if sqC else None
-    R3s  = _v2_xor(H2d3, C3pI) if sqC else None
-
-    # strict
-    if sqC and R3s is not None:
-        strict_eq = _v2_is_zero(R3s)
-        strict_na = None
-    else:
-        strict_eq = None
-        strict_na = "C3_NOT_SQUARE"
-
-    # AUTO
-    lanes = (C3[-1] if sqC and C3 else [])
-    lane_size = int(sum(int(x)&1 for x in (lanes or []))) if lanes else 0
-    posed_auto = bool(sqC and lane_size>0)
-    if posed_auto:
-        P = [[1 if (i==j and (int(lanes[j])&1)) else 0 for j in range(n3)] for i in range(n3)]
-        R3p = _v2_mm(R3s, P)
-        proj_eq = _v2_is_zero(R3p)
-        auto_na = None
-    else:
-        R3p=None; proj_eq=None
-        auto_na = ("ZERO_LANES" if (sqC and lane_size==0) else "C3_NOT_SQUARE")
-
-    # FILE (column-mask only, optional)
-    # Try to get P from SSOT; app convention: pb["P"] optional, or advanced upload block in ib.
-    P_file = None
-    file_detail = None
-    file_na = None
-    lanes_file = None
-    file_eq = None
-    posed_file = False
-
-    try:
-        # Pull from SSOT if present
-        bP = pb.get("P", [None, {}])[1]
-        P_file = bP.get("3") or bP.get("P") or None
-    except Exception:
-        P_file = None
-
-    if P_file is None:
-        file_na = "FILE_MISSING"
-    else:
-        # Guards: square, idempotent, diagonal mask, non-empty
-        ok_shape = bool(P_file and P_file[0] and len(P_file)==len(P_file[0])==n3)
-        if not ok_shape:
-            file_na = "FILE_BAD_SHAPE"; file_detail="not_square"
-        else:
-            # Idempotent
-            P2 = _v2_mm(P_file, P_file)
-            if P2!=P_file:
-                file_na = "FILE_INCONSISTENT"; file_detail="not_idempotent"
-            else:
-                # diagonal mask
-                off_diag_bad = any( (j!=i and (int(P_file[i][j])&1)) for i in range(n3) for j in range(n3) )
-                if off_diag_bad:
-                    file_na = "FILE_INCONSISTENT"; file_detail="not_column_mask"
-                else:
-                    lanes_file = [int(P_file[i][i])&1 for i in range(n3)]
-                    if sum(lanes_file)==0:
-                        file_na = "ZERO_LANES"
-                    else:
-                        posed_file = True
-                        R3f = _v2_mm(R3s, P_file) if (sqC and R3s is not None) else None
-                        file_eq = (_v2_is_zero(R3f) if R3f is not None else None)
-                        if file_eq is None and not sqC:
-                            file_na = "C3_NOT_SQUARE"
-
-    # embed + bundle dir
-    try:
-        _payload, embed_sig = _svr_build_embed(
-            ib,
-            policy="strict__VS__projected(columns@k=3,auto)",
-            lanes=(list(lanes) if posed_auto else None),
-            na_reason=(None if posed_auto else auto_na),
-        )
-    except Exception:
-        blob = {"inputs": ib.get("hashes", {}), "policy":"strict__VS__projected(columns@k=3,auto)"}
-        if posed_auto: blob["lanes"]= [int(x)&1 for x in lanes]
-        else: blob["projected_na_reason"]=auto_na
-        embed_sig = _hashlib.sha256(_json.dumps(blob,sort_keys=True,separators=(",",":")).encode("utf-8")).hexdigest()
-
-    sig8 = (embed_sig or "")[:8]
-    district_id = ib.get("district_id") or "DUNKNOWN"
-    bundle_dir = _svr_bundle_dir(district_id, sig8)
-
-    # Witness rows
-    bH = (H2d3[-1] if H2d3 else [])
-    bCI = (C3pI[-1] if (C3pI is not None and C3pI) else [])
-
-    # --- Core certs ---
-    # strict cert
-    strict_payload = {
-        "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
-        "policy_tag": "strict",
-        "witness": {
-            "bottom_H2d3": "".join("1" if int(x)&1 else "0" for x in (bH or [])),
-            "bottom_C3pI3": "".join("1" if int(x)&1 else "0" for x in (bCI or [])),
-            "lanes": None
-        },
-        "results": {
-            "out": {"2":{"eq": True}, "3":{"eq": strict_eq}},
-            "selected_cols": [1]*n3,
-            "mismatch_cols_selected": (_v2_nz_cols(R3s) if (sqC and R3s is not None) else []),
-            "residual_tag_selected": ("".join("1" if j in _v2_nz_cols(R3s) else "0" for j in range(n3)) if (sqC and R3s is not None) else ""),
-            "k2": True if sqC else None,
-            "na_reason_code": strict_na
-        },
-        "sig8": sig8,
-    }
-    f_strict = _svr_write_cert_in_bundle(bundle_dir, _svr_bundle_fname("strict", district_id, sig8), strict_payload)
-
-    # projected auto
-    proj_payload = {
-        "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
-        "policy_tag": "projected(columns@k=3,auto)",
-        "witness": {
-            "bottom_H2d3": "".join("1" if int(x)&1 else "0" for x in (bH or [])),
-            "bottom_C3pI3": "".join("1" if int(x)&1 else "0" for x in (bCI or [])),
-            "lanes": ([int(x)&1 for x in (lanes or [])] if posed_auto else None)
-        },
-        "results": {
-            "out": {"2":{"eq": True}, "3":{"eq": proj_eq}} if posed_auto else {"2":{"eq": None}, "3":{"eq": None}},
-            "na_reason_code": (None if posed_auto else auto_na),
-            "selected_cols": ([int(x)&1 for x in (lanes or [])] if posed_auto else []),
-            "mismatch_cols_selected": (_v2_nz_cols(R3p) if (posed_auto and R3p is not None) else []),
-            "residual_tag_selected": ("".join("1" if j in _v2_nz_cols(R3p) else "0" for j in range(n3)) if (posed_auto and R3p is not None) else ""),
-            "k2": True if posed_auto else None
-        },
-        "sig8": sig8,
-    }
-    f_proj = _svr_write_cert_in_bundle(bundle_dir, _svr_bundle_fname("projected_auto", district_id, sig8), proj_payload)
-
-    # A/B auto (k2 tidy → [true,true] when posed)
-    ab_auto = {
-        "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
-        "ab_pair": {
-            "pair_tag": "strict__VS__projected(columns@k=3,auto)",
-            "embed_sig": embed_sig,
-            "pair_vec": {
-                "k2":[(True if sqC else None), (True if posed_auto else None)],
-                "k3":[(bool(strict_eq) if sqC else None), (bool(proj_eq) if posed_auto else None)]
-            },
-        },
-        "sig8": sig8,
-    }
-    f_ab_auto = _svr_write_cert_in_bundle(bundle_dir, _svr_bundle_fname("ab_auto", district_id, sig8), ab_auto)
-
-    # Freezer
-    freezer = {
-        "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
-        "status": ("OK" if posed_auto else "N/A"),
-        "na_reason_code": (None if posed_auto else auto_na),
-        "sig8": sig8,
-    }
-    f_freezer = _svr_write_cert_in_bundle(bundle_dir, _svr_bundle_fname("freezer", district_id, sig8), freezer)
-
-    # A/B file (second slot mirrors posed/NA)
-    ab_file = {
-        "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
-        "ab_pair": {
-            "pair_tag": "strict__VS__projected(columns@k=3,file)",
-            "embed_sig": _hashlib.sha256(b"file-proj-embed").hexdigest(),
-            "pair_vec": {
-                "k2":[(True if sqC else None), (True if posed_file else None)],
-                "k3":[(bool(strict_eq) if sqC else None), (bool(file_eq) if posed_file else None)]
-            },
-        },
-        "sig8": sig8,
-    }
-    f_ab_file = _svr_write_cert_in_bundle(bundle_dir, _svr_bundle_fname("ab_file", district_id, sig8), ab_file)
-
-    # Optional FILE cert
-    if posed_file:
-        proj_file_payload = {
-            "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
-            "policy_tag": "projected(columns@k=3,file)",
-            "witness": { "lanes": lanes_file },
-            "results": {
-                "out": {"2":{"eq": True}, "3":{"eq": file_eq}},
-                "na_reason_code": None,
-                "selected_cols": lanes_file,
-                "mismatch_cols_selected": (_v2_nz_cols(_v2_mm(R3s, [[1 if (i==j and lanes_file[j]) else 0 for j in range(n3)] for i in range(n3)])) if (sqC and R3s is not None) else []),
-                "residual_tag_selected": "",
-                "k2": True
-            },
-            "sig8": sig8,
-        }
-        f_proj_file = _svr_write_cert_in_bundle(bundle_dir, _svr_bundle_fname("projected_file", district_id, sig8), proj_file_payload)
-    else:
-        f_proj_file = None
-
-    # Sidecars: snapshot, monotonicity, no_trivial_pass (always)
-    tau_strict = (_v2_tau4(R3s, [1]*n3) if (sqC and R3s is not None) else None)
-    rho_strict = (_v2_rank_gf2(R3s) if (sqC and R3s is not None) else None)
-    tau_auto = (_v2_tau4(R3s, lanes) if posed_auto else None)
-    rho_auto = (_v2_rank_gf2(_v2_mm(R3s, [[1 if (i==j and (int(lanes[j])&1)) else 0 for j in range(n3)] for i in range(n3)])) if posed_auto else None)
-    tau_file = (_v2_tau4(R3s, lanes_file) if posed_file else None)
-    rho_file = (_v2_rank_gf2(_v2_mm(R3s, [[1 if (i==j and lanes_file[j]) else 0 for j in range(n3)] for i in range(n3)])) if posed_file else None)
-
-    snap = {
-        "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
-        "strict": { "posed": bool(sqC), "na_reason_code": (None if sqC else "C3_NOT_SQUARE"),
-                    "tau4": tau_strict, "rho4": rho_strict, "sel_size": n3, 
-                    "mismatch_cols": (_v2_nz_cols(R3s) if (sqC and R3s is not None) else []) },
-        "auto":   { "posed": bool(posed_auto), "na_reason_code": (None if posed_auto else auto_na),
-                    "tau4": tau_auto, "rho4": rho_auto,
-                    "sel_size": (lane_size if posed_auto else None),
-                    "mismatch_cols": (_v2_nz_cols(R3p) if (posed_auto and R3p is not None) else None) },
-        "file":   { "posed": bool(posed_file), "na_reason_code": (None if posed_file else file_na),
-                    "tau4": tau_file, "rho4": rho_file,
-                    "sel_size": (sum(lanes_file) if posed_file else None),
-                    "mismatch_cols": (_v2_nz_cols(_v2_mm(R3s, [[1 if (i==j and lanes_file[j]) else 0 for j in range(n3)] for i in range(n3)])) if posed_file else None) }
-    }
-    _v2_write_json(bundle_dir / "snapshot.json", snap)
-
-    mono_auto_holds = (None if not posed_auto else (True if ((not strict_eq) or bool(proj_eq)) else False))
-    mono_file_holds = (None if not posed_file else (True if ((not strict_eq) or bool(file_eq)) else False))
-    monotonicity = {
-        "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
-        "strict_to_auto": { "posed": bool(posed_auto), "holds": mono_auto_holds, "na_reason_code": (None if posed_auto else auto_na) },
-        "strict_to_file": { "posed": bool(posed_file), "holds": mono_file_holds, "na_reason_code": (None if posed_file else file_na) }
-    }
-    _v2_write_json(bundle_dir / "monotonicity.json", monotonicity)
-
-    no_trivial = {
-        "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
-        "auto": { "lanes_size": lane_size, "lanes_zero_vector": (lane_size==0), "c3_square": bool(sqC),
-                  "projected_posed": bool(posed_auto), "na_reason_code": (None if posed_auto else auto_na) },
-        "file": { "lanes_size": (sum(lanes_file) if posed_file else None),
-                  "lanes_zero_vector": (sum(lanes_file)==0 if posed_file else None),
-                  "projected_posed": bool(posed_file), "na_reason_code": (None if posed_file else file_na) }
-    }
-    _v2_write_json(bundle_dir / "no_trivial_pass.json", no_trivial)
-
-    # Coverage JSONL (frozen schema)
-    cov = {
-        "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
-        "district_id": district_id, "sig8": sig8, "n2": int(n2), "n3": int(n3),
-        "strict_k3_eq": (bool(strict_eq) if strict_eq is not None else None),
-        "mismatch_count_strict": (len(_v2_nz_cols(R3s)) if (sqC and R3s is not None) else None),
-        "tau4_strict": (int(tau_strict) if tau_strict is not None else None),
-        "rho4_strict": (int(rho_strict) if rho_strict is not None else None),
-        "auto_posed": bool(posed_auto),
-        "proj_auto_eq": (bool(proj_eq) if posed_auto else None),
-        "mismatch_count_auto": (len(_v2_nz_cols(R3p)) if (posed_auto and R3p is not None) else None),
-        "tau4_auto": (int(tau_auto) if tau_auto is not None else None),
-        "rho4_auto": (int(rho_auto) if rho_auto is not None else None),
-        "auto_na_reason_code": (None if posed_auto else auto_na),
-        "file_posed": bool(posed_file),
-        "proj_file_eq": (bool(file_eq) if posed_file else None),
-        "mismatch_count_file": (len(_v2_nz_cols(_v2_mm(R3s, [[1 if (i==j and lanes_file[j]) else 0 for j in range(n3)] for i in range(n3)])) ) if posed_file else None),
-        "tau4_file": (int(tau_file) if tau_file is not None else None),
-        "rho4_file": (int(rho_file) if rho_file is not None else None),
-        "file_na_reason_code": (None if posed_file else file_na),
-        "lane_size_auto": (lane_size if posed_auto else None),
-        "lane_frac_auto": ( (lane_size/n3) if (posed_auto and n3) else None ),
-        "lane_size_file": (sum(lanes_file) if posed_file else None),
-        "lane_frac_file": ( (sum(lanes_file)/n3) if (posed_file and n3) else None ),
-        "sources": (ib.get("hashes") or {})
-    }
-    _v2_append_jsonl(_Path("logs")/"reports"/"coverage.jsonl", cov)
-
-    # bundle index
-    fnames = [f_strict, f_proj, f_ab_auto, f_freezer, f_ab_file]
-    if f_proj_file: fnames.append(f_proj_file)
-    sidecars = ["snapshot.json","monotonicity.json","no_trivial_pass.json"]
-    bundle_index = {"written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
-                    "filenames": [str(_Path(f).name) for f in fnames if f],
-                    "sidecars": sidecars}
-    _v2_write_json(bundle_dir/"bundle.json", bundle_index)
-
-    st.session_state["last_bundle_dir"] = str(bundle_dir)
-    return (True, f"Solver wrote {len(fnames)} cert files to {bundle_dir}", str(bundle_dir))
 # ======================= /v2 FINAL OVERRIDE (A→G) ===========================
