@@ -3214,6 +3214,19 @@ def one_press_solve(ss):
         na_reason=na_reason,
     )
     sig8 = (embed_sig_auto or "")[:8] if embed_sig_auto else "00000000"
+    # after you’ve computed overlay + e1 and BEFORE _atomic_append_jsonl(...)
+    ol = coverage_row.get("overlay", {}) or {}
+    e1 = coverage_row.get("e1", {}) or {}
+    
+    def _f(x):
+        return float(x) if isinstance(x, (int, float)) else None
+    
+    # flatten for C1:
+    coverage_row["prox_label"]           = e1.get("verdict_class") or "UNKNOWN"
+    coverage_row["sel_mismatch_rate"]    = _f(ol.get("selected_mismatch_rate"))
+    coverage_row["offrow_mismatch_rate"] = _f(ol.get("offrow_mismatch_rate"))
+    coverage_row["ker_mismatch_rate"]    = _f(ol.get("ker_lane_rate"))
+    coverage_row["contradiction_rate"]   = _f(ol.get("contradictory_lane_rate"))
 
     # --- Bundle dir + tiny index (guarded) ---
     bundle_dir = _Path("logs") / "certs" / district_id / sig8
