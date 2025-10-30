@@ -5608,3 +5608,118 @@ try:
 except Exception:
     pass
 # === End of patch ===
+# =========================
+# === V2 PASS 8 (Exports + C1 dedupe fallback) ===
+# 1) Export suite bundle as a zip (world snapshot + suite index + all bundle dirs).
+# 2) Harden C1 de-dupe: fall back to ('snapshot_id','embed_sig','policy') if inputs_sig_5_sig8 is absent.
+# =========================
+import io as ___io8, zipfile as ___zip8, datetime as ___dt8
+from pathlib import Path as ___P8
+import json as ___J8, os as ___OS8
+
+def _c1__dedupe_keep_last(recs, key_fields=("snapshot_id","inputs_sig_5_sig8")):
+    """Override: if inputs_sig_5_sig8 missing, fall back to (snapshot_id, embed_sig, policy)."""
+    if not recs:
+        return recs
+    primary_missing = not any(bool(r.get("inputs_sig_5_sig8")) for r in recs)
+    if primary_missing:
+        key_fields = ("snapshot_id","embed_sig","policy")
+    seen = set()
+    out_rev = []
+    for r in reversed(recs):
+        key = tuple((r.get(k) or "") for k in key_fields)
+        if key not in seen:
+            seen.add(key)
+            out_rev.append(r)
+    return list(reversed(out_rev))
+
+def __v2_detect_snapshot_id():
+    # Prefer session; else read alias
+    try:
+        import streamlit as _st
+        sid = _st.session_state.get("snapshot_id")
+        if sid: return sid
+    except Exception:
+        pass
+    alias = ___P8("logs/snapshots/world_snapshot.latest.json")
+    if alias.exists():
+        try:
+            sid = ___J8.loads(alias.read_text(encoding="utf-8")).get("snapshot_id")
+            if sid: return sid
+        except Exception:
+            pass
+    return None
+
+def __v2_collect_bundle_dirs_from_suite():
+    out = []
+    idx = ___P8("logs/suite_runs/suite_index.json")
+    if idx.exists():
+        try:
+            rows = ___J8.loads(idx.read_text(encoding="utf-8"))
+            for r in rows:
+                bd = r.get("bundle_dir")
+                if bd and ___P8(bd).exists():
+                    out.append(str(bd))
+        except Exception:
+            pass
+    # de-duplicate while preserving order
+    seen=set(); uniq=[]
+    for b in out:
+        if b not in seen:
+            uniq.append(b); seen.add(b)
+    return uniq
+
+def __v2_suite_bundle_zip():
+    """Create a ZIP with snapshot, suite index, and all bundle dirs under logs/certs/…"""
+    sid = __v2_detect_snapshot_id() or "unknown"
+    ts = ___dt8.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    export_dir = ___P8("logs/exports"); export_dir.mkdir(parents=True, exist_ok=True)
+    zip_path = export_dir / f"suite__{sid}__{ts}.zip"
+
+    buf = ___io8.BytesIO()
+    with ___zip8.ZipFile(buf, mode="w", compression=___zip8.ZIP_DEFLATED) as z:
+        # include snapshot (alias + exact id if available)
+        snap_alias = ___P8("logs/snapshots/world_snapshot.latest.json")
+        if snap_alias.exists():
+            z.write(snap_alias, arcname="snapshots/world_snapshot.latest.json")
+            try:
+                sid2 = ___J8.loads(snap_alias.read_text(encoding="utf-8")).get("snapshot_id")
+                exact = ___P8(f"logs/snapshots/world_snapshot__{sid2}.json")
+                if sid2 and exact.exists():
+                    z.write(exact, arcname=f"snapshots/world_snapshot__{sid2}.json")
+            except Exception:
+                pass
+        # include suite index
+        for rel in ("logs/suite_runs/suite_index.csv","logs/suite_runs/suite_index.json"):
+            p = ___P8(rel)
+            if p.exists():
+                z.write(p, arcname=rel)
+        # include all bundles referenced by the index
+        for bd in __v2_collect_bundle_dirs_from_suite():
+            bd_path = ___P8(bd)
+            for dp,_,files in ___OS8.walk(bd_path):
+                for f in files:
+                    p = ___P8(dp)/f
+                    rel = p.relative_to(bd_path.parent)  # keep one-level parent for context
+                    z.write(p, arcname=f"bundles/{rel}")
+    zip_path.write_bytes(buf.getvalue())
+    return str(zip_path)
+
+# UI: export expander with build + download button
+try:
+    import streamlit as _st
+    with _st.expander("Export (v2) — Suite bundle (zip)", expanded=False):
+        sid = __v2_detect_snapshot_id()
+        if sid:
+            _st.caption(f"Snapshot: {sid}")
+        if _st.button("Build suite ZIP", key="btn_v2_export_zip"):
+            zp = __v2_suite_bundle_zip()
+            _st.success(f"Built: {zp}")
+            try:
+                data = ___P8(zp).read_bytes()
+                _st.download_button("Download suite ZIP", data=data, file_name=___P8(zp).name, mime="application/zip")
+            except Exception as e:
+                _st.warning(f"ZIP ready on disk, but inline download failed: {e}")
+except Exception:
+    pass
+# === End PASS 8 ===
