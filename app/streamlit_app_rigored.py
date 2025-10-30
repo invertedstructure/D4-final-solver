@@ -5431,3 +5431,180 @@ def _c1_write_rollup_csv(rows, out_path: _Path):
             w.writerow({k: r.get(k) if r.get(k) is not None else "" for k in hdr})
     tmp.replace(out_path)
 # === End PASS 6 ===
+# =========================
+# === V2 SNAPSHOT STABILITY + λ CHECKSUM PATCH ===
+# - Reuse ONE content-addressed world snapshot across the full 48-run batch.
+# - Make λ reader robust (supports top-level arrays & nested shapes).
+# =========================
+from pathlib import Path as _PXX
+import json as _JXX, hashlib as _HXX, datetime as _DXX, os as _OXX
+
+def __v2__read_manifest_rows_strict():
+    """Find and read manifest_full_scope.{jsonl,csv} next to the app or in CWD."""
+    roots = []
+    try:
+        roots.append(_PXX.cwd())
+    except Exception:
+        pass
+    try:
+        here = _PXX(__file__).resolve().parent
+        roots += [here, here.parent]
+        if (here / "app").exists():
+            roots.append(here / "app")
+        if (here.parent / "app").exists():
+            roots.append(here.parent / "app")
+    except Exception:
+        pass
+    # remove dupes
+    uniq = []
+    seen = set()
+    for r in roots:
+        rp = r
+        try:
+            rp = r.resolve()
+        except Exception:
+            pass
+        if rp not in seen:
+            uniq.append(rp); seen.add(rp)
+
+    pj = pc = None
+    for r in uniq:
+        if (r / "manifest_full_scope.jsonl").exists():
+            pj = r / "manifest_full_scope.jsonl"; break
+        if (r / "manifest_full_scope.csv").exists():
+            pc = r / "manifest_full_scope.csv"; break
+
+    rows = []
+    man = {"jsonl": str(pj) if pj else "", "csv": str(pc) if pc else "", "manifest_hash": ""}
+    if pj:
+        for line in pj.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line:
+                rows.append(_JXX.loads(line))
+    elif pc:
+        import csv
+        with pc.open(newline="", encoding="utf-8") as f:
+            rows = list(csv.DictReader(f))
+    if rows:
+        h = _HXX.sha256()
+        for r in rows:
+            h.update(_JXX.dumps(r, separators=(",", ":"), sort_keys=True).encode("utf-8"))
+        man["manifest_hash"] = "sha256:" + h.hexdigest()
+    return rows, man
+
+def __v2__inventory_and_plan_canonical():
+    """Canonical inventory (sorted by id) and plan (manifest order)."""
+    rows, man = __v2__read_manifest_rows_strict()
+    inv = {"B": {}, "H": {}, "C": {}, "U": {}}
+    plan = []
+    if rows:
+        for i, rec in enumerate(rows, start=1):
+            fx = f"C{i:03d}"
+            for k, prefix in (("B", "D"), ("H", "H"), ("C", "C"), ("U", "U")):
+                p = _PXX(rec[k])
+                if not p.exists():
+                    continue
+                h = _HXX.sha256(p.read_bytes()).hexdigest()
+                stem = p.stem.upper()
+                # best-effort ID
+                id_guess = None
+                for t in ("D2","D3","H01","H10","H11",
+                          "C000","C001","C010","C011","C100","C101","C110","C111","U"):
+                    if t in stem:
+                        id_guess = t; break
+                id_guess = id_guess or f"{prefix}{stem[:2]}"
+                inv[k][id_guess] = {"id": id_guess, "path": str(p), "sha256": h}
+            try:
+                b_id = next(iter(inv["B"].keys()))
+                h_id = next(iter(inv["H"].keys()))
+                c_id = next(iter(inv["C"].keys()))
+                u_id = next(iter(inv["U"].keys()))
+                plan.append({"fixture": fx, "B": b_id, "H": h_id, "C": c_id, "U": u_id})
+            except Exception:
+                pass
+    # canonicalize: sort inventory lists by id
+    flat = {k: sorted((v for v in inv[k].values()), key=lambda z: z["id"]) for k in ("B","H","C","U")}
+    flat["__manifests__"] = man
+    return flat, plan
+
+def __v2__world_snapshot_from_manifest_once():
+    """Create/reuse a single content-addressed snapshot for the current manifest."""
+    try:
+        import streamlit as _st
+    except Exception:
+        class _D: session_state = {}
+        _st = _D()
+    ss = _st.session_state
+    # If already fixed in session, reuse
+    sid = ss.get("snapshot_id")
+    if sid:
+        return sid
+    inv, plan = __v2__inventory_and_plan_canonical()
+    body = {
+        "schema_version": str(globals().get("SCHEMA_VERSION", "2.0.0")),
+        "engine_rev": str(globals().get("ENGINE_REV", "rev-YYYYMMDD-1")),
+        "manifests": inv.get("__manifests__", {"jsonl":"", "csv":"", "manifest_hash":""}),
+        "inventory": {k: [dict(x) for x in inv.get(k, [])] for k in ("B","H","C","U")},
+        "plan_full_scope": [dict(x) for x in plan],
+    }
+    can = _JXX.dumps(body, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    sid = "ws__" + _HXX.sha256(can).hexdigest()[:8]
+    out_dir = _PXX("logs/snapshots"); out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / f"world_snapshot__{sid}.json"
+    if not out.exists():
+        body["snapshot_id"] = sid
+        body["created_at"] = _DXX.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+        out.write_text(_JXX.dumps(body, separators=(",", ":"), sort_keys=True), encoding="utf-8")
+    # alias
+    latest = out_dir / "world_snapshot.latest.json"
+    try:
+        latest.write_text(out.read_text(encoding="utf-8"), encoding="utf-8")
+    except Exception:
+        pass
+    ss["snapshot_id"] = sid
+    return sid
+
+# Override ensure() to reuse the single manifest snapshot
+def __v2_snapshot_ensure_and_stamp():
+    return __v2__world_snapshot_from_manifest_once()
+
+# More robust λ reader: supports top-level arrays too
+def ___v2_read_C_bottom_row_bits(path: str):
+    p = _PXX(path or "")
+    try:
+        j = _JXX.loads(p.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    # (A) Top-level list
+    if isinstance(j, list) and j and isinstance(j[0], list):
+        row = j[-1]
+        return [1 if x in (1, True, "1") else 0 for x in row]
+    # (B) Dict with common keys
+    if isinstance(j, dict):
+        for key in ("C3","matrix","C","mat"):
+            v = j.get(key)
+            if isinstance(v, list) and v and isinstance(v[0], list):
+                row = v[-1]
+                return [1 if x in (1, True, "1") else 0 for x in row]
+        # (C) Nested
+        for v in j.values():
+            if isinstance(v, dict):
+                for key in ("C3","matrix","C","mat"):
+                    vv = v.get(key)
+                    if isinstance(vv, list) and vv and isinstance(vv[0], list):
+                        row = vv[-1]
+                        return [1 if x in (1, True, "1") else 0 for x in row]
+    return None
+
+# Batch UI: print the single snapshot once before running
+try:
+    import streamlit as _st
+    with _st.expander("Batch (v2) — Run manifest_full_scope", expanded=False):
+        try:
+            fixed_sid = __v2__world_snapshot_from_manifest_once()
+            _st.info(f"Using snapshot: {fixed_sid}")
+        except Exception:
+            pass
+except Exception:
+    pass
+# === End of patch ===
