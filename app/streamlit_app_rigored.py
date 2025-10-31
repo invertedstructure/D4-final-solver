@@ -251,7 +251,7 @@ def run_overlap_once():
         "written_at_utc": _dt.datetime.utcnow().isoformat()+"Z",
         "policy_tag": "strict",
         "witness": {"bottom_H2d3": _bits(bH), "bottom_C3pI3": _bits(bCI), "lanes": None},
-        "results": {
+        "results": {,
             "out": {"2":{"eq": True}, "3":{"eq": strict_eq}},
             "selected_cols": sel_all,
             "mismatch_cols_selected": ([j for j in _nz_cols(R3s)] if R3s else []),
