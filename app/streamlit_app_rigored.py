@@ -44,12 +44,7 @@ def _repo_root() -> _Path:
     # repo root = parent of app dir
     return _Path(__file__).resolve().parent.parent
 
-def _abs_from_manifest(path_str: str) -> _Path:
-    p = _Path(path_str)
-    if not p.is_absolute():
-        # normalize possible 'app/...' paths
-        return (_repo_root() / p).resolve()
-    return p
+
 
 def _svr_current_snapshot_id() -> str | None:
     try:
@@ -138,51 +133,131 @@ def _suite_index_add_row(row: dict) -> None:
             w.writeheader()
         w.writerow(row)
 
-def run_suite_from_manifest(manifest_path: str, snapshot_id: str) -> tuple[bool, str, int]:
-    """Run the 48 fixtures listed in the manifest, binding each press to snapshot_id.
-    Returns (ok, message, count).
+# ---------- Suite helpers (v2) ----------
+
+from pathlib import Path as _Path
+import json as _json, hashlib as _hashlib, time as _time
+import streamlit as _st
+
+_APP_DIR  = _Path(__file__).resolve().parent         # .../app
+_REPO_DIR = _APP_DIR.parent                          # repo root
+
+def _abs_from_manifest(p_str: str) -> _Path:
     """
-    try:
-        import json as _json, datetime as _dt, glob as _glob
-        mp = _abs_from_manifest(manifest_path)
-        if not mp.exists():
-            return False, f"Manifest not found: {mp}", 0
-        lines = [ln for ln in mp.read_text(encoding="utf-8").splitlines() if ln.strip()]
-        count = 0
-        for line in lines:
-            rec = _json.loads(line)
-            # seed session_state with explicit inputs for this fixture
-            ss = st.session_state
-            ss["uploaded_boundaries"] = str(_abs_from_manifest(rec["B"]))
-            ss["uploaded_cmap"]       = str(_abs_from_manifest(rec["C"]))
-            ss["uploaded_H"]          = str(_abs_from_manifest(rec["H"]))
-            ss["uploaded_shapes"]     = str(_abs_from_manifest(rec["U"]))
-            # run one press
-            ok, msg, bundle_dir = run_overlap_once()
-            # build suite_index row
-            row = {
-                "written_at_utc": _dt.datetime.utcnow().isoformat() + "Z",
-                "snapshot_id": snapshot_id,
-                "fixture_id": rec.get("id"),
-                "bundle_dir": str(bundle_dir) if bundle_dir else None,
-            }
-            # try to enrich with lanes info by peeking at projected_auto cert if present
+    Resolve manifest paths robustly:
+      - absolute paths: return as-is
+      - 'app/…'        : resolve from REPO root
+      - everything else: resolve from APP dir
+    """
+    p = _Path(p_str)
+    if p.is_absolute():
+        return p
+    s = str(p).replace("\\", "/").lstrip("./")
+    if s.startswith("app/"):
+        return (_REPO_DIR / s).resolve()
+    return (_APP_DIR / s).resolve()
+
+def _set_inputs_for_run(B, C, H, U):
+    """
+    Prime the single-press pipeline with file paths the same way
+    the upload widgets would. We set both legacy and current keys
+    to be safe.
+    """
+    ss = _st.session_state
+    Bp, Cp, Hp, Up = map(lambda q: str(_abs_from_manifest(q)), (B, C, H, U))
+
+    # Primary keys the resolver uses
+    ss["uploaded_boundaries"] = Bp
+    ss["uploaded_cmap"]       = Cp
+    ss["uploaded_H"]          = Hp
+    ss["uploaded_shapes"]     = Up
+
+    # Common synonyms seen across earlier wiring
+    ss["uploaded_B_path"] = Bp
+    ss["uploaded_C_path"] = Cp
+    ss["uploaded_H_path"] = Hp
+    ss["uploaded_U_path"] = Up
+
+def run_suite_from_manifest(manifest_path: str, snapshot_id: str):
+    """
+    Iterate JSONL manifest: seed inputs -> call run_overlap_once()
+    -> record suite index rows.
+    """
+    manifest_abs = _abs_from_manifest(manifest_path)
+    if not manifest_abs.exists():
+        _st.error(f"Manifest not found: {manifest_abs}")
+        return False, f"Manifest not found: {manifest_abs}"
+
+    lines = []
+    with manifest_abs.open("r", encoding="utf-8") as f:
+        for raw in f:
+            raw = raw.strip()
+            if not raw:
+                continue
             try:
-                bd = _Path(bundle_dir) if bundle_dir else None
-                if bd and bd.exists():
-                    matches = list(bd.glob("*projected_columns_k_3_auto__*.json"))
-                    if matches:
-                        proj = _json.loads(matches[0].read_text(encoding="utf-8"))
-                        pc = dict(proj.get("projection_context") or {})
-                        row["lanes_popcount"] = int(pc.get("lanes_popcount")) if pc.get("lanes_popcount") is not None else None
-                        row["lanes_sig8"] = pc.get("lanes_sig8")
-            except Exception:
-                pass
-            _suite_index_add_row(row)
-            count += 1
-        return True, f"Ran {count} fixtures for snapshot {snapshot_id}", count
-    except Exception as e:
-        return False, f"Suite run failed: {e}", 0
+                lines.append(_json.loads(raw))
+            except Exception as e:
+                return False, f"Bad JSONL line: {raw[:120]}… ({e})"
+
+    ok_count = 0
+    for i, rec in enumerate(lines, 1):
+        fid = rec.get("id") or f"fixture_{i:02d}"
+        B = rec["B"]; C = rec["C"]; H = rec["H"]; U = rec["U"]
+        # Seed inputs for the single-press path
+        _set_inputs_for_run(B, C, H, U)
+
+        # Optional: quick existence preflight for clearer errors
+        miss = [p for p in (B, C, H, U) if not _abs_from_manifest(p).exists()]
+        if miss:
+            _st.warning(f"[{fid}] Missing files: {', '.join(miss)}")
+            continue
+
+        try:
+            # Use the same one-press function; it reads session_state now primed.
+            # (No kwargs: we bind to the current snapshot via world_snapshot.latest.json)
+            ok, msg, bundle_dir = run_overlap_once()
+        except TypeError:
+            # Older signature returning only (ok, msg)
+            r = run_overlap_once()
+            if isinstance(r, tuple) and len(r) >= 2:
+                ok, msg = r[0], r[1]
+                bundle_dir = None
+            else:
+                ok, msg, bundle_dir = False, "run_overlap_once returned unexpected shape", None
+
+        _st.write(f"{fid} → {'ok' if ok else 'fail'} · {msg}")
+        if ok:
+            ok_count += 1
+
+        # Append to suite index if we can read lanes info from the projected AUTO cert
+        try:
+            # Locate latest AUTO cert written by this press via the bundle.json index
+            bdir = _Path(bundle_dir) if bundle_dir else None
+            if not bdir or not bdir.exists():
+                # fallback: last bundle under logs/certs (best-effort)
+                bdir = max((_REPO_DIR / "logs" / "certs").glob("*"), key=lambda p: p.stat().st_mtime)
+            bidx = _json.loads((bdir / "bundle.json").read_text("utf-8"))
+            auto_path = bidx.get("files", {}).get("projected_auto")
+            lanes_pop = None; lanes_sig8 = None
+            if auto_path:
+                payload = _json.loads(_Path(auto_path).read_text("utf-8"))
+                pc = (payload.get("projection_context") or {})
+                lanes_pop = pc.get("lanes_popcount")
+                lanes_sig8 = pc.get("lanes_sig8")
+
+            _suite_index_add_row({
+                "fixture_id": fid,
+                "snapshot_id": snapshot_id,
+                "bundle_dir": str(bdir),
+                "lanes_popcount": lanes_pop,
+                "lanes_sig8": lanes_sig8,
+            })
+        except Exception:
+            # Non-fatal; index is a convenience
+            pass
+
+    return True, f"Completed {ok_count}/{len(lines)} fixtures."
+
 
 
 NA_CODES = {
