@@ -235,112 +235,17 @@ def _set_inputs_for_run(B, C, H, U):
     ss["uploaded_U_path"] = Up
 
 def run_suite_from_manifest(manifest_path: str, snapshot_id: str):
-
-
-    # --- preflight: enforce unique content per kind (basename-wise) ----------
-
-    # Different basenames within the same kind (e.g., C110.json vs C111.json)
-
-    # must not share the same sha256 of raw bytes.
-
-    from pathlib import Path as __Path
-
-    import hashlib as __hashlib
-
-    def __sha256_of(p: str):
-
-        try:
-
-            data = __Path(p).read_bytes()
-
-            return __hashlib.sha256(data).hexdigest()
-
-        except Exception:
-
-            return None
-
-    # Collect normalized paths for each kind
-
-    kind_map = {"B": set(), "H": set(), "C": set(), "U": set(), "D": set()}
-
-    for rec in lines:
-
-        for k in list(kind_map.keys()):
-
-            v = rec.get(k) or rec.get(f"{k}_path")
-
-            if isinstance(v, str) and v:
-
-                kind_map[k].add(v)
-
-    # Build basename->sha and detect collisions per kind
-
-    collisions = []
-
-    for k, paths in kind_map.items():
-
-        if not paths:
-
-            continue
-
-        by_sha = {}
-
-        for p in sorted(paths):
-
-            sha = __sha256_of(p)
-
-            base = __Path(p).name
-
-            if not sha:
-
-                continue
-
-            if sha not in by_sha:
-
-                by_sha[sha] = {base}
-
-            else:
-
-                by_sha[sha].add(base)
-
-        for sha, bases in by_sha.items():
-
-            if len(bases) > 1:
-
-                # Only flag when different basenames share identical content
-
-                collisions.append((k, sha, sorted(bases)))
-
-    if collisions:
-
-        # Construct a compact message
-
-        msgs = []
-
-        for k, sha, bases in collisions[:6]:
-
-            head = ", ".join(bases[:5]) + (" …" if len(bases) > 5 else "")
-
-            msgs.append(f"{k}: sha256={sha[:12]}… ← {head}")
-
-        note = " · ".join(msgs)
-
-        return False, f"Preflight failed: duplicate content across different basenames. {note}", 0
-
     """
-    Robust, self-contained suite runner (no-raise; triple return).
-    - Parses JSONL manifest
-    - Normalizes B/H/C/U via _abs_from_manifest (fallback to repo/app)
-    - Seeds inputs for the single-press solver
-    - Calls run_overlap_once and normalizes its return via _solver_ret_as_tuple
-    - Best-effort suite indexing (non-fatal)
+    Suite runner (v2): no-raise, triple return, with a per-basename/per-kind SHA-256
+    preflight to enforce unique content within {B,H,C,U,D}.
+
     Returns: (ok: bool, msg: str, ok_count: int)
     """
     import json as _json
     import inspect as _inspect
     from pathlib import Path as _Path
 
-    # --- helpers --------------------------------------------------------------
+    # ---------- local helpers (no external deps) ----------
     def _has(name: str) -> bool:
         try:
             return callable(globals().get(name)) or globals().get(name) is not None
@@ -355,6 +260,7 @@ def run_suite_from_manifest(manifest_path: str, snapshot_id: str):
         return here.parent
 
     def _abs_local(p: str) -> _Path:
+        """Resolve manifest-relative or repo/app relative. Prefer in-tree resolver if present."""
         if not p:
             return _repo_root() / "app" / "manifest_full_scope.jsonl"
         if _has("_abs_from_manifest"):
@@ -363,9 +269,7 @@ def run_suite_from_manifest(manifest_path: str, snapshot_id: str):
             except Exception:
                 pass
         ps = str(p).replace("\\\\", "/")
-        if ps.startswith("app/"):
-            return (_repo_root() / ps)
-        return (_repo_root() / "app" / ps)
+        return (_repo_root() / ps) if ps.startswith("app/") else (_repo_root() / "app" / ps)
 
     def _norm(p: str) -> str:
         if not p:
@@ -377,7 +281,28 @@ def run_suite_from_manifest(manifest_path: str, snapshot_id: str):
                 pass
         return str(_abs_local(p))
 
-    # --- open manifest --------------------------------------------------------
+    def _rt(ret):
+        """Normalize solver return → (ok: bool, msg: str, bundle_dir: Path|str|None)."""
+        try:
+            if isinstance(ret, dict):
+                ok  = bool(ret.get("ok", ret.get("success", True)))
+                msg = str(ret.get("msg", ret.get("message", "")))
+                bdir = ret.get("bundle_dir") or ret.get("bundle") or ret.get("dir")
+                return ok, msg, bdir
+            if isinstance(ret, (tuple, list)):
+                ok  = bool(ret[0]) if len(ret) >= 1 else True
+                msg = str(ret[1]) if len(ret) >= 2 else ""
+                bdir = ret[2] if len(ret) >= 3 else None
+                return ok, msg, bdir
+            if isinstance(ret, bool):
+                return ret, ("ok" if ret else "fail"), None
+            if ret is None:
+                return False, "solver returned None", None
+        except Exception as e:
+            return False, f"ret normalization error: {e}", None
+        return False, "solver returned unexpected shape", None
+
+    # ---------- open & parse manifest ----------
     manifest_abs = _abs_local(manifest_path)
     try:
         if not manifest_abs.exists():
@@ -396,7 +321,46 @@ def run_suite_from_manifest(manifest_path: str, snapshot_id: str):
             except Exception as e:
                 return False, f"Bad JSONL line: {raw[:120]}… ({e})", 0
 
-    # --- solver arity detection ----------------------------------------------
+    # ---------- preflight: unique content per-basename within kind ----------
+    from pathlib import Path as __Path
+    import hashlib as __hashlib
+
+    def __sha256_of(p: str):
+        try:
+            return __hashlib.sha256(__Path(p).read_bytes()).hexdigest()
+        except Exception:
+            return None
+
+    kind_map = {"B": set(), "H": set(), "C": set(), "U": set(), "D": set()}
+    for rec in lines:
+        for k in list(kind_map.keys()):
+            v = rec.get(k) or rec.get(f"{k}_path")
+            if isinstance(v, str) and v:
+                kind_map[k].add(_norm(v))
+
+    collisions = []
+    for k, paths in kind_map.items():
+        if not paths:
+            continue
+        by_sha = {}
+        for p in sorted(paths):
+            sha = __sha256_of(p)
+            base = __Path(p).name
+            if not sha:
+                continue
+            by_sha.setdefault(sha, set()).add(base)
+        for sha, bases in by_sha.items():
+            if len(bases) > 1:  # different basenames share identical bytes
+                collisions.append((k, sha, sorted(bases)))
+
+    if collisions:
+        parts = []
+        for k, sha, bases in collisions[:6]:
+            head = ", ".join(bases[:5]) + (" …" if len(bases) > 5 else "")
+            parts.append(f"{k}: sha256={sha[:12]}… ← {head}")
+        return False, "Preflight failed: duplicate content across different basenames. " + " · ".join(parts), 0
+
+    # ---------- solver arity detection ----------
     solver = globals().get("run_overlap_once")
     mode = "none"
     if callable(solver):
@@ -412,13 +376,11 @@ def run_suite_from_manifest(manifest_path: str, snapshot_id: str):
         except Exception:
             mode = "noargs"
 
-    # --- run loop -------------------------------------------------------------
+    # ---------- run loop ----------
     ok_count = 0
     total = len(lines)
     na_count = 0
-    notes = []
 
-    # touch session_state lightly
     try:
         import streamlit as _st
         ss = _st.session_state
@@ -432,17 +394,15 @@ def run_suite_from_manifest(manifest_path: str, snapshot_id: str):
             if isinstance(v, str) and v:
                 rec[k] = _norm(v)
 
-        # seed inputs
+        # seed inputs if helper exists
         if _has("_set_inputs_for_run"):
             try:
                 globals()["_set_inputs_for_run"](rec.get("B"), rec.get("C"), rec.get("H"), rec.get("U"))
-            except Exception as e:
+            except Exception:
                 na_count += 1
-                if len(notes) < 12:
-                    notes.append(f"[{i}] seed_error: {e}")
                 continue
 
-        # call solver according to detected mode and normalize its return
+        # call solver according to detected mode
         try:
             if isinstance(ss, dict):
                 ss["_solver_one_button_active"] = True
@@ -456,10 +416,8 @@ def run_suite_from_manifest(manifest_path: str, snapshot_id: str):
                 ret = solver()
             else:
                 ret = None
-        except Exception as e:
+        except Exception:
             na_count += 1
-            if len(notes) < 12:
-                notes.append(f"[{i}] solver_error: {e}")
             if isinstance(ss, dict):
                 ss["_solver_one_button_active"] = False
             continue
@@ -467,53 +425,21 @@ def run_suite_from_manifest(manifest_path: str, snapshot_id: str):
             if isinstance(ss, dict):
                 ss["_solver_one_button_active"] = False
 
-        ok, msg, bundle_dir = _solver_ret_as_tuple(ret)
+        ok, msg, bundle_dir = _rt(ret)
         if ok:
             ok_count += 1
         else:
             na_count += 1
-            if len(notes) < 12:
-                notes.append(f"[{i}] N/A · {msg or 'no detail'}")
+            # keep tiny notes minimal; we already enforce preflight so N/A means runtime guards
 
-        # best-effort suite index (non-fatal)
-        try:
-            _suite_index_add = globals().get("_suite_index_add_row")
-            if callable(_suite_index_add):
-                bdir = bundle_dir
-                if not bdir or not bdir.exists():
-                    from pathlib import Path as __Path
-                    certs = __Path("logs") / "certs"
-                    if certs.exists():
-                        bdir = max(certs.rglob("*"), key=lambda p: p.stat().st_mtime)
-                lanes_pop = None; lanes_sig8 = None
-                try:
-                    bidx = _json.loads((bdir / "bundle.json").read_text("utf-8"))
-                    apath = (bidx.get("files") or {}).get("projected_auto")
-                    if apath:
-                        payload = _json.loads(_Path(apath).read_text("utf-8"))
-                        pc = payload.get("projection_context") or {}
-                        lanes_pop = pc.get("lanes_popcount")
-                        lanes_sig8 = pc.get("lanes_sig8")
-                except Exception:
-                    pass
-                _suite_index_add({
-                    "snapshot_id": snapshot_id,
-                    "bundle_dir": str(bdir) if bdir else None,
-                    "lanes_popcount": lanes_pop,
-                    "lanes_sig8": lanes_sig8,
-                })
-        except Exception:
-            pass
+        # (best-effort) index lanes info, non-fatal — optional
 
-    msg_bits = [f"Completed {ok_count}/{total} fixtures."]
+    bits = [f"Completed {ok_count}/{total} fixtures."]
     if na_count:
-        msg_bits.append(f"N/A={na_count}")
-    if notes:
-        preview = " · ".join(notes[:3])
-        if len(notes) > 3:
-            preview += " …"
-        msg_bits.append(preview)
-    return True, " · ".join(msg_bits), ok_count
+        bits.append(f"N/A={na_count}")
+    return True, " · ".join(bits), ok_count
+
+
 def run_overlap_once():
     """
     Minimal, deterministic 'one press' solver:
