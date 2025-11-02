@@ -270,7 +270,7 @@ def run_suite_from_manifest(manifest_path: str, snapshot_id: str):
                 return globals()["_abs_from_manifest"](p)
             except Exception:
                 pass
-        ps = str(p).replace("\", "/").replace("\", "/")
+        ps = str(p).replace("\\\\", "/")
         if ps.startswith("app/"):
             return (_repo_root() / ps)
         return (_repo_root() / "app" / ps)
