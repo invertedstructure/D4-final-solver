@@ -237,7 +237,7 @@ def _set_inputs_for_run(B, C, H, U):
 def run_suite_from_manifest(manifest_path: str, snapshot_id: str):
     """Delegates to the robust v2 suite runner (triple return)."""
     return _run_suite_from_manifest_v2(manifest_path, snapshot_id)
-"""
+    """
     Iterate JSONL manifest: seed inputs -> call run_overlap_once()
     -> record suite index rows.
     """
