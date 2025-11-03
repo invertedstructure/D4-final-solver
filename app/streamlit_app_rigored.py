@@ -41,6 +41,18 @@ def _one_press_triple():
     if "run_overlap_once" in g and callable(g["run_overlap_once"]):
         return _solver_ret_as_tuple(g["run_overlap_once"]())
     return False, "run_overlap_once() not found in globals.", None
+# --- v2 hashing aliases (define before use) ---
+from pathlib import Path as _VPath
+import hashlib as _Vhash
+
+def _v2_sha256_path(p) -> str:
+    """Chunked SHA-256 over a file path (1 MiB blocks)."""
+    p = _VPath(p)
+    h = _Vhash.sha256()
+    with p.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
 
 def _v2_bundle_index_rebuild(bundle_dir: _Path) -> dict:
     """
