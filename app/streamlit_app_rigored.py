@@ -5307,3 +5307,116 @@ def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
     from pathlib import Path as _Path
 
 run_suite_from_manifest = _RUN_SUITE_CANON
+# === FINAL BINDING: v2 repo-only runner (returns (ok,msg,count) on ALL paths) ===
+def _RUN_SUITE_V2_REPO_ONLY(manifest_path: str, snapshot_id: str):
+    """
+    Reads manifest JSONL only (no snapshot fallback).
+    For each record:
+      - Resolve B/C/H/U under repo, fail-fast to NA row if any path missing
+      - Seed resolver path keys
+      - Call solver via _one_press_triple() (arity-proof)
+      - Write a JSONL row to suite_index.jsonl
+    Always returns (ok: bool, msg: str, count: int)
+    """
+    import json as _json
+    from pathlib import Path as _Path
+    import streamlit as _st
+
+    g = globals()
+
+    # Resolve manifest path under repo
+    try:
+        mp = _Path(g["_abs_from_manifest"](manifest_path)) if "_abs_from_manifest" in g else _Path(manifest_path)
+    except Exception:
+        mp = _Path(manifest_path)
+
+    if not mp.exists():
+        return False, f"Manifest not found: {mp}", 0
+
+    # Load JSONL (no fallback)
+    lines = []
+    try:
+        with mp.open("r", encoding="utf-8") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                lines.append(_json.loads(raw))
+    except Exception as e:
+        return False, f"Bad JSONL: {e}", 0
+
+    # suite index path
+    if "_suite_index_paths" in g and callable(g["_suite_index_paths"]):
+        jl_path, _ = g["_suite_index_paths"]()
+    else:
+        jl_path = _Path("logs/suite/suite_index.jsonl")
+        jl_path.parent.mkdir(parents=True, exist_ok=True)
+
+    ok_count, total = 0, len(lines)
+
+    try:
+        with jl_path.open("w", encoding="utf-8") as out:
+            for i, rec in enumerate(lines, 1):
+                fid = rec.get("id") or rec.get("fixture") or f"fixture_{i:02d}"
+
+                # Resolve absolute repo paths
+                def _res(k):
+                    v = rec.get(k)
+                    try:
+                        return g["_abs_from_manifest"](v) if "_abs_from_manifest" in g else v
+                    except Exception:
+                        return v
+
+                abs_B = _res("B"); abs_C = _res("C"); abs_H = _res("H"); abs_U = _res("U")
+                P = {"B": _Path(abs_B), "C": _Path(abs_C), "H": _Path(abs_H), "U": _Path(abs_U)}
+                missing = [k for k, p in P.items() if not p.exists()]
+                if missing:
+                    # NA row; do not call solver
+                    out.write(_json.dumps({
+                        "snapshot_id": snapshot_id,
+                        "fixture_id": fid,
+                        "ok": False,
+                        "code": "NA_INPUTS",
+                        "msg": f"missing in repo: {','.join(missing)}",
+                        "bundle_dir": None
+                    }, separators=(",", ":"), sort_keys=True) + "\n")
+                    continue
+
+                # Seed resolver path keys (repo-only)
+                ss = _st.session_state
+                ss["uploaded_B_path"] = P["B"].as_posix()
+                ss["uploaded_C_path"] = P["C"].as_posix()
+                ss["uploaded_H_path"] = P["H"].as_posix()
+                ss["uploaded_U_path"] = P["U"].as_posix()
+
+                # One press (normalize solver arity)
+                ok, msg, bundle_dir = _one_press_triple()
+                if ok:
+                    ok_count += 1
+
+                # Heuristic bundle-dir if solver didn't return it
+                bdir = _Path(bundle_dir) if bundle_dir else None
+                if not bdir or not bdir.exists():
+                    try:
+                        certs = list(_Path("logs/certs").glob("*/*"))
+                        bdir = max(certs, key=lambda p: p.stat().st_mtime) if certs else None
+                    except Exception:
+                        bdir = None
+
+                out.write(_json.dumps({
+                    "snapshot_id": snapshot_id,
+                    "fixture_id": fid,
+                    "ok": bool(ok),
+                    "msg": msg,
+                    "bundle_dir": (str(bdir) if bdir else None)
+                }, separators=(",", ":"), sort_keys=True) + "\n")
+    except Exception as e:
+        # Never return None — always a 3-tuple
+        return False, f"runner error: {e}", ok_count
+
+    return True, f"Completed {ok_count}/{total} fixtures.", ok_count
+
+# Final alias — place this AFTER every legacy def so the UI uses this one:
+run_suite_from_manifest = _RUN_SUITE_V2_REPO_ONLY
+# =============================================================================
+
