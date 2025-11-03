@@ -282,6 +282,21 @@ def _one_press_triple():
     if "_svr_run_once" in g and callable(g["_svr_run_once"]):
         return _solver_ret_as_tuple(g["_svr_run_once"]())
     return False, "No solver entry found (run_overlap_once/_svr_run_once).", None
+    
+def _as3(ret):
+    """Normalize any (ok,msg,count?) shape to exactly (ok:bool, msg:str, count:int)."""
+    if isinstance(ret, (tuple, list)):
+        if len(ret) >= 3: return bool(ret[0]), str(ret[1]), int(ret[2])
+        if len(ret) == 2: return bool(ret[0]), str(ret[1]), 0
+        if len(ret) == 1: return bool(ret[0]), "", 0
+    if isinstance(ret, dict):
+        ok  = bool(ret.get("ok", ret.get("success", False)))
+        msg = str(ret.get("msg", ret.get("message", "")))
+        n   = int(ret.get("count", ret.get("n", 0)) or 0)
+        return ok, msg, n
+    if isinstance(ret, bool):
+        return ret, "", 0
+    return False, "runner returned unexpected shape", 0
 
 # ===== Helper: lanes sig8 + suite message (always defined) =====
 def _lanes_sig8_from_list(L):
@@ -5355,18 +5370,25 @@ one_press_solve = run_overlap_once# ---------- Batch (v2) — Run manifest_full_
 with st.expander("Batch (v2) — Run manifest_full_scope", expanded=False):
     st.caption("Looks for app/manifest_full_scope.jsonl under repo root.")
     colA, colB, colC = st.columns(3)
-    with colA:
+   with colA:
         if st.button("Create/refresh suite snapshot", key="btn_suite_snapshot"):
             ok, msg, sid = ensure_suite_snapshot("app/manifest_full_scope.jsonl")
             (st.success if ok else st.warning)(msg)
-    with colB:
-        if st.button("Run full scope (48)", key="btn_v2_manifest_run"):
-            sid = _svr_current_snapshot_id()
-            if not sid:
-                st.warning("No snapshot found. Click 'Create/refresh suite snapshot' first.")
+   with colB:
+    if st.button("Run full scope (48)", key="btn_v2_manifest_run"):
+        sid = _svr_current_snapshot_id()
+        if not sid:
+            st.warning("No snapshot found. Click 'Create/refresh suite snapshot' first.")
+        else:
+            # Prefer repo-only runner; fall back to CANON; else final alias if present
+            g = globals()
+            runner = g.get("_RUN_SUITE_V2_REPO_ONLY") or g.get("_RUN_SUITE_CANON") or g.get("run_suite_from_manifest")
+            if runner is None:
+                st.warning("No suite runner available (need _RUN_SUITE_V2_REPO_ONLY or _RUN_SUITE_CANON).")
             else:
-                ok, msg, n = run_suite_from_manifest("app/manifest_full_scope.jsonl", sid)
+                ok, msg, n = _as3(runner("app/manifest_full_scope.jsonl", sid))
                 (st.success if ok else st.warning)(msg)
+
     with colC:
         if st.button("Build suite ZIP", key="btn_v2_suite_zip"):
             try:
