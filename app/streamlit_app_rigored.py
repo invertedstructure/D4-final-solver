@@ -5370,7 +5370,7 @@ one_press_solve = run_overlap_once# ---------- Batch (v2) — Run manifest_full_
 with st.expander("Batch (v2) — Run manifest_full_scope", expanded=False):
     st.caption("Looks for app/manifest_full_scope.jsonl under repo root.")
     colA, colB, colC = st.columns(3)
-   with colA:
+    with colA:
         if st.button("Create/refresh suite snapshot", key="btn_suite_snapshot"):
             ok, msg, sid = ensure_suite_snapshot("app/manifest_full_scope.jsonl")
             (st.success if ok else st.warning)(msg)
