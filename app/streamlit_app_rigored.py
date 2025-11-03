@@ -5824,7 +5824,7 @@ with colB:
             else:
                 ok, msg, n = run_suite_from_manifest("app/manifest_full_scope.jsonl", sid)
                 (st.success if ok else st.warning)(msg)
-    with colC:
+with colC:
         if st.button("Build suite ZIP", key="btn_v2_suite_zip"):
             try:
                 import zipfile as _zipfile, datetime as _dt, json as _json
