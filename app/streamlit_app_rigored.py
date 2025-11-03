@@ -285,6 +285,24 @@ def _v2_validate_bundle(bundle_dir: _Path) -> dict:
     }
 # ------------------------------------------------------------------------------
 
+# v2 canonicalization constants + helpers (must be defined before use)
+_V2_EPHEMERAL_KEYS = frozenset({"saved_at", "duration_ms", "wall_ms", "trace_id"})
+
+def _v2_canonical_obj(obj, exclude_keys=_V2_EPHEMERAL_KEYS):
+    if isinstance(obj, dict):
+        return {k: _v2_canonical_obj(v, exclude_keys) for k, v in obj.items() if k not in exclude_keys}
+    if isinstance(obj, list):
+        return [_v2_canonical_obj(x, exclude_keys) for x in obj]
+    return obj
+
+def _v2_canonical_json(obj, exclude_keys=_V2_EPHEMERAL_KEYS) -> str:
+    import json as _json
+    return _json.dumps(_v2_canonical_obj(obj, exclude_keys),
+                       sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+def _v2_sig8(obj, exclude_keys=_V2_EPHEMERAL_KEYS) -> str:
+    import hashlib as _hashlib
+    return _hashlib.sha256(_v2_canonical_json(obj, exclude_keys).encode("utf-8")).hexdigest()[:8]
 
 
 # --- Early runner alias shim (pre-UI) ---
