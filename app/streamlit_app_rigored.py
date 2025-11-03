@@ -492,86 +492,88 @@ def _set_inputs_for_run(B, C, H, U):
     ss["uploaded_H_path"] = Hp
     ss["uploaded_U_path"] = Up
 
+
 def run_suite_from_manifest(manifest_path: str, snapshot_id: str):
     """
-    Iterate JSONL manifest: seed inputs -> call run_overlap_once()
-    -> record suite index rows.
+    v2 repo-only batch runner (final): ALWAYS returns (ok, msg, count).
+    - Reads JSONL manifest only (no snapshot/sidebar fallback).
+    - Seeds B/C/H/U from disk, writes NA row if any missing.
+    - Calls solver via _one_press_triple() (arity-proof).
     """
-    manifest_abs = _abs_from_manifest(manifest_path)
-    if not manifest_abs.exists():
-        _st.error(f"Manifest not found: {manifest_abs}")
-        return False, f"Manifest not found: {manifest_abs}"
+    import json as _json
+    from pathlib import Path as _Path
+    import streamlit as _st
 
-    lines = []
-    with manifest_abs.open("r", encoding="utf-8") as f:
-        for raw in f:
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                lines.append(_json.loads(raw))
-            except Exception as e:
-                return False, f"Bad JSONL line: {raw[:120]}… ({e})"
+    g = globals()
+    _abs = g.get("_abs_from_manifest", lambda p: p)
+    _suite_paths = g.get("_suite_index_paths", lambda: (_Path("logs/suite/suite_index.jsonl"), None))
+
+    # Resolve manifest
+    mp = _Path(_abs(manifest_path))
+    if not mp.exists():
+        _st.error(f"Manifest not found: {mp}")
+        return False, f"Manifest not found: {mp}", 0
+
+    # Load JSONL
+    try:
+        lines = [_json.loads(ln) for ln in mp.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except Exception as e:
+        return False, f"Bad manifest JSONL at {mp}: {e}", 0
+    total = len(lines)
+
+    jl_path, _ = _suite_paths()
+    jl_path.parent.mkdir(parents=True, exist_ok=True)
 
     ok_count = 0
-    for i, rec in enumerate(lines, 1):
-        fid = rec.get("id") or f"fixture_{i:02d}"
-        B = rec["B"]; C = rec["C"]; H = rec["H"]; U = rec["U"]
-        # Seed inputs for the single-press path
-        _set_inputs_for_run(B, C, H, U)
+    with jl_path.open("w", encoding="utf-8") as out:
+        for i, rec in enumerate(lines, 1):
+            fid = rec.get("id") or rec.get("fixture") or f"fixture_{i:02d}"
 
-        # Optional: quick existence preflight for clearer errors
-        miss = [p for p in (B, C, H, U) if not _abs_from_manifest(p).exists()]
-        if miss:
-            _st.warning(f"[{fid}] Missing files: {', '.join(miss)}")
-            continue
+            # Repo-only resolve
+            pB = _Path(_abs(rec.get("B"))); pC = _Path(_abs(rec.get("C")))
+            pH = _Path(_abs(rec.get("H"))); pU = _Path(_abs(rec.get("U")))
 
-        try:
-            # Use the same one-press function; it reads session_state now primed.
-            # (No kwargs: we bind to the current snapshot via world_snapshot.latest.json)
-            ok, msg, bundle_dir = run_overlap_once()
-        except TypeError:
-            # Older signature returning only (ok, msg)
-            r = run_overlap_once()
-            if isinstance(r, tuple) and len(r) >= 2:
-                ok, msg = r[0], r[1]
-                bundle_dir = None
-            else:
-                ok, msg, bundle_dir = False, "run_overlap_once returned unexpected shape", None
+            missing = [k for k, p in (("B", pB), ("C", pC), ("H", pH), ("U", pU)) if not p or not p.exists()]
+            if missing:
+                out.write(_json.dumps({
+                    "snapshot_id": snapshot_id, "fixture_id": fid,
+                    "ok": False, "code": "NA_INPUTS",
+                    "msg": f"missing in repo: {','.join(missing)}",
+                    "bundle_dir": None
+                }, separators=(",", ":"), sort_keys=True) + "\n")
+                continue
 
-        _st.write(f"{fid} → {'ok' if ok else 'fail'} · {msg}")
-        if ok:
-            ok_count += 1
+            # Seed the solver inputs
+            try:
+                _st.session_state["uploaded_B_path"] = pB.as_posix()
+                _st.session_state["uploaded_C_path"] = pC.as_posix()
+                _st.session_state["uploaded_H_path"] = pH.as_posix()
+                _st.session_state["uploaded_U_path"] = pU.as_posix()
+            except Exception:
+                pass
 
-        # Append to suite index if we can read lanes info from the projected AUTO cert
-        try:
-            # Locate latest AUTO cert written by this press via the bundle.json index
+            # One-press, arity-proof
+            ok, msg, bundle_dir = _one_press_triple()
+            if ok:
+                ok_count += 1
+            _st.write(f"{fid} → {'ok' if ok else 'fail'} · {msg}")
+
+            # Heuristic bundle dir if solver didn’t return it
             bdir = _Path(bundle_dir) if bundle_dir else None
-            if not bdir or not bdir.exists():
-                # fallback: last bundle under logs/certs (best-effort)
-                bdir = max((_REPO_DIR / "logs" / "certs").glob("*"), key=lambda p: p.stat().st_mtime)
-            bidx = _json.loads((bdir / "bundle.json").read_text("utf-8"))
-            auto_path = bidx.get("files", {}).get("projected_auto")
-            lanes_pop = None; lanes_sig8 = None
-            if auto_path:
-                payload = _json.loads(_Path(auto_path).read_text("utf-8"))
-                pc = (payload.get("projection_context") or {})
-                lanes_pop = pc.get("lanes_popcount")
-                lanes_sig8 = pc.get("lanes_sig8")
+            if not (bdir and bdir.exists()):
+                try:
+                    certs = list(_Path("logs/certs").glob("*/*"))
+                    bdir = max(certs, key=lambda p: p.stat().st_mtime) if certs else None
+                except Exception:
+                    bdir = None
 
-            _suite_index_add_row({
-                "fixture_id": fid,
-                "snapshot_id": snapshot_id,
-                "bundle_dir": str(bdir),
-                "lanes_popcount": lanes_pop,
-                "lanes_sig8": lanes_sig8,
-            })
-        except Exception:
-            # Non-fatal; index is a convenience
-            pass
+            out.write(_json.dumps({
+                "snapshot_id": snapshot_id, "fixture_id": fid,
+                "ok": bool(ok), "msg": msg,
+                "bundle_dir": (str(bdir) if bdir else None)
+            }, separators=(",", ":"), sort_keys=True) + "\n")
 
-    return True, f"Completed {ok_count}/{len(lines)} fixtures."
-
+    return True, f"Completed {ok_count}/{total} fixtures.", ok_count
 
 
 NA_CODES = {
