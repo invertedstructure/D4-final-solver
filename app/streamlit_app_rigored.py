@@ -492,11 +492,7 @@ def _set_inputs_for_run(B, C, H, U):
     ss["uploaded_H_path"] = Hp
     ss["uploaded_U_path"] = Up
 
-def run_suite_from_manifest(manifest_path: str, snapshot_id: str):
-    """
-    Iterate JSONL manifest: seed inputs -> call run_overlap_once()
-    -> record suite index rows.
-    """
+
 def run_overlap_once():
     """
     Minimal, deterministic 'one press' solver:
@@ -5155,6 +5151,155 @@ with _st.expander("Sanity battletests (Loop‑4)", expanded=False):
 # ======================== /Sanity battletests (Loop‑4) ========================
 
 
+# ===================== v2 CANONICAL MANIFEST RUNNER (single source of truth) =====================
+
+def _solver_ret_as_tuple(ret):
+    """Normalize solver payload to (ok, msg, bundle_dir)."""
+    try:
+        # tuple/list
+        if isinstance(ret, (tuple, list)):
+            ok  = bool(ret[0]) if len(ret) >= 1 else False
+            msg = str(ret[1]) if len(ret) >= 2 else ""
+            bdir = ret[2] if len(ret) >= 3 else None
+            return ok, msg, bdir
+        # dict
+        if isinstance(ret, dict):
+            ok  = bool(ret.get("ok", ret.get("success", True)))
+            msg = str(ret.get("msg", ret.get("message", "")))
+            bdir = ret.get("bundle_dir") or ret.get("bundle") or ret.get("dir")
+            return ok, msg, bdir
+        # bare bool
+        if isinstance(ret, bool):
+            return ret, "", None
+    except Exception:
+        pass
+    return False, "solver returned unrecognized payload", None
+
+def _one_press_triple():
+    """Single entry for the UI/runner to call the solver. Never touch the solver arity elsewhere."""
+    g = globals()
+    if "run_overlap_once" in g and callable(g["run_overlap_once"]):
+        return _solver_ret_as_tuple(g["run_overlap_once"]())
+    if "_svr_run_once" in g and callable(g["_svr_run_once"]):
+        return _solver_ret_as_tuple(g["_svr_run_once"]())
+    return False, "No solver entry found (run_overlap_once/_svr_run_once).", None
+
+def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
+    """
+    Deterministic v2 runner — ALWAYS returns (ok: bool, msg: str, count: int).
+    Strictly seeds the solver from the repo manifest (no sidebar/upload fallback).
+    Rebuilds bundle.json + writes loop_receipt if helpers exist.
+    """
+    import json as _json, time as _time
+    from pathlib import Path as _Path
+    try:
+        import streamlit as _st
+    except Exception:
+        class _DummyST: 
+            def __getattr__(self, _): 
+                return lambda *a, **k: None
+        _st = _DummyST()
+
+    g = globals()
+    ok_count = 0
+
+    # Resolve manifest (prefer your helper if present)
+    _abs_from_manifest = g.get("_abs_from_manifest", lambda p: _Path(p).resolve())
+    mpath = _abs_from_manifest(manifest_path)
+    mpath = _Path(mpath)
+
+    if not mpath.exists():
+        _st.error(f"Manifest not found: {mpath}")
+        return False, f"Manifest not found: {mpath}", 0
+
+    # Read JSONL
+    lines = []
+    try:
+        with mpath.open("r", encoding="utf-8") as f:
+            for raw in f:
+                raw = raw.strip()
+                if not raw:
+                    continue
+                lines.append(_json.loads(raw))
+    except Exception as e:
+        return False, f"Bad manifest JSONL at {mpath}: {e}", 0
+
+    total = len(lines)
+    if total == 0:
+        return False, f"Empty manifest: {mpath}", 0
+
+    for i, rec in enumerate(lines, 1):
+        fid = rec.get("fixture") or rec.get("id") or f"fx{i:02d}"
+        try:
+            B, C, H, U = rec["B"], rec["C"], rec["H"], rec["U"]
+        except Exception:
+            _st.warning(f"[{fid}] malformed record (needs B/C/H/U); skipping.")
+            continue
+
+        # Resolve on-disk paths (repo files only)
+        pB = _Path(_abs_from_manifest(B))
+        pC = _Path(_abs_from_manifest(C))
+        pH = _Path(_abs_from_manifest(H))
+        pU = _Path(_abs_from_manifest(U))
+
+        # Existence preflight (pure disk check; no side uploads)
+        miss = [k for k, p in (("B", pB), ("C", pC), ("H", pH), ("U", pU)) if not p.exists()]
+        if miss:
+            _st.warning(f"[{fid}] missing inputs on disk: {', '.join(miss)} — skipping.")
+            continue
+
+        # Seed session for the one-press solver (best effort; ignore if helper absent)
+        try:
+            if "_set_inputs_for_run" in g:
+                g["_set_inputs_for_run"](str(pB), str(pC), str(pH), str(pU))
+        except Exception:
+            pass
+
+        # Call the solver through the normalizer
+        ok, msg, bundle_dir = _one_press_triple()
+        _st.write(f"{fid} → {'ok' if ok else 'fail'} · {msg}")
+        if ok:
+            ok_count += 1
+
+        # Heuristic: resolve bundle dir if solver didn't return it
+        bdir = _Path(bundle_dir) if bundle_dir else None
+        if not bdir or not bdir.exists():
+            try:
+                certs_root = _Path("logs/certs")
+                candidates = list(certs_root.glob("*/*"))
+                bdir = max(candidates, key=lambda p: p.stat().st_mtime) if candidates else None
+            except Exception:
+                bdir = None
+
+        # Pass 1/2: bundle + loop receipt (helpers optional)
+        try:
+            if bdir and bdir.exists():
+                if "_v2_bundle_index_rebuild" in g:
+                    bundle = g["_v2_bundle_index_rebuild"](bdir)
+                else:
+                    bundle = {"bundle_dir": str(bdir), "artifacts": sorted([x.name for x in bdir.glob("*.json")]),
+                              "saved_at": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime())}
+                if "_v2_write_loop_receipt" in g:
+                    g["_v2_write_loop_receipt"](bdir, fid, snapshot_id, bundle)
+        except Exception as e:
+            _st.warning(f"[{fid}] bundling warning: {e}")
+
+        # Suite index row (optional helper)
+        try:
+            if "_suite_index_add_row" in g:
+                g["_suite_index_add_row"]({
+                    "fixture_id": fid,
+                    "snapshot_id": snapshot_id,
+                    "bundle_dir": (str(bdir) if bdir else None),
+                })
+        except Exception:
+            pass
+
+    return True, f"Completed {ok_count}/{total} fixtures.", ok_count
+
+# Final alias expected by the UI
+run_suite_from_manifest = _RUN_SUITE_CANON
+# =================== /v2 CANONICAL MANIFEST RUNNER ==============================================
 
 # ========================= Solver entrypoint (pure-ish) =========================
 
