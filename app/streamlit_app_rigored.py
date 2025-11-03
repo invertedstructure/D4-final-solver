@@ -256,6 +256,41 @@ def _suite_zip_build(snapshot_id: str):
         return True, f"ZIP built with warnings ({len(missing)} missing): {preview}", str(zpath)
     return True, f"ZIP built OK · {added} entries", str(zpath)
 
+# --- v2: solver arity normalizer + single entry used by UI/batch ---------------
+
+def _solver_ret_as_tuple(ret):
+    """Normalize arbitrary solver payloads to (ok: bool, msg: str, bundle_dir: Optional[str])."""
+    try:
+        # tuple/list: (ok[, msg[, bundle_dir]])
+        if isinstance(ret, (tuple, list)):
+            ok  = bool(ret[0]) if len(ret) >= 1 else False
+            msg = str(ret[1]) if len(ret) >= 2 else ""
+            bdir = ret[2] if len(ret) >= 3 else None
+            return ok, msg, bdir
+        # dict: {"ok"/"success", "msg"/"message", "bundle_dir"/"bundle"/"dir"}
+        if isinstance(ret, dict):
+            ok  = bool(ret.get("ok", ret.get("success", True)))
+            msg = str(ret.get("msg", ret.get("message", "")))
+            bdir = ret.get("bundle_dir") or ret.get("bundle") or ret.get("dir")
+            return ok, msg, bdir
+        # bare bool
+        if isinstance(ret, bool):
+            return ret, "", None
+    except Exception:
+        pass
+    return False, "solver returned unrecognized payload", None
+
+
+def _one_press_triple():
+    """
+    Single entry that the UI/runner must call. Always returns (ok, msg, bundle_dir).
+    """
+    g = globals()
+    if "run_overlap_once" in g and callable(g["run_overlap_once"]):
+        return _solver_ret_as_tuple(g["run_overlap_once"]())
+    if "_svr_run_once" in g and callable(g["_svr_run_once"]):
+        return _solver_ret_as_tuple(g["_svr_run_once"]())
+    return False, "No solver entry found (run_overlap_once/_svr_run_once).", None
 
 
 # ===== Helper: lanes sig8 + suite message (always defined) =====
