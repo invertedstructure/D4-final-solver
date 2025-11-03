@@ -257,23 +257,7 @@ def _suite_zip_build(snapshot_id: str):
     return True, f"ZIP built OK · {added} entries", str(zpath)
 
 
-def _solver_ret_as_tuple(ret):
-    try:
-        if isinstance(ret, (tuple, list)):
-            ok  = bool(ret[0]) if len(ret)>=1 else False
-            msg = str(ret[1]) if len(ret)>=2 else ""
-            bdir = ret[2] if len(ret)>=3 else None
-            return ok, msg, bdir
-        if isinstance(ret, dict):
-            ok  = bool(ret.get("ok", ret.get("success", True)))
-            msg = str(ret.get("msg", ret.get("message", "")))
-            bdir = ret.get("bundle_dir") or ret.get("bundle") or ret.get("dir")
-            return ok, msg, bdir
-        if isinstance(ret, bool):
-            return ret, "", None
-    except Exception:
-        pass
-    return False, "solver returned unrecognized payload", None
+
 
 def _one_press_triple():
     g = globals()
