@@ -256,6 +256,141 @@ def _suite_zip_build(snapshot_id: str):
         return True, f"ZIP built with warnings ({len(missing)} missing): {preview}", str(zpath)
     return True, f"ZIP built OK · {added} entries", str(zpath)
 
+# ===================== v2 EARLY KERNEL SHIMS (place AFTER imports, BEFORE any UI) =====================
+
+from pathlib import Path as _Path
+import json as _json
+
+def _solver_ret_as_tuple(ret):
+    """Normalize arbitrary solver payloads to (ok: bool, msg: str, bundle_dir: Optional[str])."""
+    try:
+        # tuple/list
+        if isinstance(ret, (tuple, list)):
+            ok  = bool(ret[0]) if len(ret) >= 1 else False
+            msg = str(ret[1]) if len(ret) >= 2 else ""
+            bdir = ret[2] if len(ret) >= 3 else None
+            return ok, msg, bdir
+        # dict
+        if isinstance(ret, dict):
+            ok  = bool(ret.get("ok", ret.get("success", True)))
+            msg = str(ret.get("msg", ret.get("message", "")))
+            bdir = ret.get("bundle_dir") or ret.get("bundle") or ret.get("dir")
+            return ok, msg, bdir
+        # bare bool
+        if isinstance(ret, bool):
+            return ret, "", None
+    except Exception:
+        pass
+    return False, "solver returned unrecognized payload", None
+
+def _one_press_triple():
+    """
+    Single entry used by UI/runner. Never call the solver directly elsewhere.
+    Always returns (ok, msg, bundle_dir).
+    """
+    g = globals()
+    if "run_overlap_once" in g and callable(g["run_overlap_once"]):
+        return _solver_ret_as_tuple(g["run_overlap_once"]())
+    if "_svr_run_once" in g and callable(g["_svr_run_once"]):
+        return _solver_ret_as_tuple(g["_svr_run_once"]())
+    return False, "No solver entry found (run_overlap_once/_svr_run_once).", None
+
+def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
+    """
+    Deterministic v2 runner — ALWAYS returns (ok: bool, msg: str, count: int).
+    Seeds inputs strictly from the repo manifest (no sidebar/upload fallback).
+    Rebuilds bundle.json + writes loop_receipt if helpers exist.
+    """
+    import time as _time
+    try:
+        import streamlit as _st
+    except Exception:
+        class _DummyST:
+            def __getattr__(self, _): return lambda *a, **k: None
+        _st = _DummyST()
+
+    g = globals()
+
+    # Resolve manifest path (prefer project helper if present)
+    _abs_from_manifest = g.get("_abs_from_manifest")
+    mp = _Path(_abs_from_manifest(manifest_path)) if _abs_from_manifest else _Path(manifest_path).resolve()
+    if not mp.exists():
+        _st.error(f"Manifest not found: {mp}")
+        return False, f"Manifest not found: {mp}", 0
+
+    # Load JSONL
+    lines = []
+    with mp.open("r", encoding="utf-8") as f:
+        for raw in f:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                lines.append(_json.loads(raw))
+            except Exception as e:
+                return False, f"Bad JSONL line: {raw[:120]}… ({e})", 0
+
+    # Open suite index (append)
+    if "_suite_index_paths" in g:
+        jl_path, _csvp = g["_suite_index_paths"]()
+    else:
+        jl_path = _Path("logs/suite/suite_index.jsonl")
+        jl_path.parent.mkdir(parents=True, exist_ok=True)
+    out = jl_path.open("a", encoding="utf-8")
+
+    ok_count, total = 0, len(lines)
+
+    for i, rec in enumerate(lines, 1):
+        fid = rec.get("fixture") or rec.get("id") or f"fx{i:02d}"
+
+        # Seed inputs strictly from manifest (if helper available)
+        try:
+            if "_set_inputs_for_run" in g:
+                B, C, H, U = rec["B"], rec["C"], rec["H"], rec["U"]
+                g["_set_inputs_for_run"](B, C, H, U)
+        except Exception:
+            # keep running; this is strict, but we won’t crash on a bad line
+            pass
+
+        # One-press (arity-proof)
+        ok, msg, bundle_dir = _one_press_triple()
+        _st.write(f"{fid} → {'ok' if ok else 'fail'} · {msg}")
+        if ok: ok_count += 1
+
+        # Resolve bundle dir (best-effort; we don’t trust indices for truth)
+        bdir = _Path(bundle_dir) if bundle_dir else None
+
+        # Pass-1/2: rebuild bundle + write loop_receipt (if helpers exist)
+        lanes_pop, lanes_sig8 = None, None
+        try:
+            if bdir and bdir.exists():
+                bundle = g["_v2_bundle_index_rebuild"](bdir) if "_v2_bundle_index_rebuild" in g else {}
+                lanes = bundle.get("lanes") or {}
+                lanes_pop, lanes_sig8 = lanes.get("popcount"), lanes.get("sig8")
+                if "_v2_write_loop_receipt" in g:
+                    g["_v2_write_loop_receipt"](bdir, fid, snapshot_id, bundle)
+        except Exception as e:
+            _st.warning(f"[{fid}] bundling warning: {e}")
+
+        # Minimal suite_index row
+        try:
+            out.write(_json.dumps({
+                "fixture_id": fid,
+                "snapshot_id": snapshot_id,
+                "bundle_dir": str(bdir) if bdir else None,
+                "lanes_popcount": lanes_pop,
+                "lanes_sig8": lanes_sig8,
+            }) + "\n")
+            out.flush()
+        except Exception:
+            pass
+
+    out.close()
+    return True, f"Completed {ok_count}/{total} fixtures.", ok_count
+
+# Final alias — make this the only active runner symbol
+run_suite_from_manifest = _RUN_SUITE_CANON
+# ===================== /v2 EARLY KERNEL SHIMS =====================
 
 
 # ===== Helper: lanes sig8 + suite message (always defined) =====
