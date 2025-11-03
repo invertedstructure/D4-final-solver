@@ -5262,7 +5262,100 @@ with _st.expander("Sanity battletests (Loop‑4)", expanded=False):
                         file_name="battletests_loop4.json", key="dl_bt_loop4")
 # ======================== /Sanity battletests (Loop‑4) ========================
 
+def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
+    """
+    Deterministic v2 runner — ALWAYS returns (ok: bool, msg: str, count: int).
+    After each solver press, rebuilds bundle.json and writes loop_receipt__{fixture}.json.
+    Also appends lanes fields into the suite index when available.
+    """
+    import json as _json
+    import streamlit as _st
+    from pathlib import Path as _Path
 
+    manifest_abs = _abs_from_manifest(manifest_path)
+    if not manifest_abs.exists():
+        _st.error(f"Manifest not found: {manifest_abs}")
+        return False, f"Manifest not found: {manifest_abs}", 0
+
+    # Load JSONL
+    lines = []
+    with manifest_abs.open("r", encoding="utf-8") as f:
+        for raw in f:
+            raw = raw.strip()
+            if not raw:
+                continue
+            try:
+                lines.append(_json.loads(raw))
+            except Exception as e:
+                return False, f"Bad JSONL line: {raw[:120]}… ({e})", 0
+
+    ok_count = 0
+    total = len(lines)
+
+    for i, rec in enumerate(lines, 1):
+        fid = rec.get("id") or f"fixture_{i:02d}"
+        B = rec["B"]; C = rec["C"]; H = rec["H"]; U = rec["U"]
+
+        # Seed inputs
+        try:
+            _set_inputs_for_run(B, C, H, U)
+        except Exception:
+            pass
+
+        # Existence preflight
+        miss = [p for p in (B, C, H, U) if not _abs_from_manifest(p).exists()]
+        if miss:
+            _st.warning(f"[{fid}] Missing files: {', '.join(miss)}")
+            continue
+
+        # Call solver with arity guard
+        try:
+            ret = run_overlap_once()
+            ok, msg, bundle_dir = _solver_ret_as_tuple(ret)
+        except Exception as e:
+            ok, msg, bundle_dir = False, f"solver error: {e}", None
+        else:
+            ok, msg, bundle_dir = _solver_ret_as_tuple(ret)
+
+        _st.write(f"{fid} → {'ok' if ok else 'fail'} · {msg}")
+        if ok:
+            ok_count += 1
+
+        # Resolve bundle dir
+        bdir = _Path(bundle_dir) if bundle_dir else None
+        if not bdir or not bdir.exists():
+            try:
+                certs = list((_REPO_DIR / "logs" / "certs").glob("*/*"))
+                bdir = max(certs, key=lambda p: p.stat().st_mtime) if certs else None
+            except Exception:
+                bdir = None
+
+        # Pass1/2: bundle + receipt
+        lanes_pop = None; lanes_sig8 = None
+        try:
+            if bdir and bdir.exists():
+                bundle = _v2_bundle_index_rebuild(bdir)
+                lanes = bundle.get("lanes") or {}
+                lanes_pop, lanes_sig8 = lanes.get("popcount"), lanes.get("sig8")
+                _v2_write_loop_receipt(bdir, fid, snapshot_id, bundle)
+        except Exception as e:
+            _st.warning(f"[{fid}] bundling warning: {e}")
+
+        # suite index row
+        try:
+            _suite_index_add_row({
+                "fixture_id": fid,
+                "snapshot_id": snapshot_id,
+                "bundle_dir": str(bdir) if bdir else None,
+                "lanes_popcount": lanes_pop,
+                "lanes_sig8": lanes_sig8,
+            })
+        except Exception:
+            pass
+
+    return True, f"Completed {ok_count}/{total} fixtures.", ok_count
+
+run_suite_from_manifest = _RUN_SUITE_CANON
 
 # ========================= Solver entrypoint (pure-ish) =========================
 
@@ -5404,97 +5497,4 @@ with st.expander("Batch (v2) — Run manifest_full_scope", expanded=False):
             except Exception as e:
                 st.warning(f"Suite ZIP failed: {e}")
 
-def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
-    """
-    Deterministic v2 runner — ALWAYS returns (ok: bool, msg: str, count: int).
-    After each solver press, rebuilds bundle.json and writes loop_receipt__{fixture}.json.
-    Also appends lanes fields into the suite index when available.
-    """
-    import json as _json
-    import streamlit as _st
-    from pathlib import Path as _Path
 
-    manifest_abs = _abs_from_manifest(manifest_path)
-    if not manifest_abs.exists():
-        _st.error(f"Manifest not found: {manifest_abs}")
-        return False, f"Manifest not found: {manifest_abs}", 0
-
-    # Load JSONL
-    lines = []
-    with manifest_abs.open("r", encoding="utf-8") as f:
-        for raw in f:
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                lines.append(_json.loads(raw))
-            except Exception as e:
-                return False, f"Bad JSONL line: {raw[:120]}… ({e})", 0
-
-    ok_count = 0
-    total = len(lines)
-
-    for i, rec in enumerate(lines, 1):
-        fid = rec.get("id") or f"fixture_{i:02d}"
-        B = rec["B"]; C = rec["C"]; H = rec["H"]; U = rec["U"]
-
-        # Seed inputs
-        try:
-            _set_inputs_for_run(B, C, H, U)
-        except Exception:
-            pass
-
-        # Existence preflight
-        miss = [p for p in (B, C, H, U) if not _abs_from_manifest(p).exists()]
-        if miss:
-            _st.warning(f"[{fid}] Missing files: {', '.join(miss)}")
-            continue
-
-        # Call solver with arity guard
-        try:
-            ret = run_overlap_once()
-            ok, msg, bundle_dir = _solver_ret_as_tuple(ret)
-        except Exception as e:
-            ok, msg, bundle_dir = False, f"solver error: {e}", None
-        else:
-            ok, msg, bundle_dir = _solver_ret_as_tuple(ret)
-
-        _st.write(f"{fid} → {'ok' if ok else 'fail'} · {msg}")
-        if ok:
-            ok_count += 1
-
-        # Resolve bundle dir
-        bdir = _Path(bundle_dir) if bundle_dir else None
-        if not bdir or not bdir.exists():
-            try:
-                certs = list((_REPO_DIR / "logs" / "certs").glob("*/*"))
-                bdir = max(certs, key=lambda p: p.stat().st_mtime) if certs else None
-            except Exception:
-                bdir = None
-
-        # Pass1/2: bundle + receipt
-        lanes_pop = None; lanes_sig8 = None
-        try:
-            if bdir and bdir.exists():
-                bundle = _v2_bundle_index_rebuild(bdir)
-                lanes = bundle.get("lanes") or {}
-                lanes_pop, lanes_sig8 = lanes.get("popcount"), lanes.get("sig8")
-                _v2_write_loop_receipt(bdir, fid, snapshot_id, bundle)
-        except Exception as e:
-            _st.warning(f"[{fid}] bundling warning: {e}")
-
-        # suite index row
-        try:
-            _suite_index_add_row({
-                "fixture_id": fid,
-                "snapshot_id": snapshot_id,
-                "bundle_dir": str(bdir) if bdir else None,
-                "lanes_popcount": lanes_pop,
-                "lanes_sig8": lanes_sig8,
-            })
-        except Exception:
-            pass
-
-    return True, f"Completed {ok_count}/{total} fixtures.", ok_count
-
-run_suite_from_manifest = _RUN_SUITE_CANON
