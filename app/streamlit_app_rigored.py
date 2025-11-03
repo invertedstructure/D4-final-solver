@@ -5429,61 +5429,28 @@ def run_overlap_once(ss=st.session_state):
     pf = _svr_resolve_all_to_paths()   # {"B": (path, blocks), "C": ..., "H": ..., "U": ...}
     (pB, bB), (pC, bC), (pH, bH), (pU, bU) = pf["B"], pf["C"], pf["H"], pf["U"]
     ib_rc = _svr_freeze_ssot(pf)
-
     # --- C1 coverage preflight: ensure file exists (touch) ---
     try:
         COVERAGE_JSONL.parent.mkdir(parents=True, exist_ok=True)
         with open(COVERAGE_JSONL, "a", encoding="utf-8") as _f:
             pass
     except Exception as _touch_e:
-        try:
-            st.warning(f"C1 coverage preflight failed: {_touch_e}")
-        except Exception:
-            pass
+        ...
     # --- end preflight ---
-    if isinstance(ib_rc, tuple):
-        ib = ib_rc[0] or {}
-        rc = ib_rc[1] if (len(ib_rc) > 1 and isinstance(ib_rc[1], dict)) else {}
-    else:
-        ib = ib_rc or {}
-        rc = {}
-    # --- District + shapes ---
-    C3 = bC.get("3") or []
-    n3 = len(C3[0]) if (C3 and C3[0]) else 0
-    district_id = str(ib.get("district_id") or "DUNKNOWN")
-    # --- Strict / Projected(auto) summaries (shape-safe) ---
-    strict_out = _svr_strict_from_blocks(bH, bB, bC)
-    proj_meta, lanes, proj_out = _svr_projected_auto_from_blocks(bH, bB, bC)
-    # --- Embed signature for AUTO pair ---
-    na_reason = (proj_meta.get("reason") if (proj_meta and proj_meta.get("na")) else None)
-    embed_auto, embed_sig_auto = _svr_build_embed(
-        ib, "strict__VS__projected(columns@k=3,auto)",
-        lanes=(lanes if lanes else None),
-        na_reason=na_reason,
-    )
-    sig8 = (embed_sig_auto or "")[:8] if embed_sig_auto else "00000000"
-    # --- Bundle dir + tiny index (guarded) ---
+    ...
     bundle_dir = _Path("logs") / "certs" / district_id / sig8
     bundle_dir.mkdir(parents=True, exist_ok=True)
-    bundle_idx = {
-        "run_id": rc.get("run_id",""),
-        "sig8": sig8,
-        "district_id": district_id,
-        "filenames": [],
-        "counts": {"written": 0}
-    }
+    bundle_idx = {...}
     _guarded_atomic_write_json(bundle_dir / "bundle.json", bundle_idx)
-    # --- Publish anchors expected by UI ---
     ss["last_bundle_dir"]   = str(bundle_dir)
     ss["last_ab_auto_path"] = str(bundle_dir / f"ab_auto__{district_id}__{sig8}.json")
     ss["last_ab_file_path"] = str(bundle_dir / f"ab_file__{district_id}__{sig8}.json")
     ss["last_solver_result"] = {"count": 0}
-    return {"bundle_dir": str(bundle_dir), "sig8": sig8, "counts": {"written": 0}, "paths": {
-        "ab_auto": ss["last_ab_auto_path"],
-        "ab_file": ss["last_ab_file_path"],
-        "bundle": str(bundle_dir / "bundle.json"),
-    }}
+    return {"bundle_dir": str(bundle_dir), "sig8": sig8, "counts": {"written": 0}, "paths": {...}}
     # ======================= /Solver entrypoint (pure-ish) ========================
+
+
+    
 
 
 # Back-compat alias
