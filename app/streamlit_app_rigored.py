@@ -290,8 +290,7 @@ try:
 except Exception:
     pass
 
-# Normalize solver return to (ok, msg, bundle_dir)
-def _solver_ret_as_tuple(ret):
+
 
 def _one_press_triple():
     # Normalizes the solver entry to a 3-tuple (ok, msg, bundle_dir)
