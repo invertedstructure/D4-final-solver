@@ -526,18 +526,9 @@ def run_suite_from_manifest(manifest_path: str, snapshot_id: str):
             _st.warning(f"[{fid}] Missing files: {', '.join(miss)}")
             continue
 
-        try:
-            # Use the same one-press function; it reads session_state now primed.
-            # (No kwargs: we bind to the current snapshot via world_snapshot.latest.json)
-            ok, msg, bundle_dir = run_overlap_once()
-        except TypeError:
-            # Older signature returning only (ok, msg)
-            r = run_overlap_once()
-            if isinstance(r, tuple) and len(r) >= 2:
-                ok, msg = r[0], r[1]
-                bundle_dir = None
-            else:
-                ok, msg, bundle_dir = False, "run_overlap_once returned unexpected shape", None
+        # One-press, arity-proof (always normalized)
+        ok, msg, bundle_dir = _one_press_triple()
+
 
         _st.write(f"{fid} → {'ok' if ok else 'fail'} · {msg}")
         if ok:
