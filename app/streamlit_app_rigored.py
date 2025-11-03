@@ -5149,6 +5149,155 @@ with _st.expander("Sanity battletests (Loop‑4)", expanded=False):
     _st.download_button("Download battletest receipts (JSON)", _json.dumps(results).encode("utf-8"),
                         file_name="battletests_loop4.json", key="dl_bt_loop4")
 # ======================== /Sanity battletests (Loop‑4) ========================
+# --- v2: canonical JSON + hashing helpers (idempotent defs) -------------------
+import json as _json, hashlib as _hashlib
+from pathlib import Path as _Path
+
+if "_v2_canonical_obj" not in globals():
+    _V2_EPHEMERAL_KEYS = {"created_at_utc", "run_id", "nonce", "ui_nonce"}
+    def _v2_canonical_obj(obj, exclude_keys=_V2_EPHEMERAL_KEYS):
+        if isinstance(obj, dict):
+            return {k: _v2_canonical_obj(v, exclude_keys) for k, v in obj.items()
+                    if k not in exclude_keys and v is not None}
+        if isinstance(obj, list):
+            return [_v2_canonical_obj(v, exclude_keys) for v in obj]
+        return obj
+
+if "_v2_sha256_bytes" not in globals():
+    def _v2_sha256_bytes(b: bytes) -> str:
+        h = _hashlib.sha256(); h.update(b); return h.hexdigest()
+
+if "_v2_sha256_path" not in globals():
+    def _v2_sha256_path(p: _Path) -> str:
+        h = _hashlib.sha256()
+        with p.open("rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
+
+if "_v2_inputs_sig5_from_paths" not in globals():
+    def _v2_inputs_sig5_from_paths(B: _Path, C: _Path, H: _Path, U: _Path) -> str:
+        """
+        Deterministic inputs signature from raw bytes (v2 scope).
+        We hash B||C||H||U bytes and take the first 10 hex chars (5 bytes).
+        """
+        h = _hashlib.sha256()
+        for p in (B, C, H, U):
+            with p.open("rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+        return h.hexdigest()[:10]  # "sig_5" = 5 bytes (10 hex chars)
+
+# Uses your guarded atomic writer if present; falls back to plain write.
+if "_guarded_atomic_write_json" not in globals():
+    def _guarded_atomic_write_json(path: _Path, payload: dict) -> None:
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        tmp.write_text(_json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")), encoding="utf-8")
+        tmp.replace(path)
+
+if "_v2_write_cert" not in globals():
+    def _v2_write_cert(bdir: _Path, filename: str, payload: dict) -> _Path:
+        bdir.mkdir(parents=True, exist_ok=True)
+        path = bdir / filename
+        _guarded_atomic_write_json(path, payload)
+        return path
+
+if "_v2_cert_emit" not in globals():
+    def _v2_cert_emit(
+        bdir: _Path,
+        *,
+        schema_version: str,
+        engine_rev: str,
+        district_id: str,
+        fixture_id: str,
+        snapshot_id: str,
+        inputs_sig_5: str,
+        lanes_info: dict | None,  # {"sig8": "...", "popcount": int} or None
+        file_projector_posed: bool = False,
+        freezer_status: str = "NA",  # "OK" | "FAIL" | "NA"
+    ) -> dict:
+        """
+        Writes v2 mechanical certs derived from disk facts only:
+        strict, projected_auto, ab_auto, projector_freezer.
+        FILE-dependent certs are written only if file_projector_posed is True.
+        Returns dict with filenames + per-cert sig8s.
+        """
+        # Common header
+        hdr = {
+            "schema_version": schema_version or "2.0.0",
+            "engine_rev": engine_rev or "rev-UNSET",
+            "district_id": district_id,
+            "fixture_id": fixture_id,
+            "snapshot_id": snapshot_id,
+            "inputs_sig_5": inputs_sig_5,
+        }
+
+        # Helper to finalize a cert: canonicalize → compute sig → include sig8 → write with name pattern
+        def _finalize(kind: str, policy: str, body: dict, name_fmt: str) -> tuple[str, str]:
+            payload = dict(hdr); payload.update({"policy": policy}); payload.update(body or {})
+            canon = _v2_canonical_obj(payload)
+            js = _json.dumps(canon, sort_keys=True, separators=(",", ":"))
+            sig = _hashlib.sha256(js.encode("utf-8")).hexdigest()
+            sig8 = sig[:8]
+            filename = name_fmt.format(D=district_id, sig8=sig8)
+            payload["sig8"] = sig8
+            _v2_write_cert(bdir, filename, payload)
+            return filename, sig8
+
+        out = {}
+
+        # 1) strict
+        f_strict, s_strict = _finalize(
+            "strict", "strict",
+            {"verdict": "UNKNOWN"},  # v2 keeps math opaque here; validator checks bytes only
+            "overlap__{D}__strict__{sig8}.json",
+        )
+        out["strict"] = {"file": f_strict, "sig8": s_strict}
+
+        # 2) projected(columns@k=3,auto)
+        lanes_info = lanes_info or {}
+        f_proj_auto, s_proj_auto = _finalize(
+            "projected_auto", "projected(columns@k=3,auto)",
+            {"lanes": {"sig8": lanes_info.get("sig8"), "popcount": lanes_info.get("popcount")}},
+            "overlap__{D}__projected_columns_k_3_auto__{sig8}.json",
+        )
+        out["projected_auto"] = {"file": f_proj_auto, "sig8": s_proj_auto}
+
+        # 3) ab_compare (strict vs projected_auto)
+        f_ab_auto, s_ab_auto = _finalize(
+            "ab_auto", "strict__VS__projected(columns@k=3,auto)",
+            {"embed": {"strict_sig8": s_strict, "projected_auto_sig8": s_proj_auto}, "verdict": "UNKNOWN"},
+            "ab_compare__strict_vs_projected_auto__{sig8}.json",
+        )
+        out["ab_auto"] = {"file": f_ab_auto, "sig8": s_ab_auto}
+
+        # 4) projector_freezer (mechanical record; does NOT assert lanes; v2 keeps it shallow)
+        f_freezer, s_freezer = _finalize(
+            "projector_freezer", "projector_freezer",
+            {"freezer": freezer_status, "file_projector_posed": bool(file_projector_posed)},
+            "projector_freezer__{D}__{sig8}.json",
+        )
+        out["projector_freezer"] = {"file": f_freezer, "sig8": s_freezer}
+
+        # (Optional) FILE branch — only if posed. We still keep verdicts opaque in v2.
+        if file_projector_posed and freezer_status == "OK":
+            # projected(FILE)
+            f_proj_file, s_proj_file = _finalize(
+                "projected_file", "projected(columns@k=3,file)",
+                {},  # leave payload minimal
+                "overlap__{D}__projected_columns_k_3_file__{sig8}.json",
+            )
+            out["projected_file"] = {"file": f_proj_file, "sig8": s_proj_file}
+
+            # ab_compare (strict vs projected_file)
+            f_ab_file, s_ab_file = _finalize(
+                "ab_file", "strict__VS__projected(columns@k=3,file)",
+                {"embed": {"strict_sig8": s_strict, "projected_file_sig8": s_proj_file}, "verdict": "UNKNOWN"},
+                "ab_compare__strict_vs_projected_file__{sig8}.json",
+            )
+            out["ab_file"] = {"file": f_ab_file, "sig8": s_ab_file}
+
+        return out
 
 
 # ===================== v2 CANONICAL MANIFEST RUNNER (single source of truth) =====================
@@ -5283,6 +5432,72 @@ def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
                     g["_v2_write_loop_receipt"](bdir, fid, snapshot_id, bundle)
         except Exception as e:
             _st.warning(f"[{fid}] bundling warning: {e}")
+                    # --- after solver and bundle resolution --------------------------------
+        bdir = _Path(bundle_dir) if bundle_dir else None
+        if not bdir or not bdir.exists():
+            try:
+                certs = list((_REPO_DIR / "logs" / "certs").glob("*/*"))
+                bdir = max(certs, key=lambda p: p.stat().st_mtime) if certs else None
+            except Exception:
+                bdir = None
+
+        lanes_pop = None
+        lanes_sig8 = None
+        district_id = None
+
+        try:
+            if bdir and bdir.exists():
+                bundle = _v2_bundle_index_rebuild(bdir)  # your existing helper
+                lanes = bundle.get("lanes") or {}
+                lanes_pop, lanes_sig8 = lanes.get("popcount"), lanes.get("sig8")
+                district_id = bundle.get("district_id")
+
+                # --- v2: emit mechanical certs (strict, projected_auto, ab_auto, freezer) ---
+                # Build inputs_sig_5 from *actual* files on disk (manifest paths)
+                pB = _abs_from_manifest(B); pC = _abs_from_manifest(C)
+                pH = _abs_from_manifest(H); pU = _abs_from_manifest(U)
+                sig5 = _v2_inputs_sig5_from_paths(pB, pC, pH, pU)
+
+                # Pull schema/engine if present; else fallback literals
+                _schema = globals().get("SCHEMA_VERSION", "2.0.0")
+                _engine = globals().get("ENGINE_REV", "rev-UNSET")
+
+                # In batch mode we treat FILE projector as "not posed" unless your UI explicitly sets it
+                file_posed = bool(globals().get("file_pi_valid", False))
+                freezer_status = "NA"  # v2 keeps freezer shallow unless you want to wire actual status here
+
+                _v2_cert_emit(
+                    bdir,
+                    schema_version=_schema,
+                    engine_rev=_engine,
+                    district_id=district_id or "D-UNKNOWN",
+                    fixture_id=fid,
+                    snapshot_id=snapshot_id,
+                    inputs_sig_5=sig5,
+                    lanes_info={"sig8": lanes_sig8, "popcount": lanes_pop},
+                    file_projector_posed=file_posed,
+                    freezer_status=freezer_status,
+                )
+
+                # Rebuild bundle index after writing certs so presence/bitmask update
+                bundle = _v2_bundle_index_rebuild(bdir)
+
+                _v2_write_loop_receipt(bdir, fid, snapshot_id, bundle)
+        except Exception as e:
+            _st.warning(f"[{fid}] bundling/cert emit warning: {e}")
+
+        # suite_index row (unchanged)
+        try:
+            _suite_index_add_row({
+                "fixture_id": fid,
+                "snapshot_id": snapshot_id,
+                "bundle_dir": str(bdir) if bdir else None,
+                "lanes_popcount": lanes_pop,
+                "lanes_sig8": lanes_sig8,
+            })
+        except Exception:
+            pass
+
 
         # Suite index row (optional helper)
         try:
