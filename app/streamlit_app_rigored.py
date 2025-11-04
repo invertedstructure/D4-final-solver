@@ -5368,10 +5368,12 @@ def run_overlap_once(ss=st.session_state):
     else:
         ib, rc = (ib_rc or {}), {}
 
-    # -- Derive anchors from SSOT/session (never UNKNOWN if we can help it)
-    district_id  = str(ib.get("district_id") or ss.get("district_id") or "DUNKNOWN")
-    fixture_id   = str(ib.get("fixture_label") or ib.get("fixture_id") or ss.get("fixture_label") or "UNKNOWN_FIXTURE")
-    snapshot_id  = str(ib.get("snapshot_id")  or ss.get("world_snapshot_id") or "UNKNOWN_SNAPSHOT")
+       # --- District / fixture / snapshot anchors (best-effort) ---
+    district_id = str(ib.get("district_id") or "DUNKNOWN")
+    fixture_id  = str(ib.get("fixture_label") or ib.get("fixture_id") or ss.get("fixture_label") or "UNKNOWN_FIXTURE")
+    snapshot_id = str(ib.get("snapshot_id") or ss.get("world_snapshot_id") or "UNKNOWN_SNAPSHOT")
+    inputs_sig_5 = str(ib.get("inputs_sig_5") or "")
+
 
     # -- Compute inputs_sig_5 from real bytes (B,C,H,U + shapes) — v2 minimal
     def _sha256_path(p: _Path) -> str:
@@ -5405,34 +5407,27 @@ def run_overlap_once(ss=st.session_state):
     except Exception:
         pass
 
-    # -- Strict & Projected(AUTO)
+       # --- Strict & Projected(AUTO) (shape-safe) ---
     strict_out = _svr_strict_from_blocks(bH, bB, bC)
-    proj_meta, lanes_meta, proj_out = _svr_projected_auto_from_blocks(bH, bB, bC)
-
-    # Lanes: always a vector of 0/1 from bottom row of C3; add popcount & sig8
-    C3 = bC.get("3") or []
-    lanes_vec = [int(x) & 1 for x in (C3[-1] if C3 else [])]
-    lanes_pop = sum(lanes_vec)
-    lanes_sig = _hash.sha256(_json.dumps(lanes_vec, separators=(",", ":"), sort_keys=False).encode("utf-8")).hexdigest()[:8]
-
-    # -- Canonical embed for AUTO → sig8 anchor
+    proj_meta, lanes, proj_out = _svr_projected_auto_from_blocks(bH, bB, bC)
+    
+    # --- Canonical embed for AUTO pair → sig8 (bundle anchor) ---
     na_reason = (proj_meta.get("reason") if (isinstance(proj_meta, dict) and proj_meta.get("na")) else None)
+    
+    # ⬇️ Ensure the embed varies per fixture (prevents 24→1 collisions)
+    ib_for_embed = dict(ib)
+    ib_for_embed["fixture_label"] = fixture_id  # guaranteed non-empty label in embed
+    
     embed_auto, embed_sig_auto = _svr_build_embed(
-        {
-            "district_id": district_id,
-            "fixture_id": fixture_id,
-            "snapshot_id": snapshot_id,
-            "inputs_sig_5": inputs_sig_5,
-        },
-        "strict__VS__projected(columns@k=3,auto)",
-        lanes=lanes_vec,
-        projector_hash=None,
+        ib_for_embed, "strict__VS__projected(columns@k=3,auto)",
+        lanes=(lanes if lanes else None),
         na_reason=na_reason,
     )
     sig8 = (embed_sig_auto or "")[:8] if embed_sig_auto else "00000000"
-
-    # -- Bundle dir anchor
-    bundle_dir = _Path("logs") / "certs" / district_id / sig8
+    
+    # --- Bundle dir + tiny index (initial) ---
+    # ⬇️ Add fixture level to avoid cross-fixture clobbering even if sigs collide
+    bundle_dir = _Path("logs") / "certs" / district_id / fixture_id / sig8
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
     # Canonical dump + sig8 helper
