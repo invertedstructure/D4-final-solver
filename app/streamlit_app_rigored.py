@@ -5409,33 +5409,47 @@ def run_overlap_once(ss=st.session_state):
 
     strict_v, strict_na, strict_reason = _as_verdict(strict_out)
 
-    # Lanes (AUTO): prefer lanes_meta if provided; else compute from bottom row of C3
-    def _lanes_from_blocks(bC):
+        # --- Strict & Projected(AUTO) (shape-safe) ---
+    strict_out = _svr_strict_from_blocks(bH, bB, bC)
+    proj_meta, lanes_meta, proj_out = _svr_projected_auto_from_blocks(bH, bB, bC)
+    
+    # Helper: normalize solver verdict shapes to (verdict_bool or None, na_bool, reason_or_None)
+    def _as_verdict(obj):
+        if not isinstance(obj, dict):
+            return None, False, None
+        if obj.get("na"):
+            return None, True, obj.get("reason") or "NA"
+        v = obj.get("verdict", obj.get("pass", obj.get("ok", None)))
+        if isinstance(v, bool):
+            return v, False, None
+        return None, True, "NO_VERDICT"
+    
+    strict_v, strict_na, strict_reason = _as_verdict(strict_out)
+    proj_auto_v, proj_auto_na, proj_auto_reason = _as_verdict(proj_out)
+    
+    # ---- Lanes (vector + summaries) from bottom row of C3 ----
+    def _lanes_vec_from_blocks(bC):
+        import json as _json, hashlib as _hash
         C3 = bC.get("3") or []
         row = C3[-1] if C3 else []
-        lane = [int(x) & 1 for x in (row or [])]
-        pop  = sum(lane)
-        raw  = _json.dumps(lane, separators=(",", ":"), sort_keys=False).encode("ascii")
-        sig8 = _hash.sha256(raw).hexdigest()[:8] if lane else None
-        return pop, sig8
-    lanes_pop = (lanes_meta.get("popcount") if isinstance(lanes_meta, dict) else None)
-    lanes_sig8 = (lanes_meta.get("sig8")      if isinstance(lanes_meta, dict) else None)
-    if lanes_pop is None or lanes_sig8 is None:
-        lp, ls = _lanes_from_blocks(bC)
-        lanes_pop = lanes_pop if lanes_pop is not None else lp
-        lanes_sig8 = lanes_sig8 if lanes_sig8 is not None else ls
-
-    proj_auto_v, proj_auto_na, proj_auto_reason = _as_verdict(proj_out)
-
-    # --- Canonical embed for AUTO pair → sig8 (bundle anchor) ---
+        vec = [int(x) & 1 for x in (row or [])]
+        pop = sum(vec)
+        raw = _json.dumps(vec, separators=(",", ":"), sort_keys=False).encode("ascii")
+        sig8 = _hash.sha256(raw).hexdigest()[:8] if vec else None
+        return vec, pop, sig8
+    
+    lanes_vec, lanes_pop, lanes_sig8 = _lanes_vec_from_blocks(bC)
+    
+    # --- Canonical embed for AUTO pair → sig8 (bundle anchor)
     na_reason = (proj_meta.get("reason") if (isinstance(proj_meta, dict) and proj_meta.get("na")) else None)
     embed_auto, embed_sig_auto = _svr_build_embed(
         {"district_id": district_id, "fixture_id": fixture_id, "snapshot_id": snapshot_id, "inputs_sig_5": inputs_sig_5},
         "strict__VS__projected(columns@k=3,auto)",
-        lanes={"popcount": lanes_pop, "sig8": lanes_sig8},
+        lanes=lanes_vec,             # <— pass the VECTOR here
         na_reason=na_reason,
     )
     sig8 = (embed_sig_auto or "")[:8] if embed_sig_auto else "00000000"
+
 
     # --- Bundle dir ---
     bundle_dir = _Path("logs") / "certs" / district_id / sig8
@@ -5484,11 +5498,9 @@ def run_overlap_once(ss=st.session_state):
         "verdict": proj_auto_v if not proj_auto_na else None,
         "na": bool(proj_auto_na),
         "reason": proj_auto_reason if proj_auto_na else None,
-        "lanes": {"popcount": lanes_pop, "sig8": lanes_sig8},
+        "lanes": {"popcount": lanes_pop, "sig8": lanes_sig8},  # summaries only
     })
-    auto_text, auto_sig8 = _canon_dump_and_sig8(proj_auto_payload)
-    _write_json(bundle_dir / f"overlap__{district_id}__projected_columns_k_3_auto__{sig8}.json", proj_auto_payload)
-    written.append(f"overlap__{district_id}__projected_columns_k_3_auto__{sig8}.json")
+
 
     # 3) ab_compare (strict vs projected_auto) — references the two payloads by their sig8s
     ab_auto_payload = dict(base_hdr, **{
