@@ -5369,9 +5369,9 @@ def run_overlap_once(ss=st.session_state):
         ib, rc = (ib_rc or {}), {}
 
     # --- District / fixture / snapshot anchors ---
-    district_id = str(ib.get("district_id") or "DUNKNOWN")
-    fixture_id = str(st.session_state.get)("fixture_label") or ib.get("fixture_label") or ib.get("fixture_id") or "UNKNOWN_FIXTURE") or ib.get("fixture_id") or ss.get("fixture_label") or "UNKNOWN_FIXTURE")
-    snapshot_id = str(ib.get("snapshot_id") or ss.get("world_snapshot_id") or "UNKNOWN_SNAPSHOT")
+    district_id = str(ib.get("district_id") or ("DUNKNOWN")
+    fixture_id = str(st.session_state.get)("fixture_label") or ib.get("fixture_label") or ib.get("fixture_id") or ("UNKNOWN_FIXTURE") or ib.get("fixture_id") or ss.get("fixture_label")
+    snapshot_id = str(ib.get("snapshot_id") or ss.get("world_snapshot_id") or ("UNKNOWN_SNAPSHOT")
 
     # --- Compute inputs_sig_5 if missing (fallback) ---
     inputs_sig_5 = ib.get("inputs_sig_5")
