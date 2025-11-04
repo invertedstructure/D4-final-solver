@@ -5357,6 +5357,10 @@ def run_overlap_once(ss=st.session_state):
 
     import json as _json, hashlib as _hash
     from pathlib import Path as _Path
+    
+    st.session_state["file_pi_valid"] = False
+    st.session_state["file_pi_reasons"] = ["<NA reason(s)>"]  # always present; can be []
+
 
     # -- Resolve inputs + freeze SSOT (ib, rc)
     pf = _svr_resolve_all_to_paths()  # {"B": (path, blocks), "C": ..., "H": ..., "U": ...}
@@ -5410,7 +5414,18 @@ def run_overlap_once(ss=st.session_state):
        # --- Strict & Projected(AUTO) (shape-safe) ---
     strict_out = _svr_strict_from_blocks(bH, bB, bC)
     proj_meta, lanes, proj_out = _svr_projected_auto_from_blocks(bH, bB, bC)
+    # --- Lanes (v2 canonical: bottom row of C3 as a 0/1 vector) ---
+    C3 = bC.get("3") or []
+    lanes_vec = [int(x) & 1 for x in (C3[-1] if C3 else [])]
+    lanes_pop = sum(lanes_vec)
     
+    # If _hash isn't already imported in this function, add:
+    import hashlib as _hash  # <-- safe to keep even if already imported above
+    
+    lanes_sig = _hash.sha256(
+        _json.dumps(lanes_vec, separators=(",", ":"), sort_keys=False).encode("utf-8")
+    ).hexdigest()[:8]
+
     # --- Canonical embed for AUTO pair → sig8 (bundle anchor) ---
     na_reason = (proj_meta.get("reason") if (isinstance(proj_meta, dict) and proj_meta.get("na")) else None)
     
