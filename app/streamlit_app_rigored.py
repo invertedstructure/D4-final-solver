@@ -419,7 +419,9 @@ from pathlib import Path as _Path
 import datetime as _dt
 import random as _random
 import uuid, streamlit as st
-
+import json as _json
+from pathlib import Path as _Path
+import hashlib as _hash
 # Page config must be the first Streamlit command
 SCHEMA_VERSION = "2.0.0"
 ENGINE_REV     = "rev-20251022-1"
@@ -5352,9 +5354,7 @@ def run_overlap_once(ss=st.session_state):
       • Updates bundle.json (filenames[], counts.written)
       • Publishes session anchors and returns a small receipt (dict)
     """
-    import json as _json
-    from pathlib import Path as _Path
-    import hashlib as _hash
+    
 
     # --- Resolve inputs and freeze SSOT ---
     pf = _svr_resolve_all_to_paths()  # {"B": (path, blocks), "C": ..., "H": ..., "U": ...}
