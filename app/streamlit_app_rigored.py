@@ -21,6 +21,16 @@ try:
         _st.session_state["_ui_nonce"] = _secrets.token_hex(4)
 except Exception:
     pass
+    
+import json as _json
+import hashlib as _hash
+
+def _canon_dump_and_sig8(obj):
+    """Return (canonical_json_text, first_8_of_sha256) for small cert payloads."""
+    can = _v2_canonical_obj(obj)
+    raw = _json.dumps(can, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    h = _hash.sha256(raw).hexdigest()
+    return raw.decode("utf-8"), h[:8]
 
 # Normalize solver return to (ok, msg, bundle_dir)
 def _solver_ret_as_tuple(ret):
@@ -5491,6 +5501,9 @@ def run_overlap_once(ss=st.session_state):
     strict_text, strict_sig8 = _canon_dump_and_sig8(strict_payload)
     _write_json(bundle_dir / f"overlap__{district_id}__strict__{sig8}.json", strict_payload)
     written.append(f"overlap__{district_id}__strict__{sig8}.json")
+    strict_text, strict_sig8 = _canon_dump_and_sig8(strict_payload)
+    auto_text,   auto_sig8   = _canon_dump_and_sig8(proj_auto_payload)
+
 
     # 2) projected(columns@k=3,auto)
     proj_auto_payload = dict(base_hdr, **{
