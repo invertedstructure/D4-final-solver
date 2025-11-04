@@ -5344,6 +5344,8 @@ with _st.expander("Sanity battletests (Loop‑4)", expanded=False):
                         file_name="battletests_loop4.json", key="dl_bt_loop4")
 # ======================== /Sanity battletests (Loop‑4) ========================
 
+
+
 # ========================= Solver entrypoint (v2: emit baseline certs) =========================
 def run_overlap_once(ss=st.session_state):
     """
@@ -5354,13 +5356,8 @@ def run_overlap_once(ss=st.session_state):
       • Write the 4 core certs; conditionally write the 2 FILE certs
       • Update bundle.json; publish session anchors; return a dict receipt
     """
-
     import json as _json, hashlib as _hash
     from pathlib import Path as _Path
-    
-    st.session_state["file_pi_valid"] = False
-    st.session_state["file_pi_reasons"] = ["<NA reason(s)>"]  # always present; can be []
-
 
     # -- Resolve inputs + freeze SSOT (ib, rc)
     pf = _svr_resolve_all_to_paths()  # {"B": (path, blocks), "C": ..., "H": ..., "U": ...}
@@ -5372,14 +5369,13 @@ def run_overlap_once(ss=st.session_state):
     else:
         ib, rc = (ib_rc or {}), {}
 
-       # --- District / fixture / snapshot anchors (best-effort) ---
+    # --- District / fixture / snapshot anchors (best-effort) ---
     district_id = str(ib.get("district_id") or "DUNKNOWN")
     fixture_id  = str(ib.get("fixture_label") or ib.get("fixture_id") or ss.get("fixture_label") or "UNKNOWN_FIXTURE")
     snapshot_id = str(ib.get("snapshot_id") or ss.get("world_snapshot_id") or "UNKNOWN_SNAPSHOT")
-    inputs_sig_5 = str(ib.get("inputs_sig_5") or "")
+    inputs_sig_5_hdr = ib.get("inputs_sig_5")  # may be missing; we recompute next
 
-
-    # -- Compute inputs_sig_5 from real bytes (B,C,H,U + shapes) — v2 minimal
+    # -- Recompute inputs_sig_5 from real bytes (B,C,H,U + shapes) — v2 minimal
     def _sha256_path(p: _Path) -> str:
         h = _hash.sha256()
         with _Path(p).open("rb") as f:
@@ -5411,37 +5407,37 @@ def run_overlap_once(ss=st.session_state):
     except Exception:
         pass
 
-       # --- Strict & Projected(AUTO) (shape-safe) ---
+    # --- Strict & Projected(AUTO) (shape-safe) ---
     strict_out = _svr_strict_from_blocks(bH, bB, bC)
-    proj_meta, lanes, proj_out = _svr_projected_auto_from_blocks(bH, bB, bC)
+    proj_meta, _lanes_meta, proj_out = _svr_projected_auto_from_blocks(bH, bB, bC)
+
     # --- Lanes (v2 canonical: bottom row of C3 as a 0/1 vector) ---
     C3 = bC.get("3") or []
     lanes_vec = [int(x) & 1 for x in (C3[-1] if C3 else [])]
     lanes_pop = sum(lanes_vec)
-    
-    # If _hash isn't already imported in this function, add:
-    import hashlib as _hash  # <-- safe to keep even if already imported above
-    
     lanes_sig = _hash.sha256(
         _json.dumps(lanes_vec, separators=(",", ":"), sort_keys=False).encode("utf-8")
     ).hexdigest()[:8]
 
     # --- Canonical embed for AUTO pair → sig8 (bundle anchor) ---
     na_reason = (proj_meta.get("reason") if (isinstance(proj_meta, dict) and proj_meta.get("na")) else None)
-    
-    # ⬇️ Ensure the embed varies per fixture (prevents 24→1 collisions)
+
+    # Ensure the embed varies per fixture (prevents 24→1 collisions)
     ib_for_embed = dict(ib)
     ib_for_embed["fixture_label"] = fixture_id  # guaranteed non-empty label in embed
-    
+
+    # (2) pass lanes as a VECTOR into the embed (critical for canonicalization)
     embed_auto, embed_sig_auto = _svr_build_embed(
-        ib_for_embed, "strict__VS__projected(columns@k=3,auto)",
-        lanes=(lanes if lanes else None),
+        ib_for_embed,
+        "strict__VS__projected(columns@k=3,auto)",
+        lanes=lanes_vec,                 # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<< (2)
+        projector_hash=None,
         na_reason=na_reason,
     )
     sig8 = (embed_sig_auto or "")[:8] if embed_sig_auto else "00000000"
-    
+
     # --- Bundle dir + tiny index (initial) ---
-    # ⬇️ Add fixture level to avoid cross-fixture clobbering even if sigs collide
+    # Add fixture level to avoid cross-fixture clobbering even if sigs collide
     bundle_dir = _Path("logs") / "certs" / district_id / fixture_id / sig8
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
@@ -5512,7 +5508,7 @@ def run_overlap_once(ss=st.session_state):
     written.append(f"ab_compare__strict_vs_projected_auto__{sig8}.json")
 
     # 4) projector_freezer (always present; FILE certs gated)
-    file_pi_valid   = bool(ss.get("file_pi_valid", False))  # default FALSE (important!)
+    file_pi_valid   = bool(ss.get("file_pi_valid", False))  # default FALSE
     file_pi_reasons = list(ss.get("file_pi_reasons", []) or [])
     freezer_payload = dict(base_hdr)
     freezer_payload.update({
@@ -5524,7 +5520,7 @@ def run_overlap_once(ss=st.session_state):
     _write_json(bundle_dir / f"projector_freezer__{district_id}__{sig8}.json", freezer_payload)
     written.append(f"projector_freezer__{district_id}__{sig8}.json")
 
-    # 5–6) FILE certs only if Π is valid (and, optionally, posed)
+    # 5–6) FILE certs only if Π is valid (and posed)
     file_pi_path = ss.get("file_pi_path") or None
     if file_pi_valid and file_pi_path:
         proj_file_payload = dict(base_hdr)
@@ -5572,7 +5568,8 @@ def run_overlap_once(ss=st.session_state):
     # -- Publish session anchors for UI
     ss["last_bundle_dir"]    = str(bundle_dir)
     ss["last_ab_auto_path"]  = str(bundle_dir / f"ab_compare__strict_vs_projected_auto__{sig8}.json")
-    ss["last_ab_file_path"]  = str(bundle_dir / f"ab_compare__strict_vs_projected_file__{sig8}.json") if ("ab_file" in filemap) else None
+    ss["last_ab_file_path"]  = (str(bundle_dir / f"ab_compare__strict_vs_projected_file__{sig8}.json")
+                                if ("projected_file" in filemap) else None)
     ss["last_solver_result"] = {"count": len(written)}
 
     # -- Return dict receipt; _one_press_triple will normalize to (ok,msg,dir)
@@ -5583,8 +5580,6 @@ def run_overlap_once(ss=st.session_state):
         "paths": {"bundle": str(bundle_dir / "bundle.json")},
     }
 # ======================= /Solver entrypoint (v2 emit) ========================
-
-
 
 
 
