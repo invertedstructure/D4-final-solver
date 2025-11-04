@@ -74,6 +74,52 @@ def _v2_find_expected_files(bdir: _VPath):
             elif prefix in name and (mid in name if mid else True):
                 out[key] = fp
     return out
+    
+# ---- v2 canonicalization (stable JSON for hashing) ----
+_V2_EPHEMERAL_KEYS = {
+    # runtime/UI noise we never want to affect canonical hashes
+    "created_at", "created_at_utc", "updated_at", "updated_at_utc",
+    "_ui_nonce", "__ui_nonce", "__nonce", "__ts",
+    # convenience blobs that shouldn’t enter canonical digests
+    "bundle_dir", "filenames", "counts", "paths",
+}
+
+def _v2_canonical_obj(obj, exclude_keys=_V2_EPHEMERAL_KEYS):
+    """
+    Recursively sanitize an object so that json.dumps(obj, sort_keys=True, separators=(',', ':'))
+    is stable across runs and platforms. Drops ephemeral keys and None values.
+    """
+    # dict → dict (sans ephemeral/None), recurse values
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in obj.items():
+            if k in exclude_keys or v is None:
+                continue
+            out[str(k)] = _v2_canonical_obj(v, exclude_keys)
+        return out
+
+    # list/tuple → list (recurse)
+    if isinstance(obj, (list, tuple)):
+        return [_v2_canonical_obj(x, exclude_keys) for x in obj]
+
+    # set → sorted list (stable)
+    if isinstance(obj, set):
+        return sorted(_v2_canonical_obj(x, exclude_keys) for x in obj)
+
+    # pathlib.Path or path-like → posix string
+    try:
+        # duck-typing: pathlib objects have .as_posix()
+        if hasattr(obj, "as_posix"):
+            return obj.as_posix()
+    except Exception:
+        pass
+
+    # bytes → hex (stable text)
+    if isinstance(obj, (bytes, bytearray)):
+        return obj.hex()
+
+    # primitives pass through
+    return obj
 
 def _v2_extract_ids_from_path(bdir: _VPath):
     try:
