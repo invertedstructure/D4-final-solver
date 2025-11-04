@@ -5344,55 +5344,60 @@ with _st.expander("Sanity battletests (Loop‑4)", expanded=False):
                         file_name="battletests_loop4.json", key="dl_bt_loop4")
 # ======================== /Sanity battletests (Loop‑4) ========================
 
-
 # ========================= Solver entrypoint (v2: emit baseline certs) =========================
 def run_overlap_once(ss=st.session_state):
     """
-    v2 mechanical writer (stable anchor):
-      • Resolves inputs & freezes SSOT
-      • Computes strict + projected(AUTO) summaries
-      • Builds embed for AUTO using {fixture_id, snapshot_id, inputs_sig_5, lanes_vec}
-      • Writes 4 core certs (+2 FILE certs when Π valid)
-      • Updates bundle.json and returns a small receipt (dict)
+    v2 mechanical writer (no UI side-effects):
+      • Resolve inputs & freeze SSOT
+      • Compute strict + projected(AUTO)
+      • Build canonical embed for AUTO → sig8 (dir anchor)
+      • Write the 4 core certs; conditionally write the 2 FILE certs
+      • Update bundle.json; publish session anchors; return a dict receipt
     """
-    import json as _json
+
+    import json as _json, hashlib as _hash
     from pathlib import Path as _Path
 
-    # --- Resolve inputs and freeze SSOT ---
+    # -- Resolve inputs + freeze SSOT (ib, rc)
     pf = _svr_resolve_all_to_paths()  # {"B": (path, blocks), "C": ..., "H": ..., "U": ...}
     (pB, bB), (pC, bC), (pH, bH), (pU, bU) = pf["B"], pf["C"], pf["H"], pf["U"]
-    ib_rc = _svr_freeze_ssot(pf)  # ib (inputs bundle), rc (run context)
+    ib_rc = _svr_freeze_ssot(pf)
     if isinstance(ib_rc, tuple):
         ib = ib_rc[0] or {}
         rc = ib_rc[1] if (len(ib_rc) > 1 and isinstance(ib_rc[1], dict)) else {}
     else:
         ib, rc = (ib_rc or {}), {}
 
-    # --- District / fixture / snapshot anchors ---
-    district_id = str(ib.get("district_id") or "DUNKNOWN")
-    fixture_id  = str(ib.get("fixture_label") or ib.get("fixture_id") or ss.get("fixture_label") or "UNKNOWN_FIXTURE")
-    snapshot_id = str(ib.get("snapshot_id") or ss.get("world_snapshot_id") or "UNKNOWN_SNAPSHOT")
+    # -- Derive anchors from SSOT/session (never UNKNOWN if we can help it)
+    district_id  = str(ib.get("district_id") or ss.get("district_id") or "DUNKNOWN")
+    fixture_id   = str(ib.get("fixture_label") or ib.get("fixture_id") or ss.get("fixture_label") or "UNKNOWN_FIXTURE")
+    snapshot_id  = str(ib.get("snapshot_id")  or ss.get("world_snapshot_id") or "UNKNOWN_SNAPSHOT")
 
-    # --- Compute inputs_sig_5 if missing (fallback) ---
-    inputs_sig_5 = ib.get("inputs_sig_5")
-    try:
-        n3 = len((bC.get("3") or [[]])[0]) if (bC.get("3") and (bC.get("3")[0])) else 0
-    except Exception:
-        n3 = 0
-    if not inputs_sig_5:
-        # 5 small, deterministic pieces: sha(B), sha(C), sha(H), sha(U), sha(shapes)
-        try:
-            sB = _v2_sha256_path(pB)
-            sC = _v2_sha256_path(pC)
-            sH = _v2_sha256_path(pH)
-            sU = _v2_sha256_path(pU)
-            shapes_blob = _json.dumps({"n3": n3}, sort_keys=True).encode("utf-8")
-            sSh = _hash.sha256(shapes_blob).hexdigest()
-            inputs_sig_5 = [sB, sC, sH, sU, sSh]
-        except Exception:
-            inputs_sig_5 = []
+    # -- Compute inputs_sig_5 from real bytes (B,C,H,U + shapes) — v2 minimal
+    def _sha256_path(p: _Path) -> str:
+        h = _hash.sha256()
+        with _Path(p).open("rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""):
+                h.update(chunk)
+        return h.hexdigest()
 
-    # --- Touch coverage file (C1 preflight) ---
+    def _shapes_hash() -> str:
+        C3 = bC.get("3") or []
+        n3 = len(C3[0]) if (C3 and C3[0]) else 0
+        H2 = bH.get("2") or []
+        n2 = len(H2) if H2 else 0
+        raw = f"n2={n2};n3={n3}".encode("utf-8")
+        return _hash.sha256(raw).hexdigest()
+
+    inputs_sig_5 = [
+        _sha256_path(pB),  # B bytes
+        _sha256_path(pC),  # C bytes
+        _sha256_path(pH),  # H bytes
+        _sha256_path(pU),  # U bytes
+        _shapes_hash(),    # shapes
+    ]
+
+    # -- C1 coverage preflight (touch file, but do not fail on errors)
     try:
         COVERAGE_JSONL.parent.mkdir(parents=True, exist_ok=True)
         with open(COVERAGE_JSONL, "a", encoding="utf-8"):
@@ -5400,70 +5405,52 @@ def run_overlap_once(ss=st.session_state):
     except Exception:
         pass
 
-    # --- Strict & Projected(AUTO) (shape-safe) ---
+    # -- Strict & Projected(AUTO)
     strict_out = _svr_strict_from_blocks(bH, bB, bC)
-    proj_meta, lanes, proj_out = _svr_projected_auto_from_blocks(bH, bB, bC)
+    proj_meta, lanes_meta, proj_out = _svr_projected_auto_from_blocks(bH, bB, bC)
 
-    # --- Build a lanes vector (0/1 list) for embed + record popcount/sig8 for certs ---
-    lanes_vec = None
-    try:
-        if isinstance(lanes, (list, tuple)):
-            lanes_vec = [int(x) & 1 for x in lanes]
-        elif isinstance(lanes, dict):
-            for k in ("mask", "vec", "lanes", "bits"):
-                if isinstance(lanes.get(k), (list, tuple)):
-                    lanes_vec = [int(x) & 1 for x in lanes[k]]
-                    break
-        if lanes_vec is None:
-            C3 = bC.get("3") or []
-            if C3 and isinstance(C3[-1], list):
-                lanes_vec = [int(x) & 1 for x in C3[-1]]
-    except Exception:
-        lanes_vec = None
+    # Lanes: always a vector of 0/1 from bottom row of C3; add popcount & sig8
+    C3 = bC.get("3") or []
+    lanes_vec = [int(x) & 1 for x in (C3[-1] if C3 else [])]
+    lanes_pop = sum(lanes_vec)
+    lanes_sig = _hash.sha256(_json.dumps(lanes_vec, separators=(",", ":"), sort_keys=False).encode("utf-8")).hexdigest()[:8]
 
-    lanes_pop = int(sum(lanes_vec)) if lanes_vec else 0
-    try:
-        _lanes_raw = _json.dumps(lanes_vec or [], separators=(",", ":"), sort_keys=True).encode("utf-8")
-        lanes_sig8 = _hash.sha256(_lanes_raw).hexdigest()[:8]
-    except Exception:
-        lanes_sig8 = None
-
-    # --- Canonical embed for AUTO pair → sig8 (bundle anchor) ---
+    # -- Canonical embed for AUTO → sig8 anchor
     na_reason = (proj_meta.get("reason") if (isinstance(proj_meta, dict) and proj_meta.get("na")) else None)
-    ib_embed = {
-        "district_id": district_id,
-        "fixture_id": fixture_id,
-        "snapshot_id": snapshot_id,
-        "inputs_sig_5": list(inputs_sig_5) if isinstance(inputs_sig_5, (list, tuple)) else [],
-    }
     embed_auto, embed_sig_auto = _svr_build_embed(
-        ib_embed,
+        {
+            "district_id": district_id,
+            "fixture_id": fixture_id,
+            "snapshot_id": snapshot_id,
+            "inputs_sig_5": inputs_sig_5,
+        },
         "strict__VS__projected(columns@k=3,auto)",
-        lanes=(lanes_vec or []),
+        lanes=lanes_vec,
+        projector_hash=None,
         na_reason=na_reason,
     )
     sig8 = (embed_sig_auto or "")[:8] if embed_sig_auto else "00000000"
 
-    # --- Bundle dir ---
+    # -- Bundle dir anchor
     bundle_dir = _Path("logs") / "certs" / district_id / sig8
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
-    # Helpers
+    # Canonical dump + sig8 helper
     def _canon_dump_and_sig8(obj: dict) -> tuple[str, str]:
         can = _v2_canonical_obj(obj)
         raw = _json.dumps(can, sort_keys=True, separators=(",", ":")).encode("utf-8")
         h = _hash.sha256(raw).hexdigest()
         return raw.decode("utf-8"), h[:8]
 
+    # Guarded write helper
     def _write_json(path: _Path, payload: dict) -> str:
         try:
             _guarded_atomic_write_json(path, payload)
         except Exception:
-            path.write_text(_json.dumps(_v2_canonical_obj(payload), sort_keys=True, separators=(",", ":")),
-                            encoding="utf-8")
+            path.write_text(_json.dumps(_v2_canonical_obj(payload), sort_keys=True, separators=(",", ":")), encoding="utf-8")
         return path.name
 
-    # --- Shared header across certs (now non-empty + correct) ---
+    # -- Shared header
     base_hdr = {
         "schema_version": SCHEMA_VERSION,
         "engine_rev": ENGINE_REV,
@@ -5479,30 +5466,30 @@ def run_overlap_once(ss=st.session_state):
     strict_payload = dict(base_hdr)
     strict_payload.update({
         "policy": "strict",
-        "verdict": strict_out.get("pass") if isinstance(strict_out, dict) else None,
+        "verdict": (strict_out.get("pass") if isinstance(strict_out, dict) else None),
     })
     _write_json(bundle_dir / f"overlap__{district_id}__strict__{sig8}.json", strict_payload)
     written.append(f"overlap__{district_id}__strict__{sig8}.json")
+    strict_text, strict_sig8 = _canon_dump_and_sig8(strict_payload)
 
     # 2) projected(columns@k=3,auto)
     proj_auto_payload = dict(base_hdr)
     proj_auto_payload.update({
         "policy": "projected(columns@k=3,auto)",
         "projection_context": {
-            "lanes": (lanes_vec or []),
+            "lanes": lanes_vec,
             "lanes_popcount": lanes_pop,
-            "lanes_sig8": lanes_sig8,
+            "lanes_sig8": lanes_sig,
         },
         "na": bool(proj_meta.get("na")) if isinstance(proj_meta, dict) else False,
         "reason": na_reason,
-        "verdict": proj_out.get("pass") if isinstance(proj_out, dict) else None,
+        "verdict": (proj_out.get("pass") if isinstance(proj_out, dict) else None),
     })
     _write_json(bundle_dir / f"overlap__{district_id}__projected_columns_k_3_auto__{sig8}.json", proj_auto_payload)
     written.append(f"overlap__{district_id}__projected_columns_k_3_auto__{sig8}.json")
+    auto_text, auto_sig8 = _canon_dump_and_sig8(proj_auto_payload)
 
     # 3) ab_compare (strict vs projected_auto)
-    _, strict_sig8 = _canon_dump_and_sig8(strict_payload)
-    _, auto_sig8   = _canon_dump_and_sig8(proj_auto_payload)
     ab_auto_payload = dict(base_hdr)
     ab_auto_payload.update({
         "policy": "strict__VS__projected(columns@k=3,auto)",
@@ -5514,8 +5501,8 @@ def run_overlap_once(ss=st.session_state):
     _write_json(bundle_dir / f"ab_compare__strict_vs_projected_auto__{sig8}.json", ab_auto_payload)
     written.append(f"ab_compare__strict_vs_projected_auto__{sig8}.json")
 
-    # 4) projector_freezer
-    file_pi_valid   = bool(ss.get("file_pi_valid", True))
+    # 4) projector_freezer (always present; FILE certs gated)
+    file_pi_valid   = bool(ss.get("file_pi_valid", False))  # default FALSE (important!)
     file_pi_reasons = list(ss.get("file_pi_reasons", []) or [])
     freezer_payload = dict(base_hdr)
     freezer_payload.update({
@@ -5527,17 +5514,18 @@ def run_overlap_once(ss=st.session_state):
     _write_json(bundle_dir / f"projector_freezer__{district_id}__{sig8}.json", freezer_payload)
     written.append(f"projector_freezer__{district_id}__{sig8}.json")
 
-    # 5–6) FILE pair (only if Π valid)
-    if file_pi_valid:
+    # 5–6) FILE certs only if Π is valid (and, optionally, posed)
+    file_pi_path = ss.get("file_pi_path") or None
+    if file_pi_valid and file_pi_path:
         proj_file_payload = dict(base_hdr)
         proj_file_payload.update({
             "policy": "projected(columns@k=3,file)",
-            "verdict": None,  # v2: presence + cross-refs only
+            "verdict": None,  # v2: validator checks presence/xrefs only
         })
         _write_json(bundle_dir / f"overlap__{district_id}__projected_columns_k_3_file__{sig8}.json", proj_file_payload)
         written.append(f"overlap__{district_id}__projected_columns_k_3_file__{sig8}.json")
-
         _, file_sig8 = _canon_dump_and_sig8(proj_file_payload)
+
         ab_file_payload = dict(base_hdr)
         ab_file_payload.update({
             "policy": "strict__VS__projected(columns@k=3,file)",
@@ -5549,39 +5537,45 @@ def run_overlap_once(ss=st.session_state):
         _write_json(bundle_dir / f"ab_compare__strict_vs_projected_file__{sig8}.json", ab_file_payload)
         written.append(f"ab_compare__strict_vs_projected_file__{sig8}.json")
 
-    # --- bundle.json ---
+    # -- Update bundle index (filenames list, file map, lanes)
+    filemap = {
+        "strict":          str(bundle_dir / f"overlap__{district_id}__strict__{sig8}.json"),
+        "projected_auto":  str(bundle_dir / f"overlap__{district_id}__projected_columns_k_3_auto__{sig8}.json"),
+        "ab_auto":         str(bundle_dir / f"ab_compare__strict_vs_projected_auto__{sig8}.json"),
+        "freezer":         str(bundle_dir / f"projector_freezer__{district_id}__{sig8}.json"),
+    }
+    if file_pi_valid and file_pi_path:
+        filemap["projected_file"] = str(bundle_dir / f"overlap__{district_id}__projected_columns_k_3_file__{sig8}.json")
+        filemap["ab_file"] = str(bundle_dir / f"ab_compare__strict_vs_projected_file__{sig8}.json")
+
     bundle_idx = {
         "run_id": rc.get("run_id", ""),
         "sig8": sig8,
         "district_id": district_id,
         "filenames": written,
-        "files": {
-            "strict": str(bundle_dir / f"overlap__{district_id}__strict__{sig8}.json"),
-            "projected_auto": str(bundle_dir / f"overlap__{district_id}__projected_columns_k_3_auto__{sig8}.json"),
-            "ab_auto": str(bundle_dir / f"ab_compare__strict_vs_projected_auto__{sig8}.json"),
-            "freezer": str(bundle_dir / f"projector_freezer__{district_id}__{sig8}.json"),
-            "projected_file": (str(bundle_dir / f"overlap__{district_id}__projected_columns_k_3_file__{sig8}.json") if file_pi_valid else None),
-            "ab_file": (str(bundle_dir / f"ab_compare__strict_vs_projected_file__{sig8}.json") if file_pi_valid else None),
-        },
-        "lanes": {"popcount": lanes_pop, "sig8": lanes_sig8},
+        "files": filemap,
+        "lanes": {"popcount": lanes_pop, "sig8": lanes_sig},
         "counts": {"written": len(written)},
     }
     _guarded_atomic_write_json(bundle_dir / "bundle.json", bundle_idx)
 
-    # --- Publish anchors expected by UI ---
-    ss["last_bundle_dir"]   = str(bundle_dir)
-    ss["last_ab_auto_path"] = str(bundle_dir / f"ab_compare__strict_vs_projected_auto__{sig8}.json")
-    ss["last_ab_file_path"] = str(bundle_dir / f"ab_compare__strict_vs_projected_file__{sig8}.json")
+    # -- Publish session anchors for UI
+    ss["last_bundle_dir"]    = str(bundle_dir)
+    ss["last_ab_auto_path"]  = str(bundle_dir / f"ab_compare__strict_vs_projected_auto__{sig8}.json")
+    ss["last_ab_file_path"]  = str(bundle_dir / f"ab_compare__strict_vs_projected_file__{sig8}.json") if ("ab_file" in filemap) else None
     ss["last_solver_result"] = {"count": len(written)}
 
+    # -- Return dict receipt; _one_press_triple will normalize to (ok,msg,dir)
     return {
         "bundle_dir": str(bundle_dir),
         "sig8": sig8,
         "counts": {"written": len(written)},
         "paths": {"bundle": str(bundle_dir / "bundle.json")},
     }
+# ======================= /Solver entrypoint (v2 emit) ========================
 
-# ======================= /Solver entrypoint (v2 emit) =========================
+
+
 
 
 
