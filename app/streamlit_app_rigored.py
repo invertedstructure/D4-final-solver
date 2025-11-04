@@ -1011,7 +1011,7 @@ def run_overlap_once():
 except Exception as _e:
         # loop receipt is non-fatal for one-press path
         pass
-, bundle_idx)
+, (bundle_idx)
 
 
     # ---- C1 coverage append (pattern-only; safe if metrics are N/A) ----
