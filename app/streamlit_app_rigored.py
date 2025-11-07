@@ -421,34 +421,7 @@ def _as3(ret):
         return ret, "", 0
     return False, "runner returned unexpected shape", 0
     
-def _co_hash8(obj) -> str:
-    import hashlib, json as _j
-    h = hashlib.sha256(_j.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-    return h[:8]
 
-def _co_guess_H_variant(paths_dict: dict) -> str:
-    # scan all path-like strings for H00/H01/H10/H11
-    import re
-    hay = " ".join([str(v) for v in (paths_dict or {}).values()])
-    m = re.search(r"\b(H00|H01|H10|H11)\b", hay.upper())
-    return m.group(1) if m else "H00"
-
-def _co_guess_C_code(paths_dict: dict, fixtures_C_raw: str = "") -> str:
-    import re
-    hay = (" ".join([str(v) for v in (paths_dict or {}).values()]) + " " + str(fixtures_C_raw)).upper()
-    m = re.search(r"\bC(\d{3})\b", hay)
-    return f"C{m.group(1)}" if m else "C???.MISSING"
-
-def _co_sig8_from_mats(H2, d3, C3) -> str:
-    return _co_hash8({"H2": H2, "d3": d3, "C3": C3})
-
-def _co_guess_district_id(D: str, d3) -> str:
-    # mimic your D + short-hash style in a deterministic way
-    return f"{D}{_co_hash8({'d3': d3})}"
-
-def _co_guess_snapshot_id(ss, rc, paths_dict) -> str:
-    sid = (ss or {}).get("world_snapshot_id") or rc.get("snapshot_id") or ""
-    return sid if sid else f"ws__{_co_hash8(paths_dict or {})}"
 
 # ===== Helper: lanes sig8 + suite message (always defined) =====
 def _lanes_sig8_from_list(L):
@@ -5902,6 +5875,35 @@ def run_suite_from_manifest(manifest_path: str, snapshot_id: str):
 # ====================== V2 CANONICAL — COMPUTE-ONLY (no legacy, no harvest) ======================
 import os, json, time, uuid, hashlib
 from pathlib import Path as _Pco
+
+def _co_hash8(obj) -> str:
+    import hashlib, json as _j
+    h = hashlib.sha256(_j.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return h[:8]
+
+def _co_guess_H_variant(paths_dict: dict) -> str:
+    # scan all path-like strings for H00/H01/H10/H11
+    import re
+    hay = " ".join([str(v) for v in (paths_dict or {}).values()])
+    m = re.search(r"\b(H00|H01|H10|H11)\b", hay.upper())
+    return m.group(1) if m else "H00"
+
+def _co_guess_C_code(paths_dict: dict, fixtures_C_raw: str = "") -> str:
+    import re
+    hay = (" ".join([str(v) for v in (paths_dict or {}).values()]) + " " + str(fixtures_C_raw)).upper()
+    m = re.search(r"\bC(\d{3})\b", hay)
+    return f"C{m.group(1)}" if m else "C???.MISSING"
+
+def _co_sig8_from_mats(H2, d3, C3) -> str:
+    return _co_hash8({"H2": H2, "d3": d3, "C3": C3})
+
+def _co_guess_district_id(D: str, d3) -> str:
+    # mimic your D + short-hash style in a deterministic way
+    return f"{D}{_co_hash8({'d3': d3})}"
+
+def _co_guess_snapshot_id(ss, rc, paths_dict) -> str:
+    sid = (ss or {}).get("world_snapshot_id") or rc.get("snapshot_id") or ""
+    return sid if sid else f"ws__{_co_hash8(paths_dict or {})}"
 
 def _co_write_json(p: _Pco, obj: dict):
     p.parent.mkdir(parents=True, exist_ok=True)
