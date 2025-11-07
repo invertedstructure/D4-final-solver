@@ -180,6 +180,67 @@ def _v2_bundle_index_rebuild(bdir: _VPath):
     (bdir / "bundle.json").write_text(_Vjson.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
     return bundle
 
+# ====================== V2 CANONICAL HELPERS (harvest + normalize) ======================
+import os, json, time
+from pathlib import Path as _P
+
+def _v2_infer_fixture_tuple_from_paths(pB, pH, pC, pU):
+    def _stem(p):
+        if not p: return ""
+        if isinstance(p, str): return _P(p).stem.upper()
+        try: return p.stem.upper()
+        except: return ""
+    def _name(p):
+        if not p: return ""
+        if isinstance(p, str): return _P(p).name
+        try: return p.name
+        except: return ""
+    D = "D2" if ("D2" in _name(pB)) else ("D3" if ("D3" in _name(pB)) else "UNKNOWN_D")
+    Hs = _stem(pH); H = Hs if Hs in {"H00","H01","H10","H11"} else "UNKNOWN_H"
+    Cs = _stem(pC); C = Cs if Cs.startswith("C") and len(Cs) == 4 else "UNKNOWN_C"
+    return D, H, C, "U"
+
+def _v2_bundle_dir(district_id: str, fixture_label: str, sig8: str) -> _P:
+    return _P("logs/certs") / str(district_id) / str(fixture_label) / str(sig8)
+
+def _v2_canonical_core_names(district_id: str, sig8: str) -> dict:
+    return {
+        "strict":         f"overlap__{district_id}__strict__{sig8}.json",
+        "projected_auto": f"overlap__{district_id}__projected_columns_k_3_auto__{sig8}.json",
+        "ab_auto":        f"ab_compare__strict_vs_projected_auto__{sig8}.json",
+        "freezer":        f"projector_freezer__{district_id}__{sig8}.json",
+        "projected_file": f"overlap__{district_id}__projected_columns_k_3_file__{sig8}.json",
+        "ab_file":        f"ab_compare__projected_columns_k_3_file__{sig8}.json",
+    }
+
+def _v2_write_json(p: _P, obj: dict):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, p)
+
+def _v2_patch_hdr(obj: dict, ib: dict, rc: dict) -> dict:
+    out = dict(obj or {})
+    fx = (ib or {}).get("fixtures") or {}
+    out.setdefault("fixtures", fx)
+    out.setdefault("fixture_label", (ib or {}).get("fixture_label", "UNKNOWN_FIXTURE"))
+    out.setdefault("snapshot_id", (rc or {}).get("snapshot_id", "UNKNOWN_SNAPSHOT"))
+    return out
+
+def _v2_find_latest_legacy_in_district(district_id: str):
+    base = _P("logs/certs") / district_id
+    if not base.exists(): return None
+    cand = []
+    for s in base.iterdir():
+        if s.is_dir() and len(s.name)==8:
+            strict = s / f"overlap__{district_id}__strict__{s.name}.json"
+            if strict.exists():
+                cand.append((strict.stat().st_mtime, s.name, s))
+    if not cand: return None
+    cand.sort(key=lambda x: x[0], reverse=True)
+    _, sig8, folder = cand[0]
+    return sig8, folder
+
 def _v2_write_loop_receipt(bdir: _VPath, fixture_id: str, snapshot_id: str, bundle: dict):
     rec = {
         "schema_version": "2.0.0",
@@ -5831,66 +5892,7 @@ def run_suite_from_manifest(manifest_path: str, snapshot_id: str):
 # =============================================================================
 
 
-# ====================== V2 CANONICAL HELPERS (harvest + normalize) ======================
-import os, json, time
-from pathlib import Path as _P
 
-def _v2_infer_fixture_tuple_from_paths(pB, pH, pC, pU):
-    def _stem(p):
-        if not p: return ""
-        if isinstance(p, str): return _P(p).stem.upper()
-        try: return p.stem.upper()
-        except: return ""
-    def _name(p):
-        if not p: return ""
-        if isinstance(p, str): return _P(p).name
-        try: return p.name
-        except: return ""
-    D = "D2" if ("D2" in _name(pB)) else ("D3" if ("D3" in _name(pB)) else "UNKNOWN_D")
-    Hs = _stem(pH); H = Hs if Hs in {"H00","H01","H10","H11"} else "UNKNOWN_H"
-    Cs = _stem(pC); C = Cs if Cs.startswith("C") and len(Cs) == 4 else "UNKNOWN_C"
-    return D, H, C, "U"
-
-def _v2_bundle_dir(district_id: str, fixture_label: str, sig8: str) -> _P:
-    return _P("logs/certs") / str(district_id) / str(fixture_label) / str(sig8)
-
-def _v2_canonical_core_names(district_id: str, sig8: str) -> dict:
-    return {
-        "strict":         f"overlap__{district_id}__strict__{sig8}.json",
-        "projected_auto": f"overlap__{district_id}__projected_columns_k_3_auto__{sig8}.json",
-        "ab_auto":        f"ab_compare__strict_vs_projected_auto__{sig8}.json",
-        "freezer":        f"projector_freezer__{district_id}__{sig8}.json",
-        "projected_file": f"overlap__{district_id}__projected_columns_k_3_file__{sig8}.json",
-        "ab_file":        f"ab_compare__projected_columns_k_3_file__{sig8}.json",
-    }
-
-def _v2_write_json(p: _P, obj: dict):
-    p.parent.mkdir(parents=True, exist_ok=True)
-    tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, p)
-
-def _v2_patch_hdr(obj: dict, ib: dict, rc: dict) -> dict:
-    out = dict(obj or {})
-    fx = (ib or {}).get("fixtures") or {}
-    out.setdefault("fixtures", fx)
-    out.setdefault("fixture_label", (ib or {}).get("fixture_label", "UNKNOWN_FIXTURE"))
-    out.setdefault("snapshot_id", (rc or {}).get("snapshot_id", "UNKNOWN_SNAPSHOT"))
-    return out
-
-def _v2_find_latest_legacy_in_district(district_id: str):
-    base = _P("logs/certs") / district_id
-    if not base.exists(): return None
-    cand = []
-    for s in base.iterdir():
-        if s.is_dir() and len(s.name)==8:
-            strict = s / f"overlap__{district_id}__strict__{s.name}.json"
-            if strict.exists():
-                cand.append((strict.stat().st_mtime, s.name, s))
-    if not cand: return None
-    cand.sort(key=lambda x: x[0], reverse=True)
-    _, sig8, folder = cand[0]
-    return sig8, folder
 
 
 
