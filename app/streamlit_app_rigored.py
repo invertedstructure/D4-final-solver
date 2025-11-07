@@ -84,6 +84,150 @@ def _v2_find_expected_files(bdir: _VPath):
             elif prefix in name and (mid in name if mid else True):
                 out[key] = fp
     return out
+# ====================== V2 CANONICAL 1× RUNNER ======================
+import os, json, time, uuid
+from pathlib import Path
+
+def _v2_infer_fixture_tuple_from_paths(pB, pH, pC, pU):
+    def _stem(p):
+        if not p: return ""
+        if isinstance(p, str): return Path(p).stem.upper()
+        try: return p.stem.upper()
+        except: return ""
+    def _name(p):
+        if not p: return ""
+        if isinstance(p, str): return Path(p).name
+        try: return p.name
+        except: return ""
+    D = "D2" if ("D2" in _name(pB)) else ("D3" if ("D3" in _name(pB)) else "UNKNOWN_D")
+    Hs = _stem(pH); H = Hs if Hs in {"H00","H01","H10","H11"} else "UNKNOWN_H"
+    Cs = _stem(pC); C = Cs if Cs.startswith("C") and len(Cs) == 4 else "UNKNOWN_C"
+    return D, H, C, "U"
+
+def _v2_bundle_dir(district_id: str, fixture_label: str, sig8: str) -> Path:
+    return Path("logs/certs") / str(district_id) / str(fixture_label) / str(sig8)
+
+def _v2_canonical_core_names(district_id: str, sig8: str) -> dict:
+    return {
+        "strict":         f"overlap__{district_id}__strict__{sig8}.json",
+        "projected_auto": f"overlap__{district_id}__projected_columns_k_3_auto__{sig8}.json",
+        "ab_auto":        f"ab_compare__strict_vs_projected_auto__{sig8}.json",
+        "freezer":        f"projector_freezer__{district_id}__{sig8}.json",
+        "projected_file": f"overlap__{district_id}__projected_columns_k_3_file__{sig8}.json",
+        "ab_file":        f"ab_compare__projected_columns_k_3_file__{sig8}.json",
+    }
+
+def _v2_write_json(p: Path, obj: dict):
+    p.parent.mkdir(parents=True, exist_ok=True)
+    tmp = p.with_suffix(p.suffix + ".tmp")
+    tmp.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+    os.replace(tmp, p)
+
+def _v2_patch_hdr(obj: dict, ib: dict, rc: dict) -> dict:
+    out = dict(obj or {})
+    fx = (ib or {}).get("fixtures") or {}
+    out.setdefault("fixtures", fx)
+    out.setdefault("fixture_label", (ib or {}).get("fixture_label", "UNKNOWN_FIXTURE"))
+    out.setdefault("snapshot_id", (rc or {}).get("snapshot_id", "UNKNOWN_SNAPSHOT"))
+    return out
+
+def _svr_run_once():
+    """Pure v2 1× run: compute → write 6 core + envelope (labeled), no legacy writers."""
+    # 0) Resolve inputs & freeze SSOT (use your existing helpers)
+    g = globals()
+    pb = g.get("_svr_resolve_all_to_paths", lambda: {})() or {}
+    ib, rc = g.get("_svr_freeze_ssot", lambda _pb: ({}, {}))(pb)
+
+    # 1) Infer full fixture tuple (+ add to ib and session)
+    #    pb shape: {"B": (path, ...), "C": (path, ...), "H": (path, ...), "U": (path, ...)}
+    pB = (pb.get("B") or [None])[0] if isinstance(pb.get("B"), (list, tuple)) else pb.get("B")
+    pC = (pb.get("C") or [None])[0] if isinstance(pb.get("C"), (list, tuple)) else pb.get("C")
+    pH = (pb.get("H") or [None])[0] if isinstance(pb.get("H"), (list, tuple)) else pb.get("H")
+    pU = (pb.get("U") or [None])[0] if isinstance(pb.get("U"), (list, tuple)) else pb.get("U")
+
+    D, H, C, U = _v2_infer_fixture_tuple_from_paths(pB, pH, pC, pU)
+    fixture_label = f"{D}_{H}_{C}"
+    ib = dict(ib or {})
+    ib["fixtures"] = {"district": D, "H": H, "C": C, "U": U}
+    ib["fixture_label"] = fixture_label
+
+    try:
+        import streamlit as _st
+        _st.session_state["fixture_label"] = fixture_label
+    except Exception:
+        pass
+
+    district_id = rc.get("district_id", "UNKNOWN_DISTRICT")
+    sig8        = rc.get("sig8",        "UNKNOWNSIG")
+    snap_id     = rc.get("snapshot_id", "UNKNOWN_SNAPSHOT")
+    bdir        = _v2_bundle_dir(district_id, fixture_label, sig8)
+
+    # 2) Compute verdicts using your in-file compute helpers (strict/AUTO/file/freezer/A/B).
+    #    If your project exposes other names, map them here.
+    compute_strict            = g.get("compute_strict")             or g.get("_compute_strict")
+    compute_projected_auto    = g.get("compute_projected_auto")     or g.get("_compute_projected_auto")
+    compute_projector_freezer = g.get("compute_projector_freezer")  or g.get("_compute_projector_freezer")
+    compute_projected_file    = g.get("compute_projected_file")     or g.get("_compute_projected_file")
+    compute_ab_auto           = g.get("compute_ab_auto")            or g.get("_compute_ab_auto")
+    compute_ab_file           = g.get("compute_ab_file")            or g.get("_compute_ab_file")
+
+    if not all([compute_strict, compute_projected_auto, compute_projector_freezer,
+                compute_projected_file, compute_ab_auto, compute_ab_file]):
+        return False, "Missing compute_* helpers; cannot run v2 1×.", ""
+
+    strict = compute_strict(pb, ib)                         # dict payload
+    auto   = compute_projected_auto(pb, ib)                 # dict payload (NA-coded if unposed)
+    frz    = compute_projector_freezer(pb, ib)              # dict payload (OK or NA)
+    pfile  = compute_projected_file(pb, ib, frz)            # dict payload (NA if Π invalid/zero-lane)
+
+    ab_auto = compute_ab_auto(strict, auto, ib)             # dict payload (always)
+    ab_file = compute_ab_file(pfile, frz, ib)               # dict payload (always; mirrors NA)
+
+    # 3) Write 6 core certs (stamped), then envelope
+    names = _v2_canonical_core_names(district_id, sig8)
+    _v2_write_json(bdir / names["strict"],         _v2_patch_hdr(strict,  ib, rc))
+    _v2_write_json(bdir / names["projected_auto"], _v2_patch_hdr(auto,    ib, rc))
+    _v2_write_json(bdir / names["ab_auto"],        _v2_patch_hdr(ab_auto, ib, rc))
+    _v2_write_json(bdir / names["freezer"],        _v2_patch_hdr(frz,     ib, rc))
+    _v2_write_json(bdir / names["projected_file"], _v2_patch_hdr(pfile,   ib, rc))
+    _v2_write_json(bdir / names["ab_file"],        _v2_patch_hdr(ab_file, ib, rc))
+
+    bundle = {
+        "district_id": district_id,
+        "fixture_label": fixture_label,
+        "fixtures": ib["fixtures"],
+        "sig8": sig8,
+        "filenames": [names[k] for k in ("strict","projected_auto","ab_auto","freezer","projected_file","ab_file")],
+        "core_counts": {"written": 6}
+    }
+    _v2_write_json(bdir / "bundle.json", bundle)
+    _v2_write_json(bdir / f"loop_receipt__{fixture_label}.json", {
+        "snapshot_id": snap_id,
+        "district_id": district_id,
+        "fixture_label": fixture_label,
+        "sig8": sig8,
+        "bundle_dir": str(bdir),
+        "core_counts": {"written": 6},
+        "timestamps": {"receipt_written_at": time.time()}
+    })
+
+    # 4) Sidecars (optional passthrough if you have them in rc or helpers)
+    # If your earlier code produced these under a different path, keep them out of 'bundle.filenames'
+    try:
+        side_snapshot = rc.get("snapshot_payload", {})
+        if side_snapshot:
+            _v2_write_json(bdir / "snapshot.json", side_snapshot)
+    except Exception:
+        pass
+
+    try:
+        import streamlit as _st
+        _st.session_state["last_bundle_dir"] = str(bdir)
+    except Exception:
+        pass
+
+    return True, f"v2 canonical 1× bundle → {bdir}", str(bdir)
+# ====================== end V2 CANONICAL 1× RUNNER ======================
     
 # ---- v2 canonicalization (stable JSON for hashing) ----
 _V2_EPHEMERAL_KEYS = {
@@ -4965,61 +5109,30 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
                     
 # ─────────────────────────── Solver: one-press pipeline ───────────────────────────
 
-# === One-press solver button (wired to one_press_solve) ===
+#-- === One-press solver button (wired to canonical v2) ===
 import streamlit as st
 ss = st.session_state
-_nonce = ss.get("_ui_nonce", "x")  # safe unique key seed if you already set a nonce
+_nonce = ss.get("_ui_nonce", "x")
 
 if st.button("Run solver (one press)", key=f"btn_svr_run__{_nonce}"):
     ss["_solver_busy"] = True
     ss["_solver_one_button_active"] = True
     try:
-        # Call with session if supported; fall back to no-arg
-        try:
-            _res = run_overlap_once(ss)
-        except TypeError:
-            _res = run_overlap_once()
-
-        # Normalize result: accept dict or (ok, msg, bundle_dir)
-        if isinstance(_res, dict):
-            _bundle_dir = _res.get("bundle_dir", "")
-            _counts = _res.get("counts", {}) or {}
-            _written = int(_counts.get("written", 0) or 0)
-
-            # --- hook: publish anchors for tail/download ---
-            if _bundle_dir:
-                ss["last_bundle_dir"] = _bundle_dir
-            _paths = _res.get("paths", {}) or {}
-            if isinstance(_paths, dict):
-                ss["last_ab_auto_path"] = _paths.get("ab_auto", ss.get("last_ab_auto_path", ""))
-                ss["last_ab_file_path"] = _paths.get("ab_file", ss.get("last_ab_file_path", ""))
-            ss["last_solver_result"] = _counts
-
-            st.success(f"Wrote {_written} files → {_bundle_dir}")
-
-        elif isinstance(_res, tuple) and len(_res) >= 3:
-            _ok, _msg, _bundle_dir = _res[0], _res[1], _res[2]
-            if _bundle_dir:
-                # --- hook: publish anchor even for tuple return ---
-                ss["last_bundle_dir"] = _bundle_dir
-            (st.success if _ok else st.error)(_msg)
-
-        else:
-            st.warning("Solver returned no structured result; check logs.")
-
-        # Optional: refresh read-only UI from frozen SSOT if helper exists
+        ok, msg, bundle_dir = _svr_run_once()  # <— canonical only
+        if bundle_dir:
+            ss["last_bundle_dir"] = bundle_dir
+        (st.success if ok else st.error)(msg)
+        # refresh read-only UI (optional)
         _refresh = globals().get("overlap_ui_from_frozen")
         if callable(_refresh):
-            try:
-                _refresh()
-            except Exception:
-                pass
-
+            try: _refresh()
+            except: pass
     except Exception as _e:
         st.error(f"Solver run failed: {str(_e)}")
     finally:
         ss["_solver_one_button_active"] = False
         ss["_solver_busy"] = False
+
 
         
 def tail_and_download_ui():
@@ -5586,6 +5699,14 @@ def run_overlap_once(ss=st.session_state):
     }
 
 # ======================= /Solver entrypoint (v2 emit) =========================
+
+
+
+
+
+# --- -HARD-DISABLE legacy entrypoint (prevents accidental calls) ---
+def run_overlap_once(*_a, **_k):
+    return False, "LEGACY_DISABLED", None
 
 
 
