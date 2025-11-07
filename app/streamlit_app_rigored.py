@@ -353,6 +353,35 @@ def _as3(ret):
     if isinstance(ret, bool):
         return ret, "", 0
     return False, "runner returned unexpected shape", 0
+    
+def _co_hash8(obj) -> str:
+    import hashlib, json as _j
+    h = hashlib.sha256(_j.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    return h[:8]
+
+def _co_guess_H_variant(paths_dict: dict) -> str:
+    # scan all path-like strings for H00/H01/H10/H11
+    import re
+    hay = " ".join([str(v) for v in (paths_dict or {}).values()])
+    m = re.search(r"\b(H00|H01|H10|H11)\b", hay.upper())
+    return m.group(1) if m else "H00"
+
+def _co_guess_C_code(paths_dict: dict, fixtures_C_raw: str = "") -> str:
+    import re
+    hay = (" ".join([str(v) for v in (paths_dict or {}).values()]) + " " + str(fixtures_C_raw)).upper()
+    m = re.search(r"\bC(\d{3})\b", hay)
+    return f"C{m.group(1)}" if m else "C???.MISSING"
+
+def _co_sig8_from_mats(H2, d3, C3) -> str:
+    return _co_hash8({"H2": H2, "d3": d3, "C3": C3})
+
+def _co_guess_district_id(D: str, d3) -> str:
+    # mimic your D + short-hash style in a deterministic way
+    return f"{D}{_co_hash8({'d3': d3})}"
+
+def _co_guess_snapshot_id(ss, rc, paths_dict) -> str:
+    sid = (ss or {}).get("world_snapshot_id") or rc.get("snapshot_id") or ""
+    return sid if sid else f"ws__{_co_hash8(paths_dict or {})}"
 
 # ===== Helper: lanes sig8 + suite message (always defined) =====
 def _lanes_sig8_from_list(L):
@@ -6049,43 +6078,47 @@ def _svr_run_once_computeonly(ss=None):
         return False, "Missing SSOT helpers (_svr_resolve_all_to_paths/_svr_freeze_ssot).", ""
 
     pb = resolver() or {}
+        # --- Paths & matrices
     def _first(x):
-        if isinstance(x, (list,tuple)) and x: return x[0]
+        if isinstance(x, (list, tuple)) and x: return x[0]
         return x
     pB = _first(pb.get("B")); pC = _first(pb.get("C")); pH = _first(pb.get("H")); pU = _first(pb.get("U"))
+    paths_dict = {"B": str(pB or ""), "C": str(pC or ""), "H": str(pH or ""), "U": str(pU or "")}
     if ss is None:
         try:
             import streamlit as _st
             ss = _st.session_state
         except Exception:
             ss = {}
-    ss["_last_inputs_paths"] = {"B": str(pB or ""), "C": str(pC or ""), "H": str(pH or "")}
-    fixture_label = _co_fixture_label_from_paths(ss["_last_inputs_paths"], default="MISSING_FIXTURE")
+    ss["_last_inputs_paths"] = dict(paths_dict)
 
-    ib, rc = freezer(pb)
-    ib = dict(ib or {}); rc = dict(rc or {})
-    district_id = rc.get("district_id") or "UNKNOWN_DISTRICT"
-    sig8        = rc.get("sig8") or (rc.get("embed_sig","")[:8] or "00000000")
-    snap_id     = rc.get("snapshot_id") or "UNKNOWN_SNAPSHOT"
-
-    D = "D2" if "D2" in (str(pB).upper()) else ("D3" if "D3" in (str(pB).upper()) else "UNKNOWN_D")
-    Ht = _co_stem(pH); Ht = Ht if Ht in {"H00","H01","H10","H11"} else "H00"
-    Ct = _co_stem(pC); Ct = Ct if Ct.startswith("C") else "C???"
-    fixtures = {"district": D, "H": Ht, "C": Ct, "U": "U"}
-
+    # Matrices
     H2, d3, C3 = _co_extract_mats(pb)
     _, n3 = _co_shape(d3)
 
-    strict = _co_compute_strict(H2, d3, C3)
-    auto   = _co_compute_projected_auto(H2, d3, C3)
-    frz_info, lanes_file = _co_compute_freezer_FILE(ss, n3)
-    if lanes_file is None:
-        pfile = {"policy_tag": "projected(columns@k=3,file)", "results":{"k3":{"eq": None}}, "na_reason_code": frz_info["na_reason_code"]}
-    else:
-        pfile = _co_compute_projected_file(H2, d3, C3, lanes_file)
+    # Robust H/C inference
+    Ht_guess = _co_guess_H_variant(paths_dict)         # H00/H01/H10/H11
+    C_raw_stem = _co_stem(pC)                          # e.g., "CMAP__...__C110"
+    Ct_guess = _co_guess_C_code(paths_dict, C_raw_stem)  # e.g., "C110"
 
-    ab_auto = _co_ab_compare(strict, auto, "strict__VS__projected(columns@k=3,auto)")
-    ab_file = _co_ab_compare(strict, pfile, "strict__VS__projected(columns@k=3,file)")
+    # District & IDs (deterministic fallbacks)
+    D = "D2" if "D2" in paths_dict["B"].upper() else ("D3" if "D3" in paths_dict["B"].upper() else "D?")
+    ib, rc = freezer(pb); ib = dict(ib or {}); rc = dict(rc or {})
+
+    district_id = rc.get("district_id")
+    if not district_id or district_id.startswith("UNKNOWN"):
+        district_id = _co_guess_district_id(D, d3)
+
+    sig8 = rc.get("sig8") or (rc.get("embed_sig","")[:8] if rc.get("embed_sig") else None)
+    if not sig8 or sig8 == "00000000":
+        sig8 = _co_sig8_from_mats(H2, d3, C3)
+
+    snap_id = _co_guess_snapshot_id(ss, rc, paths_dict)
+
+    # Final fixtures and human label (short codes)
+    fixtures = {"district": D, "H": Ht_guess, "C": Ct_guess, "C_raw": C_raw_stem, "U": "U"}
+    fixture_label = f"{D}_{Ht_guess}_{Ct_guess}"
+
 
     def _stamp(obj):
         o = dict(obj or {})
