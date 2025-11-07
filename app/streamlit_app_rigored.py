@@ -4963,107 +4963,7 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
     
                                   
                     
-# ─────────────────────────── Solver: one-press pipeline ───────────────────────────
 
-# === One-press solver button (wired to one_press_solve) ===
-import streamlit as st
-ss = st.session_state
-_nonce = ss.get("_ui_nonce", "x")  # safe unique key seed if you already set a nonce
-
-if st.button("Run solver (one press)", key=f"btn_svr_run__{_nonce}"):
-    ss["_solver_busy"] = True
-    ss["_solver_one_button_active"] = True
-    try:
-        ok, msg, bundle_dir = _svr_run_once()
-        if bundle_dir:
-            ss['last_bundle_dir'] = bundle_dir
-        (st.success if ok else st.error)(msg)
-        _refresh = globals().get('overlap_ui_from_frozen')
-        if callable(_refresh):
-            try:
-                _refresh()
-            except Exception:
-                pass
-    except Exception as _e:
-        st.error(f'Solver run failed: {str(_e)}')
-    finally:
-        ss['_solver_one_button_active'] = False
-        ss['_solver_busy'] = False
-def tail_and_download_ui():
-    import os, json, zipfile
-    from pathlib import Path
-    ss = st.session_state
-    last_dir = ss.get("last_bundle_dir", "")
-    st.markdown("#### Latest cert files")
-    if not last_dir or not os.path.isdir(last_dir):
-        st.info("No bundle.json yet — run the solver to write certs.")
-        return
-
-    p_bundle = Path(last_dir) / "bundle.json"
-    files = []
-    try:
-        files = (json.loads(p_bundle.read_text(encoding="utf-8")).get("filenames", []) if p_bundle.exists() else [])
-    except Exception:
-        files = []
-
-    if files:
-        tail = files[-6:][::-1]
-        for fn in tail:
-            st.write(f"• {fn}")
-            try:
-                fp = Path(last_dir) / fn
-                if fp.suffix.lower() == ".json":
-                    data = json.loads(fp.read_text(encoding="utf-8"))
-                    # compact peek like your earlier UI
-                    if isinstance(data, dict) and "ab_pair" in data:
-                        st.caption(f"pair_vec: {data['ab_pair'].get('pair_vec', {})}")
-                    elif isinstance(data, dict) and "results" in data:
-                        out = data["results"].get("out", {})
-                        na = data["results"].get("na_reason_code") or data.get("na_reason_code")
-                        if isinstance(out, dict) and "3" in out and "eq" in out["3"]:
-                            st.caption(f"k3.eq: {out['3']['eq']} • NA: {na}")
-                    elif isinstance(data, dict) and "status" in data:
-                        st.caption(f"freezer: {data.get('status')} • {data.get('na_reason_code','')}")
-            except Exception:
-                pass
-    else:
-        st.info("No files listed in bundle.json.")
-# Ensure session fixture_label matches bundle (prevents UNKNOWN_FIXTURE in zips)
-try:
-    _bpath = Path(last_dir) / "bundle.json"
-    if _bpath.exists():
-        _bj = json.loads(_bpath.read_text(encoding="utf-8"))
-        _lab = _bj.get("fixture_label")
-        if _lab and st.session_state.get("fixture_label") != _lab:
-            st.session_state["fixture_label"] = _lab
-except Exception:
-    pass
-
-
-    # Build & serve bundle.zip (keys deduped via nonce)
-    try:
-        zpath = Path(last_dir) / "bundle.zip"
-        with zipfile.ZipFile(str(zpath), "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for root, _, fns in os.walk(last_dir):
-                for fn in fns:
-                    if fn.endswith(".zip"):  # avoid nesting
-                        continue
-                    full = Path(root)/fn
-                    arc  = os.path.relpath(str(full), start=str(last_dir))
-                    zf.write(str(full), arc)
-        with open(zpath, "rb") as fh:
-            st.download_button(
-                "Download bundle.zip",
-                data=fh,
-                file_name="bundle.zip",
-                mime="application/zip",
-                key=f"btn_dl_bundle_zip__{ss['_ui_nonce']}"
-            )
-    except Exception as e:
-        st.warning(f"Zip build/serve issue: {e}")
-
-# call this immediately under your solver section:
-tail_and_download_ui()
 
 
 # =========================== Sanity battletests (Loop‑4) ===========================
@@ -5932,3 +5832,104 @@ def _svr_run_once():
 
     return True, f"v2 canonical 1× bundle → {bdir}", str(bdir)
 # ====================== END V2 CANONICAL HELPERS ======================
+# ─────────────────────────── Solver: one-press pipeline ───────────────────────────
+
+# === One-press solver button (wired to one_press_solve) ===
+import streamlit as st
+ss = st.session_state
+_nonce = ss.get("_ui_nonce", "x")  # safe unique key seed if you already set a nonce
+
+if st.button("Run solver (one press)", key=f"btn_svr_run__{_nonce}"):
+    ss["_solver_busy"] = True
+    ss["_solver_one_button_active"] = True
+    try:
+        ok, msg, bundle_dir = _svr_run_once()
+        if bundle_dir:
+            ss['last_bundle_dir'] = bundle_dir
+        (st.success if ok else st.error)(msg)
+        _refresh = globals().get('overlap_ui_from_frozen')
+        if callable(_refresh):
+            try:
+                _refresh()
+            except Exception:
+                pass
+    except Exception as _e:
+        st.error(f'Solver run failed: {str(_e)}')
+    finally:
+        ss['_solver_one_button_active'] = False
+        ss['_solver_busy'] = False
+def tail_and_download_ui():
+    import os, json, zipfile
+    from pathlib import Path
+    ss = st.session_state
+    last_dir = ss.get("last_bundle_dir", "")
+    st.markdown("#### Latest cert files")
+    if not last_dir or not os.path.isdir(last_dir):
+        st.info("No bundle.json yet — run the solver to write certs.")
+        return
+
+    p_bundle = Path(last_dir) / "bundle.json"
+    files = []
+    try:
+        files = (json.loads(p_bundle.read_text(encoding="utf-8")).get("filenames", []) if p_bundle.exists() else [])
+    except Exception:
+        files = []
+
+    if files:
+        tail = files[-6:][::-1]
+        for fn in tail:
+            st.write(f"• {fn}")
+            try:
+                fp = Path(last_dir) / fn
+                if fp.suffix.lower() == ".json":
+                    data = json.loads(fp.read_text(encoding="utf-8"))
+                    # compact peek like your earlier UI
+                    if isinstance(data, dict) and "ab_pair" in data:
+                        st.caption(f"pair_vec: {data['ab_pair'].get('pair_vec', {})}")
+                    elif isinstance(data, dict) and "results" in data:
+                        out = data["results"].get("out", {})
+                        na = data["results"].get("na_reason_code") or data.get("na_reason_code")
+                        if isinstance(out, dict) and "3" in out and "eq" in out["3"]:
+                            st.caption(f"k3.eq: {out['3']['eq']} • NA: {na}")
+                    elif isinstance(data, dict) and "status" in data:
+                        st.caption(f"freezer: {data.get('status')} • {data.get('na_reason_code','')}")
+            except Exception:
+                pass
+    else:
+        st.info("No files listed in bundle.json.")
+# Ensure session fixture_label matches bundle (prevents UNKNOWN_FIXTURE in zips)
+try:
+    _bpath = Path(last_dir) / "bundle.json"
+    if _bpath.exists():
+        _bj = json.loads(_bpath.read_text(encoding="utf-8"))
+        _lab = _bj.get("fixture_label")
+        if _lab and st.session_state.get("fixture_label") != _lab:
+            st.session_state["fixture_label"] = _lab
+except Exception:
+    pass
+
+
+    # Build & serve bundle.zip (keys deduped via nonce)
+    try:
+        zpath = Path(last_dir) / "bundle.zip"
+        with zipfile.ZipFile(str(zpath), "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for root, _, fns in os.walk(last_dir):
+                for fn in fns:
+                    if fn.endswith(".zip"):  # avoid nesting
+                        continue
+                    full = Path(root)/fn
+                    arc  = os.path.relpath(str(full), start=str(last_dir))
+                    zf.write(str(full), arc)
+        with open(zpath, "rb") as fh:
+            st.download_button(
+                "Download bundle.zip",
+                data=fh,
+                file_name="bundle.zip",
+                mime="application/zip",
+                key=f"btn_dl_bundle_zip__{ss['_ui_nonce']}"
+            )
+    except Exception as e:
+        st.warning(f"Zip build/serve issue: {e}")
+
+# call this immediately under your solver section:
+tail_and_download_ui()
