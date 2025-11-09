@@ -1262,7 +1262,17 @@ with st.expander("C1 — Coverage rollup & health ping", expanded=False):
             f"ker={fmt(hp.get('mean_ker_mismatch_rate'))} · "
             f"ctr={fmt(hp.get('mean_contradiction_rate'))}"
         )
-
+# JSON-first download of coverage.jsonl (INSERTED HERE)
+    if cov_path.exists():
+        try:
+            with open(str(cov_path), "rb") as _fh:
+                st.download_button("Download coverage.jsonl", _fh,
+                                   file_name="coverage.jsonl",
+                                   mime="text/plain",
+                                   key="btn_c1_download_jsonl")
+        except Exception:
+            # Handle case where file exists but is inaccessible/corrupt
+            pass
     # Rollup button
     if cov_path.exists():
         if st.button("Build rollup CSV (group by prox_label)", key="btn_c1_rollup"):
