@@ -6812,44 +6812,19 @@ def _svr_run_once_computeonly_hard(ss=None):
     ab_auto_payload = _mk_ab("strict__VS__projected(columns@k=3,auto)", strict_eq, auto_eq)
     ab_file_payload = _mk_ab("strict__VS__projected(columns@k=3,file)", strict_eq, file_eq)
 
-        # --- WRITE CORE CERT CIRCUIT (FAT mode) -------------------------------------
+           # --- WRITE MIN CORE (V2-pure) — exactly 2 certs per fixture ------------------
     def _as_dims(x):
         if isinstance(x, dict):
-            if "dims" in x: return x["dims"]
+            if "dims" in x: return {"n2": x["dims"].get("n2"), "n3": x["dims"].get("n3")}
             if "n2" in x and "n3" in x: return {"n2": x["n2"], "n3": x["n3"]}
         return None
     
     dims = _as_dims(strict_payload) or _as_dims(auto_payload)
     
-    # Normalize NA payloads for FILE family if missing (we still write them in FAT mode)
-    if not file_payload:
-        file_payload = {
-            "schema": "overlap.v2",
-            "policy": "projected(columns@k=3,file)",
-            "na_reason": "FILE_MISSING",
-            "district_id": district_id,
-            "fixture_label": fixture_label,
-            "sig8": sig8,
-        }
-        if dims: file_payload["dims"] = dims
-    
-    if not ab_file_payload:
-        ab_file_payload = {
-            "schema": "ab_compare.v2",
-            "policy": "projected(columns@k=3,file)",
-            "na_reason": "FILE_MISSING",
-            "district_id": district_id,
-            "fixture_label": fixture_label,
-            "sig8": sig8,
-        }
-        if dims: ab_file_payload["dims"] = dims
-    
-    # Stamp helper (adds common provenance)
     def _stamp(obj, policy=None):
         o = dict(obj or {})
         if policy and "policy" not in o:
             o["policy"] = policy
-        o.setdefault("fixtures", fixtures)
         o.setdefault("fixture_label", fixture_label)
         if snapshot_id: o.setdefault("snapshot_id", snapshot_id)
         o.setdefault("sig8", sig8)
@@ -6860,45 +6835,28 @@ def _svr_run_once_computeonly_hard(ss=None):
     names = {
         "strict":         f"overlap__{district_id}__strict__{sig8}.json",
         "projected_auto": f"overlap__{district_id}__projected_columns_k_3_auto__{sig8}.json",
-        "ab_auto":        f"ab_compare__strict_vs_projected_auto__{sig8}.json",
-        "freezer":        f"projector_freezer__{district_id}__{sig8}.json",
-        "projected_file": f"overlap__{district_id}__projected_columns_k_3_file__{sig8}.json",
-        "ab_file":        f"ab_compare__projected_columns_k_3_file__{sig8}.json",
     }
     
-    # Write all six (posed + unposed families)
+    # Write exactly two certs (no FILE, no A/B)
     _hard_co_write_json(bdir / names["strict"],         _stamp(strict_payload, "strict"))
     _hard_co_write_json(bdir / names["projected_auto"], _stamp(auto_payload, "projected(columns@k=3,auto)"))
-    _hard_co_write_json(bdir / names["ab_auto"],        _stamp(ab_auto_payload, "strict__VS__projected(columns@k=3,auto)"))
-    _hard_co_write_json(bdir / names["freezer"],        _stamp(freezer_payload, "projector_freezer"))
-    _hard_co_write_json(bdir / names["projected_file"], _stamp(file_payload, "projected(columns@k=3,file)"))
-    _hard_co_write_json(bdir / names["ab_file"],        _stamp(ab_file_payload, "projected(columns@k=3,file)__A/B"))
     
-    # Bundle index (surface lanes if present from AUTO)
-    lanes = {}
-    try:
-        if isinstance(auto_payload, dict):
-            lsig = auto_payload.get("lanes_sig256") or auto_payload.get("lanes_sig8")
-            lpop = (auto_payload.get("metrics") or {}).get("lanes_popcount")
-            if lsig or lpop is not None:
-                lanes = {"sig8": (lsig[-8:] if isinstance(lsig, str) else None), "popcount": lpop}
-    except Exception:
-        pass
-    
+    # Bundle envelope (2-core)
     bundle = {
         "schema": "bundle.v2",
         "district_id": district_id,
         "fixture_label": fixture_label,
-        "fixtures": fixtures,   # SSOT-ish provenance echo
         "sig8": sig8,
-        "filenames": [names[k] for k in ("strict","projected_auto","ab_auto","freezer","projected_file","ab_file")],
-        "lanes": lanes,
-        "core_counts": {"written": 6},
+        "filenames": [names[k] for k in ("strict", "projected_auto")],
+        "core_counts": {"written": 2},
+        "lanes": (auto_payload.get("lanes") or {}) if isinstance(auto_payload, dict) else {},
+        "metrics": (auto_payload.get("metrics") or {}) if isinstance(auto_payload, dict) else {},
         "written_at_utc": int(_time.time()),
     }
+    if dims: bundle["dims"] = dims
     _hard_co_write_json(bdir / "bundle.json", bundle)
     
-    # Loop receipt v2, anchored to SSOT (paths will be filled by the helper)
+    # SSOT-anchored receipt (v2)
     _v2_write_loop_receipt_for_bundle(bdir, extra={
         "district_id": district_id,
         "fixture_label": fixture_label,
@@ -6906,6 +6864,7 @@ def _svr_run_once_computeonly_hard(ss=None):
         "dims": dims,
     })
     # ---------------------------------------------------------------------------
+
     
 
 
@@ -7086,7 +7045,7 @@ except Exception:
     pass
 
 # ====================== END V2 COMPUTE-ONLY (HARD) ======================
-# --- V2 CORE (64×) — one press → receipts → manifest → (optional) suite/hist
+# --- V2 CORE (64×) — one press → receipts → manifest → suite → hist/zip
 _st.subheader("V2 — 64× → Receipts → Manifest → Suite/Histograms")
 
 from pathlib import Path as _Path
@@ -7104,13 +7063,8 @@ snapshot_id = _st.text_input(
     value=_time.strftime("%Y%m%d-%H%M%S", _time.localtime()),
     key="v2_core_snapshot",
 )
-run_suite_after = _st.checkbox(
-    "Run suite + histograms after manifest regen",
-    value=False,
-    key="v2_core_suite",
-)
 
-if _st.button("Run V2 core (64× → receipts → manifest → optional suite/hist)", key="btn_v2_core_flow"):
+if _st.button("Run V2 core (64× → receipts → manifest → suite/hist/zip)", key="btn_v2_core_flow"):
     repo_root   = _repo_root()
     inputs_root = repo_root / "app" / "inputs"
     manifests_dir = _MANIFESTS_DIR if '_MANIFESTS_DIR' in globals() else (repo_root / "logs" / "manifests")
@@ -7119,14 +7073,14 @@ if _st.button("Run V2 core (64× → receipts → manifest → optional suite/hi
     B_dir, H_dir, C_dir = inputs_root / "B", inputs_root / "H", inputs_root / "C"
     U_path = (inputs_root / "U.json").resolve()
 
-    # basic preflight
+    # preflight
     if not (B_dir.exists() and H_dir.exists() and C_dir.exists() and U_path.exists()):
         _st.error(f"Missing inputs dir/file. B:{B_dir.exists()} H:{H_dir.exists()} C:{C_dir.exists()} U:{U_path.exists()}")
     else:
-        # discover D from B/*.json; hard-code H (4) and C (8) for 64×
+        # discover D; hard-code H (4) and C (8) for 64×
         D_tags = sorted(p.stem for p in B_dir.glob("D*.json"))
         H_tags = ["H00", "H01", "H10", "H11"]
-        C_tags = [f"C{n:03b}" for n in range(8)]  # C000..C111 (3-bit → 8)
+        C_tags = [f"C{n:03b}" for n in range(8)]  # C000..C111
 
         rows = []
         for D in D_tags:
@@ -7142,134 +7096,103 @@ if _st.button("Run V2 core (64× → receipts → manifest → optional suite/hi
                     if not Cp.exists():
                         continue
                     fid = f"{D}_{Ht}_{Ct}"
-                    rows.append({
-                        "fixture_label": fid,
-                        "paths": {
-                            "B": str(B_path),
-                            "C": str(Cp),
-                            "H": str(Hp),
-                            "U": str(U_path),
-                        },
-                    })
+                    rows.append({"fixture_label": fid, "paths": {"B": str(B_path), "C": str(Cp), "H": str(Hp), "U": str(U_path)}})
 
         if not rows:
             _st.error("No rows produced — check that the 64× fixtures exist on disk.")
-        else:
-            # 1) write a bootstrap manifest with absolute paths
-            man_boot = manifests_dir / "manifest_bootstrap__ALL.jsonl"
-            man_boot.write_text(
-                "\n".join(_json.dumps(r, separators=(",", ":")) for r in rows) + "\n",
-                encoding="utf-8",
-            )
-            _st.success(f"Bootstrap manifest written with {len(rows)} rows → {man_boot}")
+            _st.stop()
 
-            # 2) run 64× to emit receipts
-            snap = snapshot_id or str(_uuid.uuid4())
-            ok1, msg1, cnt1 = run_suite_from_manifest(str(man_boot), snap)  # returns (ok,msg,count)
-            (_st.success if ok1 else _st.warning)(f"Bootstrap run: {msg1} · rows={cnt1}")
+        # 1) bootstrap manifest with absolute paths
+        man_boot = manifests_dir / "manifest_bootstrap__ALL.jsonl"
+        man_boot.write_text("\n".join(_json.dumps(r, separators=(",", ":")) for r in rows) + "\n", encoding="utf-8")
+        _st.success(f"Bootstrap manifest written with {len(rows)} rows → {man_boot}")
 
-            # 3) regenerate the REAL manifest from receipts (v2 invariant)
-            try:
-                regen = _v2_regen_manifest_from_receipts()
-                # tolerate either (ok, path, n) or (n, path)
-                if isinstance(regen, tuple) and len(regen) == 3:
-                    ok2, path2, n2 = regen
-                elif isinstance(regen, tuple) and len(regen) == 2:
-                    n2, path2 = regen
-                    ok2 = n2 > 0
-                else:
-                    ok2, path2, n2 = True, manifests_dir / "manifest_full_scope.jsonl", 0
-                (_st.success if ok2 else _st.warning)(f"Manifest regenerated with {n2} rows → {path2}")
-            except Exception as e:
-                _st.warning(f"Manifest regen failed: {e}")
-                ok2, path2, n2 = False, manifests_dir / "manifest_full_scope.jsonl", 0
+        # 2) run 64× to emit receipts
+        snap = snapshot_id or str(_uuid.uuid4())
+        ok1, msg1, cnt1 = run_suite_from_manifest(str(man_boot), snap)
+        (_st.success if ok1 else _st.warning)(f"Bootstrap run: {msg1} · rows={cnt1}")
 
-            # offer downloads for manifest + coverage (handy even if you skip suite)
-            try:
-                real_manifest = manifests_dir / "manifest_full_scope.jsonl"
-                if real_manifest.exists():
-                    _st.download_button(
-                        "Download manifest_full_scope.jsonl",
-                        data=real_manifest.read_bytes(),
-                        file_name="manifest_full_scope.jsonl",
-                        mime="text/plain",
-                        key="btn_v2_download_manifest_core",
-                    )
-                cov_path = _v2_coverage_path()
-                if cov_path.exists():
-                    _st.download_button(
-                        "Download coverage.jsonl",
-                        data=cov_path.read_bytes(),
-                        file_name="coverage.jsonl",
-                        mime="text/plain",
-                        key="btn_v2_download_coverage_core",
-                    )
-            except Exception:
-                pass
+        # 3) regenerate real manifest from receipts
+        try:
+            ok2, path2, n2 = _v2_regen_manifest_from_receipts()
+            (_st.success if ok2 else _st.warning)(f"Manifest regenerated with {n2} rows → {path2}")
+        except Exception as e:
+            _st.warning(f"Manifest regen failed: {e}")
+            ok2, path2, n2 = False, manifests_dir / "manifest_full_scope.jsonl", 0
 
-            # 4) optional: run suite from REAL manifest + histograms + FAT zip + rollup + coverage sanity
-            if run_suite_after and ok2:
-                real_man = manifests_dir / "manifest_full_scope.jsonl"
-                if not real_man.exists():
-                    _st.warning(f"Real manifest not found: {real_man}")
-                else:
-                    snap2 = snapshot_id or str(_uuid.uuid4())
-                    ok3, msg3, cnt3 = run_suite_from_manifest(str(real_man), snap2)
-                    (_st.success if ok3 else _st.warning)(f"Suite run: {msg3} · rows={cnt3}")
+        # always run suite (no toggles/clicks)
+        if not ok2:
+            _st.stop()
 
-                    # Histograms
-                    try:
-                        okh, msgh, outp = _v2_build_histograms_from_coverage()
-                        (_st.success if okh else _st.warning)(msgh)
-                        if okh and outp and outp.exists():
-                            _st.download_button(
-                                "Download histograms_v2.json",
-                                data=outp.read_bytes(),
-                                file_name="histograms_v2.json",
-                                mime="application/json",
-                                key="btn_v2_download_hist_v2core",
-                            )
-                    except Exception as e:
-                        _st.warning(f"Histogram build failed: {e}")
+        real_man = manifests_dir / "manifest_full_scope.jsonl"
+        if not real_man.exists():
+            _st.error(f"Real manifest not found: {real_man}")
+            _st.stop()
 
-                    # FAT suite bundle (all certs + receipts + sidecars)
-                    try:
-                        zip_path = _v2_pack_suite_fat_zip(snap2)
-                        if zip_path and zip_path.exists():
-                            _st.download_button(
-                                "Download FAT suite bundle (all certs/receipts)",
-                                data=zip_path.read_bytes(),
-                                file_name=zip_path.name,
-                                mime="application/zip",
-                                key="btn_v2_download_suite_fat",
-                            )
-                    except Exception as e:
-                        _st.warning(f"FAT bundle zip failed: {e}")
+        snap2 = snapshot_id or str(_uuid.uuid4())
+        ok3, msg3, cnt3 = run_suite_from_manifest(str(real_man), snap2)
+        (_st.success if ok3 else _st.warning)(f"Suite run: {msg3} · rows={cnt3}")
 
-                    # Optional: coverage rollup CSV download
-                    try:
-                        g = globals()
-                        if "_coverage_rollup_write_csv" in g:
-                            path_csv = g["_coverage_rollup_write_csv"]()
-                            if path_csv and path_csv.exists():
-                                _st.download_button(
-                                    "Download coverage_rollup.csv",
-                                    data=path_csv.read_bytes(),
-                                    file_name="coverage_rollup.csv",
-                                    mime="text/csv",
-                                    key="btn_v2_download_cov_rollup",
-                                )
-                    except Exception:
-                        pass
+        # histograms over coverage
+        try:
+            okh, msgh, outp = _v2_build_histograms_from_coverage()
+            (_st.success if okh else _st.warning)(msgh)
+            if okh and outp and outp.exists():
+                _st.download_button(
+                    "Download histograms_v2.json",
+                    data=outp.read_bytes(),
+                    file_name="histograms_v2.json",
+                    mime="application/json",
+                    key="btn_v2_download_hist_v2core",
+                )
+        except Exception as e:
+            _st.warning(f"Histogram build failed: {e}")
 
-                    # Coverage sanity for this snapshot (expect ≥ executed)
-                    try:
-                        parsed = _v2_coverage_count_for_snapshot(snap2)
-                        if parsed < cnt3:
-                            _st.warning(f"Coverage parsed {parsed}/{cnt3} rows for snapshot {snap2} (expected ≥ executed).")
-                        else:
-                            _st.info(f"Coverage parsed rows: {parsed} (snapshot {snap2})")
-                    except Exception:
-                        pass
+        # convenience downloads
+        try:
+            if real_man.exists():
+                _st.download_button(
+                    "Download manifest_full_scope.jsonl",
+                    data=real_man.read_bytes(),
+                    file_name="manifest_full_scope.jsonl",
+                    mime="text/plain",
+                    key="btn_v2_download_manifest_core",
+                )
+            cov_path = _v2_coverage_path()
+            if cov_path.exists():
+                _st.download_button(
+                    "Download coverage.jsonl",
+                    data=cov_path.read_bytes(),
+                    file_name="coverage.jsonl",
+                    mime="text/plain",
+                    key="btn_v2_download_coverage_core",
+                )
+        except Exception:
+            pass
+
+        # FAT zip (whatever JSONs exist per bundle — here: 2 core + bundle + receipt)
+        try:
+            zip_path = _v2_pack_suite_fat_zip(snap2)
+            if zip_path and zip_path.exists():
+                _st.download_button(
+                    "Download FAT suite bundle (all certs/receipts)",
+                    data=zip_path.read_bytes(),
+                    file_name=zip_path.name,
+                    mime="application/zip",
+                    key="btn_v2_download_suite_fat",
+                )
+        except Exception as e:
+            _st.warning(f"FAT bundle zip failed: {e}")
+
+        # coverage sanity for this snapshot (expect == executed)
+        try:
+            parsed = _v2_coverage_count_for_snapshot(snap2)
+            if parsed < cnt3:
+                _st.warning(f"Coverage parsed {parsed}/{cnt3} rows for snapshot {snap2} (expected ≥ executed).")
+            else:
+                _st.info(f"Coverage parsed rows: {parsed} (snapshot {snap2})")
+        except Exception:
+            pass
+
 
                        
