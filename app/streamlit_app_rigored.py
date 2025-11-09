@@ -6395,6 +6395,261 @@ except Exception:
     pass
 # ====================== END V2 CANONICAL — COMPUTE-ONLY ======================
 
+# ─────────────────────────────────────────────────────────────────────────────
+# V2 strict mechanics: receipts → manifest → suite → histograms
+# self-contained helpers, no changes to your 1× pipeline
+# ─────────────────────────────────────────────────────────────────────────────
+from pathlib import Path as _Path
+import os as _os, json as _json, time as _time, glob as _glob, math as _math
+import collections as _collections
+import streamlit as _st
+
+# --- Constants & dirs
+_REPO_ROOT = _Path(__file__).resolve().parent.parent
+_CERTS_DIR = _REPO_ROOT / "logs" / "certs"
+_MANIFESTS_DIR = _REPO_ROOT / "logs" / "manifests"
+_REPORTS_DIR = _REPO_ROOT / "logs" / "reports"
+_MANIFESTS_DIR.mkdir(parents=True, exist_ok=True)
+_REPORTS_DIR.mkdir(parents=True, exist_ok=True)
+
+# --- Atomic JSON write
+def _v2_atomic_write_json(path: _Path, obj: dict):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with tmp.open("w", encoding="utf-8") as f:
+        _json.dump(obj, f, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    _os.replace(str(tmp), str(path))
+
+# --- Latest bundle discovery (best-effort, by mtime)
+def _v2_latest_bundle_dir() -> _Path | None:
+    cand = []
+    if _CERTS_DIR.exists():
+        for p in _CERTS_DIR.rglob("bundle.json"):
+            try:
+                cand.append((p.stat().st_mtime, p.parent))
+            except Exception:
+                pass
+    if not cand:
+        return None
+    cand.sort(reverse=True)
+    return cand[0][1]  # dir hosting bundle.json
+
+# --- Pull SSOT paths for receipt (prefers session_state)
+def _v2_collect_paths_from_ssot() -> dict:
+    ss = _st.session_state
+    keys = [
+        ("B", ["uploaded_B_path","uploaded_boundaries"]),
+        ("C", ["uploaded_C_path","uploaded_cmap"]),
+        ("H", ["uploaded_H_path","uploaded_H"]),
+        ("U", ["uploaded_U_path","uploaded_shapes"]),
+    ]
+    out = {}
+    for k, opts in keys:
+        val = None
+        for o in opts:
+            v = ss.get(o)
+            if isinstance(v, str) and v:
+                val = v; break
+        out[k] = str(_Path(val).resolve()) if val else None
+    return out
+
+# --- Write a loop_receipt (v2) into a given bundle dir
+def _v2_write_loop_receipt_for_bundle(bdir: _Path, *, extra: dict | None = None) -> tuple[bool,str]:
+    """
+    Writes loop_receipt__{fixture_label}.json using info from:
+      - bundle.json (if present),
+      - session_state (absolute paths),
+    and minimal required rc-like fields if found.
+    """
+    if not bdir or not bdir.exists():
+        return False, "No bundle dir found."
+
+    # Try to read bundle.json for rc-like info
+    bundle = {}
+    bj = bdir / "bundle.json"
+    if bj.exists():
+        try:
+            bundle = _json.loads(bj.read_text(encoding="utf-8"))
+        except Exception as e:
+            return False, f"bundle.json unreadable: {e}"
+
+    # derive fixture/district/sig8 if available
+    fixture_label = (bundle.get("fixture_label")
+                     or bundle.get("rc",{}).get("fixture_label")
+                     or "UNKNOWN")
+    district_id   = (bundle.get("district_id")
+                     or bundle.get("rc",{}).get("district_id")
+                     or "UNKNOWN")
+    dims = (bundle.get("dims")
+            or bundle.get("rc",{}).get("dims")
+            or {"n2": bundle.get("n2", None), "n3": bundle.get("n3", None)})
+    sig8 = (bundle.get("sig8")
+            or bundle.get("rc",{}).get("sig8")
+            or _Path(bdir).name)
+
+    # collect absolute input paths from session_state (best-effort)
+    paths = _v2_collect_paths_from_ssot()
+
+    # Produce the receipt object
+    receipt = {
+        "schema": "loop_receipt.v2",
+        "written_at_utc": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+        "bundle_dir": str(bdir.resolve()),
+        "district_id": district_id,
+        "fixture_label": fixture_label,
+        "sig8": sig8,
+        "dims": dims,
+        "paths": paths,  # {"B": abs, "C": abs, "H": abs, "U": abs}
+    }
+    if extra:
+        receipt.update(extra)
+
+    # Write
+    outp = bdir / f"loop_receipt__{fixture_label}.json"
+    _v2_atomic_write_json(outp, receipt)
+    return True, f"Wrote {outp.name}"
+
+# --- Regenerate manifest_full_scope.jsonl by scanning loop_receipts
+def _v2_regen_manifest_from_receipts() -> tuple[int, _Path]:
+    out = _MANIFESTS_DIR / "manifest_full_scope.jsonl"
+    kept = 0
+    with out.open("w", encoding="utf-8") as mf:
+        for rp in _CERTS_DIR.rglob("loop_receipt__*.json"):
+            try:
+                r = _json.loads(rp.read_text(encoding="utf-8"))
+            except Exception:
+                continue
+            if r.get("schema") != "loop_receipt.v2":
+                continue
+            paths = (r.get("paths") or {})
+            B, C, H, U = (paths.get("B"), paths.get("C"), paths.get("H"), paths.get("U"))
+            # require all four and they should exist
+            if not all([B, C, H, U]):
+                continue
+            if not all([_Path(p).exists() for p in [B,C,H,U]]):
+                continue
+            row = {
+                "fixture_label": r.get("fixture_label"),
+                "district_id": r.get("district_id"),
+                "sig8": r.get("sig8"),
+                "bundle_dir": r.get("bundle_dir"),
+                "dims": r.get("dims"),
+                "B": B, "C": C, "H": H, "U": U,
+            }
+            mf.write(_json.dumps(row, ensure_ascii=False, separators=(",",":"), sort_keys=True) + "\n")
+            kept += 1
+    return kept, out
+
+# --- Histogram reductions over coverage.jsonl
+def _v2_build_histograms_from_coverage(cov_path: _Path | None = None) -> tuple[bool, str, _Path | None]:
+    cov = cov_path or (_REPORTS_DIR / "coverage.jsonl")  # your coverage lives in logs/reports
+    if not cov.exists():
+        return False, "coverage.jsonl not found.", None
+
+    # read coverage.jsonl
+    rows = []
+    with cov.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rows.append(_json.loads(line))
+            except Exception:
+                pass
+    if not rows:
+        return False, "coverage.jsonl had 0 parseable rows.", None
+
+    # helpers
+    def _inc(d, k): d[k] = d.get(k, 0) + 1
+    def _bucket_rate(x: float | None, step=0.05) -> str:
+        if x is None: return "NA"
+        x = max(0.0, min(1.0, float(x)))
+        b = round(_math.floor(x/step)*step, 2)
+        return f"{b:0.2f}"
+
+    H = {
+        "lane_popcount_auto": {},           # counts by popcount
+        "ker_lane_count_auto": {},          # counts by ker-lane count
+        "R3_kernel_cols_popcount": {},      # counts by kernel-intersection size
+        "sel_mismatch_rate_buckets": {},    # 0.00,0.05,…
+        "ker_red_true": 0,                  # scalar count
+        "ker_red_false": 0,                 # scalar count
+        # Optional buckets (you can extend later):
+        # "verdict_class_auto": {}, "verdict_class_file": {},
+    }
+
+    for r in rows:
+        _inc(H["lane_popcount_auto"], str(r.get("lane_popcount_auto", "NA")))
+        _inc(H["ker_lane_count_auto"], str(r.get("ker_lane_count_auto", "NA")))
+        _inc(H["R3_kernel_cols_popcount"], str(r.get("R3_kernel_cols_popcount", "NA")))
+        _inc(H["sel_mismatch_rate_buckets"], _bucket_rate(r.get("sel_mismatch_rate")))
+        if r.get("ker_red") is True: H["ker_red_true"] += 1
+        elif r.get("ker_red") is False: H["ker_red_false"] += 1
+
+    outp = _REPORTS_DIR / "histograms_v2.json"
+    _v2_atomic_write_json(outp, {
+        "schema": "histograms_v2",
+        "source": str(cov.resolve()),
+        "written_at_utc": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
+        "bins": H,
+        "notes": "Pure reductions from coverage.jsonl; no algebra recompute.",
+    })
+    return True, f"Wrote {outp}", outp
+
+# --- UI: strict plumbing for V2
+with _st.expander("V2 — Receipts → Manifest → Suite → Histograms", expanded=False):
+    _st.caption("No uploads. The system discovers itself from bundles/receipts.")
+
+    # 1) Write/repair loop_receipt for latest bundle
+    if _st.button("Write/repair loop_receipt (latest 1× bundle)", key="btn_v2_write_receipt"):
+        bdir = _v2_latest_bundle_dir()
+        if not bdir:
+            _st.error("No bundles found under logs/certs.")
+        else:
+            ok, msg = _v2_write_loop_receipt_for_bundle(bdir)
+            (_st.success if ok else _st.warning)(msg)
+
+    # 2) Regenerate manifest_full_scope.jsonl from receipts
+    if _st.button("Regenerate manifest from receipts (m00)", key="btn_v2_regen_manifest"):
+        kept, mp = _v2_regen_manifest_from_receipts()
+        if kept == 0:
+            _st.warning(f"Manifest regenerated with 0 rows → {mp}")
+        else:
+            _st.success(f"Manifest regenerated with {kept} rows → {mp}")
+            try:
+                _st.download_button("Download manifest_full_scope.jsonl",
+                                    data=mp.read_bytes(),
+                                    file_name="manifest_full_scope.jsonl",
+                                    mime="text/plain",
+                                    key="btn_v2_download_manifest")
+            except Exception:
+                pass
+
+    # 3) Run suite from manifest (calls your existing runner)
+    snapshot_id = _st.text_input("Snapshot id (for suite index)", value=_time.strftime("%Y%m%d-%H%M%S", _time.localtime()),
+                                 key="txt_v2_snapshot")
+    manifest_abs = (_MANIFESTS_DIR / "manifest_full_scope.jsonl")
+    if _st.button("Run suite from manifest (r00)", key="btn_v2_run_suite"):
+        if not manifest_abs.exists():
+            _st.error(f"Manifest not found: {manifest_abs}")
+        else:
+            ok, msg = run_suite_from_manifest(str(manifest_abs), snapshot_id)  # existing function
+            (_st.success if ok else _st.warning)(msg)
+
+    # 4) Build histograms over coverage.jsonl (h00)
+    if _st.button("Build histograms_v2 from coverage.jsonl (h00)", key="btn_v2_hist"):
+        ok, msg, outp = _v2_build_histograms_from_coverage()
+        (_st.success if ok else _st.warning)(msg)
+        if ok and outp and outp.exists():
+            try:
+                _st.download_button("Download histograms_v2.json",
+                                    data=outp.read_bytes(),
+                                    file_name="histograms_v2.json",
+                                    mime="application/json",
+                                    key="btn_v2_download_hist")
+            except Exception:
+                pass
 
 
 # ====================== V2 COMPUTE-ONLY (HARD) — single source of truth ======================
