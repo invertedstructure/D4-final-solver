@@ -5279,256 +5279,7 @@ def tail_and_download_ui():
 tail_and_download_ui()
 
 
-# =========================== Sanity battletests (Loop‑4) ===========================
-import streamlit as _st
-import json as _json
-import hashlib as _hashlib
-# === Canonical path map (Pass 1) ===
-from pathlib import Path as _PathAlias
 
-ROOT            = _PathAlias(".").resolve()
-LOGS_DIR        = ROOT / "logs"
-CERTS_DIR       = LOGS_DIR / "certs"
-REPORTS_DIR     = LOGS_DIR / "reports"
-COVERAGE_JSONL  = REPORTS_DIR / "coverage.jsonl"
-COVERAGE_ROLLUP = REPORTS_DIR / "coverage_rollup.csv"
-
-# Ensure dirs exist at app start (idempotent)
-for _p in (CERTS_DIR, REPORTS_DIR):
-    try:
-        _p.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
-
-# Back-compat shims (do NOT change behavior of existing code; only provide canonical values)
-try:
-    DIRS
-except NameError:
-    DIRS = {
-        "root": str(ROOT),
-        "logs": str(LOGS_DIR),
-        "certs": str(CERTS_DIR),
-        "reports": str(REPORTS_DIR),
-    }
-
-# === End canonical path map (Pass 1) ===
-
-
-
-def _bt_sha256_text(s: str) -> str:
-    return _hashlib.sha256(s.encode("ascii")).hexdigest()
-
-def _bt_lanes_sig256(lanes):
-    bitstr = "".join("1" if int(x) & 1 else "0" for x in (lanes or []))
-    return _bt_sha256_text(bitstr)
-
-def _bt_identity(n):
-    return [[1 if i==j else 0 for j in range(n)] for i in range(n)]
-
-def _bt_zero(r,c):
-    return [[0 for _ in range(c)] for __ in range(r)]
-
-def _bt_mul(A,B):
-    try:
-        # Prefer canonical if present
-        if "_gf2_mul" in globals() and callable(globals()["_gf2_mul"]):
-            return _gf2_mul(A,B)  # type: ignore
-    except Exception: pass
-    if not A or not B: return []
-    m,k,n = len(A), len(A[0]), len(B[0])
-    C = [[0]*n for _ in range(m)]
-    for i in range(m):
-        for t in range(k):
-            if A[i][t] & 1:
-                Bt = B[t]
-                for j in range(n):
-                    C[i][j] ^= (Bt[j] & 1)
-    return C
-
-def _bt_xor(A,B):
-    if not A: return [r[:] for r in (B or [])]
-    if not B: return [r[:] for r in (A or [])]
-    r,c = len(A), len(A[0])
-    return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
-
-def _bt_is_zero(M):
-    return (not M) or all(((x & 1) == 0) for row in M for x in row)
-
-def _bt_lane_mask_from_d3(d3):
-    if not d3 or not (d3[0] if d3 else []): return []
-    rows, n3 = len(d3), len(d3[0])
-    return [1 if any(int(d3[i][j]) & 1 for i in range(rows)) else 0 for j in range(n3)]
-
-def _bt_projected(R3, P):
-    if not (R3 and P): return []
-    return _bt_mul(R3, P)
-
-def _bt_diag_from_mask(lm):
-    n = len(lm or [])
-    return [[1 if (i==j and int(lm[j])==1) else 0 for j in range(n)] for i in range(n)]
-
-def _bt_support_cols(M):
-    if not M: return set()
-    r,c = len(M), len(M[0])
-    out = set()
-    for j in range(c):
-        if any(M[i][j] & 1 for i in range(r)):
-            out.add(j)
-    return out
-
-def _bt_kernel_cols(d3):
-    if not d3: return set()
-    r,c = len(d3), len(d3[0])
-    out = set()
-    for j in range(c):
-        if not any(int(d3[i][j]) & 1 for i in range(r)):
-            out.add(j)
-    return out
-
-def _bt_verdict(H2,d3,C3, P=None):
-    """Return (verdict, receipt) using pure algebra rules."""
-    n3 = len(C3) if C3 else 0
-    I3 = _bt_identity(n3) if n3 and C3 and (len(C3)==len(C3[0])) else []
-    # Build strict R3 defensively
-    R3s = _bt_xor(_bt_mul(H2, d3), _bt_xor(C3, I3)) if (H2 and d3 and C3 and I3) else None
-    posed = bool(P) and bool(I3)
-    # Strict eq only defined if shapes valid
-    strict_eq = (R3s is not None) and _bt_is_zero(R3s)
-    if R3s is None:
-        # treat as unposed/invalid shape path
-        return "RED_UNPOSED", {"strict_eq": None, "posed": False, "proj_eq": None, "na": "PROJECTOR_INVALID_SHAPE"}
-    proj_eq = None
-    if posed and R3s is not None:
-        R3p = _bt_projected(R3s, P)
-        proj_eq = _bt_is_zero(R3p)
-    # Compute ker/supp logic
-    ker_cols  = _bt_kernel_cols(d3)
-    supp_cols = _bt_support_cols(R3s) if R3s is not None else set()
-    verdict = None
-    integrity = None
-    if strict_eq is True:
-        verdict = "GREEN"
-        if posed and proj_eq is False:
-            integrity = "PROJECTOR_INTEGRITY_FAIL"
-    else:
-        if not posed:
-            verdict = "RED_UNPOSED"
-        else:
-            lanes = {j for j, b in enumerate([row[j] for j,row in enumerate(P)]) if b} if P else set()
-            # lanes from P's diagonal (P assumed diagonal here)
-            lanes = {j for j in range(len(P)) if int(P[j][j])==1} if P else set()
-            if supp_cols.issubset(ker_cols):
-                if lanes.intersection(supp_cols):
-                    verdict = "KER-EXPOSED"
-                else:
-                    verdict = "KER-FILTERED"
-            else:
-                verdict = "RED_BOTH"
-    rec = {
-        "strict_eq": strict_eq,
-        "projected_posed": bool(posed),
-        "projected_eq": proj_eq,
-        "integrity": {"failure_code": integrity} if integrity else None,
-        "ker_cols": sorted(list(ker_cols)),
-        "supp_cols": sorted(list(supp_cols)),
-        "n3": len(C3[0]) if C3 and C3[0] else 0,
-    }
-    return verdict, rec
-
-def _bt_health(d3, lanes, C3, prior_lanes=None, thresholds=None):
-    n3 = len(C3) if C3 else 0
-    thresholds = thresholds or {"tau_size":0.30,"tau_ker":0.10,"tau_stability":0.60}
-    if not C3 or not C3[0] or len(C3)!=len(C3[0]):
-        return {"class":"INVALID","na_reason_code":"PROJECTOR_INVALID_SHAPE","thresholds":thresholds}
-    lane_size = sum(int(x)&1 for x in (lanes or []))
-    if lane_size==0:
-        return {"class":"INVALID","na_reason_code":"PROJECTOR_ZERO_LANES","thresholds":thresholds,"lane_size":0,"lane_frac":0.0}
-    lane_frac = lane_size/max(1,n3)
-    ker = _bt_kernel_cols(d3)
-    ker_lane = sum(1 for j,b in enumerate(lanes or []) if (int(b)&1) and (j in ker))
-    ker_lane_rate = ker_lane/max(1,lane_size)
-    stability = None
-    stability_applied = False
-    if isinstance(prior_lanes, list) and prior_lanes and len(prior_lanes)==len(lanes):
-        U = {j for j,b in enumerate(lanes) if int(b)&1} | {j for j,b in enumerate(prior_lanes) if int(b)&1}
-        I = {j for j,b in enumerate(lanes) if int(b)&1} & {j for j,b in enumerate(prior_lanes) if int(b)&1}
-        stability = (len(I)/len(U)) if U else 1.0
-        stability_applied = True
-    # classify
-    fails = 0
-    if lane_frac < thresholds["tau_size"]: fails += 1
-    if ker_lane_rate > thresholds["tau_ker"]: fails += 1
-    if stability_applied and (stability is not None) and (stability < thresholds["tau_stability"]): fails += 1
-    cls = "HEALTHY" if fails==0 else ("WARN" if fails==1 else "WARN")
-    return {
-        "class": cls,
-        "lane_size": lane_size,
-        "lane_frac": lane_frac,
-        "ker_lane_rate": ker_lane_rate,
-        "stability_jaccard": stability,
-        "stability_applied": stability_applied,
-        "thresholds": thresholds,
-        "ker_only_projector": (ker_lane_rate==1.0),
-    }
-
-with _st.expander("Sanity battletests (Loop‑4)", expanded=False):
-    _st.caption("Quick, side-effect-free checks of the core algebra & policy receipts.")
-    n3 = 3
-    # Base matrices
-    I3 = _bt_identity(n3)
-    Z3 = _bt_zero(n3,n3)
-    # Case 1: GREEN + posed projected → proj=1 (else integrity)
-    H2 = Z3[:]      # 3x3 zeros
-    d3 = [[1,0,0],[0,0,0],[0,0,0]]  # lane at j=0
-    C3 = I3[:]      # identity
-    P_auto = _bt_diag_from_mask(_bt_lane_mask_from_d3(d3))
-    v1, r1 = _bt_verdict(H2,d3,C3,P_auto)
-    rec1 = {"case":"GREEN_posed","verdict":v1,"receipt":r1}
-
-    # Case 2: KER-FILTERED (strict fails on kernel-only, lanes exclude failing cols)
-    H2b = Z3[:]
-    d3b = [[0,1,0],[0,0,1],[0,0,0]]  # kernel at j=0 only
-    C3b = [[1,0,1],[0,1,0],[0,0,1]]  # make residual support={0}
-    P_auto_b = _bt_diag_from_mask(_bt_lane_mask_from_d3(d3b))  # excludes j=0
-    v2, r2 = _bt_verdict(H2b,d3b,C3b,P_auto_b)
-    rec2 = {"case":"KER_FILTERED","verdict":v2,"receipt":r2}
-
-    # Case 3: KER-EXPOSED (kernel-only fail but FILE lanes include it → projected fails)
-    P_file_expose = _bt_diag_from_mask([1,1,1])  # include kernel j=0
-    v3, r3 = _bt_verdict(H2b,d3b,C3b,P_file_expose)
-    rec3 = {"case":"KER_EXPOSED","verdict":v3,"receipt":r3}
-
-    # Case 4: RED_BOTH (non-kernel fail present → projected fails)
-    H2c = Z3[:]
-    d3c = [[0,1,0],[0,0,1],[0,0,0]]   # lanes at j=1,2
-    C3c = [[1,0,0],[0,1,1],[0,0,1]]   # residual support includes j=2 (lane col)
-    P_auto_c = _bt_diag_from_mask(_bt_lane_mask_from_d3(d3c))  # includes j=2
-    v4, r4 = _bt_verdict(H2c,d3c,C3c,P_auto_c)
-    rec4 = {"case":"RED_BOTH","verdict":v4,"receipt":r4}
-
-    # Case 5: PROJECTOR health INVALID scenarios
-    d3z = [[0,0,0],[0,0,0],[0,0,0]]  # all-zero → zero lanes
-    C3z = I3[:]
-    lanes_z = _bt_lane_mask_from_d3(d3z)
-    h1 = _bt_health(d3z, lanes_z, C3z)  # PROJECTOR_ZERO_LANES
-    # invalid shape
-    C_bad = [[1,0],[0,1],[0,0]]  # 3x2 non-square
-    h2 = _bt_health(d3, _bt_lane_mask_from_d3(d3), C_bad)  # PROJECTOR_INVALID_SHAPE
-    rec5 = {"case":"HEALTH_INVALID","health_zero_lanes":h1, "health_bad_shape":h2}
-
-    # Freezer mismatch: lanes_sig AUTO vs FILE (POLICY_DIVERGENT expectation)
-    auto_sig = _bt_lanes_sig256(_bt_lane_mask_from_d3(d3b))
-    file_sig = _bt_lanes_sig256([1,1,1])  # intentionally different
-    freezer = {"status": ("ERROR" if auto_sig != file_sig else "OK"),
-               "auto_lanes_sig256": auto_sig, "file_lanes_sig256": file_sig,
-               "na_reason_code": ("POLICY_DIVERGENT" if auto_sig != file_sig else "")}
-    rec6 = {"case":"FREEZER_DIVERGENT","freezer":freezer}
-
-    results = [rec1, rec2, rec3, rec4, rec5, rec6]
-    _st.code(_json.dumps(results, indent=2), language="json")
-    _st.download_button("Download battletest receipts (JSON)", _json.dumps(results).encode("utf-8"),
-                        file_name="battletests_loop4.json", key="dl_bt_loop4")
-# ======================== /Sanity battletests (Loop‑4) ========================
 
 
 # ========================= Solver entrypoint (v2: emit baseline certs) =========================
@@ -5780,79 +5531,12 @@ def run_overlap_once(ss=st.session_state):
 # Back-compat alias
 one_press_solve = run_overlap_once
 
-# ---------- Batch (v2) — Run manifest_full_scope ----------
-with st.expander("Batch (v2) — Run manifest_full_scope", expanded=False):
-    st.caption("Looks for app/manifest_full_scope.jsonl under repo root.")
-    colA, colB, colC = st.columns(3)
-    with colA:
-        if st.button("Create/refresh suite snapshot", key="btn_suite_snapshot"):
-            ok, msg, sid = ensure_suite_snapshot("app/manifest_full_scope.jsonl")
-            (st.success if ok else st.warning)(msg)
-    with colB:
-        if st.button("Run full scope (48)", key="btn_v2_manifest_run"):
-            sid = _svr_current_snapshot_id()
-            if not sid:
-                st.warning("No snapshot found. Click 'Create/refresh suite snapshot' first.")
-            else:
-                # Prefer repo-only runner; fall back to CANON; else final alias if present
-                g = globals()
-                runner = g.get("_RUN_SUITE_V2_REPO_ONLY") or g.get("_RUN_SUITE_CANON") or g.get("run_suite_from_manifest")
-                if runner is None:
-                    st.warning("No suite runner available (need _RUN_SUITE_V2_REPO_ONLY or _RUN_SUITE_CANON).")
-                else:
-                    ok, msg, n = _as3(runner("app/manifest_full_scope.jsonl", sid))
-                    (st.success if ok else st.warning)(msg)
 
-    with colC:
-        if st.button("Build suite ZIP", key="btn_v2_suite_zip"):
-            try:
-                import zipfile as _zipfile, datetime as _dt, json as _json
-                sid = _svr_current_snapshot_id()
-                if not sid:
-                    st.warning("No snapshot found.")
-                else:
-                    export_dir = _Path(DIRS.get("exports", "logs/exports"))
-                    export_dir.mkdir(parents=True, exist_ok=True)
-                    ts = _dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-                    zpath = export_dir / f"suite__{sid}__{ts}.zip"
-                    # gather from suite_index
-                    jl, _csvp = _suite_index_paths()
-                    paths = []
-                    if jl.exists():
-                        for ln in jl.read_text(encoding="utf-8").splitlines():
-                            try:
-                                rec = _json.loads(ln)
-                                bd = rec.get("bundle_dir")
-                                if bd:
-                                    paths.append(_Path(bd))
-                            except Exception:
-                                pass
-                    with _zipfile.ZipFile(zpath, "w", _zipfile.ZIP_DEFLATED) as zf:
-                        # include snapshot + suite_index files
-                        snaps_dir = _Path(DIRS.get("snapshots", "logs/snapshots"))
-                        snap_file = snaps_dir / f"world_snapshot__{sid}.json"
-                        if snap_file.exists():
-                            zf.write(snap_file, arcname=f"world_snapshot__{sid}.json")
-                        # include suite index files
-                        jl_path, csv_path = _suite_index_paths()
-                        if jl_path.exists():
-                            zf.write(jl_path, arcname="suite_index.jsonl")
-                        if csv_path.exists():
-                            zf.write(csv_path, arcname="suite_index.csv")
-                        # include bundles
-                        for bd in paths:
-                            if bd.exists():
-                                for fp in bd.glob("*"):
-                                    zf.write(fp, arcname=str(_Path("bundles")/ bd.parent.name / bd.name / fp.name))
-                    st.success(f"Suite ZIP ready: {zpath}")
-                    st.download_button("Download suite ZIP", data=zpath.read_bytes(), file_name=zpath.name, mime="application/zip", key=f"dl_suite_zip_{ts}")
-            except Exception as e:
-                st.warning(f"Suite ZIP failed: {e}")
 
 def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
     """
     Deterministic v2 runner — ALWAYS returns (ok: bool, msg: str, count: int).
-    Reads manifest JSONL, seeds B/C/H/U for each row, runs the solver once per row,
+    Reads the real manifest (JSONL), seeds B/C/H/U for each row, runs per-row worker,
     rebuilds bundle.json, and writes loop_receipt__{fixture}.json.
     """
     import json as _json
@@ -5876,18 +5560,18 @@ def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
                 except Exception as e:
                     return False, f"Bad JSONL line: {raw[:120]}… ({e})", 0
 
-    # Small helper: coerce to absolute (repo-root fallback) and check existence
+    # Helper: absolute path (repo-root fallback)
     def _ensure_abs(p: str | None) -> _Path | None:
         if not p:
             return None
-        pth = _Path(p)
-        if not pth.is_absolute():
+        q = _Path(p)
+        if not q.is_absolute():
             try:
-                root = _REPO_DIR  # prefer global if present
+                root = _REPO_DIR
             except Exception:
                 root = _Path(__file__).resolve().parents[1]
-            pth = root / p
-        return pth
+            q = root / q
+        return q
 
     ok_count = 0
     total = len(rows)
@@ -5909,14 +5593,14 @@ def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
             _st.warning(f"[{fid}] Missing keys in manifest: {', '.join(missing_keys)}")
             continue
 
-        # File existence preflight (after absolute normalization)
+        # Existence preflight
         Bp, Cp, Hp, Up = map(_ensure_abs, (B, C, H, U))
         missing_files = [k for k, pth in {"B": Bp, "C": Cp, "H": Hp, "U": Up}.items() if not (pth and pth.exists())]
         if missing_files:
             _st.warning(f"[{fid}] Missing files: {', '.join(missing_files)}")
             continue
 
-        # Seed inputs (strings) and session context
+        # Seed inputs & session context
         try:
             _set_inputs_for_run(str(Bp), str(Cp), str(Hp), str(Up))
         except Exception as e:
@@ -5927,7 +5611,7 @@ def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
         if "world_snapshot_id" not in _st.session_state:
             _st.session_state["world_snapshot_id"] = snapshot_id
 
-        # Run the solver once for this row
+        # Run the per-row worker
         try:
             ret = run_overlap_once()
         except Exception as e:
@@ -5939,7 +5623,7 @@ def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
         if ok:
             ok_count += 1
 
-        # Resolve bundle dir (fallback to most recent cert dir)
+        # Resolve bundle dir (fallback: most recent cert dir)
         bdir = _Path(bundle_dir) if bundle_dir else None
         if not bdir or not bdir.exists():
             try:
@@ -5948,7 +5632,7 @@ def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
             except Exception:
                 bdir = None
 
-        # Rebuild bundle index and write loop_receipt.v2
+        # Rebuild bundle and (re)write v2 receipt; best-effort lanes sidecar
         lanes_pop = None
         lanes_sig8 = None
         try:
@@ -5960,7 +5644,7 @@ def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
         except Exception as e:
             _st.warning(f"[{fid}] bundling warning: {e}")
 
-        # Append to suite index (best-effort)
+        # Suite index append (best-effort)
         try:
             _suite_index_add_row({
                 "fixture_id": fid,
@@ -5975,6 +5659,7 @@ def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
     return True, f"Completed {ok_count}/{total} fixtures.", ok_count
 
 
+
 # neutralized (final alias installed at EOF): run_suite_from_manifest = _RUN_SUITE_CANON
 
 # =============================================================================
@@ -5987,8 +5672,7 @@ except Exception:
 
 def run_suite_from_manifest(manifest_path: str, snapshot_id: str):
     """
-    Final dispatcher. Always returns a 3-tuple (ok: bool, msg: str, count: int).
-    Prefers repo-only v2 runner, falls back to CANON, then legacy.
+    Dispatch to the available runner and ALWAYS return (ok, msg, count).
     """
     g = globals()
     if "_RUN_SUITE_V2_REPO_ONLY" in g:
@@ -5998,22 +5682,16 @@ def run_suite_from_manifest(manifest_path: str, snapshot_id: str):
     elif "run_suite_from_manifest__legacy" in g:
         ret = g["run_suite_from_manifest__legacy"](manifest_path, snapshot_id)
     else:
-        return False, "No suite runner available (need _RUN_SUITE_V2_REPO_ONLY or _RUN_SUITE_CANON).", 0
+        return False, "Suite runner not found", 0
 
-    # Normalize to a 3-tuple
-    if isinstance(ret, (tuple, list)):
-        if len(ret) >= 3: return bool(ret[0]), str(ret[1]), int(ret[2])
-        if len(ret) == 2: return bool(ret[0]), str(ret[1]), 0
-        if len(ret) == 1: return bool(ret[0]), "", 0
-    if isinstance(ret, dict):
-        ok  = bool(ret.get("ok", ret.get("success", False)))
-        msg = str(ret.get("msg", ret.get("message", "")))
-        n   = int(ret.get("count", ret.get("n", 0)) or 0)
-        return ok, msg, n
-    if isinstance(ret, bool):
-        return ret, "", 0
-    return False, "runner returned unexpected shape", 0
-# =============================================================================
+    if isinstance(ret, tuple):
+        if len(ret) == 3:
+            return ret
+        if len(ret) == 2:
+            ok, msg = ret
+            return bool(ok), str(msg), 0
+    return bool(ret), str(ret), 0
+
 
 
 
@@ -6662,150 +6340,7 @@ def _v2_build_histograms_from_coverage(cov_path: _Path | None = None) -> tuple[b
     })
     return True, f"Wrote {outp}", outp
 
-# --- UI: V2 one-button bootstrap flow (no nested expanders)
-_st.subheader("V2 — Bootstrap → Receipts → Manifest → Suite/Histograms")
 
-from pathlib import Path as _Path
-import json as _json
-import uuid as _uuid
-
-def __repo_root():
-    try:
-        return _REPO_DIR
-    except Exception:
-        return _Path(__file__).resolve().parents[1]
-
-def __norm_suite_ret(ret):
-    """Normalize any runner return into (ok: bool, msg: str, count: int)."""
-    if isinstance(ret, tuple):
-        if len(ret) == 3:
-            ok, msg, cnt = ret
-            return bool(ok), str(msg), int(cnt)
-        if len(ret) == 2:
-            ok, msg = ret
-            return bool(ok), str(msg), 0
-    return bool(ret), str(ret), 0
-
-def __suite_call(manifest_path: str, snapshot_id: str):
-    g = globals()
-    if "_RUN_SUITE_CANON" in g:
-        return __norm_suite_ret(g["_RUN_SUITE_CANON"](manifest_path, snapshot_id))
-    if "run_suite_from_manifest" in g:
-        return __norm_suite_ret(g["run_suite_from_manifest"](manifest_path, snapshot_id))
-    return False, "Suite runner not found", 0
-
-# Controls
-cols = _st.columns([1,1,1,2])
-with cols[0]:
-    D_tag = _st.selectbox("District (B)", ["D2", "D3"], index=1, key="v2_bootstrap_dtag")
-with cols[1]:
-    do_run = _st.checkbox("Run 64×", value=True, key="v2_bootstrap_run")
-with cols[2]:
-    do_regen = _st.checkbox("Regen manifest", value=True, key="v2_bootstrap_regen")
-with cols[3]:
-    do_suite = _st.checkbox("Run suite + histograms", value=False, key="v2_bootstrap_suite")
-
-snapshot_id = _st.text_input(
-    "Snapshot id",
-    value=_time.strftime("%Y%m%d-%H%M%S", _time.localtime()),
-    key="v2_bootstrap_snapshot",
-)
-
-if _st.button("Bootstrap v2 flow (64 → receipts → manifest → suite/hist)", key="btn_v2_bootstrap_flow"):
-    repo_root   = __repo_root()
-    inputs_root = repo_root / "app" / "inputs"
-    manifests_dir = _MANIFESTS_DIR if '_MANIFESTS_DIR' in globals() else (repo_root / "logs" / "manifests")
-    manifests_dir.mkdir(parents=True, exist_ok=True)
-
-    # Canonical SSOT inputs
-    B_path = (inputs_root / "B" / f"{D_tag}.json").resolve()
-    U_path = (inputs_root / "U.json").resolve()
-    if not B_path.exists() or not U_path.exists():
-        _st.error(f"Missing B or U. B exists={B_path.exists()} · U exists={U_path.exists()}")
-    else:
-        # Grid H×C = 4×16 = 64
-        H_tags = ["H00", "H01", "H10", "H11"]
-        C_tags = [f"C{n:03b}" for n in range(16)]  # C000..C111
-
-        rows = []
-        for Ht in H_tags:
-            Hp = (inputs_root / "H" / f"{Ht}.json").resolve()
-            if not Hp.exists():
-                _st.warning(f"Missing H file: {Hp}")
-                continue
-            for Ct in C_tags:
-                Cp = (inputs_root / "C" / f"{Ct}.json").resolve()
-                if not Cp.exists():
-                    _st.warning(f"Missing C file: {Cp}")
-                    continue
-                fid = f"{D_tag}_{Ht}_{Ct}"
-                rows.append({
-                    "fixture_label": fid,
-                    "paths": {
-                        "B": str(B_path),
-                        "C": str(Cp),
-                        "H": str(Hp),
-                        "U": str(U_path),
-                    },
-                })
-
-        if not rows:
-            _st.error("No rows produced — check H/C inputs.")
-        else:
-            # 1) Write a temporary bootstrap manifest (absolute paths)
-            man_boot = manifests_dir / f"manifest_bootstrap__{D_tag}.jsonl"
-            man_boot.write_text("\n".join(_json.dumps(r, separators=(",", ":")) for r in rows) + "\n", encoding="utf-8")
-            _st.success(f"Bootstrap manifest written with {len(rows)} rows → {man_boot}")
-
-            # 2) Run 64× to emit receipts
-            if do_run:
-                snap = snapshot_id or str(_uuid.uuid4())
-                ok1, msg1, cnt1 = __suite_call(str(man_boot), snap)
-                (_st.success if ok1 else _st.warning)(f"Bootstrap run: {msg1} · rows={cnt1}")
-
-            # 3) Regenerate the real manifest from receipts (v2 invariant)
-            real_manifest = manifests_dir / "manifest_full_scope.jsonl"
-            if do_regen:
-                try:
-                    regen_ret = _v2_regen_manifest_from_receipts()
-                    # tolerate (kept, path) or (ok, path, count)
-                    if isinstance(regen_ret, tuple):
-                        if len(regen_ret) == 3:
-                            ok2, path2, n2 = regen_ret
-                        elif len(regen_ret) == 2:
-                            n2, path2 = regen_ret
-                            ok2 = n2 > 0
-                        else:
-                            ok2, path2, n2 = True, real_manifest, 0
-                    else:
-                        ok2, path2, n2 = True, real_manifest, 0
-                    (_st.success if ok2 else _st.warning)(f"Manifest regenerated with {n2} rows → {path2}")
-                except Exception as e:
-                    _st.warning(f"Manifest regen failed: {e}")
-
-            # 4) Run suite from the real manifest (+ histograms if asked)
-            if do_suite:
-                if not real_manifest.exists():
-                    _st.warning(f"Real manifest not found: {real_manifest}")
-                else:
-                    snap2 = snapshot_id or str(_uuid.uuid4())
-                    ok3, msg3, cnt3 = __suite_call(str(real_manifest), snap2)
-                    (_st.success if ok3 else _st.warning)(f"Suite run: {msg3} · rows={cnt3}")
-
-                    # Build histograms
-                    try:
-                        okh, msgh, outp = _v2_build_histograms_from_coverage()
-                        (_st.success if okh else _st.warning)(msgh)
-                        if okh and outp and outp.exists():
-                            _st.download_button(
-                                "Download histograms_v2.json",
-                                data=outp.read_bytes(),
-                                file_name="histograms_v2.json",
-                                mime="application/json",
-                                key="btn_v2_download_hist_bootstrap",
-                            )
-                    except Exception as e:
-                        _st.warning(f"Histogram build failed: {e}")
 
 
 # ====================== V2 COMPUTE-ONLY (HARD) — single source of truth ======================
