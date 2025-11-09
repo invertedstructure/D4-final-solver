@@ -5669,13 +5669,43 @@ def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
             except Exception:
                 bdir = None
 
-        # Rebuild bundle and (re)write v2 receipt; try to surface lanes
+               # Rebuild bundle and (re)write v2 receipt; surface lanes + append coverage
         try:
             if bdir and bdir.exists():
                 bundle = _v2_bundle_index_rebuild(bdir)
+
+                # lanes sidecar (AUTO)
                 lanes = bundle.get("lanes") or {}
                 lanes_pop, lanes_sig8 = lanes.get("popcount"), lanes.get("sig8")
+
+                # idempotent v2 receipt (SSOT-anchored absolute paths)
                 _v2_write_loop_receipt(bdir, fid, snapshot_id, bundle)
+
+                # --- per-row coverage append (minimal but parseable) ---
+                try:
+                    import uuid as _uuid
+                    cov = {
+                        "fixture_label":  fid,
+                        "snapshot_id":    snapshot_id,
+                        "run_id":         str(_uuid.uuid4()),
+                        "district_id":    bundle.get("district_id"),
+                        "sig8":           bundle.get("sig8"),
+                        "policy":         "strict_vs_projected_auto",
+                        # metrics (default to 0.0 if not present so reducers have mass)
+                        "mismatch_sel":    float((bundle.get("metrics") or {}).get("mismatch_sel", 0.0)),
+                        "mismatch_offrow": float((bundle.get("metrics") or {}).get("mismatch_offrow", 0.0)),
+                        "mismatch_ker":    float((bundle.get("metrics") or {}).get("mismatch_ker", 0.0)),
+                        "verdict_class":   (bundle.get("verdict_class") or "UNKNOWN"),
+                        "lanes_popcount":  lanes_pop,
+                        "na_reason":       None,
+                    }
+                    _v2_coverage_append(cov)
+                except Exception as e:
+                    try:
+                        _st.warning(f"[{fid}] coverage append failed: {e}")
+                    except Exception:
+                        pass
+
                 # suite index append (best-effort)
                 try:
                     _suite_index_add_row({
@@ -5689,6 +5719,7 @@ def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
                     pass
         except Exception as e:
             _st.warning(f"[{fid}] bundling warning: {e}")
+
 
     return True, f"Completed {ok_count}/{total} fixtures.", ok_count
 
@@ -7101,6 +7132,28 @@ if _st.button("Run V2 core (64× → receipts → manifest → optional suite/hi
             except Exception as e:
                 _st.warning(f"Manifest regen failed: {e}")
                 ok2, path2, n2 = False, manifests_dir / "manifest_full_scope.jsonl", 0
+            # Offer downloads for manifest + coverage (optional but handy)
+            try:
+                real_manifest = manifests_dir / "manifest_full_scope.jsonl"
+                if real_manifest.exists():
+                    _st.download_button(
+                        "Download manifest_full_scope.jsonl",
+                        data=real_manifest.read_bytes(),
+                        file_name="manifest_full_scope.jsonl",
+                        mime="text/plain",
+                        key="btn_v2_download_manifest_core",
+                    )
+                cov_path = _v2_coverage_path()
+                if cov_path.exists():
+                    _st.download_button(
+                        "Download coverage.jsonl",
+                        data=cov_path.read_bytes(),
+                        file_name="coverage.jsonl",
+                        mime="text/plain",
+                        key="btn_v2_download_coverage_core",
+                    )
+            except Exception:
+                pass
 
             # 4) optional: run suite from REAL manifest + histograms
             if run_suite_after and ok2:
@@ -7124,3 +7177,14 @@ if _st.button("Run V2 core (64× → receipts → manifest → optional suite/hi
                             )
                     except Exception as e:
                         _st.warning(f"Histogram build failed: {e}")
+                        # After suite run (ok3,msg3,cnt3) — tiny coverage sanity
+              # After suite run (ok3,msg3,cnt3) — tiny coverage sanity
+            try:
+                parsed = _v2_coverage_count_for_snapshot(snap2)
+                if parsed < cnt3:
+                    _st.warning(f"Coverage parsed {parsed}/{cnt3} rows for snapshot {snap2} (expected ≥ executed).")
+                else:
+                    _st.info(f"Coverage parsed rows: {parsed} (snapshot {snap2})")
+            except Exception:
+                pass
+                       
