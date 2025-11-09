@@ -6193,116 +6193,124 @@ def _svr_run_once_computeonly(ss=None):
     fixtures = {"district": D, "H": Ht_guess, "C": Ct_guess, "C_raw": C_raw_stem, "U": "U"}
     fixture_label = f"{D}_{Ht_guess}_{Ct_guess}"
 
-# --- v2 compute-only 1× bundle (6-core circuit, honest logging) --------------
-import time, uuid, json as _json, hashlib as _hashlib
-from pathlib import Path as _Path
-import re as _re
+    # --- v2 compute-only 1× bundle (6-core circuit, honest logging) --------------
+    import time, uuid, json as _json, hashlib as _hashlib
+    from pathlib import Path as _Path
+    import re as _re
 
-def _as_dims(x):
-    if isinstance(x, dict):
-        if "dims" in x and isinstance(x["dims"], dict):
-            return {"n2": x["dims"].get("n2"), "n3": x["dims"].get("n3")}
-        if "n2" in x and "n3" in x:
-            return {"n2": x["n2"], "n3": x["n3"]}
-    return None
+    def _as_dims(x):
+        if isinstance(x, dict):
+            if "dims" in x and isinstance(x["dims"], dict):
+                return {"n2": x["dims"].get("n2"), "n3": x["dims"].get("n3")}
+            if "n2" in x and "n3" in x:
+                return {"n2": x["n2"], "n3": x["n3"]}
+        return None
 
-dims = _as_dims(strict) or _as_dims(auto)
+    # dims from strict/auto if available
+    dims = _as_dims(strict) or _as_dims(auto)
 
-def _stamp(obj, policy=None):
-    o = dict(obj or {})
-    if policy and "policy" not in o:
-        o["policy"] = policy
-    o.setdefault("fixture_label", fixture_label)
-    o.setdefault("snapshot_id", snap_id)
-    o.setdefault("sig8", sig8)
-    o.setdefault("written_at_utc", int(time.time()))
-    return o
+    def _stamp(obj, policy=None):
+        o = dict(obj or {})
+        if policy and "policy" not in o:
+            o["policy"] = policy
+        o.setdefault("fixture_label", fixture_label)
+        o.setdefault("snapshot_id", snap_id)
+        o.setdefault("sig8", sig8)
+        o.setdefault("written_at_utc", int(time.time()))
+        return o
 
-bdir  = _co_bundle_dir(district_id, fixture_label, sig8)
-names = {
-    "strict":         f"overlap__{district_id}__strict__{sig8}.json",
-    "projected_auto": f"overlap__{district_id}__projected_columns_k_3_auto__{sig8}.json",
-    "ab_auto":        f"ab_compare__strict_vs_projected_auto__{sig8}.json",
-    "freezer":        f"projector_freezer__{district_id}__{sig8}.json",
-    "projected_file": f"overlap__{district_id}__projected_columns_k_3_file__{sig8}.json",
-    "ab_file":        f"ab_compare__projected_columns_k_3_file__{sig8}.json",
-}
+    bdir = _co_bundle_dir(district_id, fixture_label, sig8)
+    names = {
+        "strict":         f"overlap__{district_id}__strict__{sig8}.json",
+        "projected_auto": f"overlap__{district_id}__projected_columns_k_3_auto__{sig8}.json",
+        "ab_auto":        f"ab_compare__strict_vs_projected_auto__{sig8}.json",
+        "freezer":        f"projector_freezer__{district_id}__{sig8}.json",
+        "projected_file": f"overlap__{district_id}__projected_columns_k_3_file__{sig8}.json",
+        "ab_file":        f"ab_compare__projected_columns_k_3_file__{sig8}.json",
+    }
 
-# Write certs exactly as produced by the compute pass (no forcing)
-_co_write_json(bdir / names["strict"],         _stamp(strict,         "strict"))
-_co_write_json(bdir / names["projected_auto"], _stamp(auto,           "projected(columns@k=3,auto)"))
-_co_write_json(bdir / names["ab_auto"],        _stamp(ab_auto,        "strict__VS__projected(columns@k=3,auto)"))
-_co_write_json(bdir / names["freezer"],        _stamp(frz_info,       "projector_freezer"))
-_co_write_json(bdir / names["projected_file"], _stamp(pfile,          "projected(columns@k=3,file)"))
-_co_write_json(bdir / names["ab_file"],        _stamp(ab_file,        "projected(columns@k=3,file)__A/B"))
+    # Write certs exactly as produced by the compute pass (no forcing)
+    _co_write_json(bdir / names["strict"],         _stamp(strict,         "strict"))
+    _co_write_json(bdir / names["projected_auto"], _stamp(auto,           "projected(columns@k=3,auto)"))
+    _co_write_json(bdir / names["ab_auto"],        _stamp(ab_auto,        "strict__VS__projected(columns@k=3,auto)"))
+    _co_write_json(bdir / names["freezer"],        _stamp(frz_info,       "projector_freezer"))
+    _co_write_json(bdir / names["projected_file"], _stamp(pfile,          "projected(columns@k=3,file)"))
+    _co_write_json(bdir / names["ab_file"],        _stamp(ab_file,        "projected(columns@k=3,file)__A/B"))
 
-# Presence + hashes (honest: hash what exists)
-present_keys = []
-sizes, hashes = {}, {}
-for key, fname in names.items():
-    fp = bdir / fname
-    if fp.exists():
-        present_keys.append(key)
-        data = fp.read_bytes()
-        sizes[fname] = len(data)
-        hashes[fname] = _hashlib.sha256(data).hexdigest()
+    # Presence + hashes (hash what actually landed on disk)
+    present_keys = []
+    sizes, hashes = {}, {}
+    for key, fname in names.items():
+        fp = bdir / fname
+        if fp.exists():
+            present_keys.append(key)
+            data = fp.read_bytes()
+            sizes[fname] = len(data)
+            hashes[fname] = _hashlib.sha256(data).hexdigest()
 
-presence_mask_hex = f"{sum(1 << i for i, k in enumerate(['strict','projected_auto','ab_auto','freezer','projected_file','ab_file']) if k in present_keys):02x}"
-core_written = len(present_keys)
+    # fixed slot order for mask: [strict, projected_auto, ab_auto, freezer, projected_file, ab_file]
+    slot_order = ['strict','projected_auto','ab_auto','freezer','projected_file','ab_file']
+    presence_mask_hex = f"{sum(1 << i for i, k in enumerate(slot_order) if k in present_keys):02x}"
+    core_written = len(present_keys)
 
-bundle = {
-    "schema": "bundle.v2",
-    "district_id": district_id,                 # <-- correct provenance
-    "fixture_label": fixture_label,
-    "sig8": sig8,
-    "filenames": [names[k] for k in ("strict","projected_auto","ab_auto","freezer","projected_file","ab_file")],
-    "presence_mask_hex": presence_mask_hex,
-    "core_counts": {"written": core_written},
-    "sizes": sizes,
-    "hashes": hashes,
-    "written_at_utc": int(time.time()),
-}
-if dims: bundle["dims"] = dims
-# (Optional echo) o.setdefault("fixtures", fixtures) — drop if you want smaller bundles
-# bundle["fixtures"] = fixtures
-_co_write_json(bdir / "bundle.json", bundle)
+    bundle = {
+        "schema": "bundle.v2",
+        "district_id": district_id,                 # correct provenance
+        "fixture_label": fixture_label,
+        "sig8": sig8,
+        "filenames": [names[k] for k in slot_order],
+        "presence_mask_hex": presence_mask_hex,
+        "core_counts": {"written": core_written},
+        "sizes": sizes,
+        "hashes": hashes,
+        "written_at_utc": int(time.time()),
+    }
+    if dims: bundle["dims"] = dims
+    _co_write_json(bdir / "bundle.json", bundle)
 
-# Build absolute SSOT paths from fixture_label (D*/H**/C***)
-try:
-    repo_root = _REPO_DIR
-except Exception:
-    repo_root = _Path(__file__).resolve().parents[1]
-inputs_root = repo_root / "app" / "inputs"
+    # Build absolute SSOT paths from fixture_label (D*/H**/C***)
+    try:
+        repo_root = _REPO_DIR
+    except Exception:
+        repo_root = _Path(__file__).resolve().parents[1]
+    inputs_root = repo_root / "app" / "inputs"
 
-mD = _re.search(r"(?:^|_)D(\d+)", fixture_label); D_tag = f"D{mD.group(1)}" if mD else None
-mH = _re.search(r"(?:^|_)H(\d+)", fixture_label); H_tag = f"H{mH.group(1)}" if mH else None
-mC = _re.search(r"(?:^|_)C(\d+)", fixture_label); C_tag = f"C{mC.group(1)}" if mC else None
+    mD = _re.search(r"(?:^|_)D(\d+)", fixture_label); D_tag = f"D{mD.group(1)}" if mD else None
+    mH = _re.search(r"(?:^|_)H(\d+)", fixture_label); H_tag = f"H{mH.group(1)}" if mH else None
+    mC = _re.search(r"(?:^|_)C(\d+)", fixture_label); C_tag = f"C{mC.group(1)}" if mC else None
 
-P = {
-    "B": str((inputs_root / "B" / f"{D_tag}.json").resolve()) if D_tag else None,
-    "C": str((inputs_root / "C" / f"{C_tag}.json").resolve()) if C_tag else None,
-    "H": str((inputs_root / "H" / f"{H_tag}.json").resolve()) if H_tag else None,
-    "U": str((inputs_root / "U.json").resolve()),
-}
+    P = {
+        "B": str((inputs_root / "B" / f"{D_tag}.json").resolve()) if D_tag else None,
+        "C": str((inputs_root / "C" / f"{C_tag}.json").resolve()) if C_tag else None,
+        "H": str((inputs_root / "H" / f"{H_tag}.json").resolve()) if H_tag else None,
+        "U": str((inputs_root / "U.json").resolve()),
+    }
 
-# loop_receipt.v2 (integer timestamp, honest core count, absolute paths)
-receipt = {
-    "schema": "loop_receipt.v2",
-    "snapshot_id": snap_id,
-    "run_id": str(uuid.uuid4()),
-    "district_id": district_id,
-    "fixture_label": fixture_label,
-    "sig8": sig8,
-    "bundle_dir": str(bdir.resolve()),
-    "paths": P,
-    "core_counts": {"written": core_written},
-    "timestamps": {"receipt_written_at": int(time.time())},
-}
-if dims: receipt["dims"] = dims
-_co_write_json(bdir / f"loop_receipt__{fixture_label}.json", receipt)
+    # loop_receipt.v2 (integer timestamp, honest core count, absolute paths)
+    receipt = {
+        "schema": "loop_receipt.v2",
+        "snapshot_id": snap_id,
+        "run_id": str(uuid.uuid4()),
+        "district_id": district_id,
+        "fixture_label": fixture_label,
+        "sig8": sig8,
+        "bundle_dir": str(bdir.resolve()),
+        "paths": P,
+        "core_counts": {"written": core_written},
+        "timestamps": {"receipt_written_at": int(time.time())},
+    }
+    if dims: receipt["dims"] = dims
+    _co_write_json(bdir / f"loop_receipt__{fixture_label}.json", receipt)
 
-return True, f"v2 compute-only 1× bundle → {bdir}", str(bdir)
-# ---------------------------------------------------------------------------
+    try:
+        import streamlit as _st
+        _st.session_state["last_bundle_dir"] = str(bdir)
+    except Exception:
+        pass
+
+    return True, f"v2 compute-only 1× bundle → {bdir}", str(bdir)
+    # ---------------------------------------------------------------------------
+
 
     
 
