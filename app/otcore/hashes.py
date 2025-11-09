@@ -1,5 +1,17 @@
 from __future__ import annotations
 from typing import Iterable, Tuple, Any
+
+# Robust import: works even if io.py doesn’t define dump_canonical yet.
+try:
+    from .io import dump_canonical  # type: ignore[attr-defined]
+except Exception:
+    import json as _json
+    def dump_canonical(obj) -> str:
+        return _json.dumps(obj, separators=(",", ":"), sort_keys=True, ensure_ascii=True)
+
+import hashlib, datetime, os
+import json
+from typing import Iterable, Tuple, Any
 from .io import dump_canonical
 import hashlib, datetime, os
 import json
