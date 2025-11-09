@@ -6898,3 +6898,116 @@ except Exception:
     pass
 
 # ====================== END V2 COMPUTE-ONLY (HARD) ======================
+# --- V2 CORE (64×) — one press → receipts → manifest → (optional) suite/hist
+_st.subheader("V2 — 64× → Receipts → Manifest → Suite/Histograms")
+
+from pathlib import Path as _Path
+import json as _json
+import uuid as _uuid
+
+def _repo_root():
+    try:
+        return _REPO_DIR
+    except Exception:
+        return _Path(__file__).resolve().parents[1]
+
+snapshot_id = _st.text_input(
+    "Snapshot id",
+    value=_time.strftime("%Y%m%d-%H%M%S", _time.localtime()),
+    key="v2_core_snapshot",
+)
+run_suite_after = _st.checkbox("Run suite + histograms after manifest regen", value=False, key="v2_core_suite")
+
+if _st.button("Run V2 core (64× → receipts → manifest → optional suite/hist)", key="btn_v2_core_flow"):
+    repo_root   = _repo_root()
+    inputs_root = repo_root / "app" / "inputs"
+    manifests_dir = _MANIFESTS_DIR if '_MANIFESTS_DIR' in globals() else (repo_root / "logs" / "manifests")
+    manifests_dir.mkdir(parents=True, exist_ok=True)
+
+    B_dir, H_dir, C_dir = inputs_root / "B", inputs_root / "H", inputs_root / "C"
+    U_path = (inputs_root / "U.json").resolve()
+
+    # basic preflight
+    if not (B_dir.exists() and H_dir.exists() and C_dir.exists() and U_path.exists()):
+        _st.error(f"Missing inputs dir/file. B:{B_dir.exists()} H:{H_dir.exists()} C:{C_dir.exists()} U:{U_path.exists()}")
+    else:
+        # discover D from B/*.json; hard-code H (4) and C (16) for 64×
+        D_tags = sorted(p.stem for p in B_dir.glob("D*.json"))
+        H_tags = ["H00", "H01", "H10", "H11"]
+        C_tags = [f"C{n:04b}" for n in range(16)]  # C0000..C1111
+
+        rows = []
+        for D in D_tags:
+            B_path = (B_dir / f"{D}.json").resolve()
+            if not B_path.exists():
+                continue
+            for Ht in H_tags:
+                Hp = (H_dir / f"{Ht}.json").resolve()
+                if not Hp.exists():
+                    continue
+                for Ct in C_tags:
+                    Cp = (C_dir / f"{Ct}.json").resolve()
+                    if not Cp.exists():
+                        continue
+                    fid = f"{D}_{Ht}_{Ct}"
+                    rows.append({
+                        "fixture_label": fid,
+                        "paths": {
+                            "B": str(B_path),
+                            "C": str(Cp),
+                            "H": str(Hp),
+                            "U": str(U_path),
+                        },
+                    })
+
+        if not rows:
+            _st.error("No rows produced — check that the 64× fixtures exist on disk.")
+        else:
+            # 1) write a bootstrap manifest with absolute paths
+            man_boot = manifests_dir / "manifest_bootstrap__ALL.jsonl"
+            man_boot.write_text("\n".join(_json.dumps(r, separators=(",", ":")) for r in rows) + "\n", encoding="utf-8")
+            _st.success(f"Bootstrap manifest written with {len(rows)} rows → {man_boot}")
+
+            # 2) run 64× to emit receipts
+            snap = snapshot_id or str(_uuid.uuid4())
+            ok1, msg1, cnt1 = run_suite_from_manifest(str(man_boot), snap)  # MUST return (ok,msg,count)
+            (_st.success if ok1 else _st.warning)(f"Bootstrap run: {msg1} · rows={cnt1}")
+
+            # 3) regenerate the REAL manifest from receipts (v2 invariant)
+            try:
+                regen = _v2_regen_manifest_from_receipts()
+                # tolerate either (ok, path, n) or (n, path)
+                if isinstance(regen, tuple) and len(regen) == 3:
+                    ok2, path2, n2 = regen
+                elif isinstance(regen, tuple) and len(regen) == 2:
+                    n2, path2 = regen
+                    ok2 = n2 > 0
+                else:
+                    ok2, path2, n2 = True, manifests_dir / "manifest_full_scope.jsonl", 0
+                (_st.success if ok2 else _st.warning)(f"Manifest regenerated with {n2} rows → {path2}")
+            except Exception as e:
+                _st.warning(f"Manifest regen failed: {e}")
+                ok2, path2, n2 = False, manifests_dir / "manifest_full_scope.jsonl", 0
+
+            # 4) optional: run suite from REAL manifest + histograms
+            if run_suite_after and ok2:
+                real_man = manifests_dir / "manifest_full_scope.jsonl"
+                if not real_man.exists():
+                    _st.warning(f"Real manifest not found: {real_man}")
+                else:
+                    snap2 = snapshot_id or str(_uuid.uuid4())
+                    ok3, msg3, cnt3 = run_suite_from_manifest(str(real_man), snap2)
+                    (_st.success if ok3 else _st.warning)(f"Suite run: {msg3} · rows={cnt3}")
+                    try:
+                        okh, msgh, outp = _v2_build_histograms_from_coverage()
+                        (_st.success if okh else _st.warning)(msgh)
+                        if okh and outp and outp.exists():
+                            _st.download_button(
+                                "Download histograms_v2.json",
+                                data=outp.read_bytes(),
+                                file_name="histograms_v2.json",
+                                mime="application/json",
+                                key="btn_v2_download_hist_v2core",
+                            )
+                    except Exception as e:
+                        _st.warning(f"Histogram build failed: {e}")
