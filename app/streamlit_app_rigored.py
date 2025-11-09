@@ -6485,6 +6485,39 @@ def _v2_build_histograms_from_coverage(cov_path: _Path | None = None) -> tuple[b
     return True, f"Wrote {outp}", outp
 
 
+def _v2_pack_suite_fat_zip(snapshot_id: str):
+    """
+    Create a single ZIP with *all* per-bundle JSONs (6 certs + bundle + loop_receipt + sidecars).
+    Returns Path to the zip (or None).
+    """
+    from zipfile import ZipFile, ZIP_STORED
+    try:
+        root = _REPO_DIR
+    except Exception:
+        from pathlib import Path as _Path
+        root = _Path(__file__).resolve().parents[1]
+
+    reports_dir = root / "logs" / "reports"
+    reports_dir.mkdir(parents=True, exist_ok=True)
+    outp = reports_dir / f"suite_fat__{snapshot_id}.zip"
+
+    certs_dir = root / "logs" / "certs"
+    if not certs_dir.exists():
+        return None
+
+    try:
+        with ZipFile(outp, "w", compression=ZIP_STORED) as z:
+            for bj in certs_dir.rglob("bundle.json"):
+                bdir = bj.parent
+                for p in sorted(bdir.glob("*.json")):
+                    # Keep simple: include all JSONs in each bundle dir
+                    try:
+                        z.write(p, arcname=str(p.relative_to(root)))
+                    except Exception:
+                        pass
+        return outp
+    except Exception:
+        return None
 
 
 # ====================== V2 COMPUTE-ONLY (HARD) — single source of truth ======================
@@ -6779,17 +6812,50 @@ def _svr_run_once_computeonly_hard(ss=None):
     ab_auto_payload = _mk_ab("strict__VS__projected(columns@k=3,auto)", strict_eq, auto_eq)
     ab_file_payload = _mk_ab("strict__VS__projected(columns@k=3,file)", strict_eq, file_eq)
 
-        # --- Stamp + hard writes
-    def _stamp(obj):
+        # --- WRITE CORE CERT CIRCUIT (FAT mode) -------------------------------------
+    def _as_dims(x):
+        if isinstance(x, dict):
+            if "dims" in x: return x["dims"]
+            if "n2" in x and "n3" in x: return {"n2": x["n2"], "n3": x["n3"]}
+        return None
+    
+    dims = _as_dims(strict_payload) or _as_dims(auto_payload)
+    
+    # Normalize NA payloads for FILE family if missing (we still write them in FAT mode)
+    if not file_payload:
+        file_payload = {
+            "schema": "overlap.v2",
+            "policy": "projected(columns@k=3,file)",
+            "na_reason": "FILE_MISSING",
+            "district_id": district_id,
+            "fixture_label": fixture_label,
+            "sig8": sig8,
+        }
+        if dims: file_payload["dims"] = dims
+    
+    if not ab_file_payload:
+        ab_file_payload = {
+            "schema": "ab_compare.v2",
+            "policy": "projected(columns@k=3,file)",
+            "na_reason": "FILE_MISSING",
+            "district_id": district_id,
+            "fixture_label": fixture_label,
+            "sig8": sig8,
+        }
+        if dims: ab_file_payload["dims"] = dims
+    
+    # Stamp helper (adds common provenance)
+    def _stamp(obj, policy=None):
         o = dict(obj or {})
-        o.setdefault("fixtures", fixtures)          # keep as provenance, but NOT used for SSOT paths
+        if policy and "policy" not in o:
+            o["policy"] = policy
+        o.setdefault("fixtures", fixtures)
         o.setdefault("fixture_label", fixture_label)
-        if snapshot_id:
-            o.setdefault("snapshot_id", snapshot_id)
+        if snapshot_id: o.setdefault("snapshot_id", snapshot_id)
         o.setdefault("sig8", sig8)
         o.setdefault("written_at_utc", int(_time.time()))
         return o
-
+    
     bdir = _hard_bundle_dir(district_id, fixture_label, sig8)
     names = {
         "strict":         f"overlap__{district_id}__strict__{sig8}.json",
@@ -6799,70 +6865,48 @@ def _svr_run_once_computeonly_hard(ss=None):
         "projected_file": f"overlap__{district_id}__projected_columns_k_3_file__{sig8}.json",
         "ab_file":        f"ab_compare__projected_columns_k_3_file__{sig8}.json",
     }
-    _hard_co_write_json(bdir / names["strict"],         _stamp(strict_payload))
-    _hard_co_write_json(bdir / names["projected_auto"], _stamp(auto_payload))
-    _hard_co_write_json(bdir / names["ab_auto"],        _stamp(ab_auto_payload))
-    _hard_co_write_json(bdir / names["freezer"],        _stamp(freezer_payload))
-    _hard_co_write_json(bdir / names["projected_file"], _stamp(file_payload))
-    _hard_co_write_json(bdir / names["ab_file"],        _stamp(ab_file_payload))
-
+    
+    # Write all six (posed + unposed families)
+    _hard_co_write_json(bdir / names["strict"],         _stamp(strict_payload, "strict"))
+    _hard_co_write_json(bdir / names["projected_auto"], _stamp(auto_payload, "projected(columns@k=3,auto)"))
+    _hard_co_write_json(bdir / names["ab_auto"],        _stamp(ab_auto_payload, "strict__VS__projected(columns@k=3,auto)"))
+    _hard_co_write_json(bdir / names["freezer"],        _stamp(freezer_payload, "projector_freezer"))
+    _hard_co_write_json(bdir / names["projected_file"], _stamp(file_payload, "projected(columns@k=3,file)"))
+    _hard_co_write_json(bdir / names["ab_file"],        _stamp(ab_file_payload, "projected(columns@k=3,file)__A/B"))
+    
+    # Bundle index (surface lanes if present from AUTO)
+    lanes = {}
+    try:
+        if isinstance(auto_payload, dict):
+            lsig = auto_payload.get("lanes_sig256") or auto_payload.get("lanes_sig8")
+            lpop = (auto_payload.get("metrics") or {}).get("lanes_popcount")
+            if lsig or lpop is not None:
+                lanes = {"sig8": (lsig[-8:] if isinstance(lsig, str) else None), "popcount": lpop}
+    except Exception:
+        pass
+    
     bundle = {
+        "schema": "bundle.v2",
         "district_id": district_id,
         "fixture_label": fixture_label,
-        "fixtures": fixtures,  # provenance only
+        "fixtures": fixtures,   # SSOT-ish provenance echo
         "sig8": sig8,
         "filenames": [names[k] for k in ("strict","projected_auto","ab_auto","freezer","projected_file","ab_file")],
+        "lanes": lanes,
         "core_counts": {"written": 6},
         "written_at_utc": int(_time.time()),
     }
     _hard_co_write_json(bdir / "bundle.json", bundle)
-
-    # --- loop_receipt.v2 with canonical SSOT paths (no uploads, no hashed D-id)
-    from pathlib import Path as _Path
-    import re as _re
-
-    repo_root   = _Path(__file__).resolve().parents[1]   # /mount/src/d4-final-solver
-    inputs_root = repo_root / "app" / "inputs"
-
-    # fixture_label like "D3_H10_C111" → D_tag, H_tag, C_tag
-    _mD = _re.search(r"(?:^|_)D(\d+)", fixture_label or "")
-    _mH = _re.search(r"(?:^|_)H(\d+)", fixture_label or "")
-    _mC = _re.search(r"(?:^|_)C(\d+)", fixture_label or "")
-
-    D_tag = f"D{_mD.group(1)}" if _mD else (fixture_label or "").split("_")[0]
-    H_tag = f"H{_mH.group(1)}" if _mH else None
-    C_tag = f"C{_mC.group(1)}" if _mC else None
-
-    P = {
-        "B": str((inputs_root / "B" / f"{D_tag}.json").resolve()),            # <-- FIXED: B from D_tag
-        "C": str((inputs_root / "C" / f"{C_tag}.json").resolve()) if C_tag else None,
-        "H": str((inputs_root / "H" / f"{H_tag}.json").resolve()) if H_tag else None,
-        "U": str((inputs_root / "U.json").resolve()),
-    }
-
-    # dims (optional but helpful)
-    dims = None
-    if isinstance(strict_payload, dict):
-        if "dims" in strict_payload:
-            dims = strict_payload["dims"]
-        elif ("n2" in strict_payload) and ("n3" in strict_payload):
-            dims = {"n2": strict_payload["n2"], "n3": strict_payload["n3"]}
-
-    loop_receipt = {
-        "schema": "loop_receipt.v2",
-        "run_id": str(_uuid.uuid4()),
-        "district_id": district_id,                # keep the hashed district_id for provenance
-        "fixture_label": fixture_label,            # but paths derive from D_tag above
+    
+    # Loop receipt v2, anchored to SSOT (paths will be filled by the helper)
+    _v2_write_loop_receipt_for_bundle(bdir, extra={
+        "district_id": district_id,
+        "fixture_label": fixture_label,
         "sig8": sig8,
-        "bundle_dir": str(bdir.resolve()),
-        "paths": P,
-        "core_counts": {"written": 6},
-        "timestamps": {"receipt_written_at": int(_time.time())},
-    }
-    if dims:
-        loop_receipt["dims"] = dims
-
-    _hard_co_write_json(bdir / f"loop_receipt__{fixture_label}.json", loop_receipt)
+        "dims": dims,
+    })
+    # ---------------------------------------------------------------------------
+    
 
 
 
@@ -7060,7 +7104,11 @@ snapshot_id = _st.text_input(
     value=_time.strftime("%Y%m%d-%H%M%S", _time.localtime()),
     key="v2_core_snapshot",
 )
-run_suite_after = _st.checkbox("Run suite + histograms after manifest regen", value=False, key="v2_core_suite")
+run_suite_after = _st.checkbox(
+    "Run suite + histograms after manifest regen",
+    value=False,
+    key="v2_core_suite",
+)
 
 if _st.button("Run V2 core (64× → receipts → manifest → optional suite/hist)", key="btn_v2_core_flow"):
     repo_root   = _repo_root()
@@ -7075,10 +7123,10 @@ if _st.button("Run V2 core (64× → receipts → manifest → optional suite/hi
     if not (B_dir.exists() and H_dir.exists() and C_dir.exists() and U_path.exists()):
         _st.error(f"Missing inputs dir/file. B:{B_dir.exists()} H:{H_dir.exists()} C:{C_dir.exists()} U:{U_path.exists()}")
     else:
-        # discover D from B/*.json; hard-code H (4) and C (16) for 64×
+        # discover D from B/*.json; hard-code H (4) and C (8) for 64×
         D_tags = sorted(p.stem for p in B_dir.glob("D*.json"))
         H_tags = ["H00", "H01", "H10", "H11"]
-        C_tags = [f"C{n:03b}" for n in range(8)]  # C000..C111  ← this fixes it
+        C_tags = [f"C{n:03b}" for n in range(8)]  # C000..C111 (3-bit → 8)
 
         rows = []
         for D in D_tags:
@@ -7109,12 +7157,15 @@ if _st.button("Run V2 core (64× → receipts → manifest → optional suite/hi
         else:
             # 1) write a bootstrap manifest with absolute paths
             man_boot = manifests_dir / "manifest_bootstrap__ALL.jsonl"
-            man_boot.write_text("\n".join(_json.dumps(r, separators=(",", ":")) for r in rows) + "\n", encoding="utf-8")
+            man_boot.write_text(
+                "\n".join(_json.dumps(r, separators=(",", ":")) for r in rows) + "\n",
+                encoding="utf-8",
+            )
             _st.success(f"Bootstrap manifest written with {len(rows)} rows → {man_boot}")
 
             # 2) run 64× to emit receipts
             snap = snapshot_id or str(_uuid.uuid4())
-            ok1, msg1, cnt1 = run_suite_from_manifest(str(man_boot), snap)  # MUST return (ok,msg,count)
+            ok1, msg1, cnt1 = run_suite_from_manifest(str(man_boot), snap)  # returns (ok,msg,count)
             (_st.success if ok1 else _st.warning)(f"Bootstrap run: {msg1} · rows={cnt1}")
 
             # 3) regenerate the REAL manifest from receipts (v2 invariant)
@@ -7132,7 +7183,8 @@ if _st.button("Run V2 core (64× → receipts → manifest → optional suite/hi
             except Exception as e:
                 _st.warning(f"Manifest regen failed: {e}")
                 ok2, path2, n2 = False, manifests_dir / "manifest_full_scope.jsonl", 0
-            # Offer downloads for manifest + coverage (optional but handy)
+
+            # offer downloads for manifest + coverage (handy even if you skip suite)
             try:
                 real_manifest = manifests_dir / "manifest_full_scope.jsonl"
                 if real_manifest.exists():
@@ -7155,7 +7207,7 @@ if _st.button("Run V2 core (64× → receipts → manifest → optional suite/hi
             except Exception:
                 pass
 
-            # 4) optional: run suite from REAL manifest + histograms
+            # 4) optional: run suite from REAL manifest + histograms + FAT zip + rollup + coverage sanity
             if run_suite_after and ok2:
                 real_man = manifests_dir / "manifest_full_scope.jsonl"
                 if not real_man.exists():
@@ -7164,6 +7216,8 @@ if _st.button("Run V2 core (64× → receipts → manifest → optional suite/hi
                     snap2 = snapshot_id or str(_uuid.uuid4())
                     ok3, msg3, cnt3 = run_suite_from_manifest(str(real_man), snap2)
                     (_st.success if ok3 else _st.warning)(f"Suite run: {msg3} · rows={cnt3}")
+
+                    # Histograms
                     try:
                         okh, msgh, outp = _v2_build_histograms_from_coverage()
                         (_st.success if okh else _st.warning)(msgh)
@@ -7177,14 +7231,45 @@ if _st.button("Run V2 core (64× → receipts → manifest → optional suite/hi
                             )
                     except Exception as e:
                         _st.warning(f"Histogram build failed: {e}")
-                        # After suite run (ok3,msg3,cnt3) — tiny coverage sanity
-              # After suite run (ok3,msg3,cnt3) — tiny coverage sanity
-            try:
-                parsed = _v2_coverage_count_for_snapshot(snap2)
-                if parsed < cnt3:
-                    _st.warning(f"Coverage parsed {parsed}/{cnt3} rows for snapshot {snap2} (expected ≥ executed).")
-                else:
-                    _st.info(f"Coverage parsed rows: {parsed} (snapshot {snap2})")
-            except Exception:
-                pass
+
+                    # FAT suite bundle (all certs + receipts + sidecars)
+                    try:
+                        zip_path = _v2_pack_suite_fat_zip(snap2)
+                        if zip_path and zip_path.exists():
+                            _st.download_button(
+                                "Download FAT suite bundle (all certs/receipts)",
+                                data=zip_path.read_bytes(),
+                                file_name=zip_path.name,
+                                mime="application/zip",
+                                key="btn_v2_download_suite_fat",
+                            )
+                    except Exception as e:
+                        _st.warning(f"FAT bundle zip failed: {e}")
+
+                    # Optional: coverage rollup CSV download
+                    try:
+                        g = globals()
+                        if "_coverage_rollup_write_csv" in g:
+                            path_csv = g["_coverage_rollup_write_csv"]()
+                            if path_csv and path_csv.exists():
+                                _st.download_button(
+                                    "Download coverage_rollup.csv",
+                                    data=path_csv.read_bytes(),
+                                    file_name="coverage_rollup.csv",
+                                    mime="text/csv",
+                                    key="btn_v2_download_cov_rollup",
+                                )
+                    except Exception:
+                        pass
+
+                    # Coverage sanity for this snapshot (expect ≥ executed)
+                    try:
+                        parsed = _v2_coverage_count_for_snapshot(snap2)
+                        if parsed < cnt3:
+                            _st.warning(f"Coverage parsed {parsed}/{cnt3} rows for snapshot {snap2} (expected ≥ executed).")
+                        else:
+                            _st.info(f"Coverage parsed rows: {parsed} (snapshot {snap2})")
+                    except Exception:
+                        pass
+
                        
