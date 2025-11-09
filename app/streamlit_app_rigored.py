@@ -133,31 +133,29 @@ def _v2_find_expected_files(bdir: _VPath):
 def _coverage_rollup_write_csv(snapshot_id: str | None = None):
     """
     Build C1 rollup over logs/reports/coverage.jsonl.
-    If snapshot_id is provided, filter to that snapshot only (v2: we pass the current one).
-    Aggregates:
-      prox_label,count,mean_sel_mismatch_rate,mean_offrow_mismatch_rate,mean_ker_mismatch_rate,mean_ctr_rate
-    Returns Path to CSV (or None).
+    If snapshot_id is provided, filter to that snapshot only (v2 uses the __real one).
+    Writes logs/reports/coverage_rollup.csv and returns its Path (or None if no coverage file).
     """
     from pathlib import Path as _Path
-    import json as _json
-    import math as _math
-    import csv as _csv
-    import re as _re
+    import json as _json, csv as _csv, re as _re
+    from collections import defaultdict
 
+    # locate files
     try:
         root = _REPO_DIR
     except Exception:
         root = _Path(__file__).resolve().parents[1]
     rep_dir = root / "logs" / "reports"
     cov_path = rep_dir / "coverage.jsonl"
-    out_csv = rep_dir / "coverage_rollup.csv"
+    out_csv  = rep_dir / "coverage_rollup.csv"
     rep_dir.mkdir(parents=True, exist_ok=True)
 
     if not cov_path.exists():
         return None
 
     def _coerce_f(x):
-        if x is None: return None
+        if x is None:
+            return None
         try:
             return float(x)
         except Exception:
@@ -175,74 +173,70 @@ def _coverage_rollup_write_csv(snapshot_id: str | None = None):
     with cov_path.open("r", encoding="utf-8") as f:
         for line in f:
             line = line.strip()
-            if not line: continue
+            if not line:
+                continue
             try:
                 j = _json.loads(line)
             except Exception:
                 continue
             if snapshot_id and j.get("snapshot_id") != snapshot_id:
                 continue
+
             fid = j.get("fixture_label")
+
+            # map fields (v2 preferred → legacy fallbacks)
             sel_raw = j.get("mismatch_sel")
             if sel_raw is None: sel_raw = j.get("sel_mismatch_rate")
             off_raw = j.get("mismatch_offrow")
             if off_raw is None: off_raw = j.get("offrow_mismatch_rate")
             ker_raw = j.get("mismatch_ker")
             if ker_raw is None: ker_raw = j.get("ker_mismatch_rate")
-            
+
             sel = _coerce_f(sel_raw)
             off = _coerce_f(off_raw)
             ker = _coerce_f(ker_raw)
-            # ctr: in v2-min (no AB verdicts), treat any mismatch>0 as contradiction
+
+            # contradiction rate: trust known verdicts; else fallback to mismatches
             vcls = (j.get("verdict_class") or "").upper().strip()
             ctr = None
-            # only trust known stable classes; otherwise leave None and fallback
             if vcls in ("GREEN", "RED_BOTH", "KER-FILTERED", "KER-EXPOSED"):
                 ctr = 0.0 if vcls == "GREEN" else 1.0
-            
             if ctr is None:
-                sel_raw = j.get("mismatch_sel")
-                if sel_raw is None: sel_raw = j.get("sel_mismatch_rate")
-                off_raw = j.get("mismatch_offrow")
-                if off_raw is None: off_raw = j.get("offrow_mismatch_rate")
-                ker_raw = j.get("mismatch_ker")
-                if ker_raw is None: ker_raw = j.get("ker_mismatch_rate")
-            
-                def _coerce_f(x):
-                    try: return float(x)
-                    except Exception: return 0.0
-                sel = _coerce_f(sel_raw)
-                off = _coerce_f(off_raw)
-                ker = _coerce_f(ker_raw)
-                ctr = 1.0 if (sel > 0 or off > 0 or ker > 0) else 0.0
-            
+                ctr = 1.0 if ((sel or 0.0) > 0.0 or (off or 0.0) > 0.0 or (ker or 0.0) > 0.0) else 0.0
 
-    # aggregate by prox_label + an ALL row
-    from collections import defaultdict
-    agg = defaultdict(lambda: {"count":0, "sel_sum":0.0, "sel_n":0, "off_sum":0.0, "off_n":0,
-                               "ker_sum":0.0, "ker_n":0, "ctr_sum":0.0, "ctr_n":0})
+            rows.append({
+                "prox_label": _prox_label_from_fixture(fid),
+                "sel": sel, "off": off, "ker": ker, "ctr": ctr,
+            })
+
+    # aggregate by prox_label + ALL
+    agg = defaultdict(lambda: {"count":0, "sel_sum":0.0, "sel_n":0,
+                               "off_sum":0.0, "off_n":0, "ker_sum":0.0, "ker_n":0,
+                               "ctr_sum":0.0, "ctr_n":0})
 
     for r in rows:
         for key in (r["prox_label"], "ALL"):
             a = agg[key]
             a["count"] += 1
-            if r["sel"] is not None:
-                a["sel_sum"] += r["sel"]; a["sel_n"] += 1
-            if r["off"] is not None:
-                a["off_sum"] += r["off"]; a["off_n"] += 1
-            if r["ker"] is not None:
-                a["ker_sum"] += r["ker"]; a["ker_n"] += 1
-            if r["ctr"] is not None:
-                a["ctr_sum"] += r["ctr"]; a["ctr_n"] += 1
+            if r["sel"] is not None: a["sel_sum"] += r["sel"]; a["sel_n"] += 1
+            if r["off"] is not None: a["off_sum"] += r["off"]; a["off_n"] += 1
+            if r["ker"] is not None: a["ker_sum"] += r["ker"]; a["ker_n"] += 1
+            if r["ctr"] is not None: a["ctr_sum"] += r["ctr"]; a["ctr_n"] += 1
+
+    # ensure an ALL row exists even if no rows matched (so the chip can still render)
+    if "ALL" not in agg:
+        _ = agg["ALL"]
 
     # write csv
     with out_csv.open("w", newline="", encoding="utf-8") as f:
         w = _csv.writer(f)
-        w.writerow(["prox_label","count","mean_sel_mismatch_rate","mean_offrow_mismatch_rate","mean_ker_mismatch_rate","mean_ctr_rate"])
+        w.writerow([
+            "prox_label","count",
+            "mean_sel_mismatch_rate","mean_offrow_mismatch_rate","mean_ker_mismatch_rate","mean_ctr_rate"
+        ])
+        def _avg(sum_v, n): return (sum_v / n) if n > 0 else ""
         for label in sorted(agg.keys(), key=lambda x: (x!="ALL", x)):
             a = agg[label]
-            def _avg(sum_v, n):
-                return (sum_v / n) if n > 0 else ""
             w.writerow([
                 label, a["count"],
                 _avg(a["sel_sum"], a["sel_n"]),
@@ -252,6 +246,7 @@ def _coverage_rollup_write_csv(snapshot_id: str | None = None):
             ])
 
     return out_csv
+
 
    
 # ---- v2 canonicalization (stable JSON for hashing) ----
