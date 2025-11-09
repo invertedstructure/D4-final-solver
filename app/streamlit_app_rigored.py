@@ -6934,7 +6934,7 @@ if _st.button("Run V2 core (64× → receipts → manifest → optional suite/hi
         # discover D from B/*.json; hard-code H (4) and C (16) for 64×
         D_tags = sorted(p.stem for p in B_dir.glob("D*.json"))
         H_tags = ["H00", "H01", "H10", "H11"]
-        C_tags = [f"C{n:04b}" for n in range(16)]  # C0000..C1111
+        C_tags = [f"C{n:03b}" for n in range(8)]  # C000..C111  ← this fixes it
 
         rows = []
         for D in D_tags:
