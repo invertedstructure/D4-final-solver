@@ -257,23 +257,41 @@ def _v2_bundle_index_rebuild(bdir: _VPath):
 
 def _v2_write_loop_receipt(bdir: _VPath, fixture_id: str, snapshot_id: str, bundle: dict):
     """
-    Back-compat shim: write the new v2 receipt (with SSOT paths) so
-    manifest regeneration will pick it up.
+    Back-compat shim: always write loop_receipt.v2 with SSOT-anchored absolute paths
+    so manifest regeneration ingests it.
     """
-    try:
-        extra = {
-            "fixture_label": fixture_id,
-            "district_id":   bundle.get("district_id"),
-            "sig8":          bundle.get("sig8"),
-            # dims are optional; include if your bundle carries them
-            "dims": bundle.get("dims") or {"n2": bundle.get("n2"), "n3": bundle.get("n3")},
-        }
-    except Exception:
-        extra = {"fixture_label": fixture_id}
+    from pathlib import Path as _Path
+    import streamlit as _st
 
-    ok, msg = _v2_write_loop_receipt_for_bundle(bdir, extra=extra)
-    # call site ignores the return; keep a harmless return for debugging
+    # Try to collect absolute SSOT paths from session or last-run stash
+    ss = getattr(_st, "session_state", {})
+    keymap = {"B":"uploaded_boundaries","C":"uploaded_cmap","H":"uploaded_H","U":"uploaded_shapes"}
+    P = {}
+    for k, sk in keymap.items():
+        v = (ss or {}).get(sk)
+        if v:
+            P[k] = str(_Path(v).resolve())
+
+    # Fallback to the compute-only stash if present
+    for k, v in (ss or {}).get("_last_inputs_paths", {}).items():
+        if k in ("B","C","H","U") and v and k not in P:
+            P[k] = str(_Path(v).resolve())
+
+    # Normalize keys (allow None if something is truly missing)
+    P = {k: P.get(k) for k in ("B","C","H","U")}
+
+    dims = bundle.get("dims") or {"n2": bundle.get("n2"), "n3": bundle.get("n3")}
+    extra = {
+        "district_id": bundle.get("district_id"),
+        "fixture_label": fixture_id,
+        "sig8": bundle.get("sig8"),
+        "dims": dims,
+        "paths": P,  # critical for manifest regen
+    }
+
+    ok, msg = _v2_write_loop_receipt_for_bundle(_Path(bdir), extra=extra)
     return {"ok": ok, "msg": msg}
+
 
 
 # Suite ZIP builder
@@ -6987,25 +7005,55 @@ def _svr_run_once_computeonly_hard(ss=None):
     _hard_co_write_json(bdir / names["projected_file"], _stamp(file_payload))
     _hard_co_write_json(bdir / names["ab_file"],        _stamp(ab_file_payload))
 
-    bundle = {
+       bundle = {
         "district_id": district_id,
         "fixture_label": fixture_label,
-        "fixtures": fixtures,
+        "fixtures": fixtures,  # keep for debugging / provenance
         "sig8": sig8,
         "filenames": [names[k] for k in ("strict","projected_auto","ab_auto","freezer","projected_file","ab_file")],
         "core_counts": {"written": 6},
         "written_at_utc": int(_time.time())
     }
     _hard_co_write_json(bdir / "bundle.json", bundle)
-    _hard_co_write_json(bdir / f"loop_receipt__{fixture_label}.json", {
-        "run_id": str(_uuid.uuid4()),
-        "district_id": district_id,
+
+    # --- NEW: write loop_receipt.v2 with absolute SSOT paths so manifest picks it up
+    from pathlib import Path as _Path
+
+    # Normalize the four canonical paths from `fixtures` → absolute
+    # `fixtures` should be a dict like {"B": "...", "C": "...", "H": "...", "U": "..."}
+    def _abs_or_none(p):
+        try:
+            return str(_Path(p).resolve()) if p else None
+        except Exception:
+            return None
+
+    P = {
+        "B": _abs_or_none((fixtures or {}).get("B")),
+        "C": _abs_or_none((fixtures or {}).get("C")),
+        "H": _abs_or_none((fixtures or {}).get("H")),
+        "U": _abs_or_none((fixtures or {}).get("U")),
+    }
+
+    # dims are optional for manifest ingestion; include if easily available
+    dims = None
+    if isinstance(strict_payload, dict):
+        if "dims" in strict_payload:
+            dims = strict_payload["dims"]
+        elif ("n2" in strict_payload) and ("n3" in strict_payload):
+            dims = {"n2": strict_payload["n2"], "n3": strict_payload["n3"]}
+
+    extra = {
+        "district_id":   district_id,
         "fixture_label": fixture_label,
-        "sig8": sig8,
-        "bundle_dir": str(bdir),
-        "core_counts": {"written": 6},
-        "timestamps": {"receipt_written_at": _time.time()}
-    })
+        "sig8":          sig8,
+        "paths":         P,   # <-- critical for manifest regen
+    }
+    if dims:
+        extra["dims"] = dims
+
+    # Write/repair the v2 receipt (this function adds schema="loop_receipt.v2")
+    _v2_write_loop_receipt_for_bundle(bdir, extra=extra)
+
     # ---- C1 coverage append (v2 ker_RED — canonical, JSON-grounded) ----
     try:
         cov_path, _cov_csv = _c1_paths()
