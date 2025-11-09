@@ -183,9 +183,16 @@ def _coverage_rollup_write_csv(snapshot_id: str | None = None):
             if snapshot_id and j.get("snapshot_id") != snapshot_id:
                 continue
             fid = j.get("fixture_label")
-            sel = _coerce_f(j.get("mismatch_sel")    or j.get("sel_mismatch_rate"))
-            off = _coerce_f(j.get("mismatch_offrow") or j.get("offrow_mismatch_rate"))
-            ker = _coerce_f(j.get("mismatch_ker")    or j.get("ker_mismatch_rate"))
+            sel_raw = j.get("mismatch_sel")
+            if sel_raw is None: sel_raw = j.get("sel_mismatch_rate")
+            off_raw = j.get("mismatch_offrow")
+            if off_raw is None: off_raw = j.get("offrow_mismatch_rate")
+            ker_raw = j.get("mismatch_ker")
+            if ker_raw is None: ker_raw = j.get("ker_mismatch_rate")
+            
+            sel = _coerce_f(sel_raw)
+            off = _coerce_f(off_raw)
+            ker = _coerce_f(ker_raw)
             # ctr: in v2-min (no AB verdicts), treat any mismatch>0 as contradiction
             ctr = None
             try:
@@ -6218,6 +6225,10 @@ def _svr_run_once_computeonly(ss=None):
         o.setdefault("sig8", sig8)
         o.setdefault("written_at_utc", int(time.time()))
         return o
+    # Canonicalize from folder layout to avoid accidental reassignment
+    district_id   = bdir.parent.parent.name   # e.g., D00b728fe
+    fixture_label = bdir.parent.name          # e.g., D2_H11_C011
+    sig8          = bdir.name                 # e.g., 59f7a99b
 
     bdir = _co_bundle_dir(district_id, fixture_label, sig8)
     names = {
@@ -7386,9 +7397,9 @@ if _st.button("Run V2 core (64× → receipts → manifest → suite/hist/zip)",
         man_boot.write_text("\n".join(_json.dumps(r, separators=(",", ":")) for r in rows) + "\n", encoding="utf-8")
         _st.success(f"Bootstrap manifest written with {len(rows)} rows → {man_boot}")
 
-        # 2) run 64× to emit receipts
-        snap = snapshot_id or str(_uuid.uuid4())
-        ok1, msg1, cnt1 = run_suite_from_manifest(str(man_boot), snap)
+        # 2) run 64× to emit receipts — SNAPSHOT __boot
+        snap_boot = (snapshot_id or _time.strftime("%Y%m%d-%H%M%S", _time.localtime())) + "__boot"
+        ok1, msg1, cnt1 = run_suite_from_manifest(str(man_boot), snap_boot)
         (_st.success if ok1 else _st.warning)(f"Bootstrap run: {msg1} · rows={cnt1}")
 
         # 3) regenerate real manifest from receipts
@@ -7408,13 +7419,17 @@ if _st.button("Run V2 core (64× → receipts → manifest → suite/hist/zip)",
             _st.error(f"Real manifest not found: {real_man}")
             _st.stop()
 
-        snap2 = snapshot_id or str(_uuid.uuid4())
-        ok3, msg3, cnt3 = run_suite_from_manifest(str(real_man), snap2)
+        # 4) run REAL manifest — SNAPSHOT __real
+        snap_real = (snapshot_id or _time.strftime("%Y%m%d-%H%M%S", _time.localtime())) + "__real"
+        ok3, msg3, cnt3 = run_suite_from_manifest(str(real_man), snap_real)
         (_st.success if ok3 else _st.warning)(f"Suite run: {msg3} · rows={cnt3}")
 
-        # histograms over coverage
+        # 5) histograms over coverage — prefer filtering to __real if supported
         try:
-            okh, msgh, outp = _v2_build_histograms_from_coverage()
+            try:
+                okh, msgh, outp = _v2_build_histograms_from_coverage(snap_real)
+            except TypeError:
+                okh, msgh, outp = _v2_build_histograms_from_coverage()
             (_st.success if okh else _st.warning)(msgh)
             if okh and outp and outp.exists():
                 _st.download_button(
@@ -7449,9 +7464,9 @@ if _st.button("Run V2 core (64× → receipts → manifest → suite/hist/zip)",
         except Exception:
             pass
 
-        # FAT zip (whatever JSONs exist per bundle — here: 2 core + bundle + receipt)
+        # 6) FAT zip (certs/receipts + globals) — tied to __real snapshot
         try:
-            zip_path = _v2_pack_suite_fat_zip(snap2)
+            zip_path = _v2_pack_suite_fat_zip(snap_real)
             if zip_path and zip_path.exists():
                 _st.download_button(
                     "Download FAT suite bundle (all certs/receipts)",
@@ -7462,11 +7477,12 @@ if _st.button("Run V2 core (64× → receipts → manifest → suite/hist/zip)",
                 )
         except Exception as e:
             _st.warning(f"FAT bundle zip failed: {e}")
-        # C1 health ping for THIS snapshot (post-suite)
+
+        # 7) C1 health ping for THIS snapshot (__real)
         try:
-            path_csv = _coverage_rollup_write_csv(snapshot_id=snap2)
+            path_csv = _coverage_rollup_write_csv(snapshot_id=snap_real)
             if path_csv and path_csv.exists():
-                # read the ALL row for quick chip (avoid extra widgets)
+                # read the ALL row for quick chip
                 import csv as _csv
                 all_row = None
                 with path_csv.open("r", encoding="utf-8") as f:
@@ -7481,7 +7497,7 @@ if _st.button("Run V2 core (64× → receipts → manifest → suite/hist/zip)",
                     ker = all_row.get("mean_ker_mismatch_rate") or "—"
                     ctr = all_row.get("mean_ctr_rate") or "—"
                     _st.success(f"C1 Health ✅ Healthy · tail={tail} · sel={sel} · off={off} · ker={ker} · ctr={ctr}")
-                # download button (single place)
+                # single CSV download
                 _st.download_button(
                     "Download coverage_rollup.csv",
                     data=path_csv.read_bytes(),
@@ -7492,15 +7508,16 @@ if _st.button("Run V2 core (64× → receipts → manifest → suite/hist/zip)",
         except Exception as e:
             _st.warning(f"C1 rollup failed: {e}")
 
-        # coverage sanity for this snapshot (expect == executed)
+        # 8) coverage sanity for __real (expect == executed)
         try:
-            parsed = _v2_coverage_count_for_snapshot(snap2)
+            parsed = _v2_coverage_count_for_snapshot(snap_real)
             if parsed < cnt3:
-                _st.warning(f"Coverage parsed {parsed}/{cnt3} rows for snapshot {snap2} (expected ≥ executed).")
+                _st.warning(f"Coverage parsed {parsed}/{cnt3} rows for snapshot {snap_real} (expected ≥ executed).")
             else:
-                _st.info(f"Coverage parsed rows: {parsed} (snapshot {snap2})")
+                _st.info(f"Coverage parsed rows: {parsed} (snapshot {snap_real})")
         except Exception:
             pass
+
 
 
                        
