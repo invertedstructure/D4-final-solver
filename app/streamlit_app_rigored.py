@@ -293,93 +293,55 @@ def _v2_bundle_index_rebuild(bdir: _VPath):
     return bundle
 
 
-def _v2_write_loop_receipt_for_bundle(bdir, extra: dict | None = None):
+def _v2_write_loop_receipt(bdir: _VPath, fixture_id: str, snapshot_id: str, bundle: dict):
     """
-    Write loop_receipt.v2 into `bdir`. Robustly resolves:
-      - fixture_label (D*_H*_C*)
-      - district_id (hashed D-tag form OK, e.g., D3a5ca34ee)
-      - sig8 (from path or bundle.json)
-      - absolute SSOT paths for B/C/H/U from fixture_label
-    Returns (ok: bool, msg: str)
+    Back-compat shim: always write loop_receipt.v2 with SSOT-anchored absolute paths
+    derived from the fixture_id (D*_H*_C*), not the hashed district_id.
     """
-    import json as _json, time as _time, re as _re
     from pathlib import Path as _Path
+    import re as _re
 
-    bdir = _Path(bdir)
-    bundle = {}
-    bj = bdir / "bundle.json"
-    if bj.exists():
-        try:
-            bundle = _json.loads(bj.read_text(encoding="utf-8"))
-        except Exception:
-            bundle = {}
-
-    # Prefer explicit extras, fallback to bundle fields, then path parse
-    district_id   = (extra or {}).get("district_id")   or bundle.get("district_id")
-    fixture_label = (extra or {}).get("fixture_label")  or bundle.get("fixture_label")
-    sig8          = (extra or {}).get("sig8")           or bundle.get("sig8") or bdir.name
-
-    # If fixture/district missing, parse from path .../certs/{district_id}/{fixture_label}/{sig8}
-    try:
-        parent2 = bdir.parent  # .../{fixture_label}
-        parent1 = parent2.parent  # .../{district_id}
-        if not district_id:
-            district_id = parent1.name
-        if not fixture_label:
-            fixture_label = parent2.name
-    except Exception:
-        pass
-
-    # Final guard on fixture_label; refuse to write UNKNOWN
-    if not fixture_label or not _re.fullmatch(r"D\d+_H\d{2}_C\d{3}", str(fixture_label)):
-        return False, f"Bad or missing fixture_label for {bdir}"
-
-    # Derive canonical SSOT absolute paths from fixture_label
-    mD = _re.search(r"(?:^|_)D(\d+)", fixture_label); D_tag = f"D{mD.group(1)}" if mD else None
-    mH = _re.search(r"(?:^|_)H(\d+)", fixture_label); H_tag = f"H{mH.group(1)}" if mH else None
-    mC = _re.search(r"(?:^|_)C(\d+)", fixture_label); C_tag = f"C{mC.group(1)}" if mC else None
-
-    try:
-        repo_root = _REPO_DIR
-    except Exception:
-        repo_root = _Path(__file__).resolve().parents[1]
+    # Repo roots
+    repo_root   = _Path(__file__).resolve().parents[1]   # /mount/src/d4-final-solver
     inputs_root = repo_root / "app" / "inputs"
 
+    # fixture_id like "D3_H10_C111" → D_tag="D3", H_tag="H10", C_tag="C111"
+    _mD = _re.search(r"(?:^|_)D(\d+)", fixture_id or "")
+    _mH = _re.search(r"(?:^|_)H(\d+)", fixture_id or "")
+    _mC = _re.search(r"(?:^|_)C(\d+)", fixture_id or "")
+
+    D_tag = f"D{_mD.group(1)}" if _mD else (fixture_id or "").split("_")[0]
+    H_tag = f"H{_mH.group(1)}" if _mH else None
+    C_tag = f"C{_mC.group(1)}" if _mC else None
+
+    # Canonical absolute SSOT paths
     P = {
-        "B": str((inputs_root / "B" / f"{D_tag}.json").resolve()) if D_tag else None,
+        "B": str((inputs_root / "B" / f"{D_tag}.json").resolve()),            # <-- B from D_tag
         "C": str((inputs_root / "C" / f"{C_tag}.json").resolve()) if C_tag else None,
         "H": str((inputs_root / "H" / f"{H_tag}.json").resolve()) if H_tag else None,
         "U": str((inputs_root / "U.json").resolve()),
     }
 
-    # Validate absolute existence
-    from pathlib import Path as _P
-    if not all(p and _P(p).is_absolute() and _P(p).exists() for p in P.values()):
-        return False, f"[{fixture_label}] SSOT path(s) missing"
+    # dims (optional)
+    dims = bundle.get("dims")
+    if not dims:
+        n2, n3 = bundle.get("n2"), bundle.get("n3")
+        if n2 is not None and n3 is not None:
+            dims = {"n2": n2, "n3": n3}
 
-    # dims (nice to have)
-    dims = None
-    if isinstance(bundle, dict):
-        if "dims" in bundle and isinstance(bundle["dims"], dict):
-            dims = {"n2": bundle["dims"].get("n2"), "n3": bundle["dims"].get("n3")}
-
-    receipt = {
-        "schema": "loop_receipt.v2",
-        "run_id": (extra or {}).get("run_id"),
-        "district_id": district_id,
-        "fixture_label": fixture_label,
-        "sig8": sig8,
-        "bundle_dir": str(bdir.resolve()),
-        "paths": P,
-        "core_counts": {"written": 6},
-        "timestamps": {"receipt_written_at": int(_time.time())},
+    extra = {
+        "schema":        "loop_receipt.v2",
+        "district_id":   bundle.get("district_id"),
+        "fixture_label": fixture_id,
+        "sig8":          bundle.get("sig8"),
+        "paths":         P,
     }
-    if dims: receipt["dims"] = dims
+    if dims:
+        extra["dims"] = dims
 
-    # Always write with proper filename (no UNKNOWN)
-    outp = bdir / f"loop_receipt__{fixture_label}.json"
-    _hard_co_write_json(outp, receipt)
-    return True, f"[{fixture_label}] wrote loop_receipt.v2"
+    ok, msg = _v2_write_loop_receipt_for_bundle(_Path(bdir), extra=extra)
+    return {"ok": ok, "msg": msg}
+
 
 
 
@@ -6305,61 +6267,96 @@ def _v2_collect_paths_from_ssot() -> dict:
         out[k] = str(_Path(val).resolve()) if val else None
     return out
 
-# --- Write a loop_receipt (v2) into a given bundle dir
-def _v2_write_loop_receipt_for_bundle(bdir: _Path, *, extra: dict | None = None) -> tuple[bool,str]:
-    """
-    Writes loop_receipt__{fixture_label}.json using info from:
-      - bundle.json (if present),
-      - session_state (absolute paths),
-    and minimal required rc-like fields if found.
-    """
-    if not bdir or not bdir.exists():
-        return False, "No bundle dir found."
 
-    # Try to read bundle.json for rc-like info
+# --- Write a loop_receipt (v2) into a given bundle dir
+def _v2_write_loop_receipt_for_bundle(bdir, extra: dict | None = None):
+    """
+    Write loop_receipt.v2 into `bdir`. Robustly resolves:
+      - fixture_label (D*_H*_C*)
+      - district_id (hashed D-tag form OK, e.g., D3a5ca34ee)
+      - sig8 (from path or bundle.json)
+      - absolute SSOT paths for B/C/H/U from fixture_label
+    Returns (ok: bool, msg: str)
+    """
+    import json as _json, time as _time, re as _re
+    from pathlib import Path as _Path
+
+    bdir = _Path(bdir)
     bundle = {}
     bj = bdir / "bundle.json"
     if bj.exists():
         try:
             bundle = _json.loads(bj.read_text(encoding="utf-8"))
-        except Exception as e:
-            return False, f"bundle.json unreadable: {e}"
+        except Exception:
+            bundle = {}
 
-    # derive fixture/district/sig8 if available
-    fixture_label = (bundle.get("fixture_label")
-                     or bundle.get("rc",{}).get("fixture_label")
-                     or "UNKNOWN")
-    district_id   = (bundle.get("district_id")
-                     or bundle.get("rc",{}).get("district_id")
-                     or "UNKNOWN")
-    dims = (bundle.get("dims")
-            or bundle.get("rc",{}).get("dims")
-            or {"n2": bundle.get("n2", None), "n3": bundle.get("n3", None)})
-    sig8 = (bundle.get("sig8")
-            or bundle.get("rc",{}).get("sig8")
-            or _Path(bdir).name)
+    # Prefer explicit extras, fallback to bundle fields, then path parse
+    district_id   = (extra or {}).get("district_id")   or bundle.get("district_id")
+    fixture_label = (extra or {}).get("fixture_label")  or bundle.get("fixture_label")
+    sig8          = (extra or {}).get("sig8")           or bundle.get("sig8") or bdir.name
 
-    # collect absolute input paths from session_state (best-effort)
-    paths = _v2_collect_paths_from_ssot()
+    # If fixture/district missing, parse from path .../certs/{district_id}/{fixture_label}/{sig8}
+    try:
+        parent2 = bdir.parent  # .../{fixture_label}
+        parent1 = parent2.parent  # .../{district_id}
+        if not district_id:
+            district_id = parent1.name
+        if not fixture_label:
+            fixture_label = parent2.name
+    except Exception:
+        pass
 
-    # Produce the receipt object
+    # Final guard on fixture_label; refuse to write UNKNOWN
+    if not fixture_label or not _re.fullmatch(r"D\d+_H\d{2}_C\d{3}", str(fixture_label)):
+        return False, f"Bad or missing fixture_label for {bdir}"
+
+    # Derive canonical SSOT absolute paths from fixture_label
+    mD = _re.search(r"(?:^|_)D(\d+)", fixture_label); D_tag = f"D{mD.group(1)}" if mD else None
+    mH = _re.search(r"(?:^|_)H(\d+)", fixture_label); H_tag = f"H{mH.group(1)}" if mH else None
+    mC = _re.search(r"(?:^|_)C(\d+)", fixture_label); C_tag = f"C{mC.group(1)}" if mC else None
+
+    try:
+        repo_root = _REPO_DIR
+    except Exception:
+        repo_root = _Path(__file__).resolve().parents[1]
+    inputs_root = repo_root / "app" / "inputs"
+
+    P = {
+        "B": str((inputs_root / "B" / f"{D_tag}.json").resolve()) if D_tag else None,
+        "C": str((inputs_root / "C" / f"{C_tag}.json").resolve()) if C_tag else None,
+        "H": str((inputs_root / "H" / f"{H_tag}.json").resolve()) if H_tag else None,
+        "U": str((inputs_root / "U.json").resolve()),
+    }
+
+    # Validate absolute existence
+    from pathlib import Path as _P
+    if not all(p and _P(p).is_absolute() and _P(p).exists() for p in P.values()):
+        return False, f"[{fixture_label}] SSOT path(s) missing"
+
+    # dims (nice to have)
+    dims = None
+    if isinstance(bundle, dict):
+        if "dims" in bundle and isinstance(bundle["dims"], dict):
+            dims = {"n2": bundle["dims"].get("n2"), "n3": bundle["dims"].get("n3")}
+
     receipt = {
         "schema": "loop_receipt.v2",
-        "written_at_utc": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
-        "bundle_dir": str(bdir.resolve()),
+        "run_id": (extra or {}).get("run_id"),
         "district_id": district_id,
         "fixture_label": fixture_label,
         "sig8": sig8,
-        "dims": dims,
-        "paths": paths,  # {"B": abs, "C": abs, "H": abs, "U": abs}
+        "bundle_dir": str(bdir.resolve()),
+        "paths": P,
+        "core_counts": {"written": 6},
+        "timestamps": {"receipt_written_at": int(_time.time())},
     }
-    if extra:
-        receipt.update(extra)
+    if dims: receipt["dims"] = dims
 
-    # Write
+    # Always write with proper filename (no UNKNOWN)
     outp = bdir / f"loop_receipt__{fixture_label}.json"
-    _v2_atomic_write_json(outp, receipt)
-    return True, f"Wrote {outp.name}"
+    _hard_co_write_json(outp, receipt)
+    return True, f"[{fixture_label}] wrote loop_receipt.v2"
+
 
 # --- Regenerate manifest_full_scope.jsonl by scanning loop_receipts
 def _v2_regen_manifest_from_receipts():
