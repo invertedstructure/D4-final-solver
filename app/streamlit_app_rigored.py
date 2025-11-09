@@ -1339,6 +1339,44 @@ with st.expander("C1 — Coverage rollup & health ping", expanded=False):
                 except Exception:
                     pass
 # ─────────────────────────────────────────────────────────────────────────────────────────────
+# Snapshot tally — JSON-first UI (place just below the C1 expander)
+from pathlib import Path as _Path
+import json as _json
+
+_tpath = _Path("logs") / "reports" / "snapshot_tally.jsonl"
+if _tpath.exists():
+    # Download
+    with open(str(_tpath), "rb") as _fh:
+        st.download_button(
+            "Download snapshot_tally.jsonl",
+            _fh,
+            file_name="snapshot_tally.jsonl",
+            mime="text/plain",
+            key="btn_snapshot_tally_download",
+        )
+
+    # Quick peek (last record)
+    try:
+        last = None
+        with open(str(_tpath), "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                last = _json.loads(line)
+        if last:
+            st.caption("Latest snapshot_tally.jsonl record")
+            st.json({
+                "district_id": last.get("district_id"),
+                "fixture_label": last.get("fixture_label"),
+                "coverage_row_count": last.get("coverage_row_count"),
+                "counts": last.get("counts"),
+                "lane_popcount_stats": last.get("lane_popcount_stats"),
+            })
+    except Exception:
+        pass
+else:
+    st.info("snapshot_tally.jsonl not found yet — run a 1× HARD solve.")
 
 
 # ---------- Policy receipt (B) ----------
