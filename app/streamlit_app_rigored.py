@@ -258,36 +258,48 @@ def _v2_bundle_index_rebuild(bdir: _VPath):
 def _v2_write_loop_receipt(bdir: _VPath, fixture_id: str, snapshot_id: str, bundle: dict):
     """
     Back-compat shim: always write loop_receipt.v2 with SSOT-anchored absolute paths
-    so manifest regeneration ingests it.
+    derived from the fixture_id (D*_H*_C*), not the hashed district_id.
     """
     from pathlib import Path as _Path
-    import streamlit as _st
+    import re as _re
 
-    # Try to collect absolute SSOT paths from session or last-run stash
-    ss = getattr(_st, "session_state", {})
-    keymap = {"B":"uploaded_boundaries","C":"uploaded_cmap","H":"uploaded_H","U":"uploaded_shapes"}
-    P = {}
-    for k, sk in keymap.items():
-        v = (ss or {}).get(sk)
-        if v:
-            P[k] = str(_Path(v).resolve())
+    # Repo roots
+    repo_root   = _Path(__file__).resolve().parents[1]   # /mount/src/d4-final-solver
+    inputs_root = repo_root / "app" / "inputs"
 
-    # Fallback to the compute-only stash if present
-    for k, v in (ss or {}).get("_last_inputs_paths", {}).items():
-        if k in ("B","C","H","U") and v and k not in P:
-            P[k] = str(_Path(v).resolve())
+    # fixture_id like "D3_H10_C111" → D_tag="D3", H_tag="H10", C_tag="C111"
+    _mD = _re.search(r"(?:^|_)D(\d+)", fixture_id or "")
+    _mH = _re.search(r"(?:^|_)H(\d+)", fixture_id or "")
+    _mC = _re.search(r"(?:^|_)C(\d+)", fixture_id or "")
 
-    # Normalize keys (allow None if something is truly missing)
-    P = {k: P.get(k) for k in ("B","C","H","U")}
+    D_tag = f"D{_mD.group(1)}" if _mD else (fixture_id or "").split("_")[0]
+    H_tag = f"H{_mH.group(1)}" if _mH else None
+    C_tag = f"C{_mC.group(1)}" if _mC else None
 
-    dims = bundle.get("dims") or {"n2": bundle.get("n2"), "n3": bundle.get("n3")}
-    extra = {
-        "district_id": bundle.get("district_id"),
-        "fixture_label": fixture_id,
-        "sig8": bundle.get("sig8"),
-        "dims": dims,
-        "paths": P,  # critical for manifest regen
+    # Canonical absolute SSOT paths
+    P = {
+        "B": str((inputs_root / "B" / f"{D_tag}.json").resolve()),            # <-- B from D_tag
+        "C": str((inputs_root / "C" / f"{C_tag}.json").resolve()) if C_tag else None,
+        "H": str((inputs_root / "H" / f"{H_tag}.json").resolve()) if H_tag else None,
+        "U": str((inputs_root / "U.json").resolve()),
     }
+
+    # dims (optional)
+    dims = bundle.get("dims")
+    if not dims:
+        n2, n3 = bundle.get("n2"), bundle.get("n3")
+        if n2 is not None and n3 is not None:
+            dims = {"n2": n2, "n3": n3}
+
+    extra = {
+        "schema":        "loop_receipt.v2",
+        "district_id":   bundle.get("district_id"),
+        "fixture_label": fixture_id,
+        "sig8":          bundle.get("sig8"),
+        "paths":         P,
+    }
+    if dims:
+        extra["dims"] = dims
 
     ok, msg = _v2_write_loop_receipt_for_bundle(_Path(bdir), extra=extra)
     return {"ok": ok, "msg": msg}
@@ -7017,28 +7029,30 @@ def _svr_run_once_computeonly_hard(ss=None):
     }
     _hard_co_write_json(bdir / "bundle.json", bundle)
 
-    # --- Canonical SSOT paths for loop_receipt.v2 (no uploads needed)
+    # --- loop_receipt.v2 with canonical SSOT paths (no uploads, no hashed D-id)
     from pathlib import Path as _Path
     import re as _re
 
-    repo_root = _Path(__file__).resolve().parents[1]              # /mount/src/d4-final-solver
+    repo_root   = _Path(__file__).resolve().parents[1]   # /mount/src/d4-final-solver
     inputs_root = repo_root / "app" / "inputs"
 
-    # fixture_label like "D3_H10_C111" → H="H10", C="C111"
-    _mH = _re.search(r"(?:^|_)H(\d+)", fixture_label)
-    _mC = _re.search(r"(?:^|_)C(\d+)", fixture_label)
+    # fixture_label like "D3_H10_C111" → D_tag, H_tag, C_tag
+    _mD = _re.search(r"(?:^|_)D(\d+)", fixture_label or "")
+    _mH = _re.search(r"(?:^|_)H(\d+)", fixture_label or "")
+    _mC = _re.search(r"(?:^|_)C(\d+)", fixture_label or "")
+
+    D_tag = f"D{_mD.group(1)}" if _mD else (fixture_label or "").split("_")[0]
     H_tag = f"H{_mH.group(1)}" if _mH else None
     C_tag = f"C{_mC.group(1)}" if _mC else None
 
-    # Absolute SSOT paths (this is what the manifest ingestor expects)
     P = {
-        "B": str((inputs_root / "B" / f"{district_id}.json").resolve()),  # e.g., app/inputs/B/D3.json
+        "B": str((inputs_root / "B" / f"{D_tag}.json").resolve()),            # <-- FIXED: B from D_tag
         "C": str((inputs_root / "C" / f"{C_tag}.json").resolve()) if C_tag else None,
         "H": str((inputs_root / "H" / f"{H_tag}.json").resolve()) if H_tag else None,
         "U": str((inputs_root / "U.json").resolve()),
     }
 
-    # dims (optional but nice)
+    # dims (optional but helpful)
     dims = None
     if isinstance(strict_payload, dict):
         if "dims" in strict_payload:
@@ -7049,11 +7063,11 @@ def _svr_run_once_computeonly_hard(ss=None):
     loop_receipt = {
         "schema": "loop_receipt.v2",
         "run_id": str(_uuid.uuid4()),
-        "district_id": district_id,
-        "fixture_label": fixture_label,
+        "district_id": district_id,                # keep the hashed district_id for provenance
+        "fixture_label": fixture_label,            # but paths derive from D_tag above
         "sig8": sig8,
         "bundle_dir": str(bdir.resolve()),
-        "paths": P,  # <-- critical for manifest regen
+        "paths": P,
         "core_counts": {"written": 6},
         "timestamps": {"receipt_written_at": int(_time.time())},
     }
@@ -7061,6 +7075,7 @@ def _svr_run_once_computeonly_hard(ss=None):
         loop_receipt["dims"] = dims
 
     _hard_co_write_json(bdir / f"loop_receipt__{fixture_label}.json", loop_receipt)
+
 
 
     # ---- C1 coverage append (v2 ker_RED — canonical, JSON-grounded) ----
