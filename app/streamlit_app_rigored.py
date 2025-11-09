@@ -194,21 +194,28 @@ def _coverage_rollup_write_csv(snapshot_id: str | None = None):
             off = _coerce_f(off_raw)
             ker = _coerce_f(ker_raw)
             # ctr: in v2-min (no AB verdicts), treat any mismatch>0 as contradiction
+            vcls = (j.get("verdict_class") or "").upper().strip()
             ctr = None
-            try:
-                vcls = (j.get("verdict_class") or "").upper()
-                if vcls:
-                    ctr = 0.0 if vcls == "GREEN" else 1.0
-            except Exception:
-                ctr = None
+            # only trust known stable classes; otherwise leave None and fallback
+            if vcls in ("GREEN", "RED_BOTH", "KER-FILTERED", "KER-EXPOSED"):
+                ctr = 0.0 if vcls == "GREEN" else 1.0
+            
             if ctr is None:
-                # fallback purely from mismatches
-                ctr = 1.0 if ((sel or 0) > 0 or (off or 0) > 0 or (ker or 0) > 0) else 0.0
-
-            rows.append({
-                "prox_label": _prox_label_from_fixture(fid),
-                "sel": sel, "off": off, "ker": ker, "ctr": ctr
-            })
+                sel_raw = j.get("mismatch_sel")
+                if sel_raw is None: sel_raw = j.get("sel_mismatch_rate")
+                off_raw = j.get("mismatch_offrow")
+                if off_raw is None: off_raw = j.get("offrow_mismatch_rate")
+                ker_raw = j.get("mismatch_ker")
+                if ker_raw is None: ker_raw = j.get("ker_mismatch_rate")
+            
+                def _coerce_f(x):
+                    try: return float(x)
+                    except Exception: return 0.0
+                sel = _coerce_f(sel_raw)
+                off = _coerce_f(off_raw)
+                ker = _coerce_f(ker_raw)
+                ctr = 1.0 if (sel > 0 or off > 0 or ker > 0) else 0.0
+            
 
     # aggregate by prox_label + an ALL row
     from collections import defaultdict
