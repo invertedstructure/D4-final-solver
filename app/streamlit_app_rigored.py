@@ -129,7 +129,117 @@ def _v2_find_expected_files(bdir: _VPath):
             elif prefix in name and (mid in name if mid else True):
                 out[key] = fp
     return out
-    
+
+def _coverage_rollup_write_csv(snapshot_id: str | None = None):
+    """
+    Build C1 rollup over logs/reports/coverage.jsonl.
+    If snapshot_id is provided, filter to that snapshot only (v2: we pass the current one).
+    Aggregates:
+      prox_label,count,mean_sel_mismatch_rate,mean_offrow_mismatch_rate,mean_ker_mismatch_rate,mean_ctr_rate
+    Returns Path to CSV (or None).
+    """
+    from pathlib import Path as _Path
+    import json as _json
+    import math as _math
+    import csv as _csv
+    import re as _re
+
+    try:
+        root = _REPO_DIR
+    except Exception:
+        root = _Path(__file__).resolve().parents[1]
+    rep_dir = root / "logs" / "reports"
+    cov_path = rep_dir / "coverage.jsonl"
+    out_csv = rep_dir / "coverage_rollup.csv"
+    rep_dir.mkdir(parents=True, exist_ok=True)
+
+    if not cov_path.exists():
+        return None
+
+    def _coerce_f(x):
+        if x is None: return None
+        try:
+            return float(x)
+        except Exception:
+            return None
+
+    def _prox_label_from_fixture(fid: str | None):
+        # Group by D-tag (D2/D3) as a stable prox label
+        if not fid:
+            return "UNKNOWN"
+        m = _re.search(r"(?:^|_)D(\d+)", fid)
+        return f"D{m.group(1)}" if m else "UNKNOWN"
+
+    # read & normalize
+    rows = []
+    with cov_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line: continue
+            try:
+                j = _json.loads(line)
+            except Exception:
+                continue
+            if snapshot_id and j.get("snapshot_id") != snapshot_id:
+                continue
+            fid = j.get("fixture_label")
+            sel = _coerce_f(j.get("mismatch_sel")    or j.get("sel_mismatch_rate"))
+            off = _coerce_f(j.get("mismatch_offrow") or j.get("offrow_mismatch_rate"))
+            ker = _coerce_f(j.get("mismatch_ker")    or j.get("ker_mismatch_rate"))
+            # ctr: in v2-min (no AB verdicts), treat any mismatch>0 as contradiction
+            ctr = None
+            try:
+                vcls = (j.get("verdict_class") or "").upper()
+                if vcls:
+                    ctr = 0.0 if vcls == "GREEN" else 1.0
+            except Exception:
+                ctr = None
+            if ctr is None:
+                # fallback purely from mismatches
+                ctr = 1.0 if ((sel or 0) > 0 or (off or 0) > 0 or (ker or 0) > 0) else 0.0
+
+            rows.append({
+                "prox_label": _prox_label_from_fixture(fid),
+                "sel": sel, "off": off, "ker": ker, "ctr": ctr
+            })
+
+    # aggregate by prox_label + an ALL row
+    from collections import defaultdict
+    agg = defaultdict(lambda: {"count":0, "sel_sum":0.0, "sel_n":0, "off_sum":0.0, "off_n":0,
+                               "ker_sum":0.0, "ker_n":0, "ctr_sum":0.0, "ctr_n":0})
+
+    for r in rows:
+        for key in (r["prox_label"], "ALL"):
+            a = agg[key]
+            a["count"] += 1
+            if r["sel"] is not None:
+                a["sel_sum"] += r["sel"]; a["sel_n"] += 1
+            if r["off"] is not None:
+                a["off_sum"] += r["off"]; a["off_n"] += 1
+            if r["ker"] is not None:
+                a["ker_sum"] += r["ker"]; a["ker_n"] += 1
+            if r["ctr"] is not None:
+                a["ctr_sum"] += r["ctr"]; a["ctr_n"] += 1
+
+    # write csv
+    with out_csv.open("w", newline="", encoding="utf-8") as f:
+        w = _csv.writer(f)
+        w.writerow(["prox_label","count","mean_sel_mismatch_rate","mean_offrow_mismatch_rate","mean_ker_mismatch_rate","mean_ctr_rate"])
+        for label in sorted(agg.keys(), key=lambda x: (x!="ALL", x)):
+            a = agg[label]
+            def _avg(sum_v, n):
+                return (sum_v / n) if n > 0 else ""
+            w.writerow([
+                label, a["count"],
+                _avg(a["sel_sum"], a["sel_n"]),
+                _avg(a["off_sum"], a["off_n"]),
+                _avg(a["ker_sum"], a["ker_n"]),
+                _avg(a["ctr_sum"], a["ctr_n"]),
+            ])
+
+    return out_csv
+
+   
 # ---- v2 canonicalization (stable JSON for hashing) ----
 _V2_EPHEMERAL_KEYS = {
     # runtime/UI noise we never want to affect canonical hashes
@@ -6524,14 +6634,18 @@ def _v2_build_histograms_from_coverage(cov_path: _Path | None = None) -> tuple[b
 
 def _v2_pack_suite_fat_zip(snapshot_id: str):
     """
-    Create a single ZIP with *all* per-bundle JSONs (6 certs + bundle + loop_receipt + sidecars).
-    Returns Path to the zip (or None).
+    Create a ZIP with:
+      - all per-bundle JSONs (whatever exists: strict/auto + bundle + loop_receipt + sidecars)
+      - manifest_full_scope.jsonl
+      - coverage.jsonl, histograms_v2.json, coverage_rollup.csv (if present)
+    Returns Path or None.
     """
     from zipfile import ZipFile, ZIP_STORED
+    from pathlib import Path as _Path
+
     try:
         root = _REPO_DIR
     except Exception:
-        from pathlib import Path as _Path
         root = _Path(__file__).resolve().parents[1]
 
     reports_dir = root / "logs" / "reports"
@@ -6539,22 +6653,32 @@ def _v2_pack_suite_fat_zip(snapshot_id: str):
     outp = reports_dir / f"suite_fat__{snapshot_id}.zip"
 
     certs_dir = root / "logs" / "certs"
+    man = root / "logs" / "manifests" / "manifest_full_scope.jsonl"
+    cov = root / "logs" / "reports" / "coverage.jsonl"
+    hist = root / "logs" / "reports" / "histograms_v2.json"
+    roll = root / "logs" / "reports" / "coverage_rollup.csv"
+
     if not certs_dir.exists():
         return None
 
     try:
         with ZipFile(outp, "w", compression=ZIP_STORED) as z:
+            # per-bundle JSONs
             for bj in certs_dir.rglob("bundle.json"):
                 bdir = bj.parent
                 for p in sorted(bdir.glob("*.json")):
-                    # Keep simple: include all JSONs in each bundle dir
                     try:
                         z.write(p, arcname=str(p.relative_to(root)))
                     except Exception:
                         pass
+            # globals
+            for extra in (man, cov, hist, roll):
+                if extra.exists():
+                    z.write(extra, arcname=str(extra.relative_to(root)))
         return outp
     except Exception:
         return None
+
 
 
 # ====================== V2 COMPUTE-ONLY (HARD) — single source of truth ======================
@@ -7229,6 +7353,35 @@ if _st.button("Run V2 core (64× → receipts → manifest → suite/hist/zip)",
                 )
         except Exception as e:
             _st.warning(f"FAT bundle zip failed: {e}")
+        # C1 health ping for THIS snapshot (post-suite)
+        try:
+            path_csv = _coverage_rollup_write_csv(snapshot_id=snap2)
+            if path_csv and path_csv.exists():
+                # read the ALL row for quick chip (avoid extra widgets)
+                import csv as _csv
+                all_row = None
+                with path_csv.open("r", encoding="utf-8") as f:
+                    r = list(_csv.DictReader(f))
+                    for row in r:
+                        if row.get("prox_label") == "ALL":
+                            all_row = row; break
+                if all_row:
+                    tail = int(all_row.get("count") or 0)
+                    sel = all_row.get("mean_sel_mismatch_rate") or "—"
+                    off = all_row.get("mean_offrow_mismatch_rate") or "—"
+                    ker = all_row.get("mean_ker_mismatch_rate") or "—"
+                    ctr = all_row.get("mean_ctr_rate") or "—"
+                    _st.success(f"C1 Health ✅ Healthy · tail={tail} · sel={sel} · off={off} · ker={ker} · ctr={ctr}")
+                # download button (single place)
+                _st.download_button(
+                    "Download coverage_rollup.csv",
+                    data=path_csv.read_bytes(),
+                    file_name="coverage_rollup.csv",
+                    mime="text/csv",
+                    key="btn_v2_download_cov_rollup_final",
+                )
+        except Exception as e:
+            _st.warning(f"C1 rollup failed: {e}")
 
         # coverage sanity for this snapshot (expect == executed)
         try:
