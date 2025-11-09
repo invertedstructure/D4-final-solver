@@ -292,54 +292,94 @@ def _v2_bundle_index_rebuild(bdir: _VPath):
     (bdir / "bundle.json").write_text(_Vjson.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
     return bundle
 
-def _v2_write_loop_receipt(bdir: _VPath, fixture_id: str, snapshot_id: str, bundle: dict):
-    """
-    Back-compat shim: always write loop_receipt.v2 with SSOT-anchored absolute paths
-    derived from the fixture_id (D*_H*_C*), not the hashed district_id.
-    """
-    from pathlib import Path as _Path
-    import re as _re
 
-    # Repo roots
-    repo_root   = _Path(__file__).resolve().parents[1]   # /mount/src/d4-final-solver
+def _v2_write_loop_receipt_for_bundle(bdir, extra: dict | None = None):
+    """
+    Write loop_receipt.v2 into `bdir`. Robustly resolves:
+      - fixture_label (D*_H*_C*)
+      - district_id (hashed D-tag form OK, e.g., D3a5ca34ee)
+      - sig8 (from path or bundle.json)
+      - absolute SSOT paths for B/C/H/U from fixture_label
+    Returns (ok: bool, msg: str)
+    """
+    import json as _json, time as _time, re as _re
+    from pathlib import Path as _Path
+
+    bdir = _Path(bdir)
+    bundle = {}
+    bj = bdir / "bundle.json"
+    if bj.exists():
+        try:
+            bundle = _json.loads(bj.read_text(encoding="utf-8"))
+        except Exception:
+            bundle = {}
+
+    # Prefer explicit extras, fallback to bundle fields, then path parse
+    district_id   = (extra or {}).get("district_id")   or bundle.get("district_id")
+    fixture_label = (extra or {}).get("fixture_label")  or bundle.get("fixture_label")
+    sig8          = (extra or {}).get("sig8")           or bundle.get("sig8") or bdir.name
+
+    # If fixture/district missing, parse from path .../certs/{district_id}/{fixture_label}/{sig8}
+    try:
+        parent2 = bdir.parent  # .../{fixture_label}
+        parent1 = parent2.parent  # .../{district_id}
+        if not district_id:
+            district_id = parent1.name
+        if not fixture_label:
+            fixture_label = parent2.name
+    except Exception:
+        pass
+
+    # Final guard on fixture_label; refuse to write UNKNOWN
+    if not fixture_label or not _re.fullmatch(r"D\d+_H\d{2}_C\d{3}", str(fixture_label)):
+        return False, f"Bad or missing fixture_label for {bdir}"
+
+    # Derive canonical SSOT absolute paths from fixture_label
+    mD = _re.search(r"(?:^|_)D(\d+)", fixture_label); D_tag = f"D{mD.group(1)}" if mD else None
+    mH = _re.search(r"(?:^|_)H(\d+)", fixture_label); H_tag = f"H{mH.group(1)}" if mH else None
+    mC = _re.search(r"(?:^|_)C(\d+)", fixture_label); C_tag = f"C{mC.group(1)}" if mC else None
+
+    try:
+        repo_root = _REPO_DIR
+    except Exception:
+        repo_root = _Path(__file__).resolve().parents[1]
     inputs_root = repo_root / "app" / "inputs"
 
-    # fixture_id like "D3_H10_C111" → D_tag="D3", H_tag="H10", C_tag="C111"
-    _mD = _re.search(r"(?:^|_)D(\d+)", fixture_id or "")
-    _mH = _re.search(r"(?:^|_)H(\d+)", fixture_id or "")
-    _mC = _re.search(r"(?:^|_)C(\d+)", fixture_id or "")
-
-    D_tag = f"D{_mD.group(1)}" if _mD else (fixture_id or "").split("_")[0]
-    H_tag = f"H{_mH.group(1)}" if _mH else None
-    C_tag = f"C{_mC.group(1)}" if _mC else None
-
-    # Canonical absolute SSOT paths
     P = {
-        "B": str((inputs_root / "B" / f"{D_tag}.json").resolve()),            # <-- B from D_tag
+        "B": str((inputs_root / "B" / f"{D_tag}.json").resolve()) if D_tag else None,
         "C": str((inputs_root / "C" / f"{C_tag}.json").resolve()) if C_tag else None,
         "H": str((inputs_root / "H" / f"{H_tag}.json").resolve()) if H_tag else None,
         "U": str((inputs_root / "U.json").resolve()),
     }
 
-    # dims (optional)
-    dims = bundle.get("dims")
-    if not dims:
-        n2, n3 = bundle.get("n2"), bundle.get("n3")
-        if n2 is not None and n3 is not None:
-            dims = {"n2": n2, "n3": n3}
+    # Validate absolute existence
+    from pathlib import Path as _P
+    if not all(p and _P(p).is_absolute() and _P(p).exists() for p in P.values()):
+        return False, f"[{fixture_label}] SSOT path(s) missing"
 
-    extra = {
-        "schema":        "loop_receipt.v2",
-        "district_id":   bundle.get("district_id"),
-        "fixture_label": fixture_id,
-        "sig8":          bundle.get("sig8"),
-        "paths":         P,
+    # dims (nice to have)
+    dims = None
+    if isinstance(bundle, dict):
+        if "dims" in bundle and isinstance(bundle["dims"], dict):
+            dims = {"n2": bundle["dims"].get("n2"), "n3": bundle["dims"].get("n3")}
+
+    receipt = {
+        "schema": "loop_receipt.v2",
+        "run_id": (extra or {}).get("run_id"),
+        "district_id": district_id,
+        "fixture_label": fixture_label,
+        "sig8": sig8,
+        "bundle_dir": str(bdir.resolve()),
+        "paths": P,
+        "core_counts": {"written": 6},
+        "timestamps": {"receipt_written_at": int(_time.time())},
     }
-    if dims:
-        extra["dims"] = dims
+    if dims: receipt["dims"] = dims
 
-    ok, msg = _v2_write_loop_receipt_for_bundle(_Path(bdir), extra=extra)
-    return {"ok": ok, "msg": msg}
+    # Always write with proper filename (no UNKNOWN)
+    outp = bdir / f"loop_receipt__{fixture_label}.json"
+    _hard_co_write_json(outp, receipt)
+    return True, f"[{fixture_label}] wrote loop_receipt.v2"
 
 
 
@@ -6641,8 +6681,17 @@ def _hard_fixture_tuple_from_paths(pB, pH, pC):
     C = f"C{mC.group(1)}" if mC else "C???"
     return D, H, C, f"{D}_{H}_{C}"
 
-def _hard_bundle_dir(district_id: str, fixture_label: str, sig8: str) -> _Ph:
-    return _Ph("logs/certs") / str(district_id) / str(fixture_label) / str(sig8)
+def _hard_bundle_dir(district_id: str, fixture_label: str, sig8: str):
+    """Canonical: logs/certs/{district_id}/{fixture_label}/{sig8}."""
+    from pathlib import Path as _Path
+    try:
+        root = _CERTS_DIR
+    except Exception:
+        root = _Path(__file__).resolve().parents[1] / "logs" / "certs"
+    bdir = root / str(district_id) / str(fixture_label) / str(sig8)
+    bdir.mkdir(parents=True, exist_ok=True)
+    return bdir
+
 
 def _svr_run_once_computeonly_hard(ss=None):
     g = globals()
