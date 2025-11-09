@@ -7005,7 +7005,7 @@ def _svr_run_once_computeonly_hard(ss=None):
     _hard_co_write_json(bdir / names["projected_file"], _stamp(file_payload))
     _hard_co_write_json(bdir / names["ab_file"],        _stamp(ab_file_payload))
 
-       bundle = {
+    bundle = {
         "district_id": district_id,
         "fixture_label": fixture_label,
         "fixtures": fixtures,  # keep for debugging / provenance
