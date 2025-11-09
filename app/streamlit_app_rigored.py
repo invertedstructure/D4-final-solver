@@ -256,19 +256,25 @@ def _v2_bundle_index_rebuild(bdir: _VPath):
     return bundle
 
 def _v2_write_loop_receipt(bdir: _VPath, fixture_id: str, snapshot_id: str, bundle: dict):
-    rec = {
-        "schema_version": "2.0.0",
-        "fixture_id": fixture_id,
-        "snapshot_id": snapshot_id,
-        "district_id": bundle.get("district_id"),
-        "sig8": bundle.get("sig8"),
-        "presence_mask_hex": bundle.get("presence_mask_hex"),
-        "lanes": bundle.get("lanes"),
-        "hashes": bundle.get("hashes"),
-        "sizes": bundle.get("sizes"),
-    }
-    (_VPath(bdir) / f"loop_receipt__{fixture_id}.json").write_text(_Vjson.dumps(rec, indent=2, sort_keys=True), encoding="utf-8")
-    return rec
+    """
+    Back-compat shim: write the new v2 receipt (with SSOT paths) so
+    manifest regeneration will pick it up.
+    """
+    try:
+        extra = {
+            "fixture_label": fixture_id,
+            "district_id":   bundle.get("district_id"),
+            "sig8":          bundle.get("sig8"),
+            # dims are optional; include if your bundle carries them
+            "dims": bundle.get("dims") or {"n2": bundle.get("n2"), "n3": bundle.get("n3")},
+        }
+    except Exception:
+        extra = {"fixture_label": fixture_id}
+
+    ok, msg = _v2_write_loop_receipt_for_bundle(bdir, extra=extra)
+    # call site ignores the return; keep a harmless return for debugging
+    return {"ok": ok, "msg": msg}
+
 
 # Suite ZIP builder
 def _suite_zip_build(snapshot_id: str):
