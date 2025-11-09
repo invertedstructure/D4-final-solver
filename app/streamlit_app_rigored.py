@@ -1315,30 +1315,117 @@ with st.expander("C1 — Coverage rollup & health ping", expanded=False):
             # Handle case where file exists but is inaccessible/corrupt
             pass
 
-    # Rollup button
+          # Rollup button
     if cov_path.exists():
         if st.button("Build rollup CSV (group by prox_label)", key="btn_c1_rollup"):
             rows = _c1_rollup_rows(cov_path)
             if not rows:
                 st.warning("No rows parsed from coverage.jsonl.")
             else:
-                _c1_write_rollup_csv(rows, csv_out)
+                # IMPORTANT: pass cov_path to the writer (not 'rows')
+                _c1_write_rollup_csv(cov_path, csv_out)
                 st.success(f"Wrote {len(rows)} rows → {csv_out}")
-                # Show a small table without requiring pandas
-                st.table([{k: (None if v is None else (round(v, 6) if isinstance(v, float) else v))
-                           for k, v in r.items()} for r in rows])
+    
+                # UI-friendly formatting: None → "—", numbers → fixed 4 decimals
+                def _fmt(x):
+                    if x is None:
+                        return "—"
+                    try:
+                        return f"{float(x):.4f}"
+                    except Exception:
+                        return str(x)
+    
+                ui_rows = []
+                for r in rows:
+                    ui_rows.append({
+                        "prox_label": r["prox_label"],
+                        "count": r["count"],
+                        "mean_sel_mismatch_rate": _fmt(r["mean_sel_mismatch_rate"]),
+                        "mean_offrow_mismatch_rate": _fmt(r["mean_offrow_mismatch_rate"]),
+                        "mean_ker_mismatch_rate": _fmt(r["mean_ker_mismatch_rate"]),
+                        "mean_ctr_rate": _fmt(r["mean_ctr_rate"]),  # preferred display
+                        # keep legacy visible a bit longer if you want; or drop it entirely:
+                        # "mean_contradiction_rate": _fmt(r["mean_contradiction_rate"]),
+                    })
+                st.table(ui_rows)
+    
+                # Optional: CSV download
                 try:
-                    # Optional: download
-                    st.download_button(
-                        "Download rollup.csv",
-                        data=open(csv_out, "rb").read(),
-                        file_name="coverage_rollup.csv",
-                        mime="text/csv",
-                        key="btn_c1_download_rollup",
-                    )
+                    with open(csv_out, "rb") as _f:
+                        st.download_button(
+                            "Download rollup.csv",
+                            data=_f.read(),
+                            file_name="coverage_rollup.csv",
+                            mime="text/csv",
+                            key="btn_c1_download_rollup",
+                        )
                 except Exception:
                     pass
-# ─────────────────────────────────────────────────────────────────────────────────────────────
+        # Snapshot tally — JSON-first UI
+        from pathlib import Path as _Path
+        import json as _json
+        
+        _tpath = _Path("logs") / "reports" / "snapshot_tally.jsonl"
+        if _tpath.exists():
+            # Download
+            try:
+                with open(str(_tpath), "rb") as _fh:
+                    st.download_button(
+                        "Download snapshot_tally.jsonl",
+                        _fh,
+                        file_name="snapshot_tally.jsonl",
+                        mime="text/plain",
+                        key="btn_snapshot_tally_download",
+                    )
+            except Exception:
+                pass
+        
+            # Quick peek (last record = your recent 1× run)
+            try:
+                last = None
+                with open(str(_tpath), "r", encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        last = _json.loads(line)
+                if last:
+                    st.caption("Latest snapshot_tally.jsonl record")
+                    st.json({
+                        "district_id": last.get("district_id"),
+                        "fixture_label": last.get("fixture_label"),
+                        "coverage_row_count": last.get("coverage_row_count"),
+                        "counts": last.get("counts"),
+                        "lane_popcount_stats": last.get("lane_popcount_stats"),
+                    })
+            except Exception:
+                pass
+        
+            # Optional: quick aggregate over the whole file (counts only)
+            if st.button("Summarize all snapshot tallies", key="btn_snapshot_summarize"):
+                try:
+                    bins = ["GREEN","KER-FILTERED","KER-EXPOSED","FILTERED_OFFLANE","RED_BOTH","RED_UNPOSED"]
+                    agg = {"AUTO": {k: 0 for k in bins}, "FILE": {k: 0 for k in bins}, "n_records": 0}
+                    with open(str(_tpath), "r", encoding="utf-8") as fh:
+                        for line in fh:
+                            line = line.strip()
+                            if not line:
+                                continue
+                            rec = _json.loads(line)
+                            c = (rec.get("counts") or {})
+                            for side in ("AUTO","FILE"):
+                                side_counts = c.get(side) or {}
+                                for k in bins:
+                                    agg[side][k] += int(side_counts.get(k, 0) or 0)
+                            agg["n_records"] += 1
+                    st.write(agg)
+                except Exception as e:
+                    st.warning(f"Could not summarize snapshot_tally.jsonl: {e}")
+        else:
+            st.info("snapshot_tally.jsonl not found yet — run a 1× HARD solve.")
+        
+        
+        # ─────────────────────────────────────────────────────────────────────────────────────────────
 
 
 # ---------- Policy receipt (B) ----------
