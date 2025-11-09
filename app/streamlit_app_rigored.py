@@ -6193,61 +6193,118 @@ def _svr_run_once_computeonly(ss=None):
     fixtures = {"district": D, "H": Ht_guess, "C": Ct_guess, "C_raw": C_raw_stem, "U": "U"}
     fixture_label = f"{D}_{Ht_guess}_{Ct_guess}"
 
+# --- v2 compute-only 1× bundle (6-core circuit, honest logging) --------------
+import time, uuid, json as _json, hashlib as _hashlib
+from pathlib import Path as _Path
+import re as _re
 
-    def _stamp(obj):
-        o = dict(obj or {})
-        o.setdefault("fixtures", fixtures)
-        o.setdefault("fixture_label", fixture_label)
-        o.setdefault("snapshot_id", snap_id)
-        o.setdefault("sig8", sig8)
-        o.setdefault("written_at_utc", int(time.time()))
-        return o
+def _as_dims(x):
+    if isinstance(x, dict):
+        if "dims" in x and isinstance(x["dims"], dict):
+            return {"n2": x["dims"].get("n2"), "n3": x["dims"].get("n3")}
+        if "n2" in x and "n3" in x:
+            return {"n2": x["n2"], "n3": x["n3"]}
+    return None
 
-    bdir  = _co_bundle_dir(district_id, fixture_label, sig8)
-    names = {
-        "strict":         f"overlap__{district_id}__strict__{sig8}.json",
-        "projected_auto": f"overlap__{district_id}__projected_columns_k_3_auto__{sig8}.json",
-        "ab_auto":        f"ab_compare__strict_vs_projected_auto__{sig8}.json",
-        "freezer":        f"projector_freezer__{district_id}__{sig8}.json",
-        "projected_file": f"overlap__{district_id}__projected_columns_k_3_file__{sig8}.json",
-        "ab_file":        f"ab_compare__projected_columns_k_3_file__{sig8}.json",
-    }
+dims = _as_dims(strict) or _as_dims(auto)
 
-    _co_write_json(bdir / names["strict"],         _stamp(strict))
-    _co_write_json(bdir / names["projected_auto"], _stamp(auto))
-    _co_write_json(bdir / names["ab_auto"],        _stamp(ab_auto))
-    _co_write_json(bdir / names["freezer"],        _stamp(frz_info))
-    _co_write_json(bdir / names["projected_file"], _stamp(pfile))
-    _co_write_json(bdir / names["ab_file"],        _stamp(ab_file))
+def _stamp(obj, policy=None):
+    o = dict(obj or {})
+    if policy and "policy" not in o:
+        o["policy"] = policy
+    o.setdefault("fixture_label", fixture_label)
+    o.setdefault("snapshot_id", snap_id)
+    o.setdefault("sig8", sig8)
+    o.setdefault("written_at_utc", int(time.time()))
+    return o
 
-    bundle = {
-        "district_id": district_id,
-        "fixture_label": fixture_label,
-        "fixtures": fixtures,
-        "sig8": sig8,
-        "filenames": [names[k] for k in ("strict","projected_auto","ab_auto","freezer","projected_file","ab_file")],
-        "core_counts": {"written": 6},
-        "written_at_utc": int(time.time())
-    }
-    _co_write_json(bdir / "bundle.json", bundle)
-    _co_write_json(bdir / f"loop_receipt__{fixture_label}.json", {
-        "snapshot_id": snap_id,
-        "run_id": str(uuid.uuid4()),
-        "district_id": district_id,
-        "fixture_label": fixture_label,
-        "sig8": sig8,
-        "bundle_dir": str(bdir),
-        "core_counts": {"written": 6, "ok": None, "na": None},
-        "timestamps": {"receipt_written_at": time.time()}
-    })
+bdir  = _co_bundle_dir(district_id, fixture_label, sig8)
+names = {
+    "strict":         f"overlap__{district_id}__strict__{sig8}.json",
+    "projected_auto": f"overlap__{district_id}__projected_columns_k_3_auto__{sig8}.json",
+    "ab_auto":        f"ab_compare__strict_vs_projected_auto__{sig8}.json",
+    "freezer":        f"projector_freezer__{district_id}__{sig8}.json",
+    "projected_file": f"overlap__{district_id}__projected_columns_k_3_file__{sig8}.json",
+    "ab_file":        f"ab_compare__projected_columns_k_3_file__{sig8}.json",
+}
 
-    try:
-        import streamlit as _st
-        _st.session_state["last_bundle_dir"] = str(bdir)
-    except Exception:
-        pass
+# Write certs exactly as produced by the compute pass (no forcing)
+_co_write_json(bdir / names["strict"],         _stamp(strict,         "strict"))
+_co_write_json(bdir / names["projected_auto"], _stamp(auto,           "projected(columns@k=3,auto)"))
+_co_write_json(bdir / names["ab_auto"],        _stamp(ab_auto,        "strict__VS__projected(columns@k=3,auto)"))
+_co_write_json(bdir / names["freezer"],        _stamp(frz_info,       "projector_freezer"))
+_co_write_json(bdir / names["projected_file"], _stamp(pfile,          "projected(columns@k=3,file)"))
+_co_write_json(bdir / names["ab_file"],        _stamp(ab_file,        "projected(columns@k=3,file)__A/B"))
 
-    return True, f"v2 compute-only 1× bundle → {bdir}", str(bdir)
+# Presence + hashes (honest: hash what exists)
+present_keys = []
+sizes, hashes = {}, {}
+for key, fname in names.items():
+    fp = bdir / fname
+    if fp.exists():
+        present_keys.append(key)
+        data = fp.read_bytes()
+        sizes[fname] = len(data)
+        hashes[fname] = _hashlib.sha256(data).hexdigest()
+
+presence_mask_hex = f"{sum(1 << i for i, k in enumerate(['strict','projected_auto','ab_auto','freezer','projected_file','ab_file']) if k in present_keys):02x}"
+core_written = len(present_keys)
+
+bundle = {
+    "schema": "bundle.v2",
+    "district_id": district_id,                 # <-- correct provenance
+    "fixture_label": fixture_label,
+    "sig8": sig8,
+    "filenames": [names[k] for k in ("strict","projected_auto","ab_auto","freezer","projected_file","ab_file")],
+    "presence_mask_hex": presence_mask_hex,
+    "core_counts": {"written": core_written},
+    "sizes": sizes,
+    "hashes": hashes,
+    "written_at_utc": int(time.time()),
+}
+if dims: bundle["dims"] = dims
+# (Optional echo) o.setdefault("fixtures", fixtures) — drop if you want smaller bundles
+# bundle["fixtures"] = fixtures
+_co_write_json(bdir / "bundle.json", bundle)
+
+# Build absolute SSOT paths from fixture_label (D*/H**/C***)
+try:
+    repo_root = _REPO_DIR
+except Exception:
+    repo_root = _Path(__file__).resolve().parents[1]
+inputs_root = repo_root / "app" / "inputs"
+
+mD = _re.search(r"(?:^|_)D(\d+)", fixture_label); D_tag = f"D{mD.group(1)}" if mD else None
+mH = _re.search(r"(?:^|_)H(\d+)", fixture_label); H_tag = f"H{mH.group(1)}" if mH else None
+mC = _re.search(r"(?:^|_)C(\d+)", fixture_label); C_tag = f"C{mC.group(1)}" if mC else None
+
+P = {
+    "B": str((inputs_root / "B" / f"{D_tag}.json").resolve()) if D_tag else None,
+    "C": str((inputs_root / "C" / f"{C_tag}.json").resolve()) if C_tag else None,
+    "H": str((inputs_root / "H" / f"{H_tag}.json").resolve()) if H_tag else None,
+    "U": str((inputs_root / "U.json").resolve()),
+}
+
+# loop_receipt.v2 (integer timestamp, honest core count, absolute paths)
+receipt = {
+    "schema": "loop_receipt.v2",
+    "snapshot_id": snap_id,
+    "run_id": str(uuid.uuid4()),
+    "district_id": district_id,
+    "fixture_label": fixture_label,
+    "sig8": sig8,
+    "bundle_dir": str(bdir.resolve()),
+    "paths": P,
+    "core_counts": {"written": core_written},
+    "timestamps": {"receipt_written_at": int(time.time())},
+}
+if dims: receipt["dims"] = dims
+_co_write_json(bdir / f"loop_receipt__{fixture_label}.json", receipt)
+
+return True, f"v2 compute-only 1× bundle → {bdir}", str(bdir)
+# ---------------------------------------------------------------------------
+
+    
 
 def one_press_v2_compute_only_ui():
     import streamlit as st
@@ -6575,61 +6632,105 @@ def _v2_regen_manifest_from_receipts():
 
 
 # --- Histogram reductions over coverage.jsonl
-def _v2_build_histograms_from_coverage(cov_path: _Path | None = None) -> tuple[bool, str, _Path | None]:
-    cov = cov_path or (_REPORTS_DIR / "coverage.jsonl")  # your coverage lives in logs/reports
-    if not cov.exists():
+def _v2_build_histograms_from_coverage(snapshot_id: str | None = None):
+    """
+    Build simple histograms over coverage.jsonl with a tolerant field mapper.
+    Writes logs/reports/histograms_v2.json and returns (ok, msg, out_path).
+    """
+    import json as _json
+    from pathlib import Path as _Path
+    from collections import defaultdict
+
+    try:
+        root = _REPO_DIR
+    except Exception:
+        root = _Path(__file__).resolve().parents[1]
+    rep_dir = root / "logs" / "reports"
+    cov_path = rep_dir / "coverage.jsonl"
+    outp = rep_dir / "histograms_v2.json"
+    rep_dir.mkdir(parents=True, exist_ok=True)
+
+    if not cov_path.exists():
         return False, "coverage.jsonl not found.", None
 
-    # read coverage.jsonl
-    rows = []
-    with cov.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rows.append(_json.loads(line))
-            except Exception:
-                pass
-    if not rows:
-        return False, "coverage.jsonl had 0 parseable rows.", None
+    def _coerce_f(x):
+        if x is None: return None
+        try: return float(x)
+        except Exception: return None
 
-    # helpers
-    def _inc(d, k): d[k] = d.get(k, 0) + 1
-    def _bucket_rate(x: float | None, step=0.05) -> str:
+    def _bucket_rate_0_1(x):
         if x is None: return "NA"
-        x = max(0.0, min(1.0, float(x)))
-        b = round(_math.floor(x/step)*step, 2)
-        return f"{b:0.2f}"
+        x = max(0.0, min(1.0, x))
+        # 10 buckets: [0.0,0.1),[0.1,0.2),..., [0.9,1.0]
+        b = int(x * 10)
+        lo = b / 10.0
+        hi = 1.0 if b == 9 else (b + 1) / 10.0
+        return f"{lo:.1f}–{hi:.1f}"
 
-    H = {
-        "lane_popcount_auto": {},           # counts by popcount
-        "ker_lane_count_auto": {},          # counts by ker-lane count
-        "R3_kernel_cols_popcount": {},      # counts by kernel-intersection size
-        "sel_mismatch_rate_buckets": {},    # 0.00,0.05,…
-        "ker_red_true": 0,                  # scalar count
-        "ker_red_false": 0,                 # scalar count
-        # Optional buckets (you can extend later):
-        # "verdict_class_auto": {}, "verdict_class_file": {},
+    def _bucket_int_small(n):
+        if n is None: return "NA"
+        try: n = int(n)
+        except Exception: return "NA"
+        if n <= 0: return "0"
+        if n <= 4: return str(n)
+        if n <= 8: return "5–8"
+        if n <= 16: return "9–16"
+        return "17+"
+
+    # bins
+    bins = {
+        "sel_mismatch_rate_buckets": defaultdict(int),
+        "offrow_mismatch_rate_buckets": defaultdict(int),
+        "ker_mismatch_rate_buckets": defaultdict(int),
+        "lanes_popcount_buckets": defaultdict(int),
+        "verdict_class": defaultdict(int),
+        "by_district": defaultdict(int),
     }
 
-    for r in rows:
-        _inc(H["lane_popcount_auto"], str(r.get("lane_popcount_auto", "NA")))
-        _inc(H["ker_lane_count_auto"], str(r.get("ker_lane_count_auto", "NA")))
-        _inc(H["R3_kernel_cols_popcount"], str(r.get("R3_kernel_cols_popcount", "NA")))
-        _inc(H["sel_mismatch_rate_buckets"], _bucket_rate(r.get("sel_mismatch_rate")))
-        if r.get("ker_red") is True: H["ker_red_true"] += 1
-        elif r.get("ker_red") is False: H["ker_red_false"] += 1
+    # read and map fields
+    import re as _re
+    with cov_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line: continue
+            try:
+                r = _json.loads(line)
+            except Exception:
+                continue
+            if snapshot_id and r.get("snapshot_id") != snapshot_id:
+                continue
 
-    outp = _REPORTS_DIR / "histograms_v2.json"
-    _v2_atomic_write_json(outp, {
-        "schema": "histograms_v2",
-        "source": str(cov.resolve()),
-        "written_at_utc": _time.strftime("%Y-%m-%dT%H:%M:%SZ", _time.gmtime()),
-        "bins": H,
-        "notes": "Pure reductions from coverage.jsonl; no algebra recompute.",
-    })
-    return True, f"Wrote {outp}", outp
+            fid = r.get("fixture_label", "")
+            mD = _re.search(r"(?:^|_)D(\d+)", fid)
+            dtag = f"D{mD.group(1)}" if mD else "UNKNOWN"
+
+            # v2 preferred → legacy fallbacks
+            lanes_pop = r.get("lanes_popcount")
+            if lanes_pop is None:
+                lanes_pop = r.get("lane_popcount_auto")  # legacy
+            sel = r.get("mismatch_sel");    sel = sel if sel is not None else r.get("sel_mismatch_rate")
+            off = r.get("mismatch_offrow"); off = off if off is not None else r.get("offrow_mismatch_rate")
+            ker = r.get("mismatch_ker");    ker = ker if ker is not None else r.get("ker_mismatch_rate")
+            vcls = (r.get("verdict_class") or "UNKNOWN").upper()
+
+            # increment bins
+            bins["lanes_popcount_buckets"][_bucket_int_small(lanes_pop)] += 1
+            bins["sel_mismatch_rate_buckets"][_bucket_rate_0_1(_coerce_f(sel))] += 1
+            bins["offrow_mismatch_rate_buckets"][_bucket_rate_0_1(_coerce_f(off))] += 1
+            bins["ker_mismatch_rate_buckets"][_bucket_rate_0_1(_coerce_f(ker))] += 1
+            bins["verdict_class"][vcls] += 1
+            bins["by_district"][dtag] += 1
+
+    # write out
+    out = {k: dict(v) for k, v in bins.items()}
+    try:
+        outp.write_text(_json.dumps(out, separators=(",", ":"), sort_keys=True), encoding="utf-8")
+        return True, f"Wrote {outp}", outp
+    except Exception as e:
+        return False, f"histogram write failed: {e}", None
+
+
+    
 
 
 def _v2_pack_suite_fat_zip(snapshot_id: str):
