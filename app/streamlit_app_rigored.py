@@ -5852,55 +5852,82 @@ with st.expander("Batch (v2) — Run manifest_full_scope", expanded=False):
 def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
     """
     Deterministic v2 runner — ALWAYS returns (ok: bool, msg: str, count: int).
-    After each solver press, rebuilds bundle.json and writes loop_receipt__{fixture}.json.
-    Also appends lanes fields into the suite index when available.
+    Reads manifest JSONL, seeds B/C/H/U for each row, runs the solver once per row,
+    rebuilds bundle.json, and writes loop_receipt__{fixture}.json.
     """
     import json as _json
     import streamlit as _st
     from pathlib import Path as _Path
 
+    # Resolve manifest path
     manifest_abs = _abs_from_manifest(manifest_path)
-    if not manifest_abs.exists():
+    if not manifest_abs or not manifest_abs.exists():
         _st.error(f"Manifest not found: {manifest_abs}")
         return False, f"Manifest not found: {manifest_abs}", 0
 
-    # Load JSONL
-    lines = []
+    # Read JSONL rows
+    rows = []
     with manifest_abs.open("r", encoding="utf-8") as f:
         for raw in f:
             raw = raw.strip()
-            if not raw:
-                continue
+            if raw:
+                try:
+                    rows.append(_json.loads(raw))
+                except Exception as e:
+                    return False, f"Bad JSONL line: {raw[:120]}… ({e})", 0
+
+    # Small helper: coerce to absolute (repo-root fallback) and check existence
+    def _ensure_abs(p: str | None) -> _Path | None:
+        if not p:
+            return None
+        pth = _Path(p)
+        if not pth.is_absolute():
             try:
-                lines.append(_json.loads(raw))
-            except Exception as e:
-                return False, f"Bad JSONL line: {raw[:120]}… ({e})", 0
+                root = _REPO_DIR  # prefer global if present
+            except Exception:
+                root = _Path(__file__).resolve().parents[1]
+            pth = root / p
+        return pth
 
     ok_count = 0
-    total = len(lines)
+    total = len(rows)
 
-    for i, rec in enumerate(lines, 1):
-        # inside _RUN_SUITE_CANON, in the fixture loop, before _one_press_triple()
-        fid = rec.get("fixture") or rec.get("id") or f"fx{i:02d}"
+    for i, rec in enumerate(rows, 1):
+        # Fixture id (prefer v2 key)
+        fid = rec.get("fixture_label") or rec.get("fixture") or rec.get("id") or f"fx{i:02d}"
+
+        # Extract canonical paths (v2 nested first, then legacy flat)
+        paths = rec.get("paths") or {}
+        B = paths.get("B") or rec.get("B")
+        C = paths.get("C") or rec.get("C")
+        H = paths.get("H") or rec.get("H")
+        U = paths.get("U") or rec.get("U")
+
+        # Key presence check
+        missing_keys = [k for k, v in {"B": B, "C": C, "H": H, "U": U}.items() if not v]
+        if missing_keys:
+            _st.warning(f"[{fid}] Missing keys in manifest: {', '.join(missing_keys)}")
+            continue
+
+        # File existence preflight (after absolute normalization)
+        Bp, Cp, Hp, Up = map(_ensure_abs, (B, C, H, U))
+        missing_files = [k for k, pth in {"B": Bp, "C": Cp, "H": Hp, "U": Up}.items() if not (pth and pth.exists())]
+        if missing_files:
+            _st.warning(f"[{fid}] Missing files: {', '.join(missing_files)}")
+            continue
+
+        # Seed inputs (strings) and session context
+        try:
+            _set_inputs_for_run(str(Bp), str(Cp), str(Hp), str(Up))
+        except Exception as e:
+            _st.warning(f"[{fid}] failed to seed inputs: {e}")
+            continue
+
         _st.session_state["fixture_label"] = fid
-        # (optional, but helpful) pass snapshot id too, if not already set
         if "world_snapshot_id" not in _st.session_state:
             _st.session_state["world_snapshot_id"] = snapshot_id
 
-
-        # Seed inputs
-        try:
-            _set_inputs_for_run(B, C, H, U)
-        except Exception:
-            pass
-
-        # Existence preflight
-        miss = [p for p in (B, C, H, U) if not _abs_from_manifest(p).exists()]
-        if miss:
-            _st.warning(f"[{fid}] Missing files: {', '.join(miss)}")
-            continue
-
-        # Call solver with arity guard
+        # Run the solver once for this row
         try:
             ret = run_overlap_once()
         except Exception as e:
@@ -5912,7 +5939,7 @@ def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
         if ok:
             ok_count += 1
 
-        # Resolve bundle dir
+        # Resolve bundle dir (fallback to most recent cert dir)
         bdir = _Path(bundle_dir) if bundle_dir else None
         if not bdir or not bdir.exists():
             try:
@@ -5921,8 +5948,9 @@ def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
             except Exception:
                 bdir = None
 
-        # Pass1/2: bundle + receipt
-        lanes_pop = None; lanes_sig8 = None
+        # Rebuild bundle index and write loop_receipt.v2
+        lanes_pop = None
+        lanes_sig8 = None
         try:
             if bdir and bdir.exists():
                 bundle = _v2_bundle_index_rebuild(bdir)
@@ -5932,7 +5960,7 @@ def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
         except Exception as e:
             _st.warning(f"[{fid}] bundling warning: {e}")
 
-        # suite index row
+        # Append to suite index (best-effort)
         try:
             _suite_index_add_row({
                 "fixture_id": fid,
@@ -5945,6 +5973,7 @@ def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
             pass
 
     return True, f"Completed {ok_count}/{total} fixtures.", ok_count
+
 
 # neutralized (final alias installed at EOF): run_suite_from_manifest = _RUN_SUITE_CANON
 
