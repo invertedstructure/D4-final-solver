@@ -6615,6 +6615,17 @@ with _st.expander("V2 — Receipts → Manifest → Suite → Histograms", expan
         else:
             ok, msg = _v2_write_loop_receipt_for_bundle(bdir)
             (_st.success if ok else _st.warning)(msg)
+    if _st.button("Repair loop_receipts for ALL bundles", key="btn_v2_write_all_receipts"):
+        total = 0
+        ok_count = 0
+        for bj in _CERTS_DIR.rglob("bundle.json"):
+            total += 1
+            ok, _ = _v2_write_loop_receipt_for_bundle(bj.parent)
+            ok_count += int(ok)
+        if ok_count == 0:
+            _st.warning("Wrote 0 receipts (no bundles found or SSOT paths missing).")
+        else:
+            _st.success(f"Wrote/updated {ok_count}/{total} receipts.")
 
     # 2) Regenerate manifest_full_scope.jsonl from receipts
     if _st.button("Regenerate manifest from receipts (m00)", key="btn_v2_regen_manifest"):
