@@ -6979,12 +6979,13 @@ def _svr_run_once_computeonly_hard(ss=None):
     ab_auto_payload = _mk_ab("strict__VS__projected(columns@k=3,auto)", strict_eq, auto_eq)
     ab_file_payload = _mk_ab("strict__VS__projected(columns@k=3,file)", strict_eq, file_eq)
 
-    # Stamp
+        # --- Stamp + hard writes
     def _stamp(obj):
         o = dict(obj or {})
-        o.setdefault("fixtures", fixtures)
+        o.setdefault("fixtures", fixtures)          # keep as provenance, but NOT used for SSOT paths
         o.setdefault("fixture_label", fixture_label)
-        if snapshot_id: o.setdefault("snapshot_id", snapshot_id)
+        if snapshot_id:
+            o.setdefault("snapshot_id", snapshot_id)
         o.setdefault("sig8", sig8)
         o.setdefault("written_at_utc", int(_time.time()))
         return o
@@ -7008,33 +7009,36 @@ def _svr_run_once_computeonly_hard(ss=None):
     bundle = {
         "district_id": district_id,
         "fixture_label": fixture_label,
-        "fixtures": fixtures,  # keep for debugging / provenance
+        "fixtures": fixtures,  # provenance only
         "sig8": sig8,
         "filenames": [names[k] for k in ("strict","projected_auto","ab_auto","freezer","projected_file","ab_file")],
         "core_counts": {"written": 6},
-        "written_at_utc": int(_time.time())
+        "written_at_utc": int(_time.time()),
     }
     _hard_co_write_json(bdir / "bundle.json", bundle)
 
-    # --- NEW: write loop_receipt.v2 with absolute SSOT paths so manifest picks it up
+    # --- Canonical SSOT paths for loop_receipt.v2 (no uploads needed)
     from pathlib import Path as _Path
+    import re as _re
 
-    # Normalize the four canonical paths from `fixtures` → absolute
-    # `fixtures` should be a dict like {"B": "...", "C": "...", "H": "...", "U": "..."}
-    def _abs_or_none(p):
-        try:
-            return str(_Path(p).resolve()) if p else None
-        except Exception:
-            return None
+    repo_root = _Path(__file__).resolve().parents[1]              # /mount/src/d4-final-solver
+    inputs_root = repo_root / "app" / "inputs"
 
+    # fixture_label like "D3_H10_C111" → H="H10", C="C111"
+    _mH = _re.search(r"(?:^|_)H(\d+)", fixture_label)
+    _mC = _re.search(r"(?:^|_)C(\d+)", fixture_label)
+    H_tag = f"H{_mH.group(1)}" if _mH else None
+    C_tag = f"C{_mC.group(1)}" if _mC else None
+
+    # Absolute SSOT paths (this is what the manifest ingestor expects)
     P = {
-        "B": _abs_or_none((fixtures or {}).get("B")),
-        "C": _abs_or_none((fixtures or {}).get("C")),
-        "H": _abs_or_none((fixtures or {}).get("H")),
-        "U": _abs_or_none((fixtures or {}).get("U")),
+        "B": str((inputs_root / "B" / f"{district_id}.json").resolve()),  # e.g., app/inputs/B/D3.json
+        "C": str((inputs_root / "C" / f"{C_tag}.json").resolve()) if C_tag else None,
+        "H": str((inputs_root / "H" / f"{H_tag}.json").resolve()) if H_tag else None,
+        "U": str((inputs_root / "U.json").resolve()),
     }
 
-    # dims are optional for manifest ingestion; include if easily available
+    # dims (optional but nice)
     dims = None
     if isinstance(strict_payload, dict):
         if "dims" in strict_payload:
@@ -7042,17 +7046,22 @@ def _svr_run_once_computeonly_hard(ss=None):
         elif ("n2" in strict_payload) and ("n3" in strict_payload):
             dims = {"n2": strict_payload["n2"], "n3": strict_payload["n3"]}
 
-    extra = {
-        "district_id":   district_id,
+    loop_receipt = {
+        "schema": "loop_receipt.v2",
+        "run_id": str(_uuid.uuid4()),
+        "district_id": district_id,
         "fixture_label": fixture_label,
-        "sig8":          sig8,
-        "paths":         P,   # <-- critical for manifest regen
+        "sig8": sig8,
+        "bundle_dir": str(bdir.resolve()),
+        "paths": P,  # <-- critical for manifest regen
+        "core_counts": {"written": 6},
+        "timestamps": {"receipt_written_at": int(_time.time())},
     }
     if dims:
-        extra["dims"] = dims
+        loop_receipt["dims"] = dims
 
-    # Write/repair the v2 receipt (this function adds schema="loop_receipt.v2")
-    _v2_write_loop_receipt_for_bundle(bdir, extra=extra)
+    _hard_co_write_json(bdir / f"loop_receipt__{fixture_label}.json", loop_receipt)
+
 
     # ---- C1 coverage append (v2 ker_RED — canonical, JSON-grounded) ----
     try:
