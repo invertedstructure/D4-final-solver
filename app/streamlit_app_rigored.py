@@ -39,6 +39,43 @@ def _canon_dump_and_sig8(obj):
     raw = _json.dumps(can, sort_keys=True, separators=(",", ":")).encode("utf-8")
     h = _hash.sha256(raw).hexdigest()
     return raw.decode("utf-8"), h[:8]
+def _v2_coverage_path():
+    try:
+        root = _REPO_DIR
+    except Exception:
+        from pathlib import Path as _Path
+        root = _Path(__file__).resolve().parents[1]
+    p = root / "logs" / "reports"
+    p.mkdir(parents=True, exist_ok=True)
+    return p / "coverage.jsonl"
+
+def _v2_coverage_append(row: dict):
+    """Append one JSON line to coverage.jsonl (best-effort)."""
+    import json as _json, time as _time
+    row = dict(row or {})
+    row.setdefault("ts_utc", int(_time.time()))
+    with _v2_coverage_path().open("a", encoding="utf-8") as f:
+        f.write(_json.dumps(row, separators=(",", ":"), sort_keys=False) + "\n")
+
+def _v2_coverage_count_for_snapshot(snapshot_id: str) -> int:
+    """Count parseable rows matching a snapshot_id (best-effort)."""
+    import json as _json
+    p = _v2_coverage_path()
+    if not p.exists():
+        return 0
+    n = 0
+    with p.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                j = _json.loads(line)
+            except Exception:
+                continue
+            if j.get("snapshot_id") == snapshot_id:
+                n += 1
+    return n
 
 # Normalize solver return to (ok, msg, bundle_dir)
 def _solver_ret_as_tuple(ret):
@@ -5532,7 +5569,6 @@ def run_overlap_once(ss=st.session_state):
 one_press_solve = run_overlap_once
 
 
-
 def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
     """
     Deterministic v2 runner — ALWAYS returns (ok: bool, msg: str, count: int).
@@ -5543,7 +5579,7 @@ def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
     import streamlit as _st
     from pathlib import Path as _Path
 
-    # Resolve manifest path
+    # Resolve manifest path (string → Path)
     manifest_abs = _abs_from_manifest(manifest_path)
     if not manifest_abs or not manifest_abs.exists():
         _st.error(f"Manifest not found: {manifest_abs}")
@@ -5554,23 +5590,24 @@ def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
     with manifest_abs.open("r", encoding="utf-8") as f:
         for raw in f:
             raw = raw.strip()
-            if raw:
-                try:
-                    rows.append(_json.loads(raw))
-                except Exception as e:
-                    return False, f"Bad JSONL line: {raw[:120]}… ({e})", 0
+            if not raw:
+                continue
+            try:
+                rows.append(_json.loads(raw))
+            except Exception as e:
+                return False, f"Bad JSONL line: {raw[:120]}… ({e})", 0
 
-    # Helper: absolute path (repo-root fallback)
+    # Helper: coerce to absolute path (repo-root fallback)
     def _ensure_abs(p: str | None) -> _Path | None:
         if not p:
             return None
         q = _Path(p)
         if not q.is_absolute():
             try:
-                root = _REPO_DIR
+                root = _REPO_DIR  # prefer configured repo root
             except Exception:
                 root = _Path(__file__).resolve().parents[1]
-            q = root / q
+            q = (root / q).resolve()
         return q
 
     ok_count = 0
@@ -5587,13 +5624,13 @@ def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
         H = paths.get("H") or rec.get("H")
         U = paths.get("U") or rec.get("U")
 
-        # Key presence check
+        # Presence preflight (keys present)
         missing_keys = [k for k, v in {"B": B, "C": C, "H": H, "U": U}.items() if not v]
         if missing_keys:
             _st.warning(f"[{fid}] Missing keys in manifest: {', '.join(missing_keys)}")
             continue
 
-        # Existence preflight
+        # Existence preflight (files exist)
         Bp, Cp, Hp, Up = map(_ensure_abs, (B, C, H, U))
         missing_files = [k for k, pth in {"B": Bp, "C": Cp, "H": Hp, "U": Up}.items() if not (pth and pth.exists())]
         if missing_files:
@@ -5614,59 +5651,59 @@ def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
         # Run the per-row worker
         try:
             ret = run_overlap_once()
+            ok, msg, bundle_dir = _solver_ret_as_tuple(ret)
         except Exception as e:
             ok, msg, bundle_dir = False, f"solver error: {e}", None
-        else:
-            ok, msg, bundle_dir = _solver_ret_as_tuple(ret)
 
         _st.write(f"{fid} → {'ok' if ok else 'fail'} · {msg}")
         if ok:
             ok_count += 1
 
-        # Resolve bundle dir (fallback: most recent cert dir)
+        # Resolve bundle dir (fallback to most-recent cert dir)
         bdir = _Path(bundle_dir) if bundle_dir else None
         if not bdir or not bdir.exists():
             try:
-                certs = list((_REPO_DIR / "logs" / "certs").glob("*/*"))
+                certs_root = _REPO_DIR if '_REPO_DIR' in globals() else _Path(__file__).resolve().parents[1]
+                certs = list((certs_root / "logs" / "certs").glob("*/*"))
                 bdir = max(certs, key=lambda p: p.stat().st_mtime) if certs else None
             except Exception:
                 bdir = None
 
-        # Rebuild bundle and (re)write v2 receipt; best-effort lanes sidecar
-        lanes_pop = None
-        lanes_sig8 = None
+        # Rebuild bundle and (re)write v2 receipt; try to surface lanes
         try:
             if bdir and bdir.exists():
                 bundle = _v2_bundle_index_rebuild(bdir)
                 lanes = bundle.get("lanes") or {}
                 lanes_pop, lanes_sig8 = lanes.get("popcount"), lanes.get("sig8")
                 _v2_write_loop_receipt(bdir, fid, snapshot_id, bundle)
+                # suite index append (best-effort)
+                try:
+                    _suite_index_add_row({
+                        "fixture_id": fid,
+                        "snapshot_id": snapshot_id,
+                        "bundle_dir": str(bdir),
+                        "lanes_popcount": lanes_pop,
+                        "lanes_sig8": lanes_sig8,
+                    })
+                except Exception:
+                    pass
         except Exception as e:
             _st.warning(f"[{fid}] bundling warning: {e}")
 
-        # Suite index append (best-effort)
-        try:
-            _suite_index_add_row({
-                "fixture_id": fid,
-                "snapshot_id": snapshot_id,
-                "bundle_dir": str(bdir) if bdir else None,
-                "lanes_popcount": lanes_pop,
-                "lanes_sig8": lanes_sig8,
-            })
-        except Exception:
-            pass
-
     return True, f"Completed {ok_count}/{total} fixtures.", ok_count
+
+
 
 
 
 # neutralized (final alias installed at EOF): run_suite_from_manifest = _RUN_SUITE_CANON
 
 # =============================================================================
-# FINAL, SINGLE-SOURCE RUNNER ALIAS (v2 repo-only preferred)
-# Put this block at the very bottom of the file.
+#-----------------------------------------------------------
+#---------------------------------------------------------------------------------------------------------
+
 try:
-    del run_suite_from_manifest  # if defined earlier, remove to avoid shadowing
+    del run_suite_from_manifest  # avoid shadowing old defs
 except Exception:
     pass
 
@@ -5691,6 +5728,7 @@ def run_suite_from_manifest(manifest_path: str, snapshot_id: str):
             ok, msg = ret
             return bool(ok), str(msg), 0
     return bool(ret), str(ret), 0
+
 
 
 
@@ -6253,35 +6291,110 @@ def _v2_write_loop_receipt_for_bundle(bdir: _Path, *, extra: dict | None = None)
     return True, f"Wrote {outp.name}"
 
 # --- Regenerate manifest_full_scope.jsonl by scanning loop_receipts
-def _v2_regen_manifest_from_receipts() -> tuple[int, _Path]:
-    out = _MANIFESTS_DIR / "manifest_full_scope.jsonl"
-    kept = 0
-    with out.open("w", encoding="utf-8") as mf:
-        for rp in _CERTS_DIR.rglob("loop_receipt__*.json"):
-            try:
-                r = _json.loads(rp.read_text(encoding="utf-8"))
-            except Exception:
-                continue
-            if r.get("schema") != "loop_receipt.v2":
-                continue
-            paths = (r.get("paths") or {})
-            B, C, H, U = (paths.get("B"), paths.get("C"), paths.get("H"), paths.get("U"))
-            # require all four and they should exist
-            if not all([B, C, H, U]):
-                continue
-            if not all([_Path(p).exists() for p in [B,C,H,U]]):
-                continue
-            row = {
-                "fixture_label": r.get("fixture_label"),
-                "district_id": r.get("district_id"),
-                "sig8": r.get("sig8"),
-                "bundle_dir": r.get("bundle_dir"),
-                "dims": r.get("dims"),
-                "B": B, "C": C, "H": H, "U": U,
-            }
-            mf.write(_json.dumps(row, ensure_ascii=False, separators=(",",":"), sort_keys=True) + "\n")
-            kept += 1
-    return kept, out
+def _v2_regen_manifest_from_receipts():
+    """
+    Scan logs/certs/**/loop_receipt__*.json (schema=loop_receipt.v2),
+    validate absolute SSOT paths (B,C,H,U), deduplicate by fixture_label,
+    and write logs/manifests/manifest_full_scope.jsonl atomically.
+
+    Returns: (ok: bool, manifest_path: Path, kept_count: int)
+    """
+    import json as _json
+    from pathlib import Path as _Path
+    import time as _time
+    import re as _re
+
+    try:
+        repo_root = _REPO_DIR
+    except Exception:
+        repo_root = _Path(__file__).resolve().parents[1]
+
+    manifests_dir = repo_root / "logs" / "manifests"
+    manifests_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = manifests_dir / "manifest_full_scope.jsonl"
+
+    try:
+        certs_root = _CERTS_DIR  # preferred if defined
+    except Exception:
+        certs_root = repo_root / "logs" / "certs"
+
+    receipts = list(certs_root.rglob("loop_receipt__*.json"))
+
+    records = []
+    bad = 0
+    grouped = {}  # fixture_label -> best (rec, score, src_path)
+
+    def _score(rj: dict, pth: _Path) -> float:
+        # prefer explicit receipt_written_at, fall back to file mtime
+        ts = (((rj or {}).get("timestamps") or {}).get("receipt_written_at")) or 0
+        try:
+            ts = float(ts)
+        except Exception:
+            ts = 0.0
+        return max(ts, pth.stat().st_mtime)
+
+    for rp in receipts:
+        try:
+            rj = _json.loads(rp.read_text(encoding="utf-8"))
+        except Exception:
+            bad += 1
+            continue
+
+        if not isinstance(rj, dict) or rj.get("schema") != "loop_receipt.v2":
+            bad += 1
+            continue
+
+        fid = rj.get("fixture_label") or ""
+        paths = rj.get("paths") or {}
+        B, C, H, U = paths.get("B"), paths.get("C"), paths.get("H"), paths.get("U")
+        if not (B and C and H and U):
+            bad += 1
+            continue
+
+        # All must be absolute and exist on disk
+        Bp, Cp, Hp, Up = map(_Path, (B, C, H, U))
+        if not (Bp.is_absolute() and Cp.is_absolute() and Hp.is_absolute() and Up.is_absolute()):
+            bad += 1
+            continue
+        if not (Bp.exists() and Cp.exists() and Hp.exists() and Up.exists()):
+            bad += 1
+            continue
+
+        # Enforce B comes from D-tag in fixture_label (never hashed district_id)
+        mD = _re.search(r"(?:^|_)D(\d+)", fid or "")
+        D_tag = f"D{mD.group(1)}" if mD else None
+        if not D_tag or _Path(B).stem != D_tag:
+            bad += 1
+            continue
+
+        sc = _score(rj, rp)
+        keep = grouped.get(fid)
+        if (keep is None) or (sc > keep[1]):
+            # minimal row with dims if present
+            row = {"fixture_label": fid, "paths": paths}
+            if "dims" in rj and isinstance(rj["dims"], dict):
+                row["dims"] = {"n2": rj["dims"].get("n2"), "n3": rj["dims"].get("n3")}
+            grouped[fid] = (row, sc, rp)
+
+    # finalize rows in stable order
+    for fid in sorted(grouped.keys()):
+        records.append(grouped[fid][0])
+
+    # atomic write
+    tmp = manifest_path.with_suffix(".jsonl.tmp")
+    tmp.write_text("\n".join(_json.dumps(r, separators=(",", ":")) for r in records) + "\n", encoding="utf-8")
+    tmp.replace(manifest_path)
+
+    # optional: warn if we dropped anything
+    dropped = len(receipts) - bad - len(records)
+    if dropped > 0:
+        try:
+            _st.warning(f"Manifest dedup: kept {len(records)} rows · dropped {dropped} older duplicates · skipped {bad} invalid receipts")
+        except Exception:
+            pass
+
+    return True, manifest_path, len(records)
+
 
 # --- Histogram reductions over coverage.jsonl
 def _v2_build_histograms_from_coverage(cov_path: _Path | None = None) -> tuple[bool, str, _Path | None]:
