@@ -861,76 +861,7 @@ def _set_inputs_for_run(B, C, H, U):
     ss["uploaded_H_path"] = Hp
     ss["uploaded_U_path"] = Up
 
-def run_suite_from_manifest(manifest_path: str, snapshot_id: str):
-    """
-    Iterate JSONL manifest: seed inputs -> call run_overlap_once()
-    -> record suite index rows.
-    """
-    manifest_abs = _abs_from_manifest(manifest_path)
-    if not manifest_abs.exists():
-        _st.error(f"Manifest not found: {manifest_abs}")
-        return False, f"Manifest not found: {manifest_abs}"
 
-    lines = []
-    with manifest_abs.open("r", encoding="utf-8") as f:
-        for raw in f:
-            raw = raw.strip()
-            if not raw:
-                continue
-            try:
-                lines.append(_json.loads(raw))
-            except Exception as e:
-                return False, f"Bad JSONL line: {raw[:120]}… ({e})"
-
-    ok_count = 0
-    for i, rec in enumerate(lines, 1):
-        fid = rec.get("id") or f"fixture_{i:02d}"
-        B = rec["B"]; C = rec["C"]; H = rec["H"]; U = rec["U"]
-        # Seed inputs for the single-press path
-        _set_inputs_for_run(B, C, H, U)
-
-        # Optional: quick existence preflight for clearer errors
-        miss = [p for p in (B, C, H, U) if not _abs_from_manifest(p).exists()]
-        if miss:
-            _st.warning(f"[{fid}] Missing files: {', '.join(miss)}")
-            continue
-
-        # One-press, arity-proof (always normalized)
-        ok, msg, bundle_dir = _one_press_triple()
-
-
-        _st.write(f"{fid} → {'ok' if ok else 'fail'} · {msg}")
-        if ok:
-            ok_count += 1
-
-        # Append to suite index if we can read lanes info from the projected AUTO cert
-        try:
-            # Locate latest AUTO cert written by this press via the bundle.json index
-            bdir = _Path(bundle_dir) if bundle_dir else None
-            if not bdir or not bdir.exists():
-                # fallback: last bundle under logs/certs (best-effort)
-                bdir = max((_REPO_DIR / "logs" / "certs").glob("*"), key=lambda p: p.stat().st_mtime)
-            bidx = _json.loads((bdir / "bundle.json").read_text("utf-8"))
-            auto_path = bidx.get("files", {}).get("projected_auto")
-            lanes_pop = None; lanes_sig8 = None
-            if auto_path:
-                payload = _json.loads(_Path(auto_path).read_text("utf-8"))
-                pc = (payload.get("projection_context") or {})
-                lanes_pop = pc.get("lanes_popcount")
-                lanes_sig8 = pc.get("lanes_sig8")
-
-            _suite_index_add_row({
-                "fixture_id": fid,
-                "snapshot_id": snapshot_id,
-                "bundle_dir": str(bdir),
-                "lanes_popcount": lanes_pop,
-                "lanes_sig8": lanes_sig8,
-            })
-        except Exception:
-            # Non-fatal; index is a convenience
-            pass
-
-    return True, f"Completed {ok_count}/{len(lines)} fixtures."
 
 
 
