@@ -2695,316 +2695,32 @@ def _current_inputs_sig_compat(*args, **kwargs):
         return ssot_frozen_sig_from_ib()
 
 
+# ───────────────────────── Minimal tab scaffold (temporary) ─────────────────────────
+# We still have legacy blocks like:
+#   with tab2:  # Overlap
+#   with tab3:  # Triangle
+#   with tab4:  # Towers
+#   with tab5:  # Export
+# To avoid NameError while we refactor, create tabs (or fall back to plain containers).
 
-
-
-
-# ───────────────────────── Tabs — create once, early ─────────────────────────
-if not all(n in globals() for n in ("tab1","tab2","tab3","tab4","tab5")):
+if not all(name in globals() for name in ("tab1", "tab2", "tab3", "tab4", "tab5")):
     try:
-        tab1, tab2, tab3, tab4, tab5 = st.tabs(["Unit", "Overlap", "Triangle", "Towers", "Export"])
-    except Exception as _e:
-        st.error("Tab construction failed.")
-        st.exception(_e)
-        st.stop()
-
-# ───────────────────────────────── SIDEBAR ───────────────────────────────────
-with st.sidebar:
-    st.markdown("### Upload core inputs")
-    st.caption(
-        "**Shapes (required):**\n\n```json\n{\\\"n\\\": {\\\"3\\\":3, \\\"2\\\":2, \\\"1\\\":0}}\n```\n\n"
-        "**Boundaries (required):**\n\n```json\n{\\\"blocks\\\": {\\\"3\\\": [[...]], \\\"2\\\": [[...]]}}\n```\n\n"
-        "**CMap / Move (required):**\n\n```json\n{\\\"blocks\\\": {\\\"3\\\": [[...]], \\\"2\\\": [[...]]}}\n```\n\n"
-        "**Support (optional):** either `{degree: mask}` or `{\\\"masks\\\": {degree: mask}}`.\n\n"
-        "**Triangle schema (optional):** degree-keyed `{ \\\"2\\\": {\\\"A\\\":..., \\\"B\\\":..., \\\"J\\\":...}, ... }`."
-    )
-
-    # Uploaders
-    f_shapes   = st.file_uploader("Shapes (shapes.json)",            type=["json"], key="shapes")
-    f_bound    = st.file_uploader("Boundaries (boundaries.json)",    type=["json"], key="bound")
-    f_cmap     = st.file_uploader("CMap / Move (Cmap_*.json)",       type=["json"], key="cmap")
-        # immediately after those three lines:
-    st.session_state["uploaded_shapes"]     = f_shapes
-    st.session_state["uploaded_boundaries"] = f_bound
-    st.session_state["uploaded_cmap"]       = f_cmap
-    f_support  = st.file_uploader("Support policy (optional)",       type=["json"], key="support")
-    f_triangle = st.file_uploader("Triangle schema (optional)",      type=["json"], key="tri")
-    seed       = st.text_input("Seed", "super-seed-A")
-
-    # filename stamps for provenance
-    _stamp_filename("fname_shapes",     f_shapes)
-    _stamp_filename("fname_boundaries", f_bound)
-    _stamp_filename("fname_cmap",       f_cmap)
-
-    # Show raw-bytes hash to help populate DISTRICT_MAP
-    if f_bound is not None and hasattr(f_bound, "getvalue"):
-        _raw   = f_bound.getvalue()
-        _bhash = _sha256_hex_bytes(_raw)
-        st.caption(f"boundaries raw-bytes hash: {_bhash}")
-        st.code(f'DISTRICT_MAP["{_bhash}"] = "D?"  # ← set D1/D2/D3/D4', language="python")
-
-# ───────────────────────────── LOAD CORE JSONS ───────────────────────────────
-d_shapes = read_json_file(f_shapes)
-d_bound  = read_json_file(f_bound)
-d_cmap   = read_json_file(f_cmap)
-
-# Shared inputs_block (SSOT) in session
-st.session_state.setdefault("_inputs_block", {})
-ib = st.session_state["_inputs_block"]
-
-if d_shapes and d_bound and d_cmap:
-    try:
-        # Parse core objects
-        shapes     = io.parse_shapes(d_shapes)
-        boundaries = io.parse_boundaries(d_bound)
-        cmap       = io.parse_cmap(d_cmap)
-        support    = io.parse_support(read_json_file(f_support))            if f_support  else None
-        triangle   = io.parse_triangle_schema(read_json_file(f_triangle))   if f_triangle else None
-
-        # Prefer raw-bytes boundary hash when available
-        try:
-            if hasattr(f_bound, "getvalue"):
-                boundaries_hash_fresh = _sha256_hex_bytes(f_bound.getvalue())
-            else:
-                boundaries_hash_fresh = _sha256_hex_obj(d_bound)
-        except Exception:
-            boundaries_hash_fresh = _sha256_hex_obj(d_bound)
-
-        # Light district info (lane mask + signature)
-        d3_block          = (boundaries.blocks.__root__.get("3") or [])
-        lane_mask_k3_now  = _lane_mask_from_d3(boundaries)
-        d3_rows           = len(d3_block)
-        d3_cols           = (len(d3_block[0]) if d3_block else 0)
-        district_sig      = _district_signature(lane_mask_k3_now, d3_rows, d3_cols)
-        district_id_fresh = DISTRICT_MAP.get(boundaries_hash_fresh, "UNKNOWN")
-
-        # Clear stale session bits if boundaries changed
-        _prev_bhash = st.session_state.get("_last_boundaries_hash")
-        if _prev_bhash and _prev_bhash != boundaries_hash_fresh:
-            for k in ("ab_compare", "district_id", "_projector_cache"):
-                st.session_state.pop(k, None)
-        st.session_state["_last_boundaries_hash"] = boundaries_hash_fresh
-
-        # ── SSOT: authoritative filenames, dims, and hashes (no recompute elsewhere) ──
-        C2 = (cmap.blocks.__root__.get("2") or [])
-        C3 = (cmap.blocks.__root__.get("3") or [])
-        # H source = parsed overlap_H if present, else empty cmap shell (consistent schema)
-        H_used = st.session_state.get("overlap_H") or io.parse_cmap({"blocks": {}})
-
-        ib["filenames"] = {
-            "boundaries": st.session_state.get("fname_boundaries", "boundaries.json"),
-            "C":          st.session_state.get("fname_cmap",       "cmap.json"),
-            "H":          "H.json",   # adjust if you have an uploader for H
-            "U":          st.session_state.get("fname_shapes",     "shapes.json"),
-        }
-        ib["dims"] = {
-            "n2": len(C2),
-            "n3": (len(C3[0]) if C3 else (len(d3_block[0]) if (d3_block and d3_block[0]) else 0)),
-        }
-        ib["boundaries_hash"] = boundaries_hash_fresh
-        ib["C_hash"]          = hash_json(cmap.dict())
-        ib["H_hash"]          = hash_json(H_used.dict())
-        ib["U_hash"]          = hash_json(shapes.dict())
-        ib["shapes_hash"]     = ib["U_hash"]  # 3D alias
-
-        # Mirror fresh district info for later blocks
-        st.session_state["_district_info"] = {
-            "district_id":        district_id_fresh,
-            "boundaries_hash":    boundaries_hash_fresh,
-            "lane_mask_k3_now":   lane_mask_k3_now,
-            "district_signature": district_sig,
-            "d3_rows": d3_rows,
-            "d3_cols": d3_cols,
-        }
-        st.session_state["district_id"] = district_id_fresh
-
-        # Validate schemas
-        io.validate_bundle(boundaries, shapes, cmap, support)
-        st.success("Core schemas validated ✅")
-        st.caption(
-            f"district={district_id_fresh} · bhash={boundaries_hash_fresh[:12]} · "
-            f"k3={lane_mask_k3_now} · sig={district_sig} · dims(n2,n3)={ib['dims'].get('n2')},{ib['dims'].get('n3')}"
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(
+            ["Unit (legacy)", "Overlap", "Triangle", "Towers", "Export"]
         )
+    except Exception:
+        # Extremely defensive fallback: use plain containers if tabs fail for any reason.
+        tab1 = st.container()
+        tab2 = st.container()
+        tab3 = st.container()
+        tab4 = st.container()
+        tab5 = st.container()
 
-        with safe_expander("Hashes / provenance"):
-            named = [("boundaries", boundaries.dict()),
-                     ("shapes", shapes.dict()),
-                     ("cmap", cmap.dict()),
-                     ("H_used", H_used.dict())]
-            if support:  named.append(("support",  support.dict()))
-            if triangle: named.append(("triangle", triangle.dict()))
-            ch = hashes.bundle_content_hash(named)
-            ts = hashes.timestamp_iso_lisbon()
-            rid = hashes.run_id(ch, ts)
-            st.code(
-                f"content_hash = {ch}\nrun_timestamp = {ts}\nrun_id = {rid}\napp_version = {APP_VERSION}",
-                language="bash"
-            )
-            if st.button("Export ./reports → report.zip (quick)"):
-                reports_dir = Path(DIRS["reports"])
-                if not reports_dir.exists():
-                    st.warning("No ./reports yet. Run a Tower or Manifest first.")
-                else:
-                    zpath = reports_dir / "report.zip"
-                    export_mod.zip_report(str(reports_dir), str(zpath))
-                    st.success(f"Exported: {zpath}")
-                    with open(zpath, "rb") as fz:
-                        st.download_button("Download report.zip", fz, file_name="report.zip")
 
-    except Exception as e:
-        st.error(f"Validation error: {e}")
-        st.stop()
-else:
-    missing = [name for name, f in [("Shapes", d_shapes), ("Boundaries", d_bound), ("CMap", d_cmap)] if not f]
-    st.info("Upload required files: " + ", ".join(missing))
-    st.stop()
 
-# ===================== Projected(FILE) validation banner & guard =====================
-def file_validation_failed() -> bool:
-    """Convenience predicate: returns True if last attempt to use FILE Π failed validation."""
-    return bool(st.session_state.get("_file_mode_error"))
 
-# --- ensure tabs exist even if earlier branches ran before creating them
-if "tab1" not in globals():
-    tab1, tab2, tab3, tab4, tab5 = st.tabs(["Unit", "Overlap", "Triangle", "Towers", "Export"])
 
-# ------------------------------ UNIT TAB -------------------------------------
-with tab1:
-    st.subheader("Unit gate")
 
-    # Optional boundaries override in Unit tab
-    f_B = st.file_uploader("Boundaries (boundaries*.json)", type=["json"], key="B_up")
-    _stamp_filename("fname_boundaries", f_B)
-    d_B = read_json_file(f_B) if f_B else None
-    if d_B:
-        boundaries = io.parse_boundaries(d_B)
-
-        # Re-bind district from Unit override (prefer raw bytes hash)
-        try:
-            if hasattr(f_B, "getvalue"):
-                boundaries_hash_fresh = _sha256_hex_bytes(f_B.getvalue())
-            else:
-                boundaries_hash_fresh = _sha256_hex_obj(d_B)
-        except Exception:
-            boundaries_hash_fresh = _sha256_hex_obj(d_B)
-
-        d3_block         = (boundaries.blocks.__root__.get("3") or [])
-        lane_mask_k3_now = _lane_mask_from_d3(boundaries)
-        d3_rows          = len(d3_block)
-        d3_cols          = (len(d3_block[0]) if d3_block else 0)
-        district_sig     = _district_signature(lane_mask_k3_now, d3_rows, d3_cols)
-        district_id_fresh = DISTRICT_MAP.get(boundaries_hash_fresh, "UNKNOWN")
-
-        # Clear stale session bits if boundaries changed
-        _prev_bhash = st.session_state.get("_last_boundaries_hash")
-        if _prev_bhash and _prev_bhash != boundaries_hash_fresh:
-            for k in ("ab_compare", "district_id", "_projector_cache"):
-                st.session_state.pop(k, None)
-        st.session_state["_last_boundaries_hash"] = boundaries_hash_fresh
-
-        # Update SSOT
-        st.session_state["_inputs_block"]["boundaries_filename"] = st.session_state.get("fname_boundaries", "boundaries.json")
-        st.session_state["_inputs_block"]["boundaries_hash"]     = boundaries_hash_fresh
-        st.session_state["_district_info"] = {
-            "district_id":        district_id_fresh,
-            "boundaries_hash":    boundaries_hash_fresh,
-            "lane_mask_k3_now":   lane_mask_k3_now,
-            "district_signature": district_sig,
-            "d3_rows": d3_rows,
-            "d3_cols": d3_cols,
-        }
-        st.caption(f"[Unit override] district={district_id_fresh} · bhash={boundaries_hash_fresh[:12]} · k3={lane_mask_k3_now} · sig={district_sig}")
-
-    # Optional C-map override
-    f_C = st.file_uploader("C map (optional)", type=["json"], key="C_up")
-    _stamp_filename("fname_cmap", f_C)
-    d_C = read_json_file(f_C) if f_C else None
-    if d_C:
-        cmap = io.parse_cmap(d_C)
-
-    # Optional Shapes/U override
-    f_U = st.file_uploader("Shapes / carrier U (optional)", type=["json"], key="U_up")
-    _stamp_filename("fname_shapes", f_U)
-    d_U = read_json_file(f_U) if f_U else None
-    if d_U:
-        shapes = io.parse_shapes(d_U)
-        st.session_state["_inputs_block"]["U_filename"] = st.session_state.get("fname_shapes", "shapes.json")
-
-    # Reps (if used)
-    f_reps = st.file_uploader("Reps (optional)", type=["json"], key="reps_up")
-    _stamp_filename("fname_reps", f_reps)
-    d_reps = read_json_file(f_reps) if f_reps else None
-
-    enforce = st.checkbox("Enforce rep transport (c_cod = C c_dom)", value=False)
-    if st.button("Run Unit"):
-        try:
-            out = unit_gate.unit_check(boundaries, cmap, shapes, reps=d_reps, enforce_rep_transport=enforce)
-            st.json(out)
-        except Exception as e:
-            st.error(f"Unit gate failed: {e}")
-
-# ───────────────────────── GF(2) ops shim for Tab 2 (global) ──────────────────────────
-# Provides mul, add, eye exactly as Tab 2 expects. If the library is present,
-# we import; otherwise we use local pure-python fallbacks (bitwise XOR math).
-
-try:
-    from otcore.linalg_gf2 import mul as _mul_lib, add as _add_lib, eye as _eye_lib
-    mul = _mul_lib
-    add = _add_lib
-    eye = _eye_lib
-except Exception:
-    def mul(A, B):
-        if not A or not B or not A[0] or not B[0]:
-            return []
-        m, kA = len(A), len(A[0])
-        kB, n = len(B), len(B[0])
-        if kA != kB:
-            return []
-        C = [[0]*n for _ in range(m)]
-        for i in range(m):
-            Ai = A[i]
-            for k in range(kA):
-                if Ai[k] & 1:
-                    Bk = B[k]
-                    for j in range(n):
-                        C[i][j] ^= (Bk[j] & 1)
-        return C
-
-    def add(A, B):
-        if not A: return B or []
-        if not B: return A or []
-        r, c = len(A), len(A[0])
-        if len(B) != r or len(B[0]) != c:
-            return A  # shape mismatch: leave A unchanged (safe fallback)
-        return [[(A[i][j] ^ B[i][j]) for j in range(c)] for i in range(r)]
-
-    def eye(n):
-        return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
-
-# ───────────────────────── Reuse canonical helpers (NO redefinitions here) ─────────────
-# We purposefully do NOT redefine _deep_intify/hash_json/_sha256_* etc. Use the canonical
-# ones you placed at the top of the file:
-#   - hash_json(...)
-#   - ssot_stable_blocks_sha(...)
-#   - ssot_publish_block(...)
-#   - ssot_live_sig(...), ssot_frozen_sig_from_ib(...), ssot_is_stale(...)
-#   - _truth_mask_from_d3(...)
-# If any of these are missing, define them in the canonical block (not here).
-
-# ---------- SSOT publisher (alias to canonical) ----------
-def publish_inputs_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int, projector_filename: str = ""):
-    """
-    Thin alias so callers in this tab can keep using publish_inputs_block(...).
-    Delegates to your canonical ssot_publish_block.
-    """
-    return ssot_publish_block(
-        boundaries_obj=boundaries_obj,
-        cmap_obj=cmap_obj,
-        H_obj=H_obj,
-        shapes_obj=shapes_obj,
-        n3=n3,
-        projector_filename=projector_filename,
-    )
 with tab2:
     st.subheader("Overlap")
     # Your provided code starts here
@@ -3086,58 +2802,7 @@ with tab2:
     
 
 
-# ------------------------------ UI: policy + H + projector ------------------------------
-colA, colB = st.columns([2, 2])
-with colA:
-    policy_choice = st.radio(
-        "Policy",
-        ["strict", "projected(columns@k=3,auto)", "projected(columns@k=3,file)"],
-        index=0,
-        horizontal=True,
-        key="ov_policy_choice",
-    )
-with colB:
-    f_H = st.file_uploader("Homotopy H (optional)", type=["json"], key="H_up")
-    st.session_state["uploaded_H"] = f_H
 
-proj_upload = st.file_uploader(
-    "Projector Π (k=3) file (only for projected(columns@k=3,file))",
-    type=["json"],
-    key="pj_up",
-)
-
-# Active configuration builder
-def _cfg_from_policy(policy_choice_str: str, pj_path: str | None) -> dict:
-    if policy_choice_str == "strict":
-        return cfg_strict()
-    cfg = cfg_projected_base()
-    if policy_choice_str.endswith("(auto)"):
-        cfg.setdefault("source", {})["3"] = "auto"
-        cfg.setdefault("projector_files", {})
-    else:
-        cfg.setdefault("source", {})["3"] = "file"
-        if pj_path:
-            cfg.setdefault("projector_files", {})["3"] = pj_path
-    return cfg
-
-# Handle projector upload
-pj_saved_path = ""
-if proj_upload is not None:
-    os.makedirs("projectors", exist_ok=True)
-    pj_saved_path = os.path.join("projectors", proj_upload.name)
-    with open(pj_saved_path, "wb") as _pf:
-        _pf.write(proj_upload.getvalue())
-    st.caption(f"Saved projector: `{pj_saved_path}`")
-    st.session_state["ov_last_pj_path"] = pj_saved_path
-
-# Compute active config
-cfg_active = _cfg_from_policy(
-    policy_choice,
-    st.session_state.get("ov_last_pj_path") or pj_saved_path or "",
-)
-
-# Display active policy label
-st.caption(f"Active policy: `{policy_label_from_cfg(cfg_active)}`")
 
 
 def _ab_is_fresh_now(pin=None, expected_embed_sig: str | None = None, **kwargs):
