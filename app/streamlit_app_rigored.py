@@ -3180,6 +3180,148 @@ def _svr_pick_source(kind: str):
         if k in globals() and globals().get(k) is not None:
             return globals().get(k)
     return None
+    
+def _svr_resolve_all_to_paths():
+    """
+    Resolve SSOT for B/C/H/U into canonical on-disk JSONs and return
+    a pb-bundle suitable for the v2 solver.
+
+    Uses (in priority order):
+      • Session “uploaded_*” keys (set by _set_inputs_for_run in the 64× loop)
+      • Previously frozen canonical filenames in UPLOADS_DIR
+      • Fallback: app/inputs/… under the repo root
+
+    Returns:
+      out, raw  where
+
+        out = {
+          "B": (path_B, blocks_B),
+          "C": (path_C, blocks_C),
+          "H": (path_H, blocks_H),
+          "U": (path_U, blocks_U),
+        }
+
+      and blocks_* are degree-keyed dicts (string degrees "2","3",…).
+    """
+    import streamlit as st
+    from pathlib import Path as _Path
+
+    try:
+        root = _REPO_DIR
+    except Exception:
+        root = _Path(__file__).resolve().parents[1]
+
+    # 1) Primary sources come from session_state (either uploaders or _set_inputs_for_run)
+    ss = st.session_state
+    last_paths = ss.get("_last_inputs_paths") or {}
+
+    def _pick(k_uploaded: str, k_last: str, default_rel: str | None = None):
+        """
+        Prefer explicit uploaded_* entry, then last_inputs_paths[k_last],
+        and finally an optional default path under app/inputs.
+        Always returns an absolute Path or None.
+        """
+        src = ss.get(k_uploaded) or last_paths.get(k_last)
+        if isinstance(src, str) and src.strip():
+            p = _Path(src)
+            if not p.is_absolute():
+                p = root / p
+            return p
+
+        if default_rel:
+            p = root / default_rel
+            if p.exists():
+                return p
+
+        return None
+
+    pB = _pick("uploaded_boundaries", "B", "app/inputs/B/D2.json")
+    pC = _pick("uploaded_cmap",      "C", "app/inputs/C/C000.json")
+    pH = _pick("uploaded_H",         "H", "app/inputs/H/H00.json")
+    pU = _pick("uploaded_shapes",    "U", "app/inputs/U.json")
+
+    # 2) Fallback: if something is still missing, try canonical copies in UPLOADS_DIR
+    #    This keeps old “manual 1× run” flow alive without breaking v2.
+    def _fallback(kind: str, cur: _Path | None):
+        if cur and cur.exists():
+            return cur
+        # old canonical names (if any)
+        if kind == "B":
+            name = ss.get("fname_boundaries")
+        elif kind == "C":
+            name = ss.get("fname_cmap")
+        elif kind == "H":
+            name = ss.get("fname_H") or "H.json"
+        elif kind == "U":
+            name = ss.get("fname_shapes") or "U.json"
+        else:
+            name = None
+
+        if not name:
+            return cur
+
+        cand = _Path(UPLOADS_DIR) / name
+        return cand if cand.exists() else cur
+
+    pB = _fallback("B", pB)
+    pC = _fallback("C", pC)
+    pH = _fallback("H", pH)
+    pU = _fallback("U", pU)
+
+    missing = [k for k, p in (("B", pB), ("C", pC), ("H", pH), ("U", pU)) if not p or not p.exists()]
+    if missing:
+        raise RuntimeError(f"_svr_resolve_all_to_paths: missing inputs: {', '.join(missing)}")
+
+    # 3) Normalize through a single helper: abx_read_json_any + _svr_pick_source
+    #    This gives us (path, blocks) for each kind.
+    raw = {}
+    out = {}
+
+    for kind, p in (("B", pB), ("C", pC), ("H", pH), ("U", pU)):
+        # abx_read_json_any will read file-uploader or real path; here we pass a path.
+        j, p_eff = abx_read_json_any(str(p), kind=kind)
+        # Turn JSON into degree-keyed blocks via the v2 helper
+        raw[kind] = {"path": str(p_eff), "json": j}
+        # _svr_as_blocks_v2 knows how to interpret each kind (B/C/H/U)
+    blocks_bundle = _svr_as_blocks_v2(raw)
+
+    # 4) Persist canonical filenames back into session_state (for provenance)
+    #    and build the (path, blocks) “pb” bundle.
+    for kind in ("B", "C", "H", "U"):
+        info = blocks_bundle.get(kind) or {}
+        pth = info.get("path")
+        blocks = info.get("blocks") or {}
+        if not pth:
+            continue
+
+        # keep repo-relative when possible (nicer in certs)
+        p_abs = _Path(pth)
+        try:
+            rel = p_abs.relative_to(root)
+            p_str = str(rel)
+        except Exception:
+            p_str = str(p_abs)
+
+        if kind == "B":
+            ss["fname_boundaries"] = _Path(p_str).name
+        elif kind == "C":
+            ss["fname_cmap"] = _Path(p_str).name
+        elif kind == "H":
+            ss["fname_H"] = _Path(p_str).name
+        elif kind == "U":
+            ss["fname_shapes"] = _Path(p_str).name
+
+        out[kind] = (p_str, blocks)
+
+    # 5) Cache last paths for future runs (v2 suite uses this)
+    ss["_last_inputs_paths"] = {
+        "B": out.get("B", ("", {}))[0],
+        "C": out.get("C", ("", {}))[0],
+        "H": out.get("H", ("", {}))[0],
+        "U": out.get("U", ("", {}))[0],
+    }
+
+    return out
 
 
 
