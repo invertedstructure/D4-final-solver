@@ -2801,58 +2801,7 @@ with tab2:
     
 
 
-# ------------------------------ UI: policy + H + projector ------------------------------
-colA, colB = st.columns([2, 2])
-with colA:
-    policy_choice = st.radio(
-        "Policy",
-        ["strict", "projected(columns@k=3,auto)", "projected(columns@k=3,file)"],
-        index=0,
-        horizontal=True,
-        key="ov_policy_choice",
-    )
-with colB:
-    f_H = st.file_uploader("Homotopy H (optional)", type=["json"], key="H_up")
-    st.session_state["uploaded_H"] = f_H
 
-proj_upload = st.file_uploader(
-    "Projector Π (k=3) file (only for projected(columns@k=3,file))",
-    type=["json"],
-    key="pj_up",
-)
-
-# Active configuration builder
-def _cfg_from_policy(policy_choice_str: str, pj_path: str | None) -> dict:
-    if policy_choice_str == "strict":
-        return cfg_strict()
-    cfg = cfg_projected_base()
-    if policy_choice_str.endswith("(auto)"):
-        cfg.setdefault("source", {})["3"] = "auto"
-        cfg.setdefault("projector_files", {})
-    else:
-        cfg.setdefault("source", {})["3"] = "file"
-        if pj_path:
-            cfg.setdefault("projector_files", {})["3"] = pj_path
-    return cfg
-
-# Handle projector upload
-pj_saved_path = ""
-if proj_upload is not None:
-    os.makedirs("projectors", exist_ok=True)
-    pj_saved_path = os.path.join("projectors", proj_upload.name)
-    with open(pj_saved_path, "wb") as _pf:
-        _pf.write(proj_upload.getvalue())
-    st.caption(f"Saved projector: `{pj_saved_path}`")
-    st.session_state["ov_last_pj_path"] = pj_saved_path
-
-# Compute active config
-cfg_active = _cfg_from_policy(
-    policy_choice,
-    st.session_state.get("ov_last_pj_path") or pj_saved_path or "",
-)
-
-# Display active policy label
-st.caption(f"Active policy: `{policy_label_from_cfg(cfg_active)}`")
 
 
 def _ab_is_fresh_now(pin=None, expected_embed_sig: str | None = None, **kwargs):
