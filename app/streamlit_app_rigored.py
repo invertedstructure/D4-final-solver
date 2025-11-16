@@ -1262,193 +1262,6 @@ def _guarded_guarded_atomic_write_json(path: Path, payload: dict) -> None:
     os.replace(tmp, path)
 
 # === /canonical block ===
-# ───────────────────────────── C1: Coverage rollup + Health ping ─────────────────────────────
-# Helpers are namespaced with _c1_ to avoid collisions.
-
-
-
-def _c1_iter_jsonl(p: _Path):
-    """Yield JSON objects from a JSONL file, skipping bad lines."""
-    try:
-        with open(p, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    yield _json.loads(line)
-                except Exception:
-                    # ignore malformed line
-                    continue
-    except FileNotFoundError:
-        return
-
-
-def _c1_rollup_rows(cov_path):
-    import json
-    from collections import defaultdict
-    acc = defaultdict(lambda: {"count":0,"sel":[],"off":[],"ker":[],"ctr":[]})
-    try:
-        with open(str(cov_path), "r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line: continue
-                try: rec = json.loads(line)
-                except Exception: continue
-                prox = rec.get("prox_label") or "B0"
-                a = acc[prox]; a["count"] += 1
-                for key, field in (("sel","sel_mismatch_rate"),("off","offrow_mismatch_rate"),("ker","ker_mismatch_rate"),("ctr","contradiction_rate")):
-                    v = rec.get(field, None)
-                    if v is None or isinstance(v,bool): continue
-                    try: a[key].append(float(v))
-                    except Exception: pass
-    except FileNotFoundError:
-        return []
-    def _mean(xs): return (sum(xs)/len(xs)) if xs else None
-    rows = []
-    for prox in sorted(acc.keys()):
-        a = acc[prox]
-        rows.append({
-            "prox_label": prox,
-            "count": a["count"],
-            "mean_sel_mismatch_rate": _mean(a["sel"]),
-            "mean_offrow_mismatch_rate": _mean(a["off"]),
-            "mean_ker_mismatch_rate": _mean(a["ker"]),
-            "mean_ctr_rate": _mean(a["ctr"]),
-            "mean_contradiction_rate": _mean(a["ctr"]),
-        })
-    return rows
-
-
-def _c1_write_rollup_csv(cov_path, csv_out):
-    import json, csv
-    from collections import defaultdict
-    acc = defaultdict(lambda: {"count":0,"sel":[],"off":[],"ker":[],"ctr":[]})
-    try:
-        with open(str(cov_path), "r", encoding="utf-8") as fh:
-            for line in fh:
-                line = line.strip()
-                if not line: continue
-                try: rec = json.loads(line)
-                except Exception: continue
-                prox = rec.get("prox_label") or "B0"
-                a = acc[prox]; a["count"] += 1
-                for key, field in (("sel","sel_mismatch_rate"),("off","offrow_mismatch_rate"),("ker","ker_mismatch_rate"),("ctr","contradiction_rate")):
-                    v = rec.get(field, None)
-                    if v is None or isinstance(v,bool): continue
-                    try: a[key].append(float(v))
-                    except Exception: pass
-    except FileNotFoundError:
-        pass
-    def _mean(xs): return (sum(xs)/len(xs)) if xs else None
-    rows = []
-    for prox in sorted(acc.keys()):
-        a = acc[prox]
-        rows.append({
-            "prox_label": prox,
-            "count": a["count"],
-            "mean_sel_mismatch_rate": _mean(a["sel"]),
-            "mean_offrow_mismatch_rate": _mean(a["off"]),
-            "mean_ker_mismatch_rate": _mean(a["ker"]),
-            "mean_ctr_rate": _mean(a["ctr"]),
-            "mean_contradiction_rate": _mean(a["ctr"]),
-        })
-    hdr = ["prox_label","count","mean_sel_mismatch_rate","mean_offrow_mismatch_rate","mean_ker_mismatch_rate","mean_ctr_rate","mean_contradiction_rate"]
-    with open(str(csv_out), "w", encoding="utf-8", newline="") as wfh:
-        w = csv.writer(wfh); w.writerow(hdr)
-        for r in rows:
-            w.writerow([
-                r["prox_label"], r["count"],
-                "" if r["mean_sel_mismatch_rate"] is None else f"{r['mean_sel_mismatch_rate']:.4f}",
-                "" if r["mean_offrow_mismatch_rate"] is None else f"{r['mean_offrow_mismatch_rate']:.4f}",
-                "" if r["mean_ker_mismatch_rate"] is None else f"{r['mean_ker_mismatch_rate']:.4f}",
-                "" if r["mean_ctr_rate"] is None else f"{r['mean_ctr_rate']:.4f}",
-                "" if r["mean_contradiction_rate"] is None else f"{r['mean_contradiction_rate']:.4f}",
-            ])
-
-
-def _c1_health_ping(jsonl_path: _Path, tail: int = 50):
-    """
-    Compute mean mismatch rates over the last `tail` events in coverage.jsonl.
-    Returns dict or None if no data.
-    """
-    buf = []
-    for rec in _c1_iter_jsonl(jsonl_path):
-        buf.append(rec)
-        if len(buf) > tail:
-            buf.pop(0)
-    if not buf:
-        return None
-
-    def avg(key):
-        vals = [float(x.get(key)) for x in buf if isinstance(x.get(key), (int, float))]
-        return (sum(vals) / len(vals)) if vals else None
-
-    return {
-        "tail": len(buf),
-        "mean_sel_mismatch_rate": avg("sel_mismatch_rate"),
-        "mean_offrow_mismatch_rate": avg("offrow_mismatch_rate"),
-        "mean_ker_mismatch_rate": avg("ker_mismatch_rate"),
-        "mean_contradiction_rate": avg("contradiction_rate"),
-    }
-
-def _c1_badge(hp: dict):
-    """
-    Tiny UI chip classifier. Thresholds are conservative and easy to tweak.
-    Returns (emoji, label, color_name).
-    """
-    s = hp.get("mean_sel_mismatch_rate") or 0.0
-    o = hp.get("mean_offrow_mismatch_rate") or 0.0
-    k = hp.get("mean_ker_mismatch_rate") or 0.0
-    worst = max(s, o, k)
-    if worst <= 0.05:
-        return "✅", "Healthy", "green"
-    if worst <= 0.12:
-        return "🟨", "Watch", "orange"
-    return "🟥", "Alert", "red"
-
-# ── UI: Coverage rollup (read-only C1 chip) ──
-with st.expander("C1 — Coverage rollup & health ping", expanded=False):
-    cov_path, csv_out = _c1_paths()
-    st.caption(f"Source: {cov_path} · Rollup: {csv_out}")
-
-    # Health chip (tail window over latest coverage.jsonl)
-    hp = _c1_health_ping(cov_path, tail=64)
-    if hp is None:
-        st.info("coverage.jsonl not found yet — run the V2 core once to produce coverage events.")
-    else:
-        emoji, label, _ = _c1_badge(hp)
-
-        def _fmt(x):
-            return "—" if x is None else f"{x:.3f}"
-
-        st.markdown(
-            f"**C1 Health** {emoji} {label} · tail={hp['tail']} · "
-            f"sel={_fmt(hp.get('mean_sel_mismatch_rate'))} · "
-            f"off={_fmt(hp.get('mean_offrow_mismatch_rate'))} · "
-            f"ker={_fmt(hp.get('mean_ker_mismatch_rate'))} · "
-            f"ctr={_fmt(hp.get('mean_contradiction_rate'))}"
-        )
-
-        # Optional: surface last ALL row from coverage_rollup.csv (if present), read-only
-        try:
-            import csv as _csv
-            if csv_out.exists():
-                with csv_out.open("r", encoding="utf-8") as f:
-                    rows = list(_csv.DictReader(f))
-                all_row = next((row for row in rows if row.get("prox_label") == "ALL"), None)
-                if all_row:
-                    st.caption(
-                        "Last rollup (ALL) · "
-                        f"count={all_row.get('count')} · "
-                        f"sel={all_row.get('mean_sel_mismatch_rate') or '—'} · "
-                        f"off={all_row.get('mean_offrow_mismatch_rate') or '—'} · "
-                        f"ker={all_row.get('mean_ker_mismatch_rate') or '—'} · "
-                        f"ctr={all_row.get('mean_ctr_rate') or '—'}"
-                    )
-        except Exception:
-            # purely informational; never block the app
-            pass
 
 
 # ---------- Policy receipt (B) ----------
@@ -7282,6 +7095,289 @@ if _st.button("Run V2 core (64× → receipts → manifest → suite/hist/zip)",
         except Exception:
             pass
 
+
+# ───────────────────────────── C1: Coverage rollup + Health ping ─────────────────────────────
+# Helpers are namespaced with _c1_ to avoid collisions.
+
+def _c1_iter_jsonl(p: _Path):
+    """Yield JSON objects from a JSONL file, skipping bad lines."""
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    yield _json.loads(line)
+                except Exception:
+                    # ignore malformed line
+                    continue
+    except FileNotFoundError:
+        return
+
+
+def _c1_rollup_rows(cov_path):
+    import json
+    from collections import defaultdict
+
+    def _coerce_f(x):
+        if x is None:
+            return None
+        try:
+            return float(x)
+        except Exception:
+            return None
+
+    acc = defaultdict(lambda: {"count": 0, "sel": [], "off": [], "ker": [], "ctr": []})
+    try:
+        with open(str(cov_path), "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                prox = rec.get("prox_label") or "B0"
+                a = acc[prox]
+                a["count"] += 1
+
+                # prefer new keys, fallback to legacy
+                sel_v = rec.get("mismatch_sel")
+                if sel_v is None:
+                    sel_v = rec.get("sel_mismatch_rate")
+                off_v = rec.get("mismatch_offrow")
+                if off_v is None:
+                    off_v = rec.get("offrow_mismatch_rate")
+                ker_v = rec.get("mismatch_ker")
+                if ker_v is None:
+                    ker_v = rec.get("ker_mismatch_rate")
+                ctr_v = rec.get("mismatch_ctr")
+                if ctr_v is None:
+                    ctr_v = rec.get("contradiction_rate")
+
+                for key, raw in (("sel", sel_v), ("off", off_v), ("ker", ker_v), ("ctr", ctr_v)):
+                    v = _coerce_f(raw)
+                    if v is not None:
+                        a[key].append(v)
+    except FileNotFoundError:
+        return []
+
+    def _mean(xs):
+        return (sum(xs) / len(xs)) if xs else None
+
+    rows = []
+    for prox in sorted(acc.keys()):
+        a = acc[prox]
+        rows.append({
+            "prox_label": prox,
+            "count": a["count"],
+            "mean_sel_mismatch_rate": _mean(a["sel"]),
+            "mean_offrow_mismatch_rate": _mean(a["off"]),
+            "mean_ker_mismatch_rate": _mean(a["ker"]),
+            "mean_ctr_rate": _mean(a["ctr"]),
+            "mean_contradiction_rate": _mean(a["ctr"]),
+        })
+    return rows
+
+
+def _c1_write_rollup_csv(cov_path, csv_out):
+    import json, csv
+    from collections import defaultdict
+
+    def _coerce_f(x):
+        if x is None:
+            return None
+        try:
+            return float(x)
+        except Exception:
+            return None
+
+    acc = defaultdict(lambda: {"count": 0, "sel": [], "off": [], "ker": [], "ctr": []})
+    try:
+        with open(str(cov_path), "r", encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                prox = rec.get("prox_label") or "B0"
+                a = acc[prox]
+                a["count"] += 1
+
+                # prefer new keys, fallback to legacy
+                sel_v = rec.get("mismatch_sel")
+                if sel_v is None:
+                    sel_v = rec.get("sel_mismatch_rate")
+                off_v = rec.get("mismatch_offrow")
+                if off_v is None:
+                    off_v = rec.get("offrow_mismatch_rate")
+                ker_v = rec.get("mismatch_ker")
+                if ker_v is None:
+                    ker_v = rec.get("ker_mismatch_rate")
+                ctr_v = rec.get("mismatch_ctr")
+                if ctr_v is None:
+                    ctr_v = rec.get("contradiction_rate")
+
+                for key, raw in (("sel", sel_v), ("off", off_v), ("ker", ker_v), ("ctr", ctr_v)):
+                    v = _coerce_f(raw)
+                    if v is not None:
+                        a[key].append(v)
+    except FileNotFoundError:
+        pass
+
+    def _mean(xs):
+        return (sum(xs) / len(xs)) if xs else None
+
+    rows = []
+    for prox in sorted(acc.keys()):
+        a = acc[prox]
+        rows.append({
+            "prox_label": prox,
+            "count": a["count"],
+            "mean_sel_mismatch_rate": _mean(a["sel"]),
+            "mean_offrow_mismatch_rate": _mean(a["off"]),
+            "mean_ker_mismatch_rate": _mean(a["ker"]),
+            "mean_ctr_rate": _mean(a["ctr"]),
+            "mean_contradiction_rate": _mean(a["ctr"]),
+        })
+
+    hdr = [
+        "prox_label",
+        "count",
+        "mean_sel_mismatch_rate",
+        "mean_offrow_mismatch_rate",
+        "mean_ker_mismatch_rate",
+        "mean_ctr_rate",
+        "mean_contradiction_rate",
+    ]
+    with open(str(csv_out), "w", encoding="utf-8", newline="") as wfh:
+        w = csv.writer(wfh)
+        w.writerow(hdr)
+        for r in rows:
+            w.writerow([
+                r["prox_label"], r["count"],
+                "" if r["mean_sel_mismatch_rate"] is None else f"{r['mean_sel_mismatch_rate']:.4f}",
+                "" if r["mean_offrow_mismatch_rate"] is None else f"{r['mean_offrow_mismatch_rate']:.4f}",
+                "" if r["mean_ker_mismatch_rate"] is None else f"{r['mean_ker_mismatch_rate']:.4f}",
+                "" if r["mean_ctr_rate"] is None else f"{r['mean_ctr_rate']:.4f}",
+                "" if r["mean_contradiction_rate"] is None else f"{r['mean_contradiction_rate']:.4f}",
+            ])
+
+
+def _c1_health_ping(jsonl_path: _Path, tail: int = 50):
+    """
+    Compute mean mismatch rates over the last `tail` events in coverage.jsonl.
+    Returns dict or None if no data.
+
+    Supports both legacy keys (sel_mismatch_rate, offrow_mismatch_rate, ...)
+    and the newer mismatch_* names.
+    """
+    buf = []
+    for rec in _c1_iter_jsonl(jsonl_path):
+        buf.append(rec)
+    if not buf:
+        return None
+
+    if tail > 0 and len(buf) > tail:
+        buf = buf[-tail:]
+
+    def _coerce_f(x):
+        if x is None:
+            return None
+        try:
+            return float(x)
+        except Exception:
+            return None
+
+    def avg(candidates):
+        vals = []
+        for rec in buf:
+            val = None
+            for key in candidates:
+                if key in rec and rec[key] not in (None, "", "NA"):
+                    val = _coerce_f(rec[key])
+                    if val is not None:
+                        vals.append(val)
+                        break
+        return (sum(vals) / len(vals)) if vals else None
+
+    mean_sel = avg(["mismatch_sel", "sel_mismatch_rate"])
+    mean_off = avg(["mismatch_offrow", "offrow_mismatch_rate"])
+    mean_ker = avg(["mismatch_ker", "ker_mismatch_rate"])
+    mean_ctr = avg(["mismatch_ctr", "contradiction_rate"])
+
+    return {
+        "tail": len(buf),
+        "mean_sel_mismatch_rate": mean_sel,
+        "mean_offrow_mismatch_rate": mean_off,
+        "mean_ker_mismatch_rate": mean_ker,
+        "mean_contradiction_rate": mean_ctr,
+    }
+
+
+def _c1_badge(hp: dict):
+    """
+    Tiny UI chip classifier. Thresholds are conservative and easy to tweak.
+    Returns (emoji, label, color_name).
+    """
+    s = hp.get("mean_sel_mismatch_rate") or 0.0
+    o = hp.get("mean_offrow_mismatch_rate") or 0.0
+    k = hp.get("mean_ker_mismatch_rate") or 0.0
+    worst = max(s, o, k)
+    if worst <= 0.05:
+        return "✅", "Healthy", "green"
+    if worst <= 0.12:
+        return "🟨", "Watch", "orange"
+    return "🟥", "Alert", "red"
+
+
+# ── UI: Coverage rollup (read-only C1 chip) ──
+with st.expander("C1 — Coverage rollup & health ping", expanded=False):
+    cov_path, csv_out = _c1_paths()
+    st.caption(f"Source: {cov_path} · Rollup: {csv_out}")
+
+    # Health chip (tail window over latest coverage.jsonl)
+    hp = _c1_health_ping(cov_path, tail=64)
+    if hp is None:
+        st.info("coverage.jsonl not found yet — run the V2 core once to produce coverage events.")
+    else:
+        emoji, label, _ = _c1_badge(hp)
+
+        def _fmt(x):
+            return "—" if x is None else f"{x:.3f}"
+
+        st.markdown(
+            f"**C1 Health** {emoji} {label} · tail={hp['tail']} · "
+            f"sel={_fmt(hp.get('mean_sel_mismatch_rate'))} · "
+            f"off={_fmt(hp.get('mean_offrow_mismatch_rate'))} · "
+            f"ker={_fmt(hp.get('mean_ker_mismatch_rate'))} · "
+            f"ctr={_fmt(hp.get('mean_contradiction_rate'))}"
+        )
+
+        # Optional: surface last ALL row from coverage_rollup.csv (if present), read-only
+        try:
+            import csv as _csv
+            if csv_out.exists():
+                with csv_out.open("r", encoding="utf-8") as f:
+                    rows = list(_csv.DictReader(f))
+                all_row = next((row for row in rows if row.get("prox_label") == "ALL"), None)
+                if all_row:
+                    st.caption(
+                        "Last rollup (ALL) · "
+                        f"count={all_row.get('count')} · "
+                        f"sel={all_row.get('mean_sel_mismatch_rate') or '—'} · "
+                        f"off={all_row.get('mean_offrow_mismatch_rate') or '—'} · "
+                        f"ker={all_row.get('mean_ker_mismatch_rate') or '—'} · "
+                        f"ctr={all_row.get('mean_ctr_rate') or '—'}"
+                    )
+        except Exception:
+            # purely informational; never block the app
+            pass
 
 
                        
