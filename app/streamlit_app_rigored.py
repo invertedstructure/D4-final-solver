@@ -6258,75 +6258,7 @@ def _svr_run_once_computeonly(ss=None):
 
     
 
-def one_press_v2_compute_only_ui():
-    import streamlit as st
-    ss = st.session_state
-    st.markdown("### One-press (v2 compute-only, no legacy)")
-    if st.button("Run solver (one press) — v2 compute-only", key="btn_svr_run_v2_compute_only"):
-        ss["_solver_busy"] = True
-        ss["_solver_one_button_active"] = True
-        try:
-            ok, msg, bundle_dir = _svr_run_once_computeonly(ss)
-            if bundle_dir:
-                ss["last_bundle_dir"] = bundle_dir
-            (st.success if ok else st.error)(msg)
-        except Exception as e:
-            st.error(f"Solver run failed: {e}")
-        finally:
-            ss["_solver_one_button_active"] = False
-            ss["_solver_busy"] = False
 
-def tail_and_download_ui_v2_compute_only():
-    import streamlit as st, os, json, zipfile
-    from pathlib import Path
-    ss = st.session_state
-    last_dir = ss.get("last_bundle_dir", "")
-    st.markdown("#### Latest cert files (v2 compute-only)")
-    if not last_dir or not os.path.isdir(last_dir):
-        st.info("No bundle.json yet — run the solver to write certs.")
-        return
-    try:
-        p_bundle = Path(last_dir) / "bundle.json"
-        if p_bundle.exists():
-            bj = json.loads(p_bundle.read_text(encoding="utf-8"))
-            lab = bj.get("fixture_label")
-            if lab and ss.get("fixture_label") != lab:
-                ss["fixture_label"] = lab
-            files = bj.get("filenames", [])
-        else:
-            files = []
-    except Exception:
-        files = []
-    if files:
-        tail = files[-6:][::-1]
-        for fn in tail:
-            st.write(f"• {fn}")
-    else:
-        st.info("No files listed in bundle.json.")
-    # zip
-    try:
-        zpath = Path(last_dir) / "bundle.zip"
-        with zipfile.ZipFile(str(zpath), "w", compression=zipfile.ZIP_DEFLATED) as zf:
-            for root, _, fns in os.walk(last_dir):
-                for fn in fns:
-                    if fn.endswith(".zip"):
-                        continue
-                    full = Path(root)/fn
-                    arc  = os.path.relpath(str(full), start=str(last_dir))
-                    zf.write(str(full), arc)
-        with open(zpath, "rb") as fh:
-            st.download_button("Download bundle.zip", data=fh, file_name="bundle.zip", mime="application/zip", key="btn_dl_bundle_zip_v2_compute_only")
-    except Exception as e:
-        st.warning(f"Zip build/serve issue: {e}")
-
-try:
-    import streamlit as st
-    with st.expander("V2 compute-only runner", expanded=True):
-        one_press_v2_compute_only_ui()
-        tail_and_download_ui_v2_compute_only()
-except Exception:
-    pass
-# ====================== END V2 CANONICAL — COMPUTE-ONLY ======================
 
 # ─────────────────────────────────────────────────────────────────────────────
 # V2 strict mechanics: receipts → manifest → suite → histograms
