@@ -4825,11 +4825,30 @@ def _v2_write_loop_receipt_for_bundle(bdir, extra: dict | None = None):
     if not all(p and _P(p).is_absolute() and _P(p).exists() for p in P.values()):
         return False, f"[{fixture_label}] SSOT path(s) missing"
 
-    # dims (nice to have)
+        # dims (nice to have)
     dims = None
     if isinstance(bundle, dict):
         if "dims" in bundle and isinstance(bundle["dims"], dict):
-            dims = {"n2": bundle["dims"].get("n2"), "n3": bundle["dims"].get("n3")}
+            dims = {
+                "n2": bundle["dims"].get("n2"),
+                "n3": bundle["dims"].get("n3"),
+            }
+
+    # core_counts: prefer bundle.core_counts.written, else len(files/filenames), else fallback
+    core_written = None
+    try:
+        if isinstance(bundle, dict):
+            cc = bundle.get("core_counts")
+            if isinstance(cc, dict) and isinstance(cc.get("written"), int):
+                core_written = int(cc["written"])
+            elif isinstance(bundle.get("files"), dict):
+                core_written = len(bundle["files"])
+            elif isinstance(bundle.get("filenames"), (list, tuple)):
+                core_written = len(bundle["filenames"])
+    except Exception:
+        core_written = None
+    if core_written is None:
+        core_written = 6  # conservative default for old runs
 
     receipt = {
         "schema": "loop_receipt.v2",
@@ -4839,10 +4858,12 @@ def _v2_write_loop_receipt_for_bundle(bdir, extra: dict | None = None):
         "sig8": sig8,
         "bundle_dir": str(bdir.resolve()),
         "paths": P,
-        "core_counts": {"written": 6},
+        "core_counts": {"written": int(core_written)},
         "timestamps": {"receipt_written_at": int(_time.time())},
     }
-    if dims: receipt["dims"] = dims
+    if dims:
+        receipt["dims"] = dims
+
 
     # Always write with proper filename (no UNKNOWN)
     outp = bdir / f"loop_receipt__{fixture_label}.json"
