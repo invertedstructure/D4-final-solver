@@ -3934,16 +3934,17 @@ def run_overlap_once(ss=st.session_state):
                             encoding="utf-8")
         return path.name
 
-    # --- Shared header across certs (now non-empty + correct) ---
+       # --- Shared header across certs (now non-empty + correct) ---
     base_hdr = {
         "schema_version": SCHEMA_VERSION,
         "engine_rev": ENGINE_REV,
         "district_id": district_id,
-        "fixture_id": fixture_id,
+        # fixture_label is canonical; fixture_id kept as legacy alias
+        "fixture_label": fixture_label,
+        "fixture_id": fixture_label,
         "snapshot_id": snapshot_id,
         "inputs_sig_5": inputs_sig_5,
     }
-
     written = []
 
     # 1) strict
