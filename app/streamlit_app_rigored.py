@@ -2905,25 +2905,7 @@ def overlap_ui_from_frozen():
 
 
 
-# --- Policy pill + run stamp (single rendering) --------------------------------
-_rc = st.session_state.get("run_ctx") or {}
-_ib = st.session_state.get("_inputs_block") or {}
-policy_tag = _rc.get("policy_tag") or policy_label_from_cfg(cfg_active)  # keep your existing policy labeler
-n3 = _rc.get("n3") or ((_ib.get("dims") or {}).get("n3", 0))
-def _short8(h): return (h or "")[:8]
-_h = (_ib.get("hashes") or {})
-bH = _short8(_h.get("boundaries_hash", _ib.get("boundaries_hash","")))
-cH = _short8(_h.get("C_hash",          _ib.get("C_hash","")))
-hH = _short8(_h.get("H_hash",          _ib.get("H_hash","")))
-uH = _short8(_h.get("U_hash",          _ib.get("U_hash","")))
-pH = _short8(_rc.get("projector_hash","")) if str(_rc.get("mode","")).startswith("projected(columns@k=3,file)") else "—"
 
-st.markdown(f"**Policy:** `{policy_tag}`")
-st.caption(f"{policy_tag} | n3={n3} | b={bH} C={cH} H={hH} U={uH} P={pH}")
-
-# Gentle hint only if any core hash is blank
-if any(x in ("", None) for x in (_h.get("boundaries_hash"), _h.get("C_hash"), _h.get("H_hash"), _h.get("U_hash"))):
-    st.info("SSOT isn’t fully populated yet. Run Overlap once to publish provenance hashes.")
 
 # --- A/B status chip (no HTML repr; no duplicate logic) ------------------------
 ab_pin = st.session_state.get("ab_pin") or {}
