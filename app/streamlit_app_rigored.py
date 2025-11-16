@@ -365,14 +365,21 @@ def compute_ab_file(strict_or_file_payload: dict, maybe_file_or_freezer: dict, i
     }
 
 def _v2_extract_ids_from_path(bdir: _VPath):
+    """
+    Given a bundle dir logs/certs/{district_id}/{fixture_label}/{sig8},
+    return (district_id, sig8). Falls back to (None, None) on failure.
+    """
     try:
-        sig8 = bdir.name
-        district = bdir.parent.name
-        if district.startswith("D") and len(sig8) == 8:
+        p = _VPath(bdir)
+        sig8 = p.name
+        fixture_label = p.parent.name
+        district = p.parent.parent.name
+        if district and district.startswith("D") and len(sig8) == 8:
             return district, sig8
     except Exception:
         pass
     return None, None
+
 
 def _v2_extract_lanes_from_auto(auto_fp: _VPath):
     try:
@@ -391,27 +398,57 @@ def _v2_presence_mask(keys_present):
     return f"{mask:02X}"
 
 def _v2_bundle_index_rebuild(bdir: _VPath):
+    """
+    Rebuild bundle.json in logs/certs/{district_id}/{fixture_label}/{sig8}.
+
+    files{} are the core certs we actually see on disk, so we define:
+      • counts.present      = len(files)
+      • core_counts.written = len(files)
+
+    district_id is the hashed D-tag (Dxxxx...), fixture_label is D*_H*_C*.
+    """
     bdir = _VPath(bdir)
+
     files = _v2_find_expected_files(bdir)
-    hashes = {k: _v2_sha256_path(p) for k,p in files.items()}
-    sizes  = {k: p.stat().st_size for k,p in files.items()}
-    district, sig8 = _v2_extract_ids_from_path(bdir)
+    hashes = {k: _v2_sha256_path(p) for k, p in files.items()}
+    sizes  = {k: p.stat().st_size for k, p in files.items()}
+
+    district_id, sig8 = _v2_extract_ids_from_path(bdir)
+    try:
+        fixture_label = bdir.parent.name  # logs/certs/{district}/{fixture_label}/{sig8}
+    except Exception:
+        fixture_label = None
+
+    # lanes popcount / sig8 from AUTO cert if present
     lanes_pop, lanes_sig8 = (None, None)
     if "projected_auto" in files:
-        lanes_pop, lanes_sig8 = _v2_extract_lanes_from_auto(files["projected_auto"])
-    pres = _v2_presence_mask(files.keys())
+        try:
+            lanes_pop, lanes_sig8 = _v2_extract_lanes_from_auto(files["projected_auto"])
+        except Exception:
+            lanes_pop, lanes_sig8 = (None, None)
+
+    presence_mask_hex = _v2_presence_mask(files.keys())
+    core_written = len(files)
+
     bundle = {
-        "district_id": district,
+        "district_id": district_id,
+        "fixture_label": fixture_label,
         "sig8": sig8,
-        "files": {k: str(p) for k,p in files.items()},
+        "files": {k: str(p) for k, p in files.items()},
         "hashes": hashes,
         "sizes": sizes,
-        "presence_mask_hex": pres,
-        "counts": {"present": len(files)},
+        "presence_mask_hex": presence_mask_hex,
+        "counts": {"present": core_written},
+        "core_counts": {"written": core_written},
         "lanes": {"popcount": lanes_pop, "sig8": lanes_sig8},
     }
-    (bdir / "bundle.json").write_text(_Vjson.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
+
+    (bdir / "bundle.json").write_text(
+        _Vjson.dumps(bundle, indent=2, sort_keys=True),
+        encoding="utf-8",
+    )
     return bundle
+
 
 
 def _v2_write_loop_receipt(bdir: _VPath, fixture_id: str, snapshot_id: str, bundle: dict):
