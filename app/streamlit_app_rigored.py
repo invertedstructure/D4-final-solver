@@ -903,21 +903,6 @@ os.makedirs(DIRS["certs"], exist_ok=True)
 ss = st.session_state
 if "_ui_nonce" not in ss:
     ss["_ui_nonce"] = uuid.uuid4().hex[:8]
-def run_overlap_once():
-    """
-    Minimal, deterministic 'one press' solver:
-      - resolves B/C/H/U from session (uploaded files or paths)
-      - strict lap: R3 = H2·d3 ⊕ (C3 ⊕ I3) == 0 ?
-      - projected(auto): lanes = bottom(C3) if C3 is square & non-zero; test R3·diag(lanes) == 0
-      - writes 5 certs (strict, projected:auto, ab:auto, freezer, ab:file[N/A]) + bundle.json
-      - sets st.session_state['last_bundle_dir']
-    Returns (ok: bool, msg: str, bundle_dir: str)
-    """
-    import os, json, hashlib, time
-    from pathlib import Path
-    import datetime as _dt
-
-    st.session_state.setdefault("_solver_one_button_active", True)  # allow writes
 
     def _read_json(upload_or_path):
         if upload_or_path is None:
