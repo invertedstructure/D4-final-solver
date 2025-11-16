@@ -727,6 +727,26 @@ def _repo_root() -> _Path:
     # repo root = parent of app dir
     return _Path(__file__).resolve().parent.parent
 
+# ───────────────────────── Minimal tab scaffold (temporary) ─────────────────────────
+# We still have legacy blocks like:
+#   with tab2:  # Overlap
+#   with tab3:  # Triangle
+#   with tab4:  # Towers
+#   with tab5:  # Export
+# To avoid NameError while we refactor, create tabs (or fall back to plain containers).
+
+if not all(name in globals() for name in ("tab1", "tab2", "tab3", "tab4", "tab5")):
+    try:
+        tab1, tab2, tab3, tab4, tab5 = st.tabs(
+            ["Unit (legacy)", "Overlap", "Triangle", "Towers", "Export"]
+        )
+    except Exception:
+        # Extremely defensive fallback: use plain containers if tabs fail for any reason.
+        tab1 = st.container()
+        tab2 = st.container()
+        tab3 = st.container()
+        tab4 = st.container()
+        tab5 = st.container()
 
 
 def _svr_current_snapshot_id() -> str | None:
