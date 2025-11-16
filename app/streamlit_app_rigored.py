@@ -5267,8 +5267,7 @@ def _svr_run_once_computeonly_hard(ss=None):
     sig8        = rc.get("sig8") or (rc.get("embed_sig","")[:8] if rc.get("embed_sig") else _hard_co_hash8({"H2":H2,"d3":d3,"C3":C3}))
     snapshot_id = rc.get("snapshot_id") or (ss.get("world_snapshot_id") if isinstance(ss, dict) else None) or ""
 
-    fixtures = {"district": D, "H": Htag, "C": Ctag, "U": "U"}
-
+    
     # STRICT
     strict_eq_bool = (sum(supp_R3) == 0) if R3_global else False
     strict_payload = {
@@ -5377,19 +5376,7 @@ def _svr_run_once_computeonly_hard(ss=None):
             "verdict_class": vclass_f,
         }
 
-    # AB compares inline (no globals)
-    def _mk_ab(policy_label, a_eq, b_eq):
-        emb = {"policy": policy_label}
-        embed_sig = _hashlib.sha256(_json.dumps(emb, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-        def _b(v): return (bool(v) if v is not None else None)
-        return {"ab_pair": {"policy": policy_label, "embed_sig": embed_sig,
-                            "pair_vec": {"k2":[None,None], "k3":[_b(a_eq), _b(b_eq)]}}}
-
-    strict_eq = ((strict_payload.get("results",{}) or {}).get("k3",{}) or {}).get("eq")
-    auto_eq   = ((auto_payload.get("results",{}) or {}).get("k3",{}) or {}).get("eq")
-    file_eq   = ((file_payload.get("results",{}) or {}).get("k3",{}) or {}).get("eq")
-    ab_auto_payload = _mk_ab("strict__VS__projected(columns@k=3,auto)", strict_eq, auto_eq)
-    ab_file_payload = _mk_ab("strict__VS__projected(columns@k=3,file)", strict_eq, file_eq)
+    
 
            # --- WRITE MIN CORE (V2-pure) — exactly 2 certs per fixture ------------------
     def _as_dims(x):
@@ -5603,25 +5590,7 @@ def _svr_run_once_computeonly_hard(ss=None):
 
     return True, f"v2 compute-only (HARD) 1× bundle → {bdir}", str(bdir)
 
-# UI
-try:
-    import streamlit as _st
-    with _st.expander("V2 COMPUTE-ONLY (HARD) — single source of truth", expanded=True):
-        if _st.button("Run solver (one press) — HARD v2 compute-only", key="btn_svr_run_v2_compute_only_hard"):
-            _st.session_state["_solver_busy"] = True
-            _st.session_state["_solver_one_button_active"] = True
-            try:
-                ok, msg, bundle_dir = _svr_run_once_computeonly_hard(_st.session_state)
-                if bundle_dir:
-                    _st.session_state["last_bundle_dir"] = bundle_dir
-                ( _st.success if ok else _st.error)(msg)
-            except Exception as _e:
-                _st.error(f"Solver run failed: {str(_e)}")
-            finally:
-                _st.session_state["_solver_one_button_active"] = False
-                _st.session_state["_solver_busy"] = False
-except Exception:
-    pass
+
 
 # ====================== END V2 COMPUTE-ONLY (HARD) ======================
 # --- V2 CORE (64×) — one press → receipts → manifest → suite → hist/zip
