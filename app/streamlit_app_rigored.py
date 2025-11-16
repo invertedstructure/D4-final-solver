@@ -3634,22 +3634,45 @@ if "_svr_atomic_write_json" not in globals():
         os.replace(tmp, path)
 
 
+def _svr_cert_common(ib: dict, rc: dict, policy_tag: str, extra: dict | None = None) -> dict:
+    """
+    Common header for all v2 certs (strict, projected_auto, projected_file,
+    freezer, ab_auto, ab_file).
+    """
+    district_id = rc.get("district_id") or ib.get("district_id") or "DUNKNOWN"
 
-# cert scaffold (reuse your existing ones if present)
-if "_svr_cert_common" not in globals():
-    def _svr_cert_common(ib, rc, policy_tag: str) -> dict:
-        return {
-            "schema_version": globals().get("SCHEMA_VERSION", "1"),
-            "engine_rev":     globals().get("ENGINE_REV", ""),
-            "written_at_utc": _svr_now_iso(),
-            "app_version":    globals().get("APP_VERSION", "dev"),
-            "policy_tag":     str(policy_tag),
-            "run_id":         (rc.get("run_id") or ""),
-            "district_id":    (ib.get("district_id") or ""),
-            "sig8":           "",
-            "inputs":         dict(ib),
-            "integrity":      {"content_hash": ""},
-        }
+    # Canonical fixture label
+    fixture_label = (
+        rc.get("fixture_label")
+        or rc.get("fixture_id")
+        or ib.get("fixture_label")
+        or ib.get("fixture_id")
+        or "UNKNOWN_FIXTURE"
+    )
+
+    snapshot_id = rc.get("snapshot_id") or ib.get("snapshot_id")
+
+    try:
+        inputs_sig_5 = _frozen_inputs_sig_from_ib(ib, as_tuple=False)
+    except Exception:
+        inputs_sig_5 = list(ib.get("inputs_sig_5") or [])
+
+    base_hdr = {
+        "schema_version": SCHEMA_VERSION,
+        "engine_rev": ENGINE_REV,
+        "district_id": district_id,
+        # keep fixture_id for backwards compat, but prefer fixture_label
+        "fixture_id": fixture_label,
+        "fixture_label": fixture_label,
+        "snapshot_id": snapshot_id,
+        "inputs_sig_5": inputs_sig_5,
+        "policy": policy_tag,
+    }
+
+    if extra:
+        base_hdr.update(extra)
+    return base_hdr
+
 
 
 
