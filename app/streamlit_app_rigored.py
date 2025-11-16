@@ -6571,25 +6571,7 @@ def _svr_run_once_computeonly_hard(ss=None):
 
     return True, f"v2 compute-only (HARD) 1× bundle → {bdir}", str(bdir)
 
-# UI
-try:
-    import streamlit as _st
-    with _st.expander("V2 COMPUTE-ONLY (HARD) — single source of truth", expanded=True):
-        if _st.button("Run solver (one press) — HARD v2 compute-only", key="btn_svr_run_v2_compute_only_hard"):
-            _st.session_state["_solver_busy"] = True
-            _st.session_state["_solver_one_button_active"] = True
-            try:
-                ok, msg, bundle_dir = _svr_run_once_computeonly_hard(_st.session_state)
-                if bundle_dir:
-                    _st.session_state["last_bundle_dir"] = bundle_dir
-                ( _st.success if ok else _st.error)(msg)
-            except Exception as _e:
-                _st.error(f"Solver run failed: {str(_e)}")
-            finally:
-                _st.session_state["_solver_one_button_active"] = False
-                _st.session_state["_solver_busy"] = False
-except Exception:
-    pass
+
 
 # ====================== END V2 COMPUTE-ONLY (HARD) ======================
 # --- V2 CORE (64×) — one press → receipts → manifest → suite → hist/zip
