@@ -7351,33 +7351,52 @@ with st.expander("C1 — Coverage rollup & health ping", expanded=False):
         def _fmt(x):
             return "—" if x is None else f"{x:.3f}"
 
-        st.markdown(
-            f"**C1 Health** {emoji} {label} · tail={hp['tail']} · "
-            f"sel={_fmt(hp.get('mean_sel_mismatch_rate'))} · "
-            f"off={_fmt(hp.get('mean_offrow_mismatch_rate'))} · "
-            f"ker={_fmt(hp.get('mean_ker_mismatch_rate'))} · "
-            f"ctr={_fmt(hp.get('mean_contradiction_rate'))}"
-        )
-
-        # Optional: surface last ALL row from coverage_rollup.csv (if present), read-only
+        # Try to load ALL row from rollup for a stable ctr fallback
+        all_row = None
         try:
             import csv as _csv
             if csv_out.exists():
                 with csv_out.open("r", encoding="utf-8") as f:
                     rows = list(_csv.DictReader(f))
                 all_row = next((row for row in rows if row.get("prox_label") == "ALL"), None)
-                if all_row:
-                    st.caption(
-                        "Last rollup (ALL) · "
-                        f"count={all_row.get('count')} · "
-                        f"sel={all_row.get('mean_sel_mismatch_rate') or '—'} · "
-                        f"off={all_row.get('mean_offrow_mismatch_rate') or '—'} · "
-                        f"ker={all_row.get('mean_ker_mismatch_rate') or '—'} · "
-                        f"ctr={all_row.get('mean_ctr_rate') or '—'}"
-                    )
         except Exception:
-            # purely informational; never block the app
-            pass
+            all_row = None  # purely informational
+
+        def _ctr_display():
+            # 1) Prefer live mean_contradiction_rate from coverage.jsonl
+            v = hp.get("mean_contradiction_rate")
+            if v is not None:
+                return _fmt(v)
+            # 2) Fallback to rollup's mean_ctr_rate (or mean_contradiction_rate) if present
+            if all_row:
+                raw = all_row.get("mean_ctr_rate") or all_row.get("mean_contradiction_rate")
+                if raw not in (None, "", "NA"):
+                    try:
+                        return _fmt(float(raw))
+                    except Exception:
+                        pass
+            # 3) Last resort
+            return "—"
+
+        st.markdown(
+            f"**C1 Health** {emoji} {label} · tail={hp['tail']} · "
+            f"sel={_fmt(hp.get('mean_sel_mismatch_rate'))} · "
+            f"off={_fmt(hp.get('mean_offrow_mismatch_rate'))} · "
+            f"ker={_fmt(hp.get('mean_ker_mismatch_rate'))} · "
+            f"ctr={_ctr_display()}"
+        )
+
+        # Optional: surface last ALL row from coverage_rollup.csv (if present), read-only
+        if all_row:
+            st.caption(
+                "Last rollup (ALL) · "
+                f"count={all_row.get('count')} · "
+                f"sel={all_row.get('mean_sel_mismatch_rate') or '—'} · "
+                f"off={all_row.get('mean_offrow_mismatch_rate') or '—'} · "
+                f"ker={all_row.get('mean_ker_mismatch_rate') or '—'} · "
+                f"ctr={all_row.get('mean_ctr_rate') or '—'}"
+            )
+
 
 
                        
