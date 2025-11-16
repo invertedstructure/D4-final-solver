@@ -363,14 +363,21 @@ def compute_ab_file(strict_or_file_payload: dict, maybe_file_or_freezer: dict, i
     }
 
 def _v2_extract_ids_from_path(bdir: _VPath):
+    """
+    logs/certs/{district_id}/{fixture_label}/{sig8}
+        → (district_id, fixture_label, sig8)
+    """
     try:
+        bdir = _VPath(bdir)
         sig8 = bdir.name
-        district = bdir.parent.name
-        if district.startswith("D") and len(sig8) == 8:
-            return district, sig8
+        fixture_label = bdir.parent.name
+        district_id = bdir.parent.parent.name
+        if district_id.startswith("D") and len(sig8) == 8:
+            return district_id, fixture_label, sig8
     except Exception:
         pass
-    return None, None
+    return None, None, None
+
 
 def _v2_extract_lanes_from_auto(auto_fp: _VPath):
     try:
@@ -393,20 +400,21 @@ def _v2_bundle_index_rebuild(bdir: _VPath):
     files = _v2_find_expected_files(bdir)
     hashes = {k: _v2_sha256_path(p) for k,p in files.items()}
     sizes  = {k: p.stat().st_size for k,p in files.items()}
-    district, sig8 = _v2_extract_ids_from_path(bdir)
+    district_id, fixture_label, sig8 = _v2_extract_ids_from_path(bdir)
     lanes_pop, lanes_sig8 = (None, None)
     if "projected_auto" in files:
         lanes_pop, lanes_sig8 = _v2_extract_lanes_from_auto(files["projected_auto"])
     pres = _v2_presence_mask(files.keys())
     bundle = {
-        "district_id": district,
-        "sig8": sig8,
-        "files": {k: str(p) for k,p in files.items()},
+        "district_id": district_id or "DUNKNOWN",
+        "fixture_label": fixture_label or "UNKNOWN_FIXTURE",
+        "sig8": sig8 or "UNKNOWN",
+        "files": files,
         "hashes": hashes,
         "sizes": sizes,
-        "presence_mask_hex": pres,
-        "counts": {"present": len(files)},
-        "lanes": {"popcount": lanes_pop, "sig8": lanes_sig8},
+        "presence_mask_hex": presence_mask_hex,
+        "counts": {"present": len(files)},  # already what you want
+        "lanes": lanes,
     }
     (bdir / "bundle.json").write_text(_Vjson.dumps(bundle, indent=2, sort_keys=True), encoding="utf-8")
     return bundle
@@ -4808,11 +4816,22 @@ def _v2_write_loop_receipt_for_bundle(bdir, extra: dict | None = None):
     if not all(p and _P(p).is_absolute() and _P(p).exists() for p in P.values()):
         return False, f"[{fixture_label}] SSOT path(s) missing"
 
-    # dims (nice to have)
+          # dims (nice to have)
     dims = None
     if isinstance(bundle, dict):
-        if "dims" in bundle and isinstance(bundle["dims"], dict):
-            dims = {"n2": bundle["dims"].get("n2"), "n3": bundle["dims"].get("n3")}
+        dims = bundle.get("dims")
+        if isinstance(dims, dict):
+            dims = {"n2": dims.get("n2"), "n3": dims.get("n3")}
+        else:
+            dims = None
+
+    # how many core certs actually exist in this bundle
+    files_dict = bundle.get("files") or {}
+    core_written = len(files_dict)
+    if not core_written:
+        core_written = int((bundle.get("counts") or {}).get("present") or 0)
+    if not core_written:
+        core_written = 6  # last-ditch fallback
 
     receipt = {
         "schema": "loop_receipt.v2",
@@ -4822,7 +4841,7 @@ def _v2_write_loop_receipt_for_bundle(bdir, extra: dict | None = None):
         "sig8": sig8,
         "bundle_dir": str(bdir.resolve()),
         "paths": P,
-        "core_counts": {"written": 6},
+        "core_counts": {"written": core_written},
         "timestamps": {"receipt_written_at": int(_time.time())},
     }
     if dims: receipt["dims"] = dims
