@@ -107,9 +107,11 @@ _V2_EXPECTED = [
     ("projected_auto",       "overlap__", "__projected_columns_k_3_auto__"),
     ("ab_auto",              "ab_compare__strict_vs_projected_auto__", ""),
     ("freezer",              "projector_freezer__", "",),
-    ("ab_file",              "ab_compare__projected_columns_k_3_file__", ""),
+    # ab_file: strict vs projected(FILE) pair
+    ("ab_file",              "ab_compare__strict_vs_projected_file__", ""),
     ("projected_file",       "overlap__", "__projected_columns_k_3_file__"),
 ]
+
 
 def _v2_sha256_path(p: _VPath) -> str:
     h = _Vhash.sha256()
