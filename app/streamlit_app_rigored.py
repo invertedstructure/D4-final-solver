@@ -6349,6 +6349,70 @@ with st.expander("C1 — Coverage rollup & health ping", expanded=False):
                 f"ker={all_row.get('mean_ker_mismatch_rate') or '—'} · "
                 f"ctr={all_row.get('mean_ctr_rate') or '—'}"
             )
+
+def time_tau_summarize_local_flip_toy(toy_out: dict) -> dict:
+    """
+    Compute small, stable summary stats for a time_tau_local_flip_v0.1 run.
+
+    Returns a dict with keys:
+      - schema_version
+      - base_parity, base_defects
+      - H2: {total, toggle_parity, preserve_parity, law_ok, law_total}
+      - d3: {total, toggle_parity, preserve_parity, law_ok, law_total}
+      - global_tau_law_ok: bool
+    """
+    if not isinstance(toy_out, dict):
+        return {}
+
+    base = toy_out.get("base") or {}
+    try:
+        base_parity = int(base.get("parity", 0)) & 1
+    except Exception:
+        base_parity = 0
+    base_defects = list(base.get("defects") or [])
+
+    H2_flips = list(toy_out.get("H2_flips") or [])
+    d3_flips = list(toy_out.get("d3_flips") or [])
+
+    def _stats(flips: list[dict]) -> dict:
+        total = len(flips)
+        toggle = 0
+        preserve = 0
+        law_ok = 0
+        for f in flips:
+            try:
+                dp = int(f.get("delta_parity", 0)) & 1
+            except Exception:
+                dp = 0
+            if dp == 1:
+                toggle += 1
+            else:
+                preserve += 1
+            if f.get("parity_law_ok"):
+                law_ok += 1
+        return {
+            "total": total,
+            "toggle_parity": toggle,
+            "preserve_parity": preserve,
+            "law_ok": law_ok,
+            "law_total": total,
+        }
+
+    H2_stats = _stats(H2_flips)
+    d3_stats = _stats(d3_flips)
+    global_ok = (
+        H2_stats["law_ok"] == H2_stats["law_total"]
+        and d3_stats["law_ok"] == d3_stats["law_total"]
+    )
+
+    return {
+        "schema_version": "time_tau_local_flip_summary_v0.1",
+        "base_parity": base_parity,
+        "base_defects": base_defects,
+        "H2": H2_stats,
+        "d3": d3_stats,
+        "global_tau_law_ok": bool(global_ok),
+    }
 # ───────────────────────── Lab — Time(τ) local flip toy (read-only) ─────────────────────────
 with st.expander("Lab — Time(τ) local flip toy (v3-prelude, read-only)", expanded=False):
     st.caption(
@@ -6365,59 +6429,44 @@ with st.expander("Lab — Time(τ) local flip toy (v3-prelude, read-only)", expa
         step=1,
         key=f"time_tau_flip_max_{nonce}",
     )
+
     if st.button("Run local flip toy on current SSOT", key=f"time_tau_flip_run_{nonce}"):
         try:
             toy_out = time_tau_run_local_flip_toy_from_ssot(
                 max_flips_per_kind=int(max_flips)
             )
-    
-            H2_flips = toy_out.get("H2_flips") or []
-            d3_flips = toy_out.get("d3_flips") or []
-    
-            def _summarise(flips):
-                n = len(flips)
-                if n == 0:
-                    return {
-                        "n": 0,
-                        "law_ok": 0,
-                        "toggles": 0,
-                        "preserves": 0,
-                    }
-                law_ok = sum(1 for f in flips if f.get("parity_law_ok"))
-                toggles = sum(1 for f in flips if int(f.get("delta_parity", 0)) == 1)
-                preserves = n - toggles
-                return {
-                    "n": n,
-                    "law_ok": law_ok,
-                    "toggles": toggles,
-                    "preserves": preserves,
-                }
-    
-            s_H2 = _summarise(H2_flips)
-            s_d3 = _summarise(d3_flips)
-    
-            all_law_ok = (
-                (s_H2["law_ok"] == s_H2["n"]) and
-                (s_d3["law_ok"] == s_d3["n"])
-            )
-    
-            base = toy_out.get("base") or {}
-            base_parity = int(base.get("parity", 0))
-            base_defects = base.get("defects") or []
-    
+            summary = time_tau_summarize_local_flip_toy(toy_out)
+
+            base_parity = summary.get("base_parity")
+            base_defects = summary.get("base_defects") or []
+            H2_stats = summary.get("H2") or {}
+            d3_stats = summary.get("d3") or {}
+            global_ok = summary.get("global_tau_law_ok", False)
+
+            st.markdown("**τ-toy summary**")
             st.markdown(
-                f"**τ-toy summary**  \n"
-                f"- Base parity: `{base_parity}` · base defects: `{base_defects}`  \n"
-                f"- H₂ flips: {s_H2['n']} total · {s_H2['toggles']} toggle parity · "
-                f"{s_H2['preserves']} preserve · {s_H2['law_ok']}/{s_H2['n']} obey τ-law  \n"
-                f"- d₃ flips: {s_d3['n']} total · {s_d3['toggles']} toggle parity · "
-                f"{s_d3['preserves']} preserve · {s_d3['law_ok']}/{s_d3['n']} obey τ-law  \n"
-                f"- Global τ-law: {'✅ all flips consistent' if all_law_ok else '⚠️ some flips violate τ-law'}"
+                f"Base parity: `{base_parity}` · "
+                f"base defects: `{base_defects}`"
             )
-    
+            st.markdown(
+                f"H₂ flips: {H2_stats.get('total', 0)} total · "
+                f"{H2_stats.get('toggle_parity', 0)} toggle parity · "
+                f"{H2_stats.get('preserve_parity', 0)} preserve · "
+                f"{H2_stats.get('law_ok', 0)}/{H2_stats.get('law_total', 0)} obey τ-law"
+            )
+            st.markdown(
+                f"d₃ flips: {d3_stats.get('total', 0)} total · "
+                f"{d3_stats.get('toggle_parity', 0)} toggle parity · "
+                f"{d3_stats.get('preserve_parity', 0)} preserve · "
+                f"{d3_stats.get('law_ok', 0)}/{d3_stats.get('law_total', 0)} obey τ-law"
+            )
+            st.markdown(
+                "Global τ-law: "
+                + ("✅ all flips consistent" if global_ok else "⚠️ violation(s) found")
+            )
+
+            # Raw toy output for inspection / debugging
             st.json(toy_out)
-    
         except Exception as e:
             st.warning(f"Local flip toy failed: {e}")
-
 
