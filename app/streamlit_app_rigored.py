@@ -6365,59 +6365,59 @@ with st.expander("Lab — Time(τ) local flip toy (v3-prelude, read-only)", expa
         step=1,
         key=f"time_tau_flip_max_{nonce}",
     )
-        if st.button("Run local flip toy on current SSOT", key=f"time_tau_flip_run_{nonce}"):
-        try:
-            toy_out = time_tau_run_local_flip_toy_from_ssot(
-                max_flips_per_kind=int(max_flips)
-            )
+    if st.button("Run local flip toy on current SSOT", key=f"time_tau_flip_run_{nonce}"):
+    try:
+        toy_out = time_tau_run_local_flip_toy_from_ssot(
+            max_flips_per_kind=int(max_flips)
+        )
 
-            H2_flips = toy_out.get("H2_flips") or []
-            d3_flips = toy_out.get("d3_flips") or []
+        H2_flips = toy_out.get("H2_flips") or []
+        d3_flips = toy_out.get("d3_flips") or []
 
-            def _summarise(flips):
-                n = len(flips)
-                if n == 0:
-                    return {
-                        "n": 0,
-                        "law_ok": 0,
-                        "toggles": 0,
-                        "preserves": 0,
-                    }
-                law_ok = sum(1 for f in flips if f.get("parity_law_ok"))
-                toggles = sum(1 for f in flips if int(f.get("delta_parity", 0)) == 1)
-                preserves = n - toggles
+        def _summarise(flips):
+            n = len(flips)
+            if n == 0:
                 return {
-                    "n": n,
-                    "law_ok": law_ok,
-                    "toggles": toggles,
-                    "preserves": preserves,
+                    "n": 0,
+                    "law_ok": 0,
+                    "toggles": 0,
+                    "preserves": 0,
                 }
+            law_ok = sum(1 for f in flips if f.get("parity_law_ok"))
+            toggles = sum(1 for f in flips if int(f.get("delta_parity", 0)) == 1)
+            preserves = n - toggles
+            return {
+                "n": n,
+                "law_ok": law_ok,
+                "toggles": toggles,
+                "preserves": preserves,
+            }
 
-            s_H2 = _summarise(H2_flips)
-            s_d3 = _summarise(d3_flips)
+        s_H2 = _summarise(H2_flips)
+        s_d3 = _summarise(d3_flips)
 
-            all_law_ok = (
-                (s_H2["law_ok"] == s_H2["n"]) and
-                (s_d3["law_ok"] == s_d3["n"])
-            )
+        all_law_ok = (
+            (s_H2["law_ok"] == s_H2["n"]) and
+            (s_d3["law_ok"] == s_d3["n"])
+        )
 
-            base = toy_out.get("base") or {}
-            base_parity = int(base.get("parity", 0))
-            base_defects = base.get("defects") or []
+        base = toy_out.get("base") or {}
+        base_parity = int(base.get("parity", 0))
+        base_defects = base.get("defects") or []
 
-            st.markdown(
-                f"**τ-toy summary**  \n"
-                f"- Base parity: `{base_parity}` · base defects: `{base_defects}`  \n"
-                f"- H₂ flips: {s_H2['n']} total · {s_H2['toggles']} toggle parity · "
-                f"{s_H2['preserves']} preserve · {s_H2['law_ok']}/{s_H2['n']} obey τ-law  \n"
-                f"- d₃ flips: {s_d3['n']} total · {s_d3['toggles']} toggle parity · "
-                f"{s_d3['preserves']} preserve · {s_d3['law_ok']}/{s_d3['n']} obey τ-law  \n"
-                f"- Global τ-law: {'✅ all flips consistent' if all_law_ok else '⚠️ some flips violate τ-law'}"
-            )
+        st.markdown(
+            f"**τ-toy summary**  \n"
+            f"- Base parity: `{base_parity}` · base defects: `{base_defects}`  \n"
+            f"- H₂ flips: {s_H2['n']} total · {s_H2['toggles']} toggle parity · "
+            f"{s_H2['preserves']} preserve · {s_H2['law_ok']}/{s_H2['n']} obey τ-law  \n"
+            f"- d₃ flips: {s_d3['n']} total · {s_d3['toggles']} toggle parity · "
+            f"{s_d3['preserves']} preserve · {s_d3['law_ok']}/{s_d3['n']} obey τ-law  \n"
+            f"- Global τ-law: {'✅ all flips consistent' if all_law_ok else '⚠️ some flips violate τ-law'}"
+        )
 
-            st.json(toy_out)
+        st.json(toy_out)
 
-        except Exception as e:
-            st.warning(f"Local flip toy failed: {e}")
+    except Exception as e:
+        st.warning(f"Local flip toy failed: {e}")
 
 
