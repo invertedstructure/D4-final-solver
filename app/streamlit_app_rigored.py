@@ -5645,6 +5645,207 @@ def _svr_run_once_computeonly_hard(ss=None):
 
 
 # ====================== END V2 COMPUTE-ONLY (HARD) ======================
+
+
+
+
+
+
+# --- τ local flip toy (v0.1) -------------------------------------------------
+if "_tau_local_flip_v0_1" not in globals():
+    def _tau_local_flip_v0_1(H2, d3, C3, max_flips: int = 16):
+        """
+        Toy: enumerate local flips of H2 and d3 and track how many R3 columns
+        change, and how parity p(σ) = |defects(σ)| mod 2 responds.
+
+        H2 : list[list[int]]  shape (n2, n1)
+        d3 : list[list[int]]  shape (n1, n3)
+        C3 : list[list[int]]  shape (n3, n3)
+
+        Returns a dict shaped like your sample:
+
+        {
+          "schema_version": "time_tau_local_flip_v0.1",
+          "max_flips": 16,
+          "total_possible_flips": ...,
+          "truncated": bool,
+          "base": {...},
+          "H2_flips": [...],
+          "d3_flips": [...],
+        }
+        """
+        # --- small GF(2) helpers (local, toy-only) ---------------------------
+        def _gf2(v) -> int:
+            try:
+                return 1 if (int(v) & 1) else 0
+            except Exception:
+                return 0
+
+        def _gf2_matmul(A, B):
+            # A: (r x m), B: (m x c) → (r x c) over F2
+            if not A or not B:
+                return []
+            r = len(A)
+            m = len(A[0])
+            mB = len(B)
+            c = len(B[0]) if mB else 0
+            if m != mB:
+                raise ValueError("shape mismatch in _gf2_matmul")
+            out = [[0] * c for _ in range(r)]
+            for i in range(r):
+                for k in range(m):
+                    if _gf2(A[i][k]):
+                        row_i = out[i]
+                        row_Bk = B[k]
+                        for j in range(c):
+                            row_i[j] ^= _gf2(row_Bk[j])
+            return out
+
+        def _gf2_eye(n):
+            return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
+
+        def _gf2_xor(A, B):
+            if not A:
+                return [row[:] for row in (B or [])]
+            if not B:
+                return [row[:] for row in (A or [])]
+            r = len(A)
+            c = len(A[0]) if r else 0
+            out = [[0] * c for _ in range(r)]
+            for i in range(r):
+                rowA = A[i]
+                rowB = B[i]
+                rowO = out[i]
+                for j in range(c):
+                    rowO[j] = _gf2(rowA[j]) ^ _gf2(rowB[j])
+            return out
+
+        def _defect_cols_from_R3(R3):
+            """Columns j where any entry in column j is 1."""
+            if not R3:
+                return []
+            nrows = len(R3)
+            ncols = len(R3[0])
+            defects = []
+            for j in range(ncols):
+                col_nonzero = False
+                for i in range(nrows):
+                    if _gf2(R3[i][j]):
+                        col_nonzero = True
+                        break
+                if col_nonzero:
+                    defects.append(j)
+            return defects
+
+        # --- basic shape sanity ---------------------------------------------
+        n2 = len(H2)
+        n1 = len(H2[0]) if n2 else 0
+        n1_d3 = len(d3)
+        n3 = len(d3[0]) if d3 else 0
+
+        if n1 != n1_d3:
+            raise ValueError(f"H2.shape[1] = {n1} != d3.shape[0] = {n1_d3}")
+        if len(C3) != n3 or (n3 and len(C3[0]) != n3):
+            raise ValueError("C3 must be n3×n3")
+
+        # --- base residual and parity ---------------------------------------
+        Hd = _gf2_matmul(H2, d3)          # H2 d3
+        I3 = _gf2_eye(n3)                 # identity on C3
+        R3_base = _gf2_xor(_gf2_xor(Hd, C3), I3)
+        base_defects = _defect_cols_from_R3(R3_base)
+        p0 = len(base_defects) & 1
+        base_defects_set = set(base_defects)
+
+        base = {
+            "parity": int(p0),
+            "defects": list(base_defects),
+            "H2_shape": [int(n2), int(n1)],
+            "d3_shape": [int(n1_d3), int(n3)],
+            "C3_shape": [int(n3), int(n3)],
+        }
+
+        total_possible = n2 * n1 + n1_d3 * n3
+        limit = int(max_flips)
+        remaining = max(0, limit)
+        truncated = total_possible > limit
+
+        H2_flips = []
+        d3_flips = []
+
+        # --- enumerate H2 flips ---------------------------------------------
+        for i in range(n2):
+            for j in range(n1):
+                if remaining <= 0:
+                    break
+                # flip one bit in H2
+                H2p = [row[:] for row in H2]
+                H2p[i][j] = _gf2(H2p[i][j]) ^ 1
+
+                R3p = _gf2_xor(_gf2_xor(_gf2_matmul(H2p, d3), C3), I3)
+                defects_p = _defect_cols_from_R3(R3p)
+                defects_p_set = set(defects_p)
+
+                changed_cols = sorted(list(base_defects_set ^ defects_p_set))
+                parity_after = len(defects_p) & 1
+                delta_parity = parity_after ^ p0
+                parity_law_ok = (delta_parity == (len(changed_cols) & 1))
+
+                H2_flips.append({
+                    "kind": "H2",
+                    "i": int(i),
+                    "j": int(j),
+                    "parity_after": int(parity_after),
+                    "delta_parity": int(delta_parity),
+                    "changed_cols": changed_cols,
+                    "changed_cols_size": int(len(changed_cols)),
+                    "parity_law_ok": bool(parity_law_ok),
+                })
+                remaining -= 1
+            if remaining <= 0:
+                break
+
+        # --- enumerate d3 flips ---------------------------------------------
+        for j in range(n1_d3):
+            for k in range(n3):
+                if remaining <= 0:
+                    break
+                d3p = [row[:] for row in d3]
+                d3p[j][k] = _gf2(d3p[j][k]) ^ 1
+
+                R3p = _gf2_xor(_gf2_xor(_gf2_matmul(H2, d3p), C3), I3)
+                defects_p = _defect_cols_from_R3(R3p)
+                defects_p_set = set(defects_p)
+
+                changed_cols = sorted(list(base_defects_set ^ defects_p_set))
+                parity_after = len(defects_p) & 1
+                delta_parity = parity_after ^ p0
+                parity_law_ok = (delta_parity == (len(changed_cols) & 1))
+
+                d3_flips.append({
+                    "kind": "d3",
+                    "j": int(j),
+                    "k": int(k),
+                    "parity_after": int(parity_after),
+                    "delta_parity": int(delta_parity),
+                    "changed_cols": changed_cols,
+                    "changed_cols_size": int(len(changed_cols)),
+                    "parity_law_ok": bool(parity_law_ok),
+                })
+                remaining -= 1
+            if remaining <= 0:
+                break
+
+        return {
+            "schema_version": "time_tau_local_flip_v0.1",
+            "max_flips": int(limit),
+            "total_possible_flips": int(total_possible),
+            "truncated": bool(truncated),
+            "base": base,
+            "H2_flips": H2_flips,
+            "d3_flips": d3_flips,
+        }
+# --- /τ local flip toy ------------------------------------------------------
+
 # ====================== Time(τ) local flip toy helpers (v0.1) ======================
 
 def time_tau_strict_core_from_blocks(blocks_B: dict, blocks_C: dict, blocks_H: dict) -> dict:
