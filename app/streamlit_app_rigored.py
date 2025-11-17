@@ -6331,30 +6331,27 @@ with st.expander("C1 — Coverage rollup & health ping", expanded=False):
                 f"ker={all_row.get('mean_ker_mismatch_rate') or '—'} · "
                 f"ctr={all_row.get('mean_ctr_rate') or '—'}"
             )
+# ───────────────────────── Lab — Time(τ) local flip toy (read-only) ─────────────────────────
+with st.expander("Lab — Time(τ) local flip toy (v3-prelude, read-only)", expanded=False):
+    st.caption(
+        "Toy experiment around strict residual R₃ for the current SSOT fixture. "
+        "Flips a few H₂ / d₃ bits and logs how the obstruction parity changes. "
+        "No certs or receipts are written."
+    )
+    nonce = st.session_state.get("_ui_nonce", "tau")
+    max_flips = st.number_input(
+        "Max flips per kind (H₂ / d₃)",
+        min_value=1,
+        max_value=256,
+        value=16,
+        step=1,
+        key=f"time_tau_flip_max_{nonce}",
+    )
+    if st.button("Run local flip toy on current SSOT", key=f"time_tau_flip_run_{nonce}"):
+        try:
+            toy_out = time_tau_run_local_flip_toy_from_ssot(max_flips_per_kind=int(max_flips))
+            # For now just dump the raw JSON; later you can pretty it up (tables, histograms, etc.)
+            st.json(toy_out)
+        except Exception as e:
+            st.warning(f"Local flip toy failed: {e}")
 
-
-    # ───────────────────────── Lab — Time(τ) local flip toy (read-only) ─────────────────────────
-    with st.expander("Lab — Time(τ) local flip toy (v3-prelude, read-only)", expanded=False):
-        st.caption(
-            "Toy experiment around strict residual R₃ for the current SSOT fixture. "
-            "Flips a few H₂ / d₃ bits and logs how the obstruction parity changes. "
-            "No certs or receipts are written."
-        )
-        nonce = st.session_state.get("_ui_nonce", "tau")
-        max_flips = st.number_input(
-            "Max flips per kind (H₂ / d₃)",
-            min_value=1,
-            max_value=256,
-            value=16,
-            step=1,
-            key=f"time_tau_flip_max_{nonce}",
-        )
-        if st.button("Run local flip toy on current SSOT", key=f"time_tau_flip_run_{nonce}"):
-            try:
-                toy_out = time_tau_run_local_flip_toy_from_ssot(max_flips_per_kind=int(max_flips))
-                # For now just dump the raw JSON; later you can pretty it up (tables, histograms, etc.)
-                st.json(toy_out)
-            except Exception as e:
-                st.warning(f"Local flip toy failed: {e}")
-
-                       
