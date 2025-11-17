@@ -5657,6 +5657,208 @@ def time_tau_strict_core_from_blocks(blocks_B: dict, blocks_C: dict, blocks_H: d
       - pulls d3, C3, H2 from B/C/H blocks
       - checks basic shapes
       - computes H2·d3, C3⊕I3, and R3 = H2·d3 ⊕ (C3⊕I3)
+    Returns a dict with matrices and shapes. Raises ValueError on incomplete data.
+    """
+    d3 = blocks_B.get("3") or []
+    C3 = blocks_C.get("3") or []
+    H2 = blocks_H.get("2") or []
+
+    if not (d3 and d3[0] and C3 and C3[0] and H2 and H2[0]):
+        raise ValueError("Required slices missing (need B[3], C[3], H[2]).")
+
+    mB3, nB3 = _hard_co_shape(d3)
+    mC3, nC3 = _hard_co_shape(C3)
+    mH2, nH2 = _hard_co_shape(H2)
+
+    # Basic consistency: H2·d3 and C3 must live in the same ambient space.
+    if nH2 != mB3:
+        raise ValueError(f"Shape mismatch: H2 cols ({nH2}) != d3 rows ({mB3}).")
+    if nB3 != nC3:
+        raise ValueError(f"Shape mismatch: d3 cols ({nB3}) != C3 cols ({nC3}).")
+    if mH2 != mC3:
+        raise ValueError(f"Shape mismatch: H2 rows ({mH2}) != C3 rows ({mC3}).")
+
+    sqC = (mC3 == nC3)
+    if not sqC:
+        # For the toy we require C3 square so that C3⊕I3 and R3 are well-defined.
+        raise ValueError("Local flip toy requires square C3 (n3 × n3).")
+
+    H2d3 = _hard_co_mm2(H2, d3)
+    I3   = _hard_co_eye(mC3)
+    C3pI = _hard_co_xor(C3, I3)
+    R3   = _hard_co_xor(H2d3, C3pI)
+
+    return {
+        "d3": d3,
+        "C3": C3,
+        "H2": H2,
+        "H2d3": H2d3,
+        "C3pI": C3pI,
+        "R3": R3,
+        "n3": nB3,
+        "sqC": sqC,
+        "shapes": {
+            "H2": (mH2, nH2),
+            "d3": (mB3, nB3),
+            "C3": (mC3, nC3),
+        },
+    }
+
+
+def time_tau_defect_set_from_R3(R3) -> list[int]:
+    """
+    Defect set D(σ) for the toy:
+      D = { j : column j of R3 is non-zero }.
+    Matches strict 'failing cols' with sel_all = 1.
+    """
+    if not R3 or not R3[0]:
+        return []
+    m, n = len(R3), len(R3[0])
+    D = []
+    for j in range(n):
+        col_nonzero = False
+        for i in range(m):
+            if int(R3[i][j]) & 1:
+                col_nonzero = True
+                break
+        if col_nonzero:
+            D.append(j)
+    return D
+
+
+def time_tau_run_local_flip_toy_from_blocks(
+    blocks_B: dict,
+    blocks_C: dict,
+    blocks_H: dict,
+    max_flips_per_kind: int = 32,
+) -> dict:
+    """
+    Pure-matrix Time(τ) toy:
+      - build strict core from B/C/H blocks
+      - compute base defect set D0 and parity p0
+      - flip up to max_flips_per_kind bits in H2 and d3
+      - for each flip, recompute R3 and log:
+          * parity_after, delta_parity
+          * changed_cols = symmetric difference of defect sets
+          * parity_law_ok: delta_parity == (len(changed_cols) mod 2)
+    No certs written, no side-effects.
+    """
+    core0 = time_tau_strict_core_from_blocks(blocks_B, blocks_C, blocks_H)
+    R3_0 = core0["R3"]
+    D0   = time_tau_defect_set_from_R3(R3_0)
+    p0   = len(D0) % 2
+
+    H2 = core0["H2"]
+    d3 = core0["d3"]
+    shapes = core0["shapes"]
+    mH2, nH2 = shapes["H2"]
+    mB3, nB3 = shapes["d3"]
+
+    # Common base data
+    base_info = {
+        "parity": p0,
+        "defects": D0,
+        "H2_shape": shapes["H2"],
+        "d3_shape": shapes["d3"],
+        "C3_shape": shapes["C3"],
+    }
+
+    # H2 flips
+    H2_flips = []
+    count = 0
+    for i in range(mH2):
+        for j in range(nH2):
+            if count >= max_flips_per_kind:
+                break
+            # Flip one bit in H2
+            H2p = [row[:] for row in H2]
+            H2p[i][j] = (int(H2p[i][j]) ^ 1) & 1
+            H2d3_p = _hard_co_mm2(H2p, d3)
+            R3_p = _hard_co_xor(H2d3_p, core0["C3pI"])
+
+            D1 = time_tau_defect_set_from_R3(R3_p)
+            p1 = len(D1) % 2
+            S  = sorted(set(D0) ^ set(D1))
+            delta_p = p0 ^ p1
+
+            H2_flips.append({
+                "kind": "H2",
+                "i": i,
+                "j": j,
+                "parity_after": p1,
+                "delta_parity": delta_p,
+                "changed_cols": S,
+                "changed_cols_size": len(S),
+                "parity_law_ok": (delta_p == (len(S) & 1)),
+            })
+            count += 1
+        if count >= max_flips_per_kind:
+            break
+
+    # d3 flips
+    d3_flips = []
+    count = 0
+    for j in range(mB3):
+        for k in range(nB3):
+            if count >= max_flips_per_kind:
+                break
+            # Flip one bit in d3
+            d3p = [row[:] for row in d3]
+            d3p[j][k] = (int(d3p[j][k]) ^ 1) & 1
+            H2d3_p = _hard_co_mm2(H2, d3p)
+            R3_p = _hard_co_xor(H2d3_p, core0["C3pI"])
+
+            D1 = time_tau_defect_set_from_R3(R3_p)
+            p1 = len(D1) % 2
+            S  = sorted(set(D0) ^ set(D1))
+            delta_p = p0 ^ p1
+
+            d3_flips.append({
+                "kind": "d3",
+                "j": j,
+                "k": k,
+                "parity_after": p1,
+                "delta_parity": delta_p,
+                "changed_cols": S,
+                "changed_cols_size": len(S),
+                "parity_law_ok": (delta_p == (len(S) & 1)),
+            })
+            count += 1
+        if count >= max_flips_per_kind:
+            break
+
+    return {
+        "schema_version": "time_tau_local_flip_v0.1",
+        "base": base_info,
+        "H2_flips": H2_flips,
+        "d3_flips": d3_flips,
+    }
+
+
+def time_tau_run_local_flip_toy_from_ssot(max_flips_per_kind: int = 32) -> dict:
+    """
+    Convenience wrapper: resolve B/C/H/U from SSOT and run the toy on those blocks.
+    Uses _svr_resolve_all_to_paths; does not write any new certs or receipts.
+    """
+    pf = _svr_resolve_all_to_paths() or {}
+    (pB, bB) = pf.get("B") or (None, {})
+    (pC, bC) = pf.get("C") or (None, {})
+    (pH, bH) = pf.get("H") or (None, {})
+    # U not used for this toy; we only need B/C/H.
+
+    return time_tau_run_local_flip_toy_from_blocks(
+        bB, bC, bH,
+        max_flips_per_kind=max_flips_per_kind,
+    )
+
+# ====================== Time(τ) local flip toy helpers (v0.1) ======================
+
+def time_tau_strict_core_from_blocks(blocks_B: dict, blocks_C: dict, blocks_H: dict) -> dict:
+    """
+    Minimal strict core for the Time(τ) toy:
+      - pulls d3, C3, H2 from B/C/H blocks
+      - checks basic shapes
+      - computes H2·d3, C3⊕I3, and R3 = H2·d3 ⊕ (C3⊕I3)
 
     Returns a dict with matrices and shapes. Raises ValueError on incomplete data.
     """
