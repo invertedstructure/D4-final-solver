@@ -7573,17 +7573,17 @@ def _time_tau_c4_build_coverage_ping(
         "tau_mismatch_count": tau_mismatch_count,
     }
 
-        # Propagate snapshot_id from C3/C4 rows into the Time(τ) coverage ping
-        snapshot_id = None
-        for r in rows or []:
-            sid = r.get("snapshot_id")
-            if sid:
-                snapshot_id = sid
-                break
-        if snapshot_id is not None:
-            ping["snapshot_id"] = snapshot_id
+    # Propagate snapshot_id from C3/C4 rows into the Time(τ) coverage ping
+    snapshot_id = None
+    for r in rows or []:
+        sid = r.get("snapshot_id")
+        if sid:
+            snapshot_id = sid
+            break
+    if snapshot_id is not None:
+        ping["snapshot_id"] = snapshot_id
 
-        return ping
+    return ping
 
 def _time_tau_c4_write_rollup_csv(rows: list[dict]) -> str:
     """
