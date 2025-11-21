@@ -3271,41 +3271,7 @@ if "_ab_embed_sig" not in globals():
 
         blob = {"inputs": inputs_sig, "policy": pol, "projector_hash": pj}
         return _hash.sha256(_json.dumps(blob, separators=(",", ":"), sort_keys=True).encode("ascii")).hexdigest()
-# ============ /A/B policy + embed signature helpers (compat) ============
-def _pin_ab_for_cert(strict_out: dict, projected_out: dict):
-    """Pin A/B snapshot into session with a canonical embed_sig + one-shot ticket."""
 
-    ss = st.session_state
-    ib = ss.get("_inputs_block") or {}
-    rc = ss.get("run_ctx") or {}
-
-    # inputs_sig: prefer frozen SSOT if available, else current block
-    try:
-        if "ssot_frozen_sig_from_ib" in globals() and callable(globals()["ssot_frozen_sig_from_ib"]):
-            inputs_sig = list(ssot_frozen_sig_from_ib() or [])  # type: ignore[name-defined]
-        else:
-            inputs_sig = _inputs_sig_now_from_ib(ib)
-    except Exception:
-        inputs_sig = _inputs_sig_now_from_ib(ib)
-
-    pol_tag = _canonical_policy_tag(rc)
-    pj_hash = rc.get("projector_hash","") if str(rc.get("mode","")) == "projected(columns@k=3,file)" else ""
-
-    payload = {
-        "pair_tag": f"strict__VS__{pol_tag}",
-        "inputs_sig": inputs_sig,
-        "policy_tag": pol_tag,
-        "strict":    {"out": dict(strict_out or {})},
-        "projected": {"out": dict(projected_out or {}), "policy_tag": pol_tag, "projector_hash": pj_hash},
-    }
-
-    # >>> stamp canonical embed signature <<<
-    payload["embed_sig"] = _ab_embed_sig()
-
-    ss["ab_pin"] = {"state": "pinned", "payload": payload, "consumed": False}
-    ss["_ab_ticket_pending"] = int(ss.get("_ab_ticket_pending", 0)) + 1
-    ss["write_armed"] = True
-    ss["armed_by"]    = "ab_compare"
 
 # ===== ABX fixture helpers (module-scope, guarded) =====
 from pathlib import Path
