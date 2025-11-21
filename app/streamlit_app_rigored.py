@@ -2254,19 +2254,7 @@ def _atomic_append_jsonl(path: Path, row: dict):
 if "_gallery_keys" not in st.session_state: st.session_state["_gallery_keys"] = set()
 if "_witness_keys" not in st.session_state: st.session_state["_witness_keys"] = set()
 
-# ------------------------- Run Stamp -------------------------
-def run_stamp_line() -> str:
-    ss = st.session_state
-    rc = ss.get("run_ctx") or {}
-    ib = (ss.get("_inputs_block") or {}).get("hashes", {})
-    pol = rc.get("policy_tag", "?"); n3 = int(rc.get("n3") or 0)
-    hB = (ib.get("boundaries_hash","") or "")[:8]
-    hC = (ib.get("C_hash","")         or "")[:8]
-    hH = (ib.get("H_hash","")         or "")[:8]
-    hU = (ib.get("U_hash","")         or "")[:8]
-    pH = (rc.get("projector_hash","") or "")[:8]
-    rid= (rc.get("run_id","")         or "")[:8]
-    return f"{pol} | n3={n3} | B {hB} · C {hC} · H {hH} · U {hU} | P {pH} | run {rid}"
+
 
 
 # ============================= END TOP HELPERS — CANONICAL =============================
