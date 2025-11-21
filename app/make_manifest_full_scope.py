@@ -3274,28 +3274,7 @@ else:
 
 
 
-# ---------- A/B canonical helpers (drop-in) ----------
 
-from pathlib import Path
-import json as _json
-
-def _ab_frozen_inputs_sig_list() -> list[str]:
-    """Canonical 5-hash signature, frozen if your freezer provides it."""
-    try:
-        if "ssot_frozen_sig_from_ib" in globals() and callable(globals()["ssot_frozen_sig_from_ib"]):
-            sig = ssot_frozen_sig_from_ib()
-            if sig: return list(sig)
-    except Exception:
-        pass
-    ib = st.session_state.get("_inputs_block") or {}
-    h  = (ib.get("hashes") or {})
-    return [
-        str(h.get("boundaries_hash", ib.get("boundaries_hash",""))),
-        str(h.get("C_hash",          ib.get("C_hash",""))),
-        str(h.get("H_hash",          ib.get("H_hash",""))),
-        str(h.get("U_hash",          ib.get("U_hash",""))),
-        str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
-    ]
 
 
 
