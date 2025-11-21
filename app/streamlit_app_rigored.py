@@ -62,7 +62,9 @@ import tempfile as _tempfile
 import shutil as _shutil
 from pathlib import Path as _Path
 from uuid import uuid4
-
+import os, json as _json, hashlib as _hashlib
+from pathlib import Path
+from datetime import datetime, timezone
 # == EARLY HELPERS (v2 wiring) ==
 # Safe UI nonce (prevents "no _ui_nonce" warning)
 try:
