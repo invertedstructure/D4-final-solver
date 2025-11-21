@@ -77,26 +77,6 @@ def _v2_coverage_count_for_snapshot(snapshot_id: str) -> int:
                 n += 1
     return n
 
-# Normalize solver return to (ok, msg, bundle_dir)
-def _solver_ret_as_tuple(ret):
-    try:
-        if isinstance(ret, (tuple, list)):
-            ok  = bool(ret[0]) if len(ret) >= 1 else False
-            msg = str(ret[1]) if len(ret) >= 2 else ""
-            bdir = ret[2] if len(ret) >= 3 else None
-            return ok, msg, bdir
-        if isinstance(ret, dict):
-            ok  = bool(ret.get("ok", ret.get("success", True)))
-            msg = str(ret.get("msg", ret.get("message", "")))
-            bdir = ret.get("bundle_dir") or ret.get("bundle") or ret.get("dir")
-            return ok, msg, bdir
-        if isinstance(ret, bool):
-            return ret, ("ok" if ret else "fail"), None
-        if ret is None:
-            return False, "solver returned None", None
-    except Exception as e:
-        return False, f"ret normalization error: {e}", None
-    return False, "solver returned unexpected shape", None
 
 # Pass1/2 helpers to write bundle.json and loop_receipt
 from pathlib import Path as _VPath
