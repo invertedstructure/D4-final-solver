@@ -2889,24 +2889,7 @@ if "_recompute_projected_out" not in globals():
         eq3_proj = _is_zero(R3p)
         return ({"2": {"eq": True}, "3": {"eq": bool(eq3_proj), "n_k": n3}}, debug)
 
-if "_lane_bottoms_for_diag" not in globals():
-    def _lane_bottoms_for_diag(*, H_obj, cmap_obj, d3, lane_mask):
-        def _bottom_row(M): return M[-1] if (M and len(M)) else []
-        H2 = (H_obj.blocks.__root__.get("2") or []) if H_obj else []
-        C3 = (cmap_obj.blocks.__root__.get("3") or [])
-        I3 = _eye(len(C3)) if C3 else []
-        try:
-            if "mul" not in globals() or not callable(globals()["mul"]):
-                raise RuntimeError("GF(2) mul missing.")
-            H2d3  = mul(H2, d3) if _shape_ok(H2, d3) else []
-            C3pI3 = _xor_gf2(C3, I3) if (C3 and C3[0]) else []
-        except Exception:
-            H2d3, C3pI3 = [], []
-        idx = [j for j, m in enumerate(lane_mask or []) if m]
-        bH = _bottom_row(H2d3); bC = _bottom_row(C3pI3)
-        return ([bH[j] for j in idx] if (bH and idx) else [],
-                [bC[j] for j in idx] if (bC and idx) else [])
-# =================== /A/B compat shims ===================
+
 # ============== A/B policy + embed signature helpers (compat) ==============
 import hashlib as _hash
 import json as _json
