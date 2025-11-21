@@ -2153,21 +2153,7 @@ def ssot_frozen_sig_from_ib() -> tuple[str, str, str, str, str]:
         return ("", "", "", "", "")
     return (b, C, H, U, S)
 
-def current_inputs_sig(*, _ib: dict | None = None) -> tuple[str, str, str, str, str]:
-    """
-    Canonical 5-tuple (D, C, H, U, SHAPES). If _ib provided, read from that,
-    otherwise read from the frozen st.session_state['_inputs_block'].
-    """
-    if _ib is not None:
-        h = dict((_ib or {}).get("hashes") or {})
-        return (
-            str(h.get("boundaries_hash") or ""),
-            str(h.get("C_hash")         or ""),
-            str(h.get("H_hash")         or ""),
-            str(h.get("U_hash")         or ""),
-            str(h.get("shapes_hash")    or ""),
-        )
-    return ssot_frozen_sig_from_ib()
+
 
 # ------------------------- SSOT live fingerprint (what’s currently loaded in memory) -------------------------
 def ssot_live_sig(boundaries_obj=None, cmap_obj=None, H_obj=None, shapes_obj=None) -> tuple[str, str, str, str, str]:
