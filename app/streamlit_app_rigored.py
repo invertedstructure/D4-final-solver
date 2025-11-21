@@ -1,4 +1,49 @@
 import streamlit as st
+# ─────────────────────────────────────────────────────────────────────────────
+import sys
+import os
+import json
+import csv
+import hashlib
+import platform
+import zipfile
+import tempfile
+import shutil
+import importlib.util
+import types
+import secrets
+import math
+import uuid
+from io import BytesIO
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+import random
+# ------------------------- End of Organized Helpers -------------------------
+import uuid
+import os
+import shutil
+import tempfile
+import json
+from pathlib import Path
+from contextlib import contextmanager
+# ======================= Canon Helpers SSOT - Deduped & Organized =======================
+
+import json, hashlib, streamlit as st
+from datetime import datetime, timezone
+from pathlib import Path
+import pandas as pd
+
+# Underscored aliases for helpers
+import os as _os
+import json as _json
+import hashlib as _hashlib
+import csv as _csv
+import zipfile as _zipfile
+import tempfile as _tempfile
+import shutil as _shutil
+from pathlib import Path as _Path
+from uuid import uuid4
 
 # == EARLY HELPERS (v2 wiring) ==
 # Safe UI nonce (prevents "no _ui_nonce" warning)
@@ -1500,51 +1545,6 @@ if "_svr_residual_tag_from_R3" not in globals():
 
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-import sys
-import os
-import json
-import csv
-import hashlib
-import platform
-import zipfile
-import tempfile
-import shutil
-import importlib.util
-import types
-import secrets
-import math
-import uuid
-from io import BytesIO
-from contextlib import contextmanager
-from datetime import datetime, timezone
-from pathlib import Path
-import random
-# ------------------------- End of Organized Helpers -------------------------
-import uuid
-import os
-import shutil
-import tempfile
-import json
-from pathlib import Path
-from contextlib import contextmanager
-# ======================= Canon Helpers SSOT - Deduped & Organized =======================
-
-import json, hashlib, streamlit as st
-from datetime import datetime, timezone
-from pathlib import Path
-import pandas as pd
-
-# Underscored aliases for helpers
-import os as _os
-import json as _json
-import hashlib as _hashlib
-import csv as _csv
-import zipfile as _zipfile
-import tempfile as _tempfile
-import shutil as _shutil
-from pathlib import Path as _Path
-from uuid import uuid4
 
 # Page config early so Streamlit is happy
 # ────────────────────────────── PACKAGE LOADER ──────────────────────────────
@@ -3443,43 +3443,7 @@ with tab2:
     def _bottom_row(M):
         return M[-1] if (M and len(M)) else []
 
-    def _load_h_local():
-        """Best-effort H loader used in Tab 2; resilient to missing file/var."""
-        try:
-            # prefer a session-uploaded H if your UI stashes it in st.session_state
-            up = st.session_state.get("f_H")
-            if up is not None:
-                return io.parse_cmap(read_json_file(up))
-        except Exception:
-            pass
-        try:
-            # fall back to a module-level f_H if present
-            if 'f_H' in globals() and globals()['f_H'] is not None:
-                return io.parse_cmap(read_json_file(globals()['f_H']))
-        except Exception:
-            pass
-        try:
-            # finally, fall back to whatever was produced by Overlap
-            H_obj = st.session_state.get("overlap_H")
-            if H_obj is not None:
-                return H_obj
-        except Exception:
-            pass
-        # last resort: empty cmap
-        return io.parse_cmap({"blocks": {}})
-
-    def _lane_mask_from_d3_strict(boundaries_obj):
-        """Derive lane mask directly from d3 by column support (strict truth)."""
-        try:
-            d3 = boundaries_obj.blocks.__root__.get("3") or []
-        except Exception:
-            d3 = []
-        return _truth_mask_from_d3(d3)
-
-    def _lane_mask_from_d3_local(boundaries_obj):
-        # alias maintained for existing call-sites
-        return _lane_mask_from_d3_strict(boundaries_obj)
-
+    
     def _derive_mode_from_cfg(cfg: dict) -> str:
         if not cfg or not cfg.get("enabled_layers"):
             return "strict"
@@ -3505,130 +3469,6 @@ with tab2:
                 f"R3_SHAPE: expected H2({n3}×{n2})·d3({n2}×{n3}) and (C3⊕I3)({n3}×{n3}); "
                 f"got H2({rH}×{cH}), d3({rD}×{cD}), C3({rC}×{cC})"
             )
-
-    
-
-
-
-
-
-def _ab_is_fresh_now(pin=None, expected_embed_sig: str | None = None, **kwargs):
-    """
-    Back-compat freshness check.
-    Accepts extra kwargs (rc, ib, cfg, expected_sig5, ...).
-
-    Priority:
-      1) Compare pin.payload.embed_sig to expected_embed_sig  → AB_FRESH / AB_STALE_EMBED_SIG
-      2) Fallback: compare 5-hash arrays (legacy)            → AB_FRESH / AB_STALE_INPUTS_SIG
-      3) If neither available                                → AB_CANNOT_EVAL
-    """
-    # Validate pin
-    if not isinstance(pin, dict) or pin.get("state") != "pinned":
-        return (False, "AB_PIN_MISSING")
-
-    payload = pin.get("payload") or {}
-    have_embed = str(payload.get("embed_sig") or "")
-    exp_embed  = str(expected_embed_sig or "")
-
-    # 1) Preferred: embed_sig equality
-    if exp_embed:
-        return (have_embed == exp_embed,
-                "AB_FRESH" if have_embed == exp_embed else "AB_STALE_EMBED_SIG")
-
-    # 2) Fallback: legacy 5-hash equality (keeps old reason tag)
-    exp_sig5 = kwargs.get("expected_sig5")
-    pin_sig5 = payload.get("inputs_sig_5")
-    if exp_sig5 is None and "ib" in kwargs and kwargs["ib"] is not None:
-        # If they passed ib, compute canonical 5-hash
-        try:
-            exp_sig5 = _frozen_inputs_sig_from_ib(kwargs["ib"], as_tuple=False)
-        except Exception:
-            exp_sig5 = None
-
-    if exp_sig5 is not None and pin_sig5 is not None:
-        fresh = list(exp_sig5) == list(pin_sig5)
-        return (fresh, "AB_FRESH" if fresh else "AB_STALE_INPUTS_SIG")
-
-    # 3) Couldn’t evaluate freshness
-    return (False, "AB_CANNOT_EVAL")
-
-
-
-        
-# === BEGIN PATCH: READ-ONLY OVERLAP HYDRATOR (uses frozen SSOT only) ===
-def overlap_ui_from_frozen():
-    """
-    Read-only UI refresh that re-computes visuals strictly from the *frozen* SSOT.
-    It does NOT resolve sources, does NOT write fname_*, and does NOT freeze state.
-    Safe to call after the single-button solver completed.
-    """
-
-    from pathlib import Path
-    import json as _json
-
-    ib = st.session_state.get("_inputs_block") or {}
-    fns = (ib.get("filenames") or {})
-    pB, pC, pH = fns.get("boundaries",""), fns.get("C",""), fns.get("H","")
-    if not (pB and pC and pH):
-        st.info("Overlap UI: frozen SSOT missing; run solver first.")
-        return
-
-    def _read_blocks(p):
-        try: return (_json.loads(Path(p).read_text(encoding="utf-8")).get("blocks") or {})
-        except Exception: return {}
-
-    bB = _read_blocks(pB); bC = _read_blocks(pC); bH = _read_blocks(pH)
-    d3 = bB.get("3") or []; C3 = bC.get("3") or []; H2 = bH.get("2") or []
-    n2, n3 = len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)
-
-    # Diagnostics (no writes)
-    st.caption(f"[Overlap UI] n₂×n₃ = {n2}×{n3} · src B:{Path(pB).name} · C:{Path(pC).name} · H:{Path(pH).name}")
-    if C3 and len(C3)==len(C3[0]):
-        I3 = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))]
-        def _mul(A,B):
-            if not A or not B or not A[0] or not B[0] or len(A[0])!=len(B): return []
-            m,k = len(A), len(A[0]); n = len(B[0])
-            C = [[0]*n for _ in range(m)]
-            for i in range(m):
-                for t in range(k):
-                    if A[i][t] & 1:
-                        for j in range(n): C[i][j] ^= (B[t][j] & 1)
-            return C
-        def _xor(A,B):
-            if not A: return [r[:] for r in (B or [])]
-            if not B: return [r[:] for r in (A or [])]
-            r,c = len(A), len(A[0]); return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
-        R3s = _xor(_mul(H2, d3), _xor(C3, I3)) if (H2 and d3) else []
-        bottom_H = (_mul(H2, d3)[-1] if (H2 and d3) else [])
-        bottom_CI = (_xor(C3, I3)[-1] if C3 else [])
-        lanes_auto = (C3[-1] if C3 else [])
-        st.caption(f"[Overlap UI] (H2·d3)_bottom={bottom_H} · (C3⊕I3)_bottom={bottom_CI} · lanes(auto from C₃ bottom)={lanes_auto}")
-    else:
-        st.caption("[Overlap UI] C₃ not square; projected(columns@k=3,auto) is N/A here.")
-# === END PATCH: READ-ONLY OVERLAP HYDRATOR ===
-
-
-    
-
-
-
-
-
-# --- A/B status chip (no HTML repr; no duplicate logic) ------------------------
-ab_pin = st.session_state.get("ab_pin") or {}
-if ab_pin.get("state") == "pinned":
-    fresh, reason = _ab_is_fresh_now(
-        rc=_rc,
-        ib=_ib,
-        ab_payload=(ab_pin.get("payload") or {})
-    )
-    if fresh:
-        st.success("A/B: Pinned · Fresh (will embed)")
-    else:
-        st.warning(f"A/B: Pinned · Stale ({reason})")
-else:
-    st.caption("A/B: —")
-
 
 
 
