@@ -2159,29 +2159,6 @@ st.caption(f"{policy_tag} | n3={n3} | b={bH} C={cH} H={hH} U={uH} P={pH}")
 if any(x in ("", None) for x in (_h.get("boundaries_hash"), _h.get("C_hash"), _h.get("H_hash"), _h.get("U_hash"))):
     st.info("SSOT isn’t fully populated yet. Run Overlap once to publish provenance hashes.")
 
-# --- A/B status chip (no HTML repr; no duplicate logic) ------------------------
-ab_pin = st.session_state.get("ab_pin") or {}
-if ab_pin.get("state") == "pinned":
-    fresh, reason = _ab_is_fresh_now(
-        rc=_rc,
-        ib=_ib,
-        ab_payload=(ab_pin.get("payload") or {})
-    )
-    if fresh:
-        st.success("A/B: Pinned · Fresh (will embed)")
-    else:
-        st.warning(f"A/B: Pinned · Stale ({reason})")
-else:
-    st.caption("A/B: —")
-
-
-
-
-
-
-
-
-
 
 import copy as _copy
 
