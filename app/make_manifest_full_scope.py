@@ -2125,17 +2125,7 @@ def ssot_publish_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int, 
 
     return {"before": before, "after": after, "changed": changed}
 
-# --------------------- Staleness Check (non-blocking) ---------------------
-def ssot_is_stale() -> bool:
-    """True if current live fingerprint differs from frozen _inputs_block."""
-    ss = st.session_state
-    if not ss.get("_has_overlap"):
-        return False
-    frozen = ssot_frozen_sig_from_ib()
-    if not any(frozen):
-        return False
-    live_now = ssot_live_sig()
-    return tuple(frozen) != tuple(live_now)
+
 
 # ------------------------- Projector helpers -------------------------
 def _auto_pj_hash_from_rc(rc: dict) -> str:
