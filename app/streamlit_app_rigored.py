@@ -2349,20 +2349,7 @@ def _stamp_filename(state_key: str, upload):
 
 
 
-# ---- Policy/config helpers (minimal, canonical) ----
-def cfg_strict() -> dict:
-    return {
-        "enabled_layers": [],
-        "source": {},               # no layer sources in strict
-        "projector_files": {},      # none
-    }
 
-def cfg_projected_base() -> dict:
-    return {
-        "enabled_layers": [3],      # we project layer 3
-        "source": {"3": "auto"},    # default projector source
-        "projector_files": {},      # filled only for 'file'
-    }
 
 def policy_label_from_cfg(cfg: dict) -> str:
     if not cfg or not cfg.get("enabled_layers"):
