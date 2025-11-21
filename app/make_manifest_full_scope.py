@@ -5196,21 +5196,7 @@ def _co_stem(p):
     except Exception:
         return ""
 
-def _co_fixture_label_from_paths(paths: dict, default="UNKNOWN_FIXTURE"):
-    try:
-        B = (paths.get("B") or "").upper()
-        H = (paths.get("H") or "").upper()
-        C = (paths.get("C") or "").upper()
-        D = "D2" if "D2" in B else ("D3" if "D3" in B else "D?")
-        Ht = "H00"
-        for hh in ("H00","H01","H10","H11"):
-            if hh in H: Ht = hh; break
-        import re as _re
-        m = _re.search(r"\bC\d{3}\b", C)
-        Ct = m.group(0) if m else "C???.MISSING"
-        return f"{D}_{Ht}_{Ct}"
-    except Exception:
-        return default
+
 
 # --- tiny GF(2) helpers (list-of-lists, no numpy) ---
 def _co_shape(A):
