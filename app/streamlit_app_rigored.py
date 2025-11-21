@@ -2683,46 +2683,7 @@ if "_recompute_strict_out" not in globals():
             eq3 = False
         return {"2": {"eq": True}, "3": {"eq": bool(eq3), "n_k": (len(d3[0]) if (d3 and d3[0]) else 0)}}
 
-if "_recompute_projected_out" not in globals():
-    def _recompute_projected_out(*, rc, boundaries_obj, cmap_obj, H_obj) -> tuple[dict, dict]:
-        d3 = rc.get("d3") or (boundaries_obj.blocks.__root__.get("3") or [])
-        n3 = len(d3[0]) if (d3 and d3[0]) else 0
-        lm = list(rc.get("lane_mask_k3") or ([1] * n3))
-        # Use active Π if present; else diagonal(lm)
-        P  = rc.get("P_active") or [[1 if (i == j and int(lm[j]) == 1) else 0 for j in range(n3)] for i in range(n3)]
 
-        H2 = (H_obj.blocks.__root__.get("2") or []) if H_obj else []
-        C3 = (cmap_obj.blocks.__root__.get("3") or [])
-        I3 = _eye(len(C3)) if C3 else []
-
-        shapes = {
-            "H2": (len(H2), len(H2[0]) if H2 else 0),
-            "d3": (len(d3), len(d3[0]) if d3 else 0),
-            "C3": (len(C3), len(C3[0]) if C3 else 0),
-            "P_active": (len(P), len(P[0]) if P else 0),
-        }
-
-        R3s, R3p = [], []
-        try:
-            if "mul" not in globals() or not callable(globals()["mul"]):
-                raise RuntimeError("GF(2) mul missing.")
-            R3s = _xor_gf2(mul(H2, d3), _xor_gf2(C3, I3)) if (_shape_ok(H2, d3) and C3 and C3[0] and (len(C3) == len(C3[0]))) else []
-            R3p = mul(R3s, P) if (R3s and P and len(R3s[0]) == len(P)) else []
-        except Exception:
-            R3s, R3p = [], []
-
-        def _nz_cols(M):
-            if not M: return []
-            r, c = len(M), len(M[0])
-            return [j for j in range(c) if any(M[i][j] & 1 for i in range(r))]
-
-        debug = {
-            "shapes": shapes,
-            "R3_strict_nz_cols": _nz_cols(R3s),
-            "R3_projected_nz_cols": _nz_cols(R3p),
-        }
-        eq3_proj = _is_zero(R3p)
-        return ({"2": {"eq": True}, "3": {"eq": bool(eq3_proj), "n_k": n3}}, debug)
 
 
 # ============== A/B policy + embed signature helpers (compat) ==============
