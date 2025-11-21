@@ -65,6 +65,11 @@ from uuid import uuid4
 import os, json as _json, hashlib as _hashlib
 from pathlib import Path
 from datetime import datetime, timezone
+import json as _json
+import hashlib as _hash
+from pathlib import Path as _Path
+from pathlib import Path as _VPath
+import json as _Vjson, hashlib as _Vhash
 # == EARLY HELPERS (v2 wiring) ==
 # Safe UI nonce (prevents "no _ui_nonce" warning)
 try:
@@ -87,11 +92,10 @@ try:
 except Exception:
     pass
     
-import json as _json
-import hashlib as _hash
+
 
 # --- C1 canonical paths (tuple; JSON-first) ---
-from pathlib import Path as _Path
+
 def _c1_paths():
     base = _Path("logs") / "reports"
     base.mkdir(parents=True, exist_ok=True)
@@ -164,8 +168,7 @@ def _solver_ret_as_tuple(ret):
     return False, "solver returned unexpected shape", None
 
 # Pass1/2 helpers to write bundle.json and loop_receipt
-from pathlib import Path as _VPath
-import json as _Vjson, hashlib as _Vhash
+
 
 _V2_EXPECTED = [
     ("strict",               "overlap__", "__strict__"),
@@ -858,20 +861,6 @@ ENGINE_REV     = "rev-20251022-1"
 
 DIRS = {"root": "logs", "certs": "logs/certs", "snapshots": "logs/snapshots", "reports": "logs/reports", "suite_runs": "logs/suite_runs", "exports": "logs/exports"}
 # ---------- Suite helpers (v2) ----------
-
-try:
-    _Path
-except NameError:
-    from pathlib import Path as _Path
-
-def _sha256_hex(b: bytes) -> str:
-    import hashlib as _hashlib
-    return _hashlib.sha256(b).hexdigest()
-
-def _canonical_json(obj) -> str:
-    import json as _json
-    return _json.dumps(obj, sort_keys=True, separators=(",",":"))
-
 def _repo_root() -> _Path:
     # repo root = parent of app dir
     return _Path(__file__).resolve().parent.parent
