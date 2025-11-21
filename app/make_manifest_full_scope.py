@@ -3111,64 +3111,7 @@ def _bt_health(d3, lanes, C3, prior_lanes=None, thresholds=None):
         "ker_only_projector": (ker_lane_rate==1.0),
     }
 
-with _st.expander("Sanity battletests (Loop‑4)", expanded=False):
-    _st.caption("Quick, side-effect-free checks of the core algebra & policy receipts.")
-    n3 = 3
-    # Base matrices
-    I3 = _bt_identity(n3)
-    Z3 = _bt_zero(n3,n3)
-    # Case 1: GREEN + posed projected → proj=1 (else integrity)
-    H2 = Z3[:]      # 3x3 zeros
-    d3 = [[1,0,0],[0,0,0],[0,0,0]]  # lane at j=0
-    C3 = I3[:]      # identity
-    P_auto = _bt_diag_from_mask(_bt_lane_mask_from_d3(d3))
-    v1, r1 = _bt_verdict(H2,d3,C3,P_auto)
-    rec1 = {"case":"GREEN_posed","verdict":v1,"receipt":r1}
 
-    # Case 2: KER-FILTERED (strict fails on kernel-only, lanes exclude failing cols)
-    H2b = Z3[:]
-    d3b = [[0,1,0],[0,0,1],[0,0,0]]  # kernel at j=0 only
-    C3b = [[1,0,1],[0,1,0],[0,0,1]]  # make residual support={0}
-    P_auto_b = _bt_diag_from_mask(_bt_lane_mask_from_d3(d3b))  # excludes j=0
-    v2, r2 = _bt_verdict(H2b,d3b,C3b,P_auto_b)
-    rec2 = {"case":"KER_FILTERED","verdict":v2,"receipt":r2}
-
-    # Case 3: KER-EXPOSED (kernel-only fail but FILE lanes include it → projected fails)
-    P_file_expose = _bt_diag_from_mask([1,1,1])  # include kernel j=0
-    v3, r3 = _bt_verdict(H2b,d3b,C3b,P_file_expose)
-    rec3 = {"case":"KER_EXPOSED","verdict":v3,"receipt":r3}
-
-    # Case 4: RED_BOTH (non-kernel fail present → projected fails)
-    H2c = Z3[:]
-    d3c = [[0,1,0],[0,0,1],[0,0,0]]   # lanes at j=1,2
-    C3c = [[1,0,0],[0,1,1],[0,0,1]]   # residual support includes j=2 (lane col)
-    P_auto_c = _bt_diag_from_mask(_bt_lane_mask_from_d3(d3c))  # includes j=2
-    v4, r4 = _bt_verdict(H2c,d3c,C3c,P_auto_c)
-    rec4 = {"case":"RED_BOTH","verdict":v4,"receipt":r4}
-
-    # Case 5: PROJECTOR health INVALID scenarios
-    d3z = [[0,0,0],[0,0,0],[0,0,0]]  # all-zero → zero lanes
-    C3z = I3[:]
-    lanes_z = _bt_lane_mask_from_d3(d3z)
-    h1 = _bt_health(d3z, lanes_z, C3z)  # PROJECTOR_ZERO_LANES
-    # invalid shape
-    C_bad = [[1,0],[0,1],[0,0]]  # 3x2 non-square
-    h2 = _bt_health(d3, _bt_lane_mask_from_d3(d3), C_bad)  # PROJECTOR_INVALID_SHAPE
-    rec5 = {"case":"HEALTH_INVALID","health_zero_lanes":h1, "health_bad_shape":h2}
-
-    # Freezer mismatch: lanes_sig AUTO vs FILE (POLICY_DIVERGENT expectation)
-    auto_sig = _bt_lanes_sig256(_bt_lane_mask_from_d3(d3b))
-    file_sig = _bt_lanes_sig256([1,1,1])  # intentionally different
-    freezer = {"status": ("ERROR" if auto_sig != file_sig else "OK"),
-               "auto_lanes_sig256": auto_sig, "file_lanes_sig256": file_sig,
-               "na_reason_code": ("POLICY_DIVERGENT" if auto_sig != file_sig else "")}
-    rec6 = {"case":"FREEZER_DIVERGENT","freezer":freezer}
-
-    results = [rec1, rec2, rec3, rec4, rec5, rec6]
-    _st.code(_json.dumps(results, indent=2), language="json")
-    _st.download_button("Download battletest receipts (JSON)", _json.dumps(results).encode("utf-8"),
-                        file_name="battletests_loop4.json", key="dl_bt_loop4")
-# ======================== /Sanity battletests (Loop‑4) ========================
 
 
 # ========================= Solver entrypoint (v2: emit baseline certs) =========================
