@@ -2478,11 +2478,7 @@ def is_strict_red_lanes(run_ctx: dict | None, overlap_out: dict | None, residual
 
 
 
-def witness_key(row: dict) -> tuple:
-    pol = row.get("policy") or {}; h = row.get("hashes") or {}
-    return (row.get("district",""), row.get("reason",""), row.get("residual_tag",""),
-            pol.get("policy_tag",""), h.get("boundaries_hash",""), h.get("C_hash",""),
-            h.get("H_hash",""), h.get("U_hash",""))
+
 
 if "_gallery_keys" not in st.session_state: st.session_state["_gallery_keys"] = set()
 if "_witness_keys" not in st.session_state: st.session_state["_witness_keys"] = set()
