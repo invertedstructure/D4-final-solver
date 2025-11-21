@@ -73,6 +73,7 @@ from uuid import uuid4
 from pathlib import Path as _Path
 import json as _json, hashlib as _hashlib, time as _time
 import streamlit as _st
+import copy as _copy
 # --- Canonical tiny helpers (early, guarded) ---
 from typing import Iterable, List, Optional
 # Page config must be the first Streamlit command
@@ -2088,57 +2089,6 @@ cfg_active = _cfg_from_policy(
 st.caption(f"Active policy: `{policy_label_from_cfg(cfg_active)}`")
 
 
-def _ab_is_fresh_now(pin=None, expected_embed_sig: str | None = None, **kwargs):
-    """
-    Back-compat freshness check.
-    Accepts extra kwargs (rc, ib, cfg, expected_sig5, ...).
-
-    Priority:
-      1) Compare pin.payload.embed_sig to expected_embed_sig  → AB_FRESH / AB_STALE_EMBED_SIG
-      2) Fallback: compare 5-hash arrays (legacy)            → AB_FRESH / AB_STALE_INPUTS_SIG
-      3) If neither available                                → AB_CANNOT_EVAL
-    """
-    # Validate pin
-    if not isinstance(pin, dict) or pin.get("state") != "pinned":
-        return (False, "AB_PIN_MISSING")
-
-    payload = pin.get("payload") or {}
-    have_embed = str(payload.get("embed_sig") or "")
-    exp_embed  = str(expected_embed_sig or "")
-
-    # 1) Preferred: embed_sig equality
-    if exp_embed:
-        return (have_embed == exp_embed,
-                "AB_FRESH" if have_embed == exp_embed else "AB_STALE_EMBED_SIG")
-
-    # 2) Fallback: legacy 5-hash equality (keeps old reason tag)
-    exp_sig5 = kwargs.get("expected_sig5")
-    pin_sig5 = payload.get("inputs_sig_5")
-    if exp_sig5 is None and "ib" in kwargs and kwargs["ib"] is not None:
-        # If they passed ib, compute canonical 5-hash
-        try:
-            exp_sig5 = _frozen_inputs_sig_from_ib(kwargs["ib"], as_tuple=False)
-        except Exception:
-            exp_sig5 = None
-
-    if exp_sig5 is not None and pin_sig5 is not None:
-        fresh = list(exp_sig5) == list(pin_sig5)
-        return (fresh, "AB_FRESH" if fresh else "AB_STALE_INPUTS_SIG")
-
-    # 3) Couldn’t evaluate freshness
-    return (False, "AB_CANNOT_EVAL")
-
-
-
-        
-
-
-
-    
-
-
-
-
 # --- Policy pill + run stamp (single rendering) --------------------------------
 _rc = st.session_state.get("run_ctx") or {}
 _ib = st.session_state.get("_inputs_block") or {}
@@ -2160,7 +2110,7 @@ if any(x in ("", None) for x in (_h.get("boundaries_hash"), _h.get("C_hash"), _h
     st.info("SSOT isn’t fully populated yet. Run Overlap once to publish provenance hashes.")
 
 
-import copy as _copy
+
 
 if "_shape_ok" not in globals():
     def _shape_ok(A, B):
