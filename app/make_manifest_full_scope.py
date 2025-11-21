@@ -3025,55 +3025,7 @@ def _bt_kernel_cols(d3):
             out.add(j)
     return out
 
-def _bt_verdict(H2,d3,C3, P=None):
-    """Return (verdict, receipt) using pure algebra rules."""
-    n3 = len(C3) if C3 else 0
-    I3 = _bt_identity(n3) if n3 and C3 and (len(C3)==len(C3[0])) else []
-    # Build strict R3 defensively
-    R3s = _bt_xor(_bt_mul(H2, d3), _bt_xor(C3, I3)) if (H2 and d3 and C3 and I3) else None
-    posed = bool(P) and bool(I3)
-    # Strict eq only defined if shapes valid
-    strict_eq = (R3s is not None) and _bt_is_zero(R3s)
-    if R3s is None:
-        # treat as unposed/invalid shape path
-        return "RED_UNPOSED", {"strict_eq": None, "posed": False, "proj_eq": None, "na": "PROJECTOR_INVALID_SHAPE"}
-    proj_eq = None
-    if posed and R3s is not None:
-        R3p = _bt_projected(R3s, P)
-        proj_eq = _bt_is_zero(R3p)
-    # Compute ker/supp logic
-    ker_cols  = _bt_kernel_cols(d3)
-    supp_cols = _bt_support_cols(R3s) if R3s is not None else set()
-    verdict = None
-    integrity = None
-    if strict_eq is True:
-        verdict = "GREEN"
-        if posed and proj_eq is False:
-            integrity = "PROJECTOR_INTEGRITY_FAIL"
-    else:
-        if not posed:
-            verdict = "RED_UNPOSED"
-        else:
-            lanes = {j for j, b in enumerate([row[j] for j,row in enumerate(P)]) if b} if P else set()
-            # lanes from P's diagonal (P assumed diagonal here)
-            lanes = {j for j in range(len(P)) if int(P[j][j])==1} if P else set()
-            if supp_cols.issubset(ker_cols):
-                if lanes.intersection(supp_cols):
-                    verdict = "KER-EXPOSED"
-                else:
-                    verdict = "KER-FILTERED"
-            else:
-                verdict = "RED_BOTH"
-    rec = {
-        "strict_eq": strict_eq,
-        "projected_posed": bool(posed),
-        "projected_eq": proj_eq,
-        "integrity": {"failure_code": integrity} if integrity else None,
-        "ker_cols": sorted(list(ker_cols)),
-        "supp_cols": sorted(list(supp_cols)),
-        "n3": len(C3[0]) if C3 and C3[0] else 0,
-    }
-    return verdict, rec
+
 
 
 
