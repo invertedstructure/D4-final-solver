@@ -71,6 +71,31 @@ from pathlib import Path as _Path
 from pathlib import Path as _VPath
 import json as _Vjson, hashlib as _Vhash
 # == EARLY HELPERS (v2 wiring) ==
+from pathlib import Path as _Path
+import json as _json, hashlib as _hashlib, time as _time
+import streamlit as _st
+import json as _json
+from pathlib import Path
+import os, json, time, uuid, shutil, tempfile, hashlib
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Iterable, List, Optional
+from pathlib import Path
+import json as _json
+import hashlib as _hash
+import json as _json
+import os, json as _json, hashlib as _hashlib
+from pathlib import Path
+from datetime import datetime, timezone
+import os, json, time, uuid, hashlib
+from pathlib import Path as _Pco
+import os, json as _json, hashlib as _hashlib
+from pathlib import Path
+import copy as _copy
+from pathlib import Path as _Path
+import os as _os, json as _json, time as _time, glob as _glob, math as _math
+import collections as _collections
+import streamlit as _st
 # Safe UI nonce (prevents "no _ui_nonce" warning)
 try:
     import streamlit as _st
@@ -956,9 +981,7 @@ def _suite_index_add_row(row: dict) -> None:
 
 # ---------- Suite helpers (v2) ----------
 
-from pathlib import Path as _Path
-import json as _json, hashlib as _hashlib, time as _time
-import streamlit as _st
+
 
 _APP_DIR  = _Path(__file__).resolve().parent         # .../app
 _REPO_DIR = _APP_DIR.parent                          # repo root
@@ -1140,7 +1163,7 @@ def _log_freezer_mismatch(*, fixture_id: str, auto_lanes: list[int], file_lanes:
 
 
 # --- Canonical tiny helpers (early, guarded) ---
-from typing import Iterable, List, Optional
+
 
 if "_normalize_bit" not in globals():
     def _normalize_bit(v) -> int:
@@ -1552,16 +1575,6 @@ def _frozen_inputs_sig5_hex(ib):
     return _hashlib.sha256(blob).hexdigest()
 
 # --- pin freshness helper ------------------------------------------------------
-def _pin_status_text(pin_obj, expected_sig: str) -> str:
-    """Return a short freshness badge given a pin object and the expected embed_sig."""
-    payload = (pin_obj or {}).get("payload") or {}
-    have = str(payload.get("embed_sig",""))
-    if not expected_sig:
-        return "—"
-    if not have:
-        return "—"
-    return "🟢 Fresh" if have == expected_sig else "⚠️ Stale"
-# --- strict / projected(columns@k=3,auto) helpers (guarded) --------------------------------
 if "_svr_shape_ok_for_mul" not in globals():
     def _svr_shape_ok_for_mul(A, B):
         return bool(A and B and A[0] and B[0] and (len(A[0]) == len(B)))
@@ -1685,8 +1698,7 @@ if "_svr_inputs_sig_map" not in globals():
         }
 
 # --- Unified A/B embed signature (lane-aware, cert-aligned) -------------------
-import json as _json
-from pathlib import Path
+
 
 def _inputs_sig_from_frozen_ib() -> list[str]:
     ib = st.session_state.get("_inputs_block") or {}
@@ -1745,30 +1757,6 @@ _abx_embed_sig = _embed_sig_unified
 # -------------------------------------------------------------------------------
 
 
-
-def warn_stale_once(msg="STALE_RUN_CTX: Inputs changed; please click Run Overlap to refresh."):
-    ss = st.session_state
-    if not ss.get("_stale_warned_once"):
-        st.warning(msg)
-        ss["_stale_warned_once"] = True
-
-    
-def projector_hash_of(P_blocks: list[list[int]], *, mode: str = "blocks") -> str:
-    """
-    mode="blocks" → sha256(json.dumps({"blocks":{"3":P}}, sort_keys=True, separators=(",",":")))
-    mode="file"   → sha256(file bytes)  # only when you have a filename
-    """
-    import json, hashlib, pathlib
-    if mode == "blocks":
-        blob = json.dumps({"blocks":{"3": P_blocks}}, sort_keys=True, separators=(",",":")).encode("utf-8")
-        return hashlib.sha256(blob).hexdigest()
-    elif mode.startswith("file:"):
-        path = mode.split(":",1)[1]
-        try:    return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
-        except: return ""
-    return ""
-
-
 # ---- helper for recomputing diag lanes if the snapshot lacks them
 def _ab_lane_vectors_bottom(H2, d3, C3, lm):
     """Lane vectors as bottom-row probes (matches your earlier UI semantics)."""
@@ -1788,7 +1776,7 @@ def _ab_lane_vectors_bottom(H2, d3, C3, lm):
 
     return hv, cv
 
-# ---------------- Fixture helpers (single source of truth) ----------------
+
 
 def match_fixture_from_snapshot(snap: dict) -> dict:
     reg = _get_fixtures_cached() or {}
@@ -1859,9 +1847,7 @@ def apply_fixture_to_session(fx: dict) -> None:
     ss["run_ctx"] = rc
 
 # --- baseline imports (defensive) ---
-import os, json, time, uuid, shutil, tempfile, hashlib
-from datetime import datetime, timezone
-from pathlib import Path
+
 
 # --- legacy aliases to avoid NameError from older code paths ---
 _json = json                               # some helpers still used _json.*
@@ -3152,8 +3138,7 @@ with tab2:
 
 # ---------- A/B canonical helpers (drop-in) ----------
 
-from pathlib import Path
-import json as _json
+
 
 def _ab_frozen_inputs_sig_list() -> list[str]:
     """Canonical 5-hash signature, frozen if your freezer provides it."""
@@ -3201,8 +3186,8 @@ def _ab_load_h_latest():
     # 4) last resort – session snapshot
     return ss.get("overlap_H") or io.parse_cmap({"blocks": {}})
 
-# ====================== A/B compat shims (define only if missing) ======================
-import copy as _copy
+
+
 
 if "_shape_ok" not in globals():
     def _shape_ok(A, B):
@@ -3302,8 +3287,7 @@ if "_lane_bottoms_for_diag" not in globals():
                 [bC[j] for j in idx] if (bC and idx) else [])
 # =================== /A/B compat shims ===================
 # ============== A/B policy + embed signature helpers (compat) ==============
-import hashlib as _hash
-import json as _json
+
 
 if "_canonical_policy_tag" not in globals():
     def _canonical_policy_tag(rc: dict | None) -> str:
@@ -3493,8 +3477,6 @@ if "abx_policy_tag" not in globals():
         return "strict"
 # ===== /helpers =====
 # === helpers required by the single-button solver (uploads-first source resolver) ===
-import os, json as _json, hashlib as _hashlib
-from pathlib import Path
 
 # dirs
 if "LOGS_DIR" not in globals():
@@ -3587,7 +3569,7 @@ def _svr_write_cert_in_bundle(bundle_dir: Path, filename: str, payload: dict) ->
         f.flush(); os.fsync(f.fileno())
     os.replace(tmp, p)
     return p
-# ==============================================================================
+
 def _guarded_atomic_write_json(path: Path, payload: dict):
     tmp = path.with_suffix(path.suffix + ".tmp")
     with open(tmp, "w", encoding="utf-8") as f:
@@ -3648,8 +3630,7 @@ def _svr_as_blocks(j: dict, kind: str) -> dict:
         return dict(j["blocks"])
     return dict(j)
 
-# session precedence → source object
-# --- robust blocks normalizer (handles dicts and parsed cmap objects) ---
+
 def _svr_as_blocks_v2(j: object, kind: str) -> dict:
     """
     Return canonical {"1","2","3"} blocks dict for B/C/H/U.
@@ -3816,9 +3797,7 @@ if "_svr_embed_sig" not in globals():
             return _hashlib.sha256(b"svr-embed-sig-fallback").hexdigest()
 
 # === SINGLE-BUTTON SOLVER — strict → projected(columns@k=3,auto) → A/B(auto) → freezer → A/B(file) ===
-import os, json as _json, hashlib as _hashlib
-from pathlib import Path
-from datetime import datetime, timezone
+
 
 # ---------- tiny helpers (only define if missing) ----------
 if "_svr_now_iso" not in globals():
@@ -3867,8 +3846,7 @@ if "_svr_atomic_write_json" not in globals():
 
 
 
-# cert scaffold (reuse your existing ones if present)
-# cert scaffold (v2 header; no integrity payload)
+
 if "_svr_cert_common" not in globals():
     def _svr_cert_common(ib, rc, policy_tag: str, extra: dict | None = None) -> dict:
         """
@@ -3995,245 +3973,7 @@ def _svr_apply_sig8(cert: dict, embed_sig: str) -> None:
 
 # small witness helper
 def _bottom_row(M): return M[-1] if (M and len(M)) else []
-
-
-
-
-
-
-
-
-    
-                                  
-                    
-
-
-
-
-# ========================= Solver entrypoint (v2: emit baseline certs) =========================
-def run_overlap_once(ss=st.session_state):
-    """
-    v2 mechanical writer (stable anchor):
-      • Resolves inputs & freezes SSOT
-      • Computes strict + projected(AUTO) summaries
-      • Builds embed for AUTO using {fixture_id, snapshot_id, inputs_sig_5, lanes_vec}
-      • Writes 4 core certs (+2 FILE certs when Π valid)
-      • Updates bundle.json and returns a small receipt (dict)
-    """
-    import json as _json
-    from pathlib import Path as _Path
-
-    # --- Resolve inputs and freeze SSOT ---
-    pf = _svr_resolve_all_to_paths()  # {"B": (path, blocks), "C": ..., "H": ..., "U": ...}
-    (pB, bB), (pC, bC), (pH, bH), (pU, bU) = pf["B"], pf["C"], pf["H"], pf["U"]
-    ib_rc = _svr_freeze_ssot(pf)  # ib (inputs bundle), rc (run context)
-    if isinstance(ib_rc, tuple):
-        ib = ib_rc[0] or {}
-        rc = ib_rc[1] if (len(ib_rc) > 1 and isinstance(ib_rc[1], dict)) else {}
-    else:
-        ib, rc = (ib_rc or {}), {}
-
-        # --- District / fixture / snapshot anchors ---
-    district_id = str(ib.get("district_id") or "DUNKNOWN")
-    fixture_id = str(
-        ss.get("fixture_label") or ib.get("fixture_label") or ib.get("fixture_id") or "UNKNOWN_FIXTURE"
-    )
-    snapshot_id = str(
-        ib.get("snapshot_id") or ss.get("world_snapshot_id") or "UNKNOWN_SNAPSHOT"
-    )
-
-    # --- Canonical SSOT 5-hash signature (inputs_sig_5) ---
-    try:
-        inputs_sig_5 = _frozen_inputs_sig_from_ib(ib, as_tuple=False)
-    except Exception:
-        inputs_sig_5 = list(ib.get("inputs_sig_5") or [])
-    ib["inputs_sig_5"] = list(inputs_sig_5)
-
-    # --- Touch coverage file (C1 preflight) ---
-    try:
-        COVERAGE_JSONL.parent.mkdir(parents=True, exist_ok=True)
-        with open(COVERAGE_JSONL, "a", encoding="utf-8"):
-            pass
-    except Exception:
-        pass
-
-    # --- Strict & Projected(AUTO) (shape-safe) ---
-    strict_out = _svr_strict_from_blocks(bH, bB, bC)
-    proj_meta, lanes, proj_out = _svr_projected_auto_from_blocks(bH, bB, bC)
-
-    # --- Build a lanes vector (0/1 list) for embed + record popcount/sig8 for certs ---
-    lanes_vec = None
-    try:
-        if isinstance(lanes, (list, tuple)):
-            lanes_vec = [int(x) & 1 for x in lanes]
-        elif isinstance(lanes, dict):
-            for k in ("mask", "vec", "lanes", "bits"):
-                if isinstance(lanes.get(k), (list, tuple)):
-                    lanes_vec = [int(x) & 1 for x in lanes[k]]
-                    break
-        if lanes_vec is None:
-            C3 = bC.get("3") or []
-            if C3 and isinstance(C3[-1], list):
-                lanes_vec = [int(x) & 1 for x in C3[-1]]
-    except Exception:
-        lanes_vec = None
-
-    lanes_pop = int(sum(lanes_vec)) if lanes_vec else 0
-    try:
-        _lanes_raw = _json.dumps(lanes_vec or [], separators=(",", ":"), sort_keys=True).encode("utf-8")
-        lanes_sig8 = _hash.sha256(_lanes_raw).hexdigest()[:8]
-    except Exception:
-        lanes_sig8 = None
-
-    # --- Canonical embed for AUTO pair → sig8 (bundle anchor) ---
-    na_reason = (proj_meta.get("reason") if (isinstance(proj_meta, dict) and proj_meta.get("na")) else None)
-    # ensure fixture metadata + SSOT sig live on ib for embedding
-    fixture_label = fixture_id
-    ib["district_id"] = district_id
-    ib["fixture_label"] = fixture_label
-    ib["snapshot_id"] = snapshot_id
-    ib["inputs_sig_5"] = list(inputs_sig_5) if isinstance(inputs_sig_5, (list, tuple)) else []
-    embed_auto, embed_sig_auto = _svr_build_embed(
-        ib,
-        "strict__VS__projected(columns@k=3,auto)",
-        lanes=(lanes_vec or []),
-        na_reason=na_reason,
-    )
-    sig8 = (embed_sig_auto or "")[:8] if embed_sig_auto else "00000000"
-
-    # --- Bundle dir ---
-    bundle_dir = _Path("logs") / "certs" / district_id / fixture_id / sig8
-    bundle_dir.mkdir(parents=True, exist_ok=True)
-
-    # Helpers
-    def _canon_dump_and_sig8(obj: dict) -> tuple[str, str]:
-        can = _v2_canonical_obj(obj)
-        raw = _json.dumps(can, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        h = _hash.sha256(raw).hexdigest()
-        return raw.decode("utf-8"), h[:8]
-
-    def _write_json(path: _Path, payload: dict) -> str:
-        try:
-            _guarded_atomic_write_json(path, payload)
-        except Exception:
-            path.write_text(_json.dumps(_v2_canonical_obj(payload), sort_keys=True, separators=(",", ":")),
-                            encoding="utf-8")
-        return path.name
-
-       # --- Shared header across certs (now non-empty + correct) ---
-    base_hdr = {
-        "schema_version": SCHEMA_VERSION,
-        "engine_rev": ENGINE_REV,
-        "district_id": district_id,
-        # fixture_label is canonical; fixture_id kept as legacy alias
-        "fixture_label": fixture_label,
-        "fixture_id": fixture_label,
-        "snapshot_id": snapshot_id,
-        "inputs_sig_5": inputs_sig_5,
-    }
-    written = []
-
-    # 1) strict
-    strict_verdict = strict_out.get("pass") if isinstance(strict_out, dict) else None
-    strict_payload = build_v2_strict_cert_payload(base_hdr, strict_verdict)
-    strict_path = make_strict_cert_path(bundle_dir, district_id, sig8)
-    _write_json(strict_path, strict_payload)
-    written.append(strict_path.name)
-
-    # 2) projected(columns@k=3,auto)
-    proj_verdict = proj_out.get("pass") if isinstance(proj_out, dict) else None
-    proj_auto_payload = build_v2_projected_auto_cert_payload(
-        base_hdr,
-        lanes_vec=lanes_vec,
-        lanes_popcount=lanes_pop,
-        lanes_sig8=lanes_sig8,
-        proj_meta=proj_meta if isinstance(proj_meta, dict) else {},
-        verdict=proj_verdict,
-    )
-    proj_auto_path = make_projected_auto_cert_path(bundle_dir, district_id, sig8)
-    _write_json(proj_auto_path, proj_auto_payload)
-    written.append(proj_auto_path.name)
-
-    # 3) ab_compare (strict vs projected_auto)
-    _, strict_sig8 = _canon_dump_and_sig8(strict_payload)
-    _, auto_sig8   = _canon_dump_and_sig8(proj_auto_payload)
-    ab_auto_payload = build_v2_ab_compare_payload(
-        base_hdr,
-        policy="strict__VS__projected(columns@k=3,auto)",
-        left_policy="strict",
-        left_sig8=str(strict_sig8),
-        right_policy="projected(columns@k=3,auto)",
-        right_sig8=str(auto_sig8),
-    )
-    ab_auto_path = bundle_dir / f"ab_compare__strict_vs_projected_auto__{sig8}.json"
-    _write_json(ab_auto_path, ab_auto_payload)
-    written.append(ab_auto_path.name)
-
-    # 4) projector_freezer
-    file_pi_valid   = bool(ss.get("file_pi_valid", True))
-    file_pi_reasons = list(ss.get("file_pi_reasons", []) or [])
-    freezer_payload = build_v2_projector_freezer_payload(
-        base_hdr,
-        file_pi_valid=file_pi_valid,
-        file_pi_reasons=file_pi_reasons,
-    )
-    freezer_path = bundle_dir / f"projector_freezer__{district_id}__{sig8}.json"
-    _write_json(freezer_path, freezer_payload)
-    written.append(freezer_path.name)
-
-    # 5) projected(FILE) + A/B(file) if projector valid
-    if file_pi_valid:
-        proj_file_payload = build_v2_projected_file_cert_payload(base_hdr)
-        proj_file_path = make_projected_file_cert_path(bundle_dir, district_id, sig8)
-        _write_json(proj_file_path, proj_file_payload)
-        written.append(proj_file_path.name)
-
-        _, file_sig8 = _canon_dump_and_sig8(proj_file_payload)
-        ab_file_payload = build_v2_ab_compare_payload(
-            base_hdr,
-            policy="strict__VS__projected(columns@k=3,file)",
-            left_policy="strict",
-            left_sig8=str(strict_sig8),
-            right_policy="projected(columns@k=3,file)",
-            right_sig8=str(file_sig8),
-        )
-        ab_file_path = bundle_dir / f"ab_compare__strict_vs_projected_file__{sig8}.json"
-        _write_json(ab_file_path, ab_file_payload)
-        written.append(ab_file_path.name)
-    # --- bundle.json ---
-
-    # --- bundle.json ---
-    bundle_idx = build_v2_bundle_index_payload(
-        run_id=rc.get("run_id", ""),
-        sig8=sig8,
-        district_id=district_id,
-        bundle_dir=bundle_dir,
-        filenames=written,
-        lanes_popcount=lanes_pop,
-        lanes_sig8=lanes_sig8,
-        file_pi_valid=file_pi_valid,
-    )
-    _guarded_atomic_write_json(bundle_dir / "bundle.json", bundle_idx)
-
-    # --- Publish anchors expected by UI ---
-    ss["last_bundle_dir"]   = str(bundle_dir)
-    ss["last_ab_auto_path"] = str(bundle_dir / f"ab_compare__strict_vs_projected_auto__{sig8}.json")
-    ss["last_ab_file_path"] = str(bundle_dir / f"ab_compare__strict_vs_projected_file__{sig8}.json")
-    ss["last_solver_result"] = {"count": len(written)}
-
-    return {
-        "bundle_dir": str(bundle_dir),
-        "sig8": sig8,
-        "counts": {"written": len(written)},
-        "paths": {"bundle": str(bundle_dir / "bundle.json")},
-    }
-
-# ======================= /Solver entrypoint (v2 emit) =========================
-
-
-
-
-
+      
 # Back-compat alias
 one_press_solve = run_overlap_once
 
@@ -4391,15 +4131,6 @@ def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
 
 
     return True, f"Completed {ok_count}/{total} fixtures.", ok_count
-
-
-
-
-
-# neutralized (final alias installed at EOF): run_suite_from_manifest = _RUN_SUITE_CANON
-
-# =============================================================================
-#-----------------------------------------------------------
 #---------------------------------------------------------------------------------------------------------
 
 try:
@@ -4429,14 +4160,6 @@ def run_suite_from_manifest(manifest_path: str, snapshot_id: str):
             return bool(ok), str(msg), 0
     return bool(ret), str(ret), 0
 
-
-
-
-
-
-# ====================== V2 CANONICAL — COMPUTE-ONLY (no legacy, no harvest) ======================
-import os, json, time, uuid, hashlib
-from pathlib import Path as _Pco
 
 def _co_hash8(obj) -> str:
     import hashlib, json as _j
@@ -4705,10 +4428,7 @@ def _co_ab_compare(strict, proj, policy_label):
 # V2 strict mechanics: receipts → manifest → suite → histograms
 # self-contained helpers, no changes to your 1× pipeline
 # ─────────────────────────────────────────────────────────────────────────────
-from pathlib import Path as _Path
-import os as _os, json as _json, time as _time, glob as _glob, math as _math
-import collections as _collections
-import streamlit as _st
+
 
 # --- Constants & dirs
 _REPO_ROOT = _Path(__file__).resolve().parent.parent
@@ -5852,19 +5572,6 @@ def time_tau_run_local_flip_toy_from_ssot(max_flips_per_kind: int = 32) -> dict:
         bB, bC, bH,
         max_flips_per_kind=max_flips_per_kind,
     )
-
-# =================== /Time(τ) local flip toy helpers (v0.1) ===================
-
-
-
-
-
-
-
-
-
-
-
 
 def _write_time_tau_artifacts(fixture_label, sig8, toy_out, summary, snapshot_id=None, run_id=None):
     """Write Time(τ) local flip toy artifacts (JSON + CSV) under logs/experiments/.
@@ -8358,6 +8065,7 @@ def _time_tau_c3_normalize_observation(core_obs: dict) -> dict:
         },
     }
     return solver_observation
+
 def _time_tau_c3_judge(
     tau_pred: dict,
     solver_observation: dict,
@@ -8407,17 +8115,6 @@ def _time_tau_c3_judge(
         return False, _time_tau_c3_na("OBSERVATION_PARSE_ERROR"), None
 
     return True, None, bool(expected == actual)
-
-
-
-
-
-
-
-
-
-
-
 
 def _time_tau_c3_select_flips(tau_artifact: dict) -> dict:
     """
@@ -9489,6 +9186,3 @@ with st.expander("C4 — C3 stability rollup (v0.2)", expanded=False):  # type: 
                 except Exception:
                     # Best-effort UI sugar only.
                     pass
-
-
-# --------------
