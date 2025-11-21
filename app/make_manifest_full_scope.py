@@ -2639,13 +2639,7 @@ def safe_expander(label: str, expanded: bool = False):
             yield
         return _noop()
 
-# ---- Policy/config helpers (minimal, canonical) ----
-def cfg_strict() -> dict:
-    return {
-        "enabled_layers": [],
-        "source": {},               # no layer sources in strict
-        "projector_files": {},      # none
-    }
+
 
 def cfg_projected_base() -> dict:
     return {
