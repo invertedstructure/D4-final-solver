@@ -2476,11 +2476,7 @@ def is_strict_red_lanes(run_ctx: dict | None, overlap_out: dict | None, residual
     tag = ((residual_tags or {}).get("strict") or "")
     return tag == "lanes"
 
-# ------------------------- Hash Key Builders -------------------------
-def gallery_key(row: dict) -> tuple:
-    pol = row.get("policy") or {}; h = row.get("hashes") or {}
-    return (row.get("district",""), pol.get("policy_tag",""),
-            h.get("boundaries_hash",""), h.get("C_hash",""), h.get("H_hash",""), h.get("U_hash",""))
+
 
 def witness_key(row: dict) -> tuple:
     pol = row.get("policy") or {}; h = row.get("hashes") or {}
