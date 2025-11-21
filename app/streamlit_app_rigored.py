@@ -2173,50 +2173,6 @@ def ssot_live_sig(boundaries_obj=None, cmap_obj=None, H_obj=None, shapes_obj=Non
     hS = hU  # mirror by design
     return (hB, hC, hH, hU, hS)
 
-# --------------------- Publish _inputs_block after Overlap ---------------------
-def ssot_publish_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int, projector_filename: str = "") -> dict:
-    """
-    Publish canonical _inputs_block into session state and return change info.
-    Also stamps dims, filenames, and sets freshness anchors.
-    """
-    ss = st.session_state
-    before = ssot_frozen_sig_from_ib()
-
-    hB, hC, hH, hU, hS = ssot_live_sig(boundaries_obj, cmap_obj, H_obj, shapes_obj)
-    H2 = (H_obj.blocks.__root__.get("2") or []) if (H_obj and hasattr(H_obj, "blocks")) else []
-    dims = {"n2": (len(H2) if H2 else 0), "n3": int(n3 or 0)}
-    files = {
-        "boundaries": ss.get("fname_boundaries", "boundaries.json"),
-        "cmap":       ss.get("fname_cmap",       "cmap.json"),
-        "H":          ss.get("fname_h",         "H.json"),
-        "U":          ss.get("fname_shapes",    "shapes.json"),
-        "shapes":     ss.get("fname_shapes",    "shapes.json"),
-    }
-    if projector_filename:
-        files["projector"] = projector_filename
-
-    hashes = {
-        "boundaries_hash": hB, "C_hash": hC, "H_hash": hH, "U_hash": hU, "shapes_hash": hS,
-    }
-
-    # Save block (SSOT)
-    ss["_inputs_block"] = {
-        "hashes":    hashes,
-        "dims":      dims,
-        "filenames": files,
-        # legacy flatten (readers that still look at top-level fields)
-        "boundaries_hash": hB, "C_hash": hC, "H_hash": hH, "U_hash": hU, "shapes_hash": hS,
-    }
-
-    after = ssot_frozen_sig_from_ib()
-    changed = (before != after)
-
-    # Freshness anchors for stale detection
-    ss["_has_overlap"]        = True
-    ss["_live_fp_at_overlap"] = ssot_live_sig(boundaries_obj, cmap_obj, H_obj, shapes_obj)
-
-    return {"before": before, "after": after, "changed": changed}
-
 
 
 
