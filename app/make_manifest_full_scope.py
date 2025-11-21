@@ -1159,16 +1159,7 @@ if "_selected_mask_strict" not in globals():
         try: return [1] * int(n3)
         except Exception: return []
 
-if "_selected_mask_auto" not in globals():
-    def _selected_mask_auto(lanes: Iterable[int], n3: int) -> List[int]:
-        try:
-            clean = [ _normalize_bit(x) for x in (lanes or []) ]
-            n3 = int(n3)
-            if len(clean) != n3:
-                clean = (clean + [0]*n3)[:n3]
-            return clean
-        except Exception:
-            return []
+
 # --- /tiny helpers ---
 # NEW: full-matrix residual helpers (any 1 in a column across all rows)
 if "_svr_mismatch_cols_from_R3" not in globals():
