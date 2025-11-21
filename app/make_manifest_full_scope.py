@@ -2914,44 +2914,6 @@ def tail_and_download_ui():
 tail_and_download_ui()
 
 
-# =========================== Sanity battletests (Loop‑4) ===========================
-import streamlit as _st
-import json as _json
-import hashlib as _hashlib
-# === Canonical path map (Pass 1) ===
-from pathlib import Path as _PathAlias
-
-ROOT            = _PathAlias(".").resolve()
-LOGS_DIR        = ROOT / "logs"
-CERTS_DIR       = LOGS_DIR / "certs"
-REPORTS_DIR     = LOGS_DIR / "reports"
-COVERAGE_JSONL  = REPORTS_DIR / "coverage.jsonl"
-COVERAGE_ROLLUP = REPORTS_DIR / "coverage_rollup.csv"
-
-# Ensure dirs exist at app start (idempotent)
-for _p in (CERTS_DIR, REPORTS_DIR):
-    try:
-        _p.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        pass
-
-# Back-compat shims (do NOT change behavior of existing code; only provide canonical values)
-try:
-    DIRS
-except NameError:
-    DIRS = {
-        "root": str(ROOT),
-        "logs": str(LOGS_DIR),
-        "certs": str(CERTS_DIR),
-        "reports": str(REPORTS_DIR),
-    }
-
-def _c1_paths():
-    return {
-        "coverage_jsonl": COVERAGE_JSONL,
-        "coverage_rollup_csv": COVERAGE_ROLLUP,
-    }
-# === End canonical path map (Pass 1) ===
 
 
 
