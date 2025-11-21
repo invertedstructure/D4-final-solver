@@ -2037,20 +2037,7 @@ _abx_embed_sig = _embed_sig_unified
 
 
     
-def projector_hash_of(P_blocks: list[list[int]], *, mode: str = "blocks") -> str:
-    """
-    mode="blocks" → sha256(json.dumps({"blocks":{"3":P}}, sort_keys=True, separators=(",",":")))
-    mode="file"   → sha256(file bytes)  # only when you have a filename
-    """
-    import json, hashlib, pathlib
-    if mode == "blocks":
-        blob = json.dumps({"blocks":{"3": P_blocks}}, sort_keys=True, separators=(",",":")).encode("utf-8")
-        return hashlib.sha256(blob).hexdigest()
-    elif mode.startswith("file:"):
-        path = mode.split(":",1)[1]
-        try:    return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
-        except: return ""
-    return ""
+
 
 
 # ---- helper for recomputing diag lanes if the snapshot lacks them
