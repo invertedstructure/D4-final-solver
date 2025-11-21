@@ -20,6 +20,61 @@ import uuid, streamlit as st
 import json as _json
 from pathlib import Path as _Path
 import hashlib as _hash
+# ─────────────────────────────────────────────────────────────────────────────
+import sys
+import os
+import json
+import csv
+import hashlib
+import platform
+import zipfile
+import tempfile
+import shutil
+import importlib.util
+import types
+import secrets
+import math
+import uuid
+from io import BytesIO
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+import random
+# ------------------------- End of Organized Helpers -------------------------
+import uuid
+import os
+import shutil
+import tempfile
+import json
+from pathlib import Path
+from contextlib import contextmanager
+# ======================= Canon Helpers SSOT - Deduped & Organized =======================
+# --- Unified A/B embed signature (lane-aware, cert-aligned) -------------------
+import json as _json
+from pathlib import Path
+import json, hashlib, streamlit as st
+from datetime import datetime, timezone
+from pathlib import Path
+import pandas as pd
+# --- baseline imports (defensive) ---
+import os, json, time, uuid, shutil, tempfile, hashlib
+from datetime import datetime, timezone
+from pathlib import Path
+# Underscored aliases for helpers
+import os as _os
+import json as _json
+import hashlib as _hashlib
+import csv as _csv
+import zipfile as _zipfile
+import tempfile as _tempfile
+import shutil as _shutil
+from pathlib import Path as _Path
+from uuid import uuid4
+from pathlib import Path as _Path
+import json as _json, hashlib as _hashlib, time as _time
+import streamlit as _st
+# --- Canonical tiny helpers (early, guarded) ---
+from typing import Iterable, List, Optional
 # Page config must be the first Streamlit command
 # == EARLY HELPERS (v2 wiring) ==
 # Safe UI nonce (prevents "no _ui_nonce" warning)
@@ -384,9 +439,7 @@ def _suite_index_add_row(row: dict) -> None:
 
 # ---------- Suite helpers (v2) ----------
 
-from pathlib import Path as _Path
-import json as _json, hashlib as _hashlib, time as _time
-import streamlit as _st
+
 
 _APP_DIR  = _Path(__file__).resolve().parent         # .../app
 _REPO_DIR = _APP_DIR.parent                          # repo root
@@ -712,8 +765,7 @@ with st.expander("C1 — Coverage rollup & health ping", expanded=False):
 
 
 
-# --- Canonical tiny helpers (early, guarded) ---
-from typing import Iterable, List, Optional
+#-----------------------------------------------------
 
 if "_normalize_bit" not in globals():
     def _normalize_bit(v) -> int:
@@ -787,51 +839,7 @@ if "_svr_residual_tag_from_R3" not in globals():
 
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-import sys
-import os
-import json
-import csv
-import hashlib
-import platform
-import zipfile
-import tempfile
-import shutil
-import importlib.util
-import types
-import secrets
-import math
-import uuid
-from io import BytesIO
-from contextlib import contextmanager
-from datetime import datetime, timezone
-from pathlib import Path
-import random
-# ------------------------- End of Organized Helpers -------------------------
-import uuid
-import os
-import shutil
-import tempfile
-import json
-from pathlib import Path
-from contextlib import contextmanager
-# ======================= Canon Helpers SSOT - Deduped & Organized =======================
 
-import json, hashlib, streamlit as st
-from datetime import datetime, timezone
-from pathlib import Path
-import pandas as pd
-
-# Underscored aliases for helpers
-import os as _os
-import json as _json
-import hashlib as _hashlib
-import csv as _csv
-import zipfile as _zipfile
-import tempfile as _tempfile
-import shutil as _shutil
-from pathlib import Path as _Path
-from uuid import uuid4
 
 # Page config early so Streamlit is happy
 # ────────────────────────────── PACKAGE LOADER ──────────────────────────────
@@ -1221,9 +1229,7 @@ if "_svr_inputs_sig_map" not in globals():
             "hash_shapes":  str(h.get("shapes_hash", "")),
         }
 
-# --- Unified A/B embed signature (lane-aware, cert-aligned) -------------------
-import json as _json
-from pathlib import Path
+
 
 def _inputs_sig_from_frozen_ib() -> list[str]:
     ib = st.session_state.get("_inputs_block") or {}
@@ -1361,10 +1367,7 @@ def apply_fixture_to_session(fx: dict) -> None:
     rc["fixture_code"]  = fx.get("fixture_code","")
     ss["run_ctx"] = rc
 
-# --- baseline imports (defensive) ---
-import os, json, time, uuid, shutil, tempfile, hashlib
-from datetime import datetime, timezone
-from pathlib import Path
+
 
 # --- legacy aliases to avoid NameError from older code paths ---
 _json = json                               # some helpers still used _json.*
@@ -1414,14 +1417,7 @@ LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
 
 
-# =============================== TOP HELPERS — CANONICAL ===============================
-# This block replaces the previous duplicate helpers. Single Source of Truth (SSOT).
 
-# --- Imports expected to be available ---
-# import os, json, time, uuid, shutil, tempfile, hashlib
-# from pathlib import Path
-# import streamlit as st
-# from datetime import datetime, timezone
 
 # ------------------------- Hashing Helpers -------------------------
 def _deep_intify(o):
@@ -1648,7 +1644,7 @@ def _truth_mask_from_d3(d3: list[list[int]]) -> list[int]:
 
 
 
-# ------------------------- Cache Reset -------------------------
+
 def soft_reset_before_overlap():
     ss = st.session_state
     for k in (
