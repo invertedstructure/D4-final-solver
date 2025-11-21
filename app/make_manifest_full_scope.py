@@ -4835,73 +4835,11 @@ with st.expander("A/B compare (strict vs projected(columns@k=3,auto))", expanded
                 finally:
                     ss['_solver_one_button_active'] = False
                     ss['_solver_busy'] = False
-        # --- End run button ---
-
-
-
-
-
-
-    
-                                  
+        # --- End run button ---                               
                     
-# ─────────────────────────── Solver: one-press pipeline ───────────────────────────
 
-# === One-press solver button (wired to one_press_solve) ===
-import streamlit as st
-ss = st.session_state
-_nonce = ss.get("_ui_nonce", "x")  # safe unique key seed if you already set a nonce
 
-if st.button("Run solver (one press)", key=f"btn_svr_run__{_nonce}"):
-    ss["_solver_busy"] = True
-    ss["_solver_one_button_active"] = True
-    try:
-        # Call with session if supported; fall back to no-arg
-        try:
-            _res = run_overlap_once(ss)
-        except TypeError:
-            _res = run_overlap_once()
-
-        # Normalize result: accept dict or (ok, msg, bundle_dir)
-        if isinstance(_res, dict):
-            _bundle_dir = _res.get("bundle_dir", "")
-            _counts = _res.get("counts", {}) or {}
-            _written = int(_counts.get("written", 0) or 0)
-
-            # --- hook: publish anchors for tail/download ---
-            if _bundle_dir:
-                ss["last_bundle_dir"] = _bundle_dir
-            _paths = _res.get("paths", {}) or {}
-            if isinstance(_paths, dict):
-                ss["last_ab_auto_path"] = _paths.get("ab_auto", ss.get("last_ab_auto_path", ""))
-                ss["last_ab_file_path"] = _paths.get("ab_file", ss.get("last_ab_file_path", ""))
-            ss["last_solver_result"] = _counts
-
-            st.success(f"Wrote {_written} files → {_bundle_dir}")
-
-        elif isinstance(_res, tuple) and len(_res) >= 3:
-            _ok, _msg, _bundle_dir = _res[0], _res[1], _res[2]
-            if _bundle_dir:
-                # --- hook: publish anchor even for tuple return ---
-                ss["last_bundle_dir"] = _bundle_dir
-            (st.success if _ok else st.error)(_msg)
-
-        else:
-            st.warning("Solver returned no structured result; check logs.")
-
-        # Optional: refresh read-only UI from frozen SSOT if helper exists
-        _refresh = globals().get("overlap_ui_from_frozen")
-        if callable(_refresh):
-            try:
-                _refresh()
-            except Exception:
-                pass
-
-    except Exception as _e:
-        st.error(f"Solver run failed: {str(_e)}")
-    finally:
-        ss["_solver_one_button_active"] = False
-        ss["_solver_busy"] = False
+    #---------------------------------------------------------------------------------------------------------------------------------
 
         
 def tail_and_download_ui():
