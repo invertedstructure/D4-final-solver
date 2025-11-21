@@ -1072,23 +1072,7 @@ with st.expander("C1 — Coverage rollup & health ping", expanded=False):
 
 
 
-# ---------- FREEZER mismatch JSONL (C) ----------
-def _log_freezer_mismatch(*, fixture_id: str, auto_lanes: list[int], file_lanes: list[int],
-                          verdict_auto: bool | None, verdict_file: bool | None):
-    """Append to reports/freezer_mismatch_log.jsonl when AUTO↔FILE disagree."""
-    row = {
-        "written_at_utc": _svr_now_iso(),
-        "fixture_id": str(fixture_id),
-        "auto_lanes": [int(x)&1 for x in (auto_lanes or [])],
-        "file_lanes": [int(x)&1 for x in (file_lanes or [])],
-        "verdict_auto": (None if verdict_auto is None else bool(verdict_auto)),
-        "verdict_file": (None if verdict_file is None else bool(verdict_file)),
-        "code": "FREEZER_ASSERT_MISMATCH",
-    }
-    try:
-        _atomic_append_jsonl(Path("reports") / "freezer_mismatch_log.jsonl", row)
-    except Exception:
-        pass
+
 
 
 # --- Canonical tiny helpers (early, guarded) ---
