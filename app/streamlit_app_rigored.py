@@ -2332,9 +2332,7 @@ with tab2:
             d3 = []
         return _truth_mask_from_d3(d3)
 
-    def _lane_mask_from_d3_local(boundaries_obj):
-        # alias maintained for existing call-sites
-        return _lane_mask_from_d3_strict(boundaries_obj)
+   
 
     def _derive_mode_from_cfg(cfg: dict) -> str:
         if not cfg or not cfg.get("enabled_layers"):
