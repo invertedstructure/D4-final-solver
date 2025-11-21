@@ -616,46 +616,7 @@ def _lanes_sig8_from_list(L):
     except Exception:
         return None
 
-def _suite_msg_with_lanes(bundle_dir):
-    """Return 'lanes=K · SIG8' from AUTO overlap cert inside bundle_dir; 'unknown' if not available."""
-    try:
-        import json as _json
-        from pathlib import Path as _Path
-        bd = _Path(str(bundle_dir))
-        meta_p = bd / "bundle.json"
-        if not meta_p.exists():
-            return "unknown"
-        meta = _json.loads(meta_p.read_text(encoding="utf-8"))
-        filenames = meta.get("filenames") or []
-        auto = None
-        for fn in filenames:
-            s = str(fn)
-            if "projected_columns_k_3_auto" in s:
-                auto = bd / s
-                break
-        if not auto or not auto.exists():
-            return "unknown"
-        doc = _json.loads(auto.read_text(encoding="utf-8"))
-        lanes = None
-        w = doc.get("witness")
-        if isinstance(w, dict):
-            lanes = w.get("lanes")
-        if lanes is None:
-            pc = doc.get("projection_context") or {}
-            if isinstance(pc, dict):
-                lp = pc.get("lanes_popcount")
-                ls = pc.get("lanes_sig8")
-                if isinstance(lp, int) and isinstance(ls, str):
-                    return f"lanes={lp} · {ls}"
-                lanes = pc.get("lanes")
-        if not isinstance(lanes, list):
-            return "unknown"
-        pop = sum(1 for x in lanes if int(x)==1)
-        sig8 = _lanes_sig8_from_list(lanes)
-        return f"lanes={pop} · {sig8 if sig8 else 'NA'}"
-    except Exception:
-        return "unknown"
-# ===============================================================
+
 st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
 
 # === canonical constants / helpers (single source of truth) ===
