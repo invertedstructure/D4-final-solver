@@ -2986,8 +2986,7 @@ def _bt_mul(A,B):
 
 
 
-def _bt_is_zero(M):
-    return (not M) or all(((x & 1) == 0) for row in M for x in row)
+
 
 def _bt_lane_mask_from_d3(d3):
     if not d3 or not (d3[0] if d3 else []): return []
