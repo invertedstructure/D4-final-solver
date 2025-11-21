@@ -1488,62 +1488,7 @@ def _ab_lane_vectors_bottom(H2, d3, C3, lm):
 
     return hv, cv
 
-# ---------------- Fixture helpers (single source of truth) ----------------
 
-def match_fixture_from_snapshot(snap: dict) -> dict:
-    reg = _get_fixtures_cached() or {}
-    ordering = list(reg.get("ordering") or [])
-    fixtures = list(reg.get("fixtures") or [])
-
-    # Build ordered list: declared ordering first, then the rest
-    code_to_fixture = {fx.get("code"): fx for fx in fixtures}
-    ordered = [code_to_fixture[c] for c in ordering if c in code_to_fixture] + \
-              [fx for fx in fixtures if fx.get("code") not in ordering]
-
-    # Extract normalized fields we match on
-    district = str(((snap.get("identity") or {}).get("district_id") or "UNKNOWN"))
-    policy   = str(((snap.get("policy")   or {}).get("canon")       or "strict")).lower()
-    lanes    = [int(x) for x in ((snap.get("inputs") or {}).get("lane_mask_k3") or [])]
-    Hb       = [int(x) for x in ((snap.get("diagnostics") or {}).get("lane_vec_H2@d3") or [])]
-    Cb       = [int(x) for x in ((snap.get("diagnostics") or {}).get("lane_vec_C3+I3") or [])]
-    strict_eq3 = bool((((snap.get("checks") or {}).get("k") or {}).get("3") or {}).get("eq", False))
-
-    def _veq(a, b):
-        a = [int(x) for x in (a or [])]; b = [int(x) for x in (b or [])]
-        return len(a) == len(b) and a == b
-
-    for fx in ordered:
-        m = fx.get("match") or {}
-        if m.get("district") and str(m["district"]) != district:
-            continue
-        pol_any = [str(x).lower() for x in (m.get("policy_canon_any") or [])]
-        if pol_any and (policy not in pol_any):
-            continue
-        if "lanes" in m and not _veq(m["lanes"], lanes):
-            continue
-        if "H_bottom" in m and not _veq(m["H_bottom"], Hb):
-            continue
-        if "C3_plus_I3_bottom" in m and not _veq(m["C3_plus_I3_bottom"], Cb):
-            continue
-        if "strict_eq3" in m and bool(m["strict_eq3"]) != strict_eq3:
-            continue
-
-        return {
-            "fixture_code": fx.get("code",""),
-            "fixture_label": fx.get("label",""),
-            "tag": fx.get("tag",""),
-            "strictify": fx.get("strictify","tbd"),
-            "growth_bumps": int(fx.get("growth_bumps", 0)),
-        }
-
-    # Fallback (never block)
-    return {
-        "fixture_code":  "",
-        "fixture_label": f"{district} • lanes={lanes} • H={Hb} • C+I={Cb}",
-        "tag":           "novelty",
-        "strictify":     "tbd",
-        "growth_bumps":  int(((snap.get("growth") or {}).get("growth_bumps") or 0)),
-    }
 
 
 def apply_fixture_to_session(fx: dict) -> None:
