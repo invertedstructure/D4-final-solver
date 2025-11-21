@@ -3381,15 +3381,7 @@ def _svr_hash_json(obj) -> str:
     except Exception:
         return ""
 
-def _ab_pick_pin(policy: str | None = None):
-    """Pick the right pin from session. policy in {None,'auto','file'}."""
-    ss = st.session_state
-    if policy == "file":
-        return ss.get("ab_pin_file") or ss.get("ab_pin")
-    if policy == "auto":
-        return ss.get("ab_pin_auto") or ss.get("ab_pin")
-    # default: prefer auto
-    return ss.get("ab_pin_auto") or ss.get("ab_pin_file") or ss.get("ab_pin")
+
 
 def _bundle_last_paths():
     """Return latest bundle dir and the two A/B file paths if present."""
