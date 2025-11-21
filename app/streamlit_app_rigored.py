@@ -1933,44 +1933,7 @@ def build_v2_suite_row(
         row.update(extra)
     return row
 
-# ------------------------- Fixtures Registry (cache) -------------------------
-def _fixtures_bytes_and_hash(path: str):
-    """Helper to read file bytes and compute hash."""
-    try:
-        b = Path(path).read_bytes()
-        h = _sha256_hex_bytes(b)
-        return b, h, path
-    except Exception:
-        return b"", "", path
 
-def load_fixtures_registry() -> dict | None:
-    """Load and cache the fixtures registry with cache invalidation."""
-    fx_path = Path("configs") / "fixtures.json"
-    try:
-        fx_bytes = fx_path.read_bytes()
-        fx_hash = _sha256_hex_bytes(fx_bytes)
-    except Exception:
-        st.session_state.pop("_fixtures_cache", None)
-        st.session_state.pop("_fixtures_bytes_hash", None)
-        return None
-
-    if st.session_state.get("_fixtures_bytes_hash") != fx_hash:
-        try:
-            data = json.loads(fx_bytes.decode("utf-8"))
-            cache = {
-                "version": str(data.get("version", "")),
-                "ordering": list(data.get("ordering") or []),
-                "fixtures": list(data.get("fixtures") or []),
-                "__hash": fx_hash,
-                "__path": fx_path.as_posix(),
-            }
-            st.session_state["_fixtures_cache"] = cache
-            st.session_state["_fixtures_bytes_hash"] = fx_hash
-        except Exception:
-            st.session_state.pop("_fixtures_cache", None)
-            st.session_state["_fixtures_bytes_hash"] = fx_hash
-            return None
-    return st.session_state.get("_fixtures_cache")
 
 def fixtures_load_cached(path: str = "configs/fixtures.json") -> dict:
     """Load fixtures cache with tolerant signature. Rehydrates cache if bytes hash changed."""
