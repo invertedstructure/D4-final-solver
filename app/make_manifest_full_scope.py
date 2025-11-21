@@ -920,19 +920,7 @@ def _witness_pack(bottom_H2d3_bits=None, bottom_C3pI3_bits=None, lanes=None) -> 
 
 
 
-def build_embed(*, inputs_sig_5, dims, district_id, fixture_label, policy_tag, projection_context):
-    payload = {
-        "schema_version": SCHEMA_VERSION,
-        "engine_rev": ENGINE_REV,
-        "inputs_sig_5": inputs_sig_5,
-        "dims": dims,
-        "district_id": district_id,
-        "fixture_label": fixture_label or "",
-        "policy": policy_tag,  # "strict__VS__projected(columns@k=3,auto|file)"
-        "projection_context": projection_context,
-    }
-    sig = _sha256_hex(_canonical_json(payload).encode("utf-8"))
-    return payload, sig
+
 
 # Guarded atomic writer (never writes from read-only panels)
 def _guarded_guarded_atomic_write_json(path: Path, payload: dict) -> None:
