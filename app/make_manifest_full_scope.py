@@ -2661,20 +2661,7 @@ except Exception:
 
 
 
-# ---------- SSOT publisher (alias to canonical) ----------
-def publish_inputs_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int, projector_filename: str = ""):
-    """
-    Thin alias so callers in this tab can keep using publish_inputs_block(...).
-    Delegates to your canonical ssot_publish_block.
-    """
-    return ssot_publish_block(
-        boundaries_obj=boundaries_obj,
-        cmap_obj=cmap_obj,
-        H_obj=H_obj,
-        shapes_obj=shapes_obj,
-        n3=n3,
-        projector_filename=projector_filename,
-    )
+
 with tab2:
     st.subheader("Overlap")
 
