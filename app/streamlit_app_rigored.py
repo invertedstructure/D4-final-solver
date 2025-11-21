@@ -5918,7 +5918,7 @@ def _svr_run_once_computeonly_hard(ss=None):
     ab_auto_payload = _mk_ab("strict__VS__projected(columns@k=3,auto)", strict_eq, auto_eq)
     ab_file_payload = _mk_ab("strict__VS__projected(columns@k=3,file)", strict_eq, file_eq)
 
-           # --- WRITE MIN CORE (V2-pure) — exactly 2 certs per fixture ------------------
+              # --- WRITE MIN CORE (V2-pure) — exactly 2 certs per fixture ------------------
     def _as_dims(x):
         if isinstance(x, dict):
             if "dims" in x: return {"n2": x["dims"].get("n2"), "n3": x["dims"].get("n3")}
@@ -5947,20 +5947,29 @@ def _svr_run_once_computeonly_hard(ss=None):
     _hard_co_write_json(bdir / names["strict"],         _stamp(strict_payload, "strict"))
     _hard_co_write_json(bdir / names["projected_auto"], _stamp(auto_payload, "projected(columns@k=3,auto)"))
     
-    # Bundle envelope (2-core)
-    bundle = {
-        "schema": "bundle.v2",
-        "district_id": district_id,
-        "fixture_label": fixture_label,
-        "sig8": sig8,
-        "filenames": [names[k] for k in ("strict", "projected_auto")],
-        "core_counts": {"written": 2},
-        "lanes": (auto_payload.get("lanes") or {}) if isinstance(auto_payload, dict) else {},
-        "metrics": (auto_payload.get("metrics") or {}) if isinstance(auto_payload, dict) else {},
-        "written_at_utc": int(_time.time()),
-    }
-    if dims: bundle["dims"] = dims
+        # Bundle manifest (2-core, v2)
+    filenames = [names[k] for k in ("strict", "projected_auto")]
+    lanes_extra = (auto_payload.get("lanes") or {}) if isinstance(auto_payload, dict) else {}
+    metrics_extra = (auto_payload.get("metrics") or {}) if isinstance(auto_payload, dict) else {}
+
+    bundle = build_v2_bundle_manifest(
+        district_id=district_id,
+        fixture_label=fixture_label,
+        sig8=str(sig8),
+        snapshot_id=snapshot_id or None,
+        bundle_dir=str(bdir.resolve()),
+        core_counts={"written": 2},
+        dims=dims,
+        written_at_utc=int(_time.time()),
+        # keep legacy fields via `extra` so old readers still work
+        extra={
+            "filenames": filenames,
+            "lanes": lanes_extra,
+            "metrics": metrics_extra,
+        },
+    )
     _hard_co_write_json(bdir / "bundle.json", bundle)
+
     
     # SSOT-anchored receipt (v2)
     _v2_write_loop_receipt_for_bundle(bdir, extra={
@@ -5969,7 +5978,7 @@ def _svr_run_once_computeonly_hard(ss=None):
         "sig8": sig8,
         "dims": dims,
     })
-    # ---------------------------------------------------------------------------
+
 
     
 
