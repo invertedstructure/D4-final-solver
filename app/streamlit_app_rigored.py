@@ -3159,26 +3159,8 @@ def abx_read_json_any(x, *, kind: str):
         return x, "", "dict"
     return {}, "", ""
 
-# normalize per kind → "blocks" payload we hash/persist
-def _svr_as_blocks(j: dict, kind: str) -> dict:
-    if not isinstance(j, dict): return {}
-    if kind in ("B","C","H"):
-        # prefer canonical {"blocks": {...}}
-        if isinstance(j.get("blocks"), dict):
-            return dict(j["blocks"])
-        # tolerate legacy top-level degrees
-        blk = {}
-        for deg in ("1","2","3"):
-            if deg in j and isinstance(j[deg], list):
-                blk[deg] = j[deg]
-        return blk
-    # shapes: keep json as-is (we only hash it; not validated for slices)
-    if isinstance(j.get("blocks"), dict):
-        return dict(j["blocks"])
-    return dict(j)
 
-# session precedence → source object
-# --- robust blocks normalizer (handles dicts and parsed cmap objects) ---
+
 def _svr_as_blocks_v2(j: object, kind: str) -> dict:
     """
     Return canonical {"1","2","3"} blocks dict for B/C/H/U.
