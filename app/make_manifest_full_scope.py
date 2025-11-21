@@ -2854,10 +2854,7 @@ else:
     st.info("Upload required files: " + ", ".join(missing))
     st.stop()
 
-# ===================== Projected(FILE) validation banner & guard =====================
-def file_validation_failed() -> bool:
-    """Convenience predicate: returns True if last attempt to use FILE Π failed validation."""
-    return bool(st.session_state.get("_file_mode_error"))
+
 
 # --- ensure tabs exist even if earlier branches ran before creating them
 if "tab1" not in globals():
