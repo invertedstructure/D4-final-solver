@@ -2701,10 +2701,7 @@ if "abx_hash_json" not in globals():
         except Exception:
             return ""
 
-if "abx_diag_from_mask" not in globals():
-    def abx_diag_from_mask(lm_):
-        n = len(lm_ or [])
-        return [[1 if (i == j and int(lm_[j]) == 1) else 0 for j in range(n)] for i in range(n)]
+
 
 if "abx_policy_tag" not in globals():
     def abx_policy_tag():
