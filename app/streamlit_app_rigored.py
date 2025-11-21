@@ -2490,57 +2490,7 @@ def _ab_is_fresh_now(pin=None, expected_embed_sig: str | None = None, **kwargs):
 
 
         
-# === BEGIN PATCH: READ-ONLY OVERLAP HYDRATOR (uses frozen SSOT only) ===
-def overlap_ui_from_frozen():
-    """
-    Read-only UI refresh that re-computes visuals strictly from the *frozen* SSOT.
-    It does NOT resolve sources, does NOT write fname_*, and does NOT freeze state.
-    Safe to call after the single-button solver completed.
-    """
 
-    from pathlib import Path
-    import json as _json
-
-    ib = st.session_state.get("_inputs_block") or {}
-    fns = (ib.get("filenames") or {})
-    pB, pC, pH = fns.get("boundaries",""), fns.get("C",""), fns.get("H","")
-    if not (pB and pC and pH):
-        st.info("Overlap UI: frozen SSOT missing; run solver first.")
-        return
-
-    def _read_blocks(p):
-        try: return (_json.loads(Path(p).read_text(encoding="utf-8")).get("blocks") or {})
-        except Exception: return {}
-
-    bB = _read_blocks(pB); bC = _read_blocks(pC); bH = _read_blocks(pH)
-    d3 = bB.get("3") or []; C3 = bC.get("3") or []; H2 = bH.get("2") or []
-    n2, n3 = len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)
-
-    # Diagnostics (no writes)
-    st.caption(f"[Overlap UI] n₂×n₃ = {n2}×{n3} · src B:{Path(pB).name} · C:{Path(pC).name} · H:{Path(pH).name}")
-    if C3 and len(C3)==len(C3[0]):
-        I3 = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))]
-        def _mul(A,B):
-            if not A or not B or not A[0] or not B[0] or len(A[0])!=len(B): return []
-            m,k = len(A), len(A[0]); n = len(B[0])
-            C = [[0]*n for _ in range(m)]
-            for i in range(m):
-                for t in range(k):
-                    if A[i][t] & 1:
-                        for j in range(n): C[i][j] ^= (B[t][j] & 1)
-            return C
-        def _xor(A,B):
-            if not A: return [r[:] for r in (B or [])]
-            if not B: return [r[:] for r in (A or [])]
-            r,c = len(A), len(A[0]); return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
-        R3s = _xor(_mul(H2, d3), _xor(C3, I3)) if (H2 and d3) else []
-        bottom_H = (_mul(H2, d3)[-1] if (H2 and d3) else [])
-        bottom_CI = (_xor(C3, I3)[-1] if C3 else [])
-        lanes_auto = (C3[-1] if C3 else [])
-        st.caption(f"[Overlap UI] (H2·d3)_bottom={bottom_H} · (C3⊕I3)_bottom={bottom_CI} · lanes(auto from C₃ bottom)={lanes_auto}")
-    else:
-        st.caption("[Overlap UI] C₃ not square; projected(columns@k=3,auto) is N/A here.")
-# === END PATCH: READ-ONLY OVERLAP HYDRATOR ===
 
 
     
@@ -2549,20 +2499,7 @@ def overlap_ui_from_frozen():
 
 
 
-# --- A/B status chip (no HTML repr; no duplicate logic) ------------------------
-ab_pin = st.session_state.get("ab_pin") or {}
-if ab_pin.get("state") == "pinned":
-    fresh, reason = _ab_is_fresh_now(
-        rc=_rc,
-        ib=_ib,
-        ab_payload=(ab_pin.get("payload") or {})
-    )
-    if fresh:
-        st.success("A/B: Pinned · Fresh (will embed)")
-    else:
-        st.warning(f"A/B: Pinned · Stale ({reason})")
-else:
-    st.caption("A/B: —")
+
 
 
 
