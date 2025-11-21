@@ -2421,10 +2421,7 @@ with tab2:
         src = (cfg.get("source", {}) or {}).get("3", "auto")
         return "projected(columns@k=3,file)" if src == "file" else "projected(columns@k=3,auto)"
 
-    # Projected(FILE) validation banner (single source)
-    def file_validation_failed() -> bool:
-        """Return True if last attempt to use FILE Π failed validation."""
-        return bool(st.session_state.get("_file_mode_error"))
+
 
     def _shape(M):
         return (len(M), len(M[0]) if (M and M[0]) else 0)
