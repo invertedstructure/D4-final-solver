@@ -2725,15 +2725,7 @@ except Exception:
     def eye(n):
         return [[1 if i == j else 0 for j in range(n)] for i in range(n)]
 
-# ───────────────────────── Reuse canonical helpers (NO redefinitions here) ─────────────
-# We purposefully do NOT redefine _deep_intify/hash_json/_sha256_* etc. Use the canonical
-# ones you placed at the top of the file:
-#   - hash_json(...)
-#   - ssot_stable_blocks_sha(...)
-#   - ssot_publish_block(...)
-#   - ssot_live_sig(...), ssot_frozen_sig_from_ib(...), ssot_is_stale(...)
-#   - _truth_mask_from_d3(...)
-# If any of these are missing, define them in the canonical block (not here).
+
 
 # ---------- SSOT publisher (alias to canonical) ----------
 def publish_inputs_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int, projector_filename: str = ""):
