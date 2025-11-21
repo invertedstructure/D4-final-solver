@@ -3046,17 +3046,7 @@ with tab2:
     def _shape(M):
         return (len(M), len(M[0]) if (M and M[0]) else 0)
 
-    def _guard_r3_shapes(H2, d3, C3):
-        """Ensure H2·d3 and (C3⊕I3) shapes are consistent; tolerate empty during exploration."""
-        rH, cH = _shape(H2); rD, cD = _shape(d3); rC, cC = _shape(C3)
-        if not (rH and cH and rD and cD and rC and cC):
-            return  # allow empty while exploring
-        n3, n2 = rH, cH
-        if not (rD == n2 and cD == n3 and rC == n3 and cC == n3):
-            raise RuntimeError(
-                f"R3_SHAPE: expected H2({n3}×{n2})·d3({n2}×{n3}) and (C3⊕I3)({n3}×{n3}); "
-                f"got H2({rH}×{cH}), d3({rD}×{cD}), C3({rC}×{cC})"
-            )
+
 
     
 
