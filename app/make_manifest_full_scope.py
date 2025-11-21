@@ -2127,15 +2127,7 @@ def ssot_publish_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int, 
 
 
 
-# ------------------------- Projector helpers -------------------------
-def _auto_pj_hash_from_rc(rc: dict) -> str:
-    """Stable hash for AUTO projector spec derived from lane_mask_k3."""
-    try:
-        lm = rc.get("lane_mask_k3") or []
-        blob = json.dumps(lm, sort_keys=True, separators=(",", ":"))
-        return _sha256_hex_text(blob)
-    except Exception:
-        return ""
+
 
 # ------------------------- Key Generators & Widget-Key Deduper -------------------------
 def _mkkey(ns: str, name: str) -> str:
