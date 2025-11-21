@@ -2518,11 +2518,7 @@ def _read_jsonl_tail(path: Path, N: int = 200) -> list[dict]:
             except Exception: continue
         return out
 
-# ------------------------- UI Predicates -------------------------
-def is_projected_green(run_ctx: dict | None, overlap_out: dict | None) -> bool:
-    if not run_ctx or not overlap_out: return False
-    mode = str(run_ctx.get("mode") or "")
-    return mode.startswith("projected") and bool(((overlap_out.get("3") or {}).get("eq", False)))
+
 
 def is_strict_red_lanes(run_ctx: dict | None, overlap_out: dict | None, residual_tags: dict | None) -> bool:
     if not run_ctx or not overlap_out: return False
