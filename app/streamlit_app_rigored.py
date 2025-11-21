@@ -379,14 +379,7 @@ def _v2_canonical_obj(obj, exclude_keys=_V2_EPHEMERAL_KEYS):
 
 
 
-def compute_ab_file(strict_or_file_payload: dict, maybe_file_or_freezer: dict, ib: dict = None) -> dict:
-    """
-    Flexible shim so it works with either signature you might have in the app:
-      A) compute_ab_file(strict_payload, projected_file_payload, ib)
-      B) compute_ab_file(projected_file_payload, freezer_payload, ib)    # (legacy)
-    We do NOT read any global `strict`.
-    """
-    import hashlib, json as _json
+
 
     def _k3eq(p):
         return ((p or {}).get("results", {}) or {}).get("k3", {}).get("eq")
