@@ -3041,10 +3041,7 @@ with tab2:
 
 
 
-    # Projected(FILE) validation banner (single source)
-    def file_validation_failed() -> bool:
-        """Return True if last attempt to use FILE Π failed validation."""
-        return bool(st.session_state.get("_file_mode_error"))
+  
 
     def _shape(M):
         return (len(M), len(M[0]) if (M and M[0]) else 0)
