@@ -3385,12 +3385,6 @@ def _svr_hash_json(obj) -> str:
 
 
 
-def _ab_expected_embed_sig_from_file(path: str) -> str | None:
-    try:
-        j = _json.loads(Path(path).read_text(encoding="utf-8"))
-        return str(((j or {}).get("ab_pair") or {}).get("embed_sig") or "")
-    except Exception:
-        return None
 
 # =============================== Bundle helpers ===============================
 def _svr_bundle_dir(district_id: str, sig8: str) -> Path:
