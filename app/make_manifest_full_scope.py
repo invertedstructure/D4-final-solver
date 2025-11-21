@@ -4871,74 +4871,7 @@ def run_overlap_once(ss=st.session_state):
 # Back-compat alias
 one_press_solve = run_overlap_once
 
-# ---------- Batch (v2) — Run manifest_full_scope ----------
-with st.expander("Batch (v2) — Run manifest_full_scope", expanded=False):
-    st.caption("Looks for app/manifest_full_scope.jsonl under repo root.")
-    colA, colB, colC = st.columns(3)
-    with colA:
-        if st.button("Create/refresh suite snapshot", key="btn_suite_snapshot"):
-            ok, msg, sid = ensure_suite_snapshot("app/manifest_full_scope.jsonl")
-            (st.success if ok else st.warning)(msg)
-    with colB:
-        if st.button("Run full scope (48)", key="btn_v2_manifest_run"):
-            sid = _svr_current_snapshot_id()
-            if not sid:
-                st.warning("No snapshot found. Click 'Create/refresh suite snapshot' first.")
-            else:
-                # Prefer repo-only runner; fall back to CANON; else final alias if present
-                g = globals()
-                runner = g.get("_RUN_SUITE_V2_REPO_ONLY") or g.get("_RUN_SUITE_CANON") or g.get("run_suite_from_manifest")
-                if runner is None:
-                    st.warning("No suite runner available (need _RUN_SUITE_V2_REPO_ONLY or _RUN_SUITE_CANON).")
-                else:
-                    ok, msg, n = _as3(runner("app/manifest_full_scope.jsonl", sid))
-                    (st.success if ok else st.warning)(msg)
 
-    with colC:
-        if st.button("Build suite ZIP", key="btn_v2_suite_zip"):
-            try:
-                import zipfile as _zipfile, datetime as _dt, json as _json
-                sid = _svr_current_snapshot_id()
-                if not sid:
-                    st.warning("No snapshot found.")
-                else:
-                    export_dir = _Path(DIRS.get("exports", "logs/exports"))
-                    export_dir.mkdir(parents=True, exist_ok=True)
-                    ts = _dt.datetime.utcnow().strftime("%Y%m%d_%H%M%S")
-                    zpath = export_dir / f"suite__{sid}__{ts}.zip"
-                    # gather from suite_index
-                    jl, _csvp = _suite_index_paths()
-                    paths = []
-                    if jl.exists():
-                        for ln in jl.read_text(encoding="utf-8").splitlines():
-                            try:
-                                rec = _json.loads(ln)
-                                bd = rec.get("bundle_dir")
-                                if bd:
-                                    paths.append(_Path(bd))
-                            except Exception:
-                                pass
-                    with _zipfile.ZipFile(zpath, "w", _zipfile.ZIP_DEFLATED) as zf:
-                        # include snapshot + suite_index files
-                        snaps_dir = _Path(DIRS.get("snapshots", "logs/snapshots"))
-                        snap_file = snaps_dir / f"world_snapshot__{sid}.json"
-                        if snap_file.exists():
-                            zf.write(snap_file, arcname=f"world_snapshot__{sid}.json")
-                        # include suite index files
-                        jl_path, csv_path = _suite_index_paths()
-                        if jl_path.exists():
-                            zf.write(jl_path, arcname="suite_index.jsonl")
-                        if csv_path.exists():
-                            zf.write(csv_path, arcname="suite_index.csv")
-                        # include bundles
-                        for bd in paths:
-                            if bd.exists():
-                                for fp in bd.glob("*"):
-                                    zf.write(fp, arcname=str(_Path("bundles")/ bd.parent.name / bd.name / fp.name))
-                    st.success(f"Suite ZIP ready: {zpath}")
-                    st.download_button("Download suite ZIP", data=zpath.read_bytes(), file_name=zpath.name, mime="application/zip", key=f"dl_suite_zip_{ts}")
-            except Exception as e:
-                st.warning(f"Suite ZIP failed: {e}")
 
 def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
     """
