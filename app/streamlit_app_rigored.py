@@ -702,13 +702,7 @@ def _solver_ret_as_tuple(ret):
         pass
     return False, "solver returned unrecognized payload", None
 
-def _one_press_triple():
-    g = globals()
-    if "run_overlap_once" in g and callable(g["run_overlap_once"]):
-        return _solver_ret_as_tuple(g["run_overlap_once"]())
-    if "_svr_run_once" in g and callable(g["_svr_run_once"]):
-        return _solver_ret_as_tuple(g["_svr_run_once"]())
-    return False, "No solver entry found (run_overlap_once/_svr_run_once).", None
+
     
 def _as3(ret):
     """Normalize any (ok,msg,count?) shape to exactly (ok:bool, msg:str, count:int)."""
