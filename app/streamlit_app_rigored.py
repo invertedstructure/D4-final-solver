@@ -784,24 +784,6 @@ SCHEMA_VERSION = "2.0.0"
 ENGINE_REV     = "rev-20251022-1"
 
 DIRS = {"root": "logs", "certs": "logs/certs", "snapshots": "logs/snapshots", "reports": "logs/reports", "suite_runs": "logs/suite_runs", "exports": "logs/exports"}
-# ---------- Suite helpers (v2) ----------
-
-try:
-    _Path
-except NameError:
-    from pathlib import Path as _Path
-
-def _sha256_hex(b: bytes) -> str:
-    import hashlib as _hashlib
-    return _hashlib.sha256(b).hexdigest()
-
-def _canonical_json(obj) -> str:
-    import json as _json
-    return _json.dumps(obj, sort_keys=True, separators=(",",":"))
-
-def _repo_root() -> _Path:
-    # repo root = parent of app dir
-    return _Path(__file__).resolve().parent.parent
 
 
 
