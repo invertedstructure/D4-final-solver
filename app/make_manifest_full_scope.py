@@ -2656,9 +2656,7 @@ def policy_label_from_cfg(cfg: dict) -> str:
     # keep your established label shape
     return f"projected(columns@k=3,{mode})"
 
-# (optional) projector-file validator; keep as no-op if you don't need it yet
-def validate_projector_file_strict(P, *, n3: int, lane_mask: list[int]):
-    return  # implement later if you want strict checks for Π
+
 
 
 
