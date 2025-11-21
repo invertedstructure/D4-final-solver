@@ -3075,41 +3075,7 @@ def _bt_verdict(H2,d3,C3, P=None):
     }
     return verdict, rec
 
-def _bt_health(d3, lanes, C3, prior_lanes=None, thresholds=None):
-    n3 = len(C3) if C3 else 0
-    thresholds = thresholds or {"tau_size":0.30,"tau_ker":0.10,"tau_stability":0.60}
-    if not C3 or not C3[0] or len(C3)!=len(C3[0]):
-        return {"class":"INVALID","na_reason_code":"PROJECTOR_INVALID_SHAPE","thresholds":thresholds}
-    lane_size = sum(int(x)&1 for x in (lanes or []))
-    if lane_size==0:
-        return {"class":"INVALID","na_reason_code":"PROJECTOR_ZERO_LANES","thresholds":thresholds,"lane_size":0,"lane_frac":0.0}
-    lane_frac = lane_size/max(1,n3)
-    ker = _bt_kernel_cols(d3)
-    ker_lane = sum(1 for j,b in enumerate(lanes or []) if (int(b)&1) and (j in ker))
-    ker_lane_rate = ker_lane/max(1,lane_size)
-    stability = None
-    stability_applied = False
-    if isinstance(prior_lanes, list) and prior_lanes and len(prior_lanes)==len(lanes):
-        U = {j for j,b in enumerate(lanes) if int(b)&1} | {j for j,b in enumerate(prior_lanes) if int(b)&1}
-        I = {j for j,b in enumerate(lanes) if int(b)&1} & {j for j,b in enumerate(prior_lanes) if int(b)&1}
-        stability = (len(I)/len(U)) if U else 1.0
-        stability_applied = True
-    # classify
-    fails = 0
-    if lane_frac < thresholds["tau_size"]: fails += 1
-    if ker_lane_rate > thresholds["tau_ker"]: fails += 1
-    if stability_applied and (stability is not None) and (stability < thresholds["tau_stability"]): fails += 1
-    cls = "HEALTHY" if fails==0 else ("WARN" if fails==1 else "WARN")
-    return {
-        "class": cls,
-        "lane_size": lane_size,
-        "lane_frac": lane_frac,
-        "ker_lane_rate": ker_lane_rate,
-        "stability_jaccard": stability,
-        "stability_applied": stability_applied,
-        "thresholds": thresholds,
-        "ker_only_projector": (ker_lane_rate==1.0),
-    }
+
 
 
 
