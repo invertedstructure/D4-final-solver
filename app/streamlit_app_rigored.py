@@ -3976,17 +3976,11 @@ if "_svr_xor" not in globals():
         r,c = len(A), len(A[0])
         return [[(int(A[i][j]) ^ int(B[i][j])) & 1 for j in range(c)] for i in range(r)]
 
-if "_svr_atomic_write_json" not in globals():
-    def _guarded_atomic_write_json(path: Path, payload: dict):
-        tmp = path.with_suffix(path.suffix + ".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            _json.dump(payload, f, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-            f.flush(); os.fsync(f.fileno())
-        os.replace(tmp, path)
 
 
 
-# cert scaffold (reuse your existing ones if present)
+
+
 # cert scaffold (v2 header; no integrity payload)
 if "_svr_cert_common" not in globals():
     def _svr_cert_common(ib, rc, policy_tag: str, extra: dict | None = None) -> dict:
