@@ -2687,33 +2687,7 @@ def policy_label_from_cfg(cfg: dict) -> str:
 def validate_projector_file_strict(P, *, n3: int, lane_mask: list[int]):
     return  # implement later if you want strict checks for Π
 
-# ---- compat adapter for current_inputs_sig (handles 0-arg & 1-arg versions) ----
-def _current_inputs_sig_compat(*args, **kwargs):
-    """
-    Try to call current_inputs_sig as-is. If the active def only accepts 0 args,
-    fall back to reading from provided _ib (or session).
-    Returns a 5-tuple (B,C,H,U,S).
-    """
-    try:
-        # if your canonical version exists, this just works
-        return current_inputs_sig(*args, **kwargs)
-    except TypeError:
-        # zero-arg legacy: extract _ib if caller provided it
-        _ib = None
-        if args:
-            _ib = args[0]
-        _ib = kwargs.get("_ib", _ib)
-        if _ib is not None:
-            h = dict((_ib or {}).get("hashes") or {})
-            return (
-                str(h.get("boundaries_hash") or ""),
-                str(h.get("C_hash")         or ""),
-                str(h.get("H_hash")         or ""),
-                str(h.get("U_hash")         or ""),
-                str(h.get("shapes_hash")    or ""),
-            )
-        # final fallback: whatever is frozen in session
-        return ssot_frozen_sig_from_ib()
+
 
 
 
