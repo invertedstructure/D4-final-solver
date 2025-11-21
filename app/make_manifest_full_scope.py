@@ -1438,15 +1438,7 @@ def hash_json(obj) -> str:
     s = json.dumps(_deep_intify(obj), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return _sha256_hex_text(s)
 
-# ------------------------- Fixtures Registry (cache) -------------------------
-def _fixtures_bytes_and_hash(path: str):
-    """Helper to read file bytes and compute hash."""
-    try:
-        b = Path(path).read_bytes()
-        h = _sha256_hex_bytes(b)
-        return b, h, path
-    except Exception:
-        return b"", "", path
+
 
 def load_fixtures_registry() -> dict | None:
     """Load and cache the fixtures registry with cache invalidation."""
