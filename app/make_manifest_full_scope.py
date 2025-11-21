@@ -2965,8 +2965,7 @@ def _bt_lanes_sig256(lanes):
 def _bt_identity(n):
     return [[1 if i==j else 0 for j in range(n)] for i in range(n)]
 
-def _bt_zero(r,c):
-    return [[0 for _ in range(c)] for __ in range(r)]
+
 
 def _bt_mul(A,B):
     try:
