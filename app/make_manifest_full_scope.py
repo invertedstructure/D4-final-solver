@@ -1,5 +1,26 @@
 import streamlit as st
+# === canonical constants / helpers (single source of truth) ===
 
+import os
+import json as _json
+import hashlib as _hashlib
+import uuid as _uuid
+import datetime as _datetime
+from pathlib import Path
+import os, tempfile
+import copy as _copy
+import json as _json
+import hashlib as _hash
+import json as _json
+import csv as _csv
+from pathlib import Path as _Path
+import datetime as _dt
+import random as _random
+import uuid, streamlit as st
+import json as _json
+from pathlib import Path as _Path
+import hashlib as _hash
+# Page config must be the first Streamlit command
 # == EARLY HELPERS (v2 wiring) ==
 # Safe UI nonce (prevents "no _ui_nonce" warning)
 try:
@@ -248,28 +269,7 @@ def _as3(ret):
 
 st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
 
-# === canonical constants / helpers (single source of truth) ===
 
-import os
-import json as _json
-import hashlib as _hashlib
-import uuid as _uuid
-import datetime as _datetime
-from pathlib import Path
-import os, tempfile
-import copy as _copy
-import json as _json
-import hashlib as _hash
-import json as _json
-import csv as _csv
-from pathlib import Path as _Path
-import datetime as _dt
-import random as _random
-import uuid, streamlit as st
-import json as _json
-from pathlib import Path as _Path
-import hashlib as _hash
-# Page config must be the first Streamlit command
 SCHEMA_VERSION = "2.0.0"
 ENGINE_REV     = "rev-20251022-1"
 
