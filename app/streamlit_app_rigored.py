@@ -1491,17 +1491,7 @@ def _ab_lane_vectors_bottom(H2, d3, C3, lm):
 
 
 
-def apply_fixture_to_session(fx: dict) -> None:
-    ss = st.session_state
-    ss["fixture_label"]     = fx.get("fixture_label","")
-    ss["gallery_tag"]       = fx.get("tag","")
-    ss["gallery_strictify"] = fx.get("strictify","tbd")
-    ss["growth_bumps"]      = int(fx.get("growth_bumps", 0))
 
-    rc = dict(ss.get("run_ctx") or {})
-    rc["fixture_label"] = ss["fixture_label"]
-    rc["fixture_code"]  = fx.get("fixture_code","")
-    ss["run_ctx"] = rc
 
 # --- baseline imports (defensive) ---
 import os, json, time, uuid, shutil, tempfile, hashlib
