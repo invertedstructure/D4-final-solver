@@ -2217,64 +2217,18 @@ def ssot_publish_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int, 
 
     return {"before": before, "after": after, "changed": changed}
 
-# --------------------- Staleness Check (non-blocking) ---------------------
-def ssot_is_stale() -> bool:
-    """True if current live fingerprint differs from frozen _inputs_block."""
-    ss = st.session_state
-    if not ss.get("_has_overlap"):
-        return False
-    frozen = ssot_frozen_sig_from_ib()
-    if not any(frozen):
-        return False
-    live_now = ssot_live_sig()
-    return tuple(frozen) != tuple(live_now)
 
-# ------------------------- Projector helpers -------------------------
-def _auto_pj_hash_from_rc(rc: dict) -> str:
-    """Stable hash for AUTO projector spec derived from lane_mask_k3."""
-    try:
-        lm = rc.get("lane_mask_k3") or []
-        blob = json.dumps(lm, sort_keys=True, separators=(",", ":"))
-        return _sha256_hex_text(blob)
-    except Exception:
-        return ""
+
+
 
 # ------------------------- Key Generators & Widget-Key Deduper -------------------------
 def _mkkey(ns: str, name: str) -> str:
     """Deterministic widget key: '<ns>__<name>'."""
     return f"{ns}__{name}"
 
-def ensure_unique_widget_key(key: str) -> str:
-    """
-    If a widget key was already used in this run, suffix it with __2/__3/…
-    Use this when you cannot easily rename at call site.
-    """
-    ss = st.session_state
-    used = ss.setdefault("_used_widget_keys", set())
-    if key not in used:
-        used.add(key); return key
-    i = 2
-    while True:
-        k2 = f"{key}__{i}"
-        if k2 not in used:
-            used.add(k2)
-            if not ss.get("_warned_dup_keys", False):
-                st.caption("⚠️ auto-deduped a duplicate widget key; please rename keys in code.")
-                ss["_warned_dup_keys"] = True
-            return k2
-        i += 1
 
-class _WKey:
-    shapes_up     = _mkkey("inputs",  "shapes_uploader")
-    shapes_up_alt = _mkkey("inputsB", "shapes_uploader")
-WKEY = _WKey()
 
-# ------------------------- Time/UUID Utilities -------------------------
-def new_run_id() -> str:
-    return str(uuid.uuid4())
 
-def _iso_utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
 
 # ------------------------- Fixture Nonce Utilities -------------------------
 def _ensure_fixture_nonce():
