@@ -2040,24 +2040,7 @@ _abx_embed_sig = _embed_sig_unified
 
 
 
-# ---- helper for recomputing diag lanes if the snapshot lacks them
-def _ab_lane_vectors_bottom(H2, d3, C3, lm):
-    """Lane vectors as bottom-row probes (matches your earlier UI semantics)."""
-    try:
-        H2d3  = mul(H2, d3) if _ab_shape_ok(H2, d3) else []
-        C3pI3 = _ab_xor(C3, _ab_eye(len(C3))) if (C3 and C3[0]) else []
-    except Exception:
-        H2d3, C3pI3 = [], []
-    def _bottom(M): 
-        try: return M[-1] if (M and len(M)) else []
-        except Exception: return []
-    bH, bC = _bottom(H2d3), _bottom(C3pI3)
-    idx = [j for j,m in enumerate(lm or []) if m]
-    vH = [int(bH[j]) & 1 for j in idx] if (bH and idx and max(idx) < len(bH)) else []
-    vC = [int(bC[j]) & 1 for j in idx] if (bC and idx and max(idx) < len(bC)) else []
-    return vH, vC
 
-    return hv, cv
 
 # ---------------- Fixture helpers (single source of truth) ----------------
 
