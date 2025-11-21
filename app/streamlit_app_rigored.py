@@ -781,24 +781,7 @@ def build_embed(*, inputs_sig_5, dims, district_id, fixture_label, policy_tag, p
     sig = _sha256_hex(_canonical_json(payload).encode("utf-8"))
     return payload, sig
 
-# Guarded atomic writer (never writes from read-only panels)
-def _guarded_guarded_atomic_write_json(path: Path, payload: dict) -> None:
-    try:
-        if hasattr(st, "session_state"):
-            if not st.session_state.get("_solver_one_button_active"):
-                # Panel is read-only; skip writes
-                return
-    except Exception:
-        # Headless / tests: proceed
-        pass
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with open(tmp, "w", encoding="utf-8") as f:
-        _json.dump(payload, f, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        f.flush(); os.fsync(f.fileno())
-    os.replace(tmp, path)
 
-# === /canonical block ===
 
 
 
