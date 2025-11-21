@@ -5310,73 +5310,7 @@ def _co_compute_projected_auto(H2, d3, C3):
         },
     }
 
-def _co_compute_freezer_FILE(ss, n3):
-    # attempt to get file projector diag lanes from session
-    lanes = None
-    try:
-        for key in ("file_lanes","file_pi_vec","file_projector_diag"):
-            v = ss.get(key)
-            if isinstance(v, (list,tuple)) and all((x in (0,1,True,False) for x in v)):
-                lanes = [1 if x else 0 for x in list(v)]
-                break
-        if lanes is None and isinstance(ss.get("file_projector_json"), dict):
-            diag = ss["file_projector_json"].get("diag") or ss["file_projector_json"].get("lanes")
-            if isinstance(diag, list):
-                lanes = [1 if x else 0 for x in diag]
-    except Exception:
-        lanes = None
 
-    if lanes is None:
-        return {"status": "NA", "na_reason_code": "FILE_PROJECTOR_MISSING"}, None
-    if len(lanes) != n3:
-        return {"status": "NA", "na_reason_code": "FILE_PROJECTOR_WRONG_SIZE"}, None
-    if sum(lanes)==0:
-        return {"status": "NA", "na_reason_code": "FILE_LANES_ZERO"}, lanes
-    return {"status": "OK", "na_reason_code": None}, lanes
-
-def _co_compute_projected_file(H2, d3, C3, lanes_file):
-    mC,nC = _co_shape(C3)
-    if not (mC==nC):
-        return {
-            "policy_tag": "projected(columns@k=3,file)",
-            "results": {"k3":{"eq": None}}, "na_reason_code": "C3_NON_SQUARE"
-        }
-    try:
-        Hd = _co_mm2(H2, d3)
-        R3 = _co_xor(Hd, _co_xor(C3, _co_eye(nC)))
-    except Exception as e:
-        return {"policy_tag": "projected(columns@k=3,file)",
-                "results": {"k3":{"eq": None}}, "na_reason_code": f"SHAPE_MISMATCH:{str(e)}"}
-    eq = _co_masked_allzero_cols(R3, lanes_file)
-    mism_cols_sel = []
-    mR,nR = _co_shape(R3)
-    for j in range(nR):
-        if lanes_file[j]==1:
-            for i in range(mR):
-                if R3[i][j]==1:
-                    mism_cols_sel.append(j); break
-    return {
-        "policy_tag": "projected(columns@k=3,file)",
-        "results": {
-            "k3": {"eq": bool(eq)},
-            "selected_cols": list(lanes_file),
-            "mismatch_cols_selected": mism_cols_sel,
-        },
-    }
-
-def _co_ab_compare(strict, proj, policy_label):
-    k3s = (strict.get("results",{}).get("k3",{}).get("eq"),
-           proj.get("results",{}).get("k3",{}).get("eq"))
-    embed = {"policy": policy_label}
-    emb_bytes = json.dumps(embed, sort_keys=True).encode("utf-8")
-    embed_sig = hashlib.sha256(emb_bytes).hexdigest()
-    return {
-        "ab_pair": {
-            "policy": policy_label,
-            "embed_sig": embed_sig,
-            "pair_vec": {"k2":[None,None], "k3":[k3s[0], k3s[1]]},
-        }
-    }
 
 def _svr_run_once_computeonly(ss=None):
     g = globals()
