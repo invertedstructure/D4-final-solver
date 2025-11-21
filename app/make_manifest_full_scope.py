@@ -2134,30 +2134,7 @@ def _mkkey(ns: str, name: str) -> str:
     """Deterministic widget key: '<ns>__<name>'."""
     return f"{ns}__{name}"
 
-def ensure_unique_widget_key(key: str) -> str:
-    """
-    If a widget key was already used in this run, suffix it with __2/__3/…
-    Use this when you cannot easily rename at call site.
-    """
-    ss = st.session_state
-    used = ss.setdefault("_used_widget_keys", set())
-    if key not in used:
-        used.add(key); return key
-    i = 2
-    while True:
-        k2 = f"{key}__{i}"
-        if k2 not in used:
-            used.add(k2)
-            if not ss.get("_warned_dup_keys", False):
-                st.caption("⚠️ auto-deduped a duplicate widget key; please rename keys in code.")
-                ss["_warned_dup_keys"] = True
-            return k2
-        i += 1
 
-class _WKey:
-    shapes_up     = _mkkey("inputs",  "shapes_uploader")
-    shapes_up_alt = _mkkey("inputsB", "shapes_uploader")
-WKEY = _WKey()
 
 # ------------------------- Time/UUID Utilities -------------------------
 def new_run_id() -> str:
