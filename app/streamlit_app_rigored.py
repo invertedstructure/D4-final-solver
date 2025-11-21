@@ -4272,30 +4272,6 @@ def _co_extract_mats(pb):
         return [[1 if (int(x) & 1) else 0 for x in r] for r in (M or [])]
     return _as01(H2), _as01(d3), _as01(C3)
 
-def _co_compute_strict(H2, d3, C3):
-    m2,n2 = _co_shape(H2)
-    mB,n3 = _co_shape(d3)
-    mC,nC = _co_shape(C3)
-    # guards
-    try:
-        Hd = _co_mm2(H2, d3)          # (n2 x n3)
-        CxorI = _co_xor(C3, _co_eye(nC)) if (mC==nC) else C3
-        R3 = _co_xor(Hd, CxorI)
-    except Exception as e:
-        return {"policy_tag":"strict(k=3)",
-                "results":{"k3":{"eq": None}}, "na_reason_code": f"SHAPE_MISMATCH:{str(e)}"}
-    zero_cols = _co_allzero_cols(R3)
-    eq = all(zero_cols) if R3 else False
-    selected = [1]*n3
-    mism_cols_sel = [j for j in range(n3) if not zero_cols[j]]
-    return {
-        "policy_tag": "strict(k=3)",
-        "results": {
-            "k3": {"eq": bool(eq)},
-            "selected_cols": selected,
-            "mismatch_cols_selected": mism_cols_sel,
-        },
-    }
 
 
 
