@@ -376,29 +376,7 @@ def _v2_canonical_obj(obj, exclude_keys=_V2_EPHEMERAL_KEYS):
 
     # primitives pass through
     return obj
-# --- A/B compares (argument-driven; no globals) ---
-def compute_ab_auto(strict_payload: dict, projected_auto_payload: dict, ib: dict = None) -> dict:
-    """
-    Compare strict vs projected(AUTO).
-    Uses ONLY the passed payloads; never references a global `strict`.
-    """
-    import hashlib, json as _json
-    k_strict = ((strict_payload or {}).get("results", {}) or {}).get("k3", {}).get("eq")
-    k_auto   = ((projected_auto_payload or {}).get("results", {}) or {}).get("k3", {}).get("eq")
 
-    embed = {"policy": "strict__VS__projected(columns@k=3,auto)"}
-    embed_sig = hashlib.sha256(
-        _json.dumps(embed, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    ).hexdigest()
-
-    return {
-        "ab_pair": {
-            "policy": embed["policy"],
-            "embed_sig": embed_sig,
-            "pair_vec": {"k2": [None, None], "k3": [bool(k_strict) if k_strict is not None else None,
-                                                    bool(k_auto)   if k_auto   is not None else None]},
-        }
-    }
 
 
 def compute_ab_file(strict_or_file_payload: dict, maybe_file_or_freezer: dict, ib: dict = None) -> dict:
