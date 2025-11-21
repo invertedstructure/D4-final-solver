@@ -243,20 +243,7 @@ def _as3(ret):
     
 
 
-# ===== Helper: lanes sig8 + suite message (always defined) =====
-def _lanes_sig8_from_list(L):
-    import hashlib as _hashlib
-    try:
-        b = bytearray(); acc = 0; bit = 0
-        for v in (int(x) for x in (L or [])):
-            if v: acc |= (1 << bit)
-            bit += 1
-            if bit == 8:
-                b.append(acc); acc = 0; bit = 0
-        if bit: b.append(acc)
-        return _hashlib.sha256(bytes(b)).hexdigest()[:8]
-    except Exception:
-        return None
+
 
 
 st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
