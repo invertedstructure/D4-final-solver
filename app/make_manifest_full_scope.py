@@ -2136,12 +2136,9 @@ def _mkkey(ns: str, name: str) -> str:
 
 
 
-# ------------------------- Time/UUID Utilities -------------------------
-def new_run_id() -> str:
-    return str(uuid.uuid4())
 
-def _iso_utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+
+
 
 # ------------------------- Fixture Nonce Utilities -------------------------
 def _ensure_fixture_nonce():
