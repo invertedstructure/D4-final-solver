@@ -2520,14 +2520,9 @@ def _read_jsonl_tail(path: Path, N: int = 200) -> list[dict]:
 
 
 
-def is_strict_red_lanes(run_ctx: dict | None, overlap_out: dict | None, residual_tags: dict | None) -> bool:
-    if not run_ctx or not overlap_out: return False
-    if str(run_ctx.get("mode") or "") != "strict": return False
-    if bool(((overlap_out.get("3") or {}).get("eq", True))): return False
-    tag = ((residual_tags or {}).get("strict") or "")
-    return tag == "lanes"
 
-# ------------------------- Hash Key Builders -------------------------
+
+
 def gallery_key(row: dict) -> tuple:
     pol = row.get("policy") or {}; h = row.get("hashes") or {}
     return (row.get("district",""), pol.get("policy_tag",""),
