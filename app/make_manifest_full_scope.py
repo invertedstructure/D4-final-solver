@@ -2095,29 +2095,7 @@ def _bump_fixture_nonce():
 _mark_fixtures_changed      = _bump_fixture_nonce  # legacy alias
 _soft_reset_before_overlap   = lambda: soft_reset_before_overlap()
 
-# ------------------------- Freshness Guard (non-blocking variant) -------------------------
-def require_fresh_run_ctx(*, stop_on_error: bool = False):
-    """
-    Non-blocking by default: returns rc or None and emits warnings.
-    If stop_on_error=True, mimics old behavior and st.stop() on violations.
-    """
-    _ensure_fixture_nonce()
-    ss = st.session_state
-    rc = ss.get("run_ctx")
-    def _halt(msg):
-        st.warning(msg)
-        if stop_on_error:
-            st.stop()
 
-    if not rc:
-        _halt("STALE_RUN_CTX: Run Overlap first."); return None
-    if int(rc.get("fixture_nonce", -1)) != int(ss.get("fixture_nonce", -2)):
-        _halt("STALE_RUN_CTX: Inputs changed; please click Run Overlap to refresh."); return None
-    n3 = int(rc.get("n3") or 0)
-    lm = list(rc.get("lane_mask_k3") or [])
-    if lm and n3 and len(lm) != n3:
-        _halt("Context mask length mismatch; please click Run Overlap to refresh."); return None
-    return rc
 
 # ------------------------- Mask from d3 (truth mask) -------------------------
 def _truth_mask_from_d3(d3: list[list[int]]) -> list[int]:
