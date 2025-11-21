@@ -1833,20 +1833,7 @@ def _frozen_inputs_sig_from_ib(ib, as_tuple: bool = True):
     sig5 = (hash_d, hash_U, hash_suppC, hash_suppH, hash_shapes)
     return sig5 if as_tuple else list(sig5)
 
-# Optional: single hex digest over the 5-hash tuple (stable, canonical JSON)
-def _frozen_inputs_sig5_hex(ib):
-    try:
-        _json  # type: ignore
-    except NameError:
-        import json as _json  # noqa: F401
-    try:
-        _hashlib  # type: ignore
-    except NameError:
-        import hashlib as _hashlib  # noqa: F401
 
-    sig5 = _frozen_inputs_sig_from_ib(ib, as_tuple=False)
-    blob = _json.dumps(sig5, separators=(",", ":"), sort_keys=False).encode("ascii")
-    return _hashlib.sha256(blob).hexdigest()
 
 
 # --- strict / projected(columns@k=3,auto) helpers (guarded) --------------------------------
