@@ -760,19 +760,6 @@ def _bits_to_str(bits) -> str:
 
 
 
-def build_embed(*, inputs_sig_5, dims, district_id, fixture_label, policy_tag, projection_context):
-    payload = {
-        "schema_version": SCHEMA_VERSION,
-        "engine_rev": ENGINE_REV,
-        "inputs_sig_5": inputs_sig_5,
-        "dims": dims,
-        "district_id": district_id,
-        "fixture_label": fixture_label or "",
-        "policy": policy_tag,  # "strict__VS__projected(columns@k=3,auto|file)"
-        "projection_context": projection_context,
-    }
-    sig = _sha256_hex(_canonical_json(payload).encode("utf-8"))
-    return payload, sig
 
 
 
