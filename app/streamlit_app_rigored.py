@@ -2245,17 +2245,7 @@ def _atomic_append_jsonl(path: Path, row: dict):
 
 
 
-def is_projected_green(run_ctx: dict | None, overlap_out: dict | None) -> bool:
-    if not run_ctx or not overlap_out: return False
-    mode = str(run_ctx.get("mode") or "")
-    return mode.startswith("projected") and bool(((overlap_out.get("3") or {}).get("eq", False)))
 
-def is_strict_red_lanes(run_ctx: dict | None, overlap_out: dict | None, residual_tags: dict | None) -> bool:
-    if not run_ctx or not overlap_out: return False
-    if str(run_ctx.get("mode") or "") != "strict": return False
-    if bool(((overlap_out.get("3") or {}).get("eq", True))): return False
-    tag = ((residual_tags or {}).get("strict") or "")
-    return tag == "lanes"
 
 
 
