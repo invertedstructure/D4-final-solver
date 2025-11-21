@@ -4297,46 +4297,7 @@ def _co_compute_strict(H2, d3, C3):
         },
     }
 
-def _co_compute_projected_auto(H2, d3, C3):
-    m2,n2 = _co_shape(H2)
-    mB,n3 = _co_shape(d3)
-    mC,nC = _co_shape(C3)
-    if not (mC==nC):
-        return {
-            "policy_tag": "projected(columns@k=3,auto)",
-            "results": {"k3":{"eq": None}},
-            "na_reason_code": "C3_NON_SQUARE"
-        }
-    lanes = list((C3[-1] if mC>0 else [0]*nC))
-    pop = sum(1 for x in lanes if x==1)
-    if pop==0:
-        return {
-            "policy_tag": "projected(columns@k=3,auto)",
-            "results": {"k3":{"eq": None}, "selected_cols": lanes},
-            "na_reason_code": "LANES_ZERO"
-        }
-    try:
-        Hd = _co_mm2(H2, d3)
-        R3 = _co_xor(Hd, _co_xor(C3, _co_eye(nC)))
-    except Exception as e:
-        return {"policy_tag": "projected(columns@k=3,auto)",
-                "results": {"k3":{"eq": None}}, "na_reason_code": f"SHAPE_MISMATCH:{str(e)}"}
-    eq = _co_masked_allzero_cols(R3, lanes)
-    mism_cols_sel = []
-    mR,nR = _co_shape(R3)
-    for j in range(nR):
-        if lanes[j]==1:
-            for i in range(mR):
-                if R3[i][j]==1:
-                    mism_cols_sel.append(j); break
-    return {
-        "policy_tag": "projected(columns@k=3,auto)",
-        "results": {
-            "k3": {"eq": bool(eq)},
-            "selected_cols": lanes,
-            "mismatch_cols_selected": mism_cols_sel,
-        },
-    }
+
 
 def _co_compute_freezer_FILE(ss, n3):
     # attempt to get file projector diag lanes from session
