@@ -2984,11 +2984,7 @@ def _bt_mul(A,B):
                     C[i][j] ^= (Bt[j] & 1)
     return C
 
-def _bt_xor(A,B):
-    if not A: return [r[:] for r in (B or [])]
-    if not B: return [r[:] for r in (A or [])]
-    r,c = len(A), len(A[0])
-    return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
+
 
 def _bt_is_zero(M):
     return (not M) or all(((x & 1) == 0) for row in M for x in row)
