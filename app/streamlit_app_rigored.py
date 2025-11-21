@@ -4235,15 +4235,7 @@ def _co_xor(A,B):
 def _co_eye(n):
     return [[1 if i==j else 0 for j in range(n)] for i in range(n)]
 
-def _co_allzero_cols(M):
-    m,n = _co_shape(M)
-    zero = [True]*n
-    for i in range(m):
-        row = M[i]
-        for j in range(n):
-            if row[j] == 1:
-                zero[j] = False
-    return zero  # True means column is all zeros
+
 
 def _co_masked_allzero_cols(M, lanes):
     # check columns with lanes[j]==1 are all-zero
