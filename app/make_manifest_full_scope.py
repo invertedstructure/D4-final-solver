@@ -3002,15 +3002,7 @@ def publish_inputs_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int
     )
 with tab2:
     st.subheader("Overlap")
-    # Your provided code starts here
-    def _xor_mat(A, B):
-        # prefer library add() if available (keeps one implementation)
-        if "add" in globals() and callable(globals()["add"]):
-            return globals()["add"](A, B)
-        if not A: return [r[:] for r in (B or [])]
-        if not B: return [r[:] for r in (A or [])]
-        r, c = len(A), len(A[0])
-        return [[(A[i][j] ^ B[i][j]) & 1 for j in range(c)] for i in range(r)]
+
 
     def _bottom_row(M):
         return M[-1] if (M and len(M)) else []
