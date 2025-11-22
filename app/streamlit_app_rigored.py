@@ -2416,13 +2416,6 @@ if "_svr_mul" not in globals():
                         C[i][j] ^= (int(Bt[j]) & 1)
         return C
 
-if "_svr_xor" not in globals():
-    def _svr_xor(A,B):
-        if not A: return [row[:] for row in (B or [])]
-        if not B: return [row[:] for row in (A or [])]
-        r,c = len(A), len(A[0])
-        return [[(int(A[i][j]) ^ int(B[i][j])) & 1 for j in range(c)] for i in range(r)]
-
 # cert scaffold (v2 header; no integrity payload)
 if "_svr_cert_common" not in globals():
     def _svr_cert_common(ib, rc, policy_tag: str, extra: dict | None = None) -> dict:
