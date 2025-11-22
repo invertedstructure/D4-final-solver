@@ -2558,7 +2558,7 @@ def _time_tau_c2_build_row_from_manifest(rec: dict, max_flips_per_kind: int = 16
 
         # Compute a strict_sig8 exactly as in the C1 SSOT panel: hash the minimal
         # strict core (d3, C3, H2) over F2.
-               core0 = time_tau_strict_core_from_blocks(blocks_B, blocks_C, blocks_H)
+        core0 = time_tau_strict_core_from_blocks(blocks_B, blocks_C, blocks_H)
         core_repr = {
             "d3": core0.get("d3"),
             "C3": core0.get("C3"),
