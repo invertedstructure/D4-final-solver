@@ -821,99 +821,6 @@ PARITY_CSV_PATH  = globals().get("PARITY_CSV_PATH",  PARITY_SUMMARY_CSV)
 LOGS_DIR = Path(globals().get("LOGS_DIR", "logs"))
 LOGS_DIR.mkdir(parents=True, exist_ok=True)
 
-
-
-# =============================== TOP HELPERS — CANONICAL ===============================
-# This block replaces the previous duplicate helpers. Single Source of Truth (SSOT).
-
-# --- Imports expected to be available ---
-# import os, json, time, uuid, shutil, tempfile, hashlib
-# from pathlib import Path
-# import streamlit as st
-# from datetime import datetime, timezone
-
-# ------------------------- Hashing Helpers -------------------------
-def _deep_intify(o):
-    if isinstance(o, bool): return 1 if o else 0
-    if isinstance(o, list): return [_deep_intify(x) for x in o]
-    if isinstance(o, dict): return {k: _deep_intify(v) for k, v in o.items()}
-    return o
-
-def _sha256_hex_bytes(b: bytes) -> str:
-    return hashlib.sha256(b).hexdigest()
-
-def canonical_json(obj) -> str:
-    """Canonical JSON string for hashing (bools → 0/1, sorted keys, tight separators).
-
-    v2 rule:
-      - Drop ephemeral keys / normalize structure via _v2_canonical_obj.
-      - Convert bools to 0/1 and recurse through lists/dicts via _deep_intify.
-      - Dump with sorted keys, tight separators, ensure_ascii=True.
-    """
-    try:
-        can = _v2_canonical_obj(obj)
-    except NameError:
-        # Fallback: if _v2_canonical_obj is not defined in some contexts, use obj directly
-        can = obj
-    return json.dumps(
-        _deep_intify(can),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=True,
-    )
-
-def hash_json(obj) -> str:
-    """Stable SHA-256 over a JSON-serializable object using canonical_json()."""
-    s = canonical_json(obj)
-    return _sha256_hex_text(s)
-
-def hash_json_sig8(obj) -> str:
-    """Short 'sig8' (first 8 hex chars) of hash_json(obj)."""
-    return hash_json(obj)[:8]
-
-# ------------------------- Fixture Label Helpers (v2 naming) -------------------------
-def make_fixture_label(district_id: str, h_mask: str, c_mask: str) -> str:
-    """Build canonical fixture label like 'D3_H10_C111' from pieces.
-
-    Rules:
-      - district_id is normalized to start with 'D' (e.g. '3' -> 'D3').
-      - h_mask and c_mask are coerced to strings (no padding assumptions here).
-    """
-    # Normalize district_id to include leading 'D'
-    d = str(district_id)
-    if not d.startswith("D"):
-        d = f"D{d}"
-    # Coerce masks to strings
-    h = str(h_mask)
-    c = str(c_mask)
-    return f"{d}_H{h}_C{c}"
-
-def parse_fixture_label(label: str) -> tuple[str, str, str]:
-    """Parse a canonical fixture label 'D3_H10_C111' into (district_id, h_mask, c_mask).
-
-    This is intentionally strict: if the label does not match the expected pattern,
-    a ValueError is raised so callers don't silently proceed with a malformed id.
-    """
-    import re as _re
-    s = str(label or "").strip()
-    m = _re.fullmatch(r"D(\d+)_H([01]+)_C([01]+)", s)
-    if not m:
-        raise ValueError(f"invalid fixture_label format: {label!r}")
-    d_num, h_mask, c_mask = m.groups()
-    district_id = f"D{d_num}"
-    return district_id, h_mask, c_mask
-
-# ------------------------- V2 Path Helpers (certs / bundles / receipts) -------------------------
-def _v2_certs_root() -> _Path:
-    """Canonical root for v2 cert bundles.
-
-    Prefer _CERTS_DIR if defined (repo_root/logs/certs); otherwise fall back to ./logs/certs.
-    """
-    try:
-        return _CERTS_DIR  # type: ignore[name-defined]
-    except NameError:
-        return _Path("logs") / "certs"
-
 def make_strict_cert_path(bundle_dir, district_id: str, sig8: str):
     """Return Path to the strict cert JSON inside a bundle dir.
 
@@ -937,20 +844,6 @@ def make_projected_file_cert_path(bundle_dir, district_id: str, sig8: str):
     """
     b = _Path(bundle_dir)
     return b / f"overlap__{district_id}__projected_columns_k_3_file__{sig8}.json"
-
-# ------------------------- V2 Artifact Builders (schemas & invariants) -------------------------
-
-def _v2_default_schema_version() -> str:
-    """Best-effort lookup for the global v2 schema version."""
-    return str(globals().get("SCHEMA_VERSION", "2.0.0"))
-
-
-def _v2_default_engine_rev() -> str:
-    """Best-effort lookup for the global engine revision."""
-    return str(globals().get("ENGINE_REV", "rev-UNSET"))
-
-
-
 
 def build_v2_strict_cert_payload(base_hdr: dict, verdict: bool | None) -> dict:
     """Strict cert payload from a base header and solver verdict.
