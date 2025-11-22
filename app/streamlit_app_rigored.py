@@ -504,24 +504,7 @@ def _solver_ret_as_tuple(ret):
     except Exception:
         pass
     return False, "solver returned unrecognized payload", None
-
-    
-def _as3(ret):
-    """Normalize any (ok,msg,count?) shape to exactly (ok:bool, msg:str, count:int)."""
-    if isinstance(ret, (tuple, list)):
-        if len(ret) >= 3: return bool(ret[0]), str(ret[1]), int(ret[2])
-        if len(ret) == 2: return bool(ret[0]), str(ret[1]), 0
-        if len(ret) == 1: return bool(ret[0]), "", 0
-    if isinstance(ret, dict):
-        ok  = bool(ret.get("ok", ret.get("success", False)))
-        msg = str(ret.get("msg", ret.get("message", "")))
-        n   = int(ret.get("count", ret.get("n", 0)) or 0)
-        return ok, msg, n
-    if isinstance(ret, bool):
-        return ret, "", 0
-    return False, "runner returned unexpected shape", 0
-    
-
+  
 st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
 
 
