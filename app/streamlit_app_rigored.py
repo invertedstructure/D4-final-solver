@@ -40,10 +40,6 @@ import pandas as _pd
 
 # Project-specific
 from otcore.linalg_gf2 import add as _add_lib, eye as _eye_lib, mul as _mul_lib
-
-# == EARLY HELPERS (v2 wiring) ==
-from pathlib import Path as _VPath
-import json as _Vjson, hashlib as _Vhash
 # --- C1 canonical paths (tuple; JSON-first) ---
 
 def _c1_paths():
