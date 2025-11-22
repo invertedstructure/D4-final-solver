@@ -6238,17 +6238,6 @@ def _time_tau_c3_build_and_write_receipt(
         # If we cannot ensure the directory, still return the in-memory receipt.
         return receipt
 
-    # Use a,b indices according to flip kind for human-readable naming.
-    if kind == "H2":
-        a_idx = i_idx if i_idx is not None else -1
-        b_idx = j_idx if j_idx is not None else -1
-    elif kind == "d3":
-        a_idx = j_idx if j_idx is not None else -1
-        b_idx = k_idx if k_idx is not None else -1
-    else:
-        a_idx = i_idx if i_idx is not None else -1
-        b_idx = j_idx if j_idx is not None else -1
-
     base_name = f"time_tau_c3_recompute__{fixture_label}__{strict_sig8}__{kind}_{a_idx}_{b_idx}"
     outp = exp_dir / f"{base_name}.json"
     try:
