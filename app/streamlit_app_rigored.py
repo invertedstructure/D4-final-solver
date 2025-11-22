@@ -633,20 +633,6 @@ if "_normalize_bit" not in globals():
         try: return 1 if (int(v) & 1) else 0
         except Exception: return 0
 
-if "_svr_residual_bits" not in globals():
-    def _svr_residual_bits(residual_bottom_row_bits: Iterable[int],
-                           selected_mask_bits: Iterable[int] | None) -> str:
-        try:
-            if selected_mask_bits is None:
-                row = list(residual_bottom_row_bits or [])
-                return "".join("1" if _normalize_bit(x) else "0" for x in row)
-            selected = [ _normalize_bit(r)
-                         for r, s in zip(residual_bottom_row_bits or [], selected_mask_bits or [])
-                         if _normalize_bit(s) ]
-            return "".join("1" if _normalize_bit(x) else "0" for x in selected)
-        except Exception:
-            return ""
-
 if "_selected_mask_strict" not in globals():
     def _selected_mask_strict(n3: int) -> List[int]:
         try: return [1] * int(n3)
