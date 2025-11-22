@@ -633,18 +633,6 @@ if "_normalize_bit" not in globals():
         try: return 1 if (int(v) & 1) else 0
         except Exception: return 0
 
-if "_svr_mismatch_cols" not in globals():
-    def _svr_mismatch_cols(residual_bottom_row_bits: Iterable[int],
-                           selected_mask_bits: Iterable[int]) -> List[int]:
-        idxs: List[int] = []
-        try:
-            for j, (r, s) in enumerate(zip(residual_bottom_row_bits, selected_mask_bits)):
-                if _normalize_bit(s) and _normalize_bit(r):
-                    idxs.append(j)
-        except Exception:
-            idxs = []
-        return idxs
-
 if "_svr_residual_bits" not in globals():
     def _svr_residual_bits(residual_bottom_row_bits: Iterable[int],
                            selected_mask_bits: Iterable[int] | None) -> str:
