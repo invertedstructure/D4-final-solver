@@ -972,21 +972,6 @@ def build_v2_bundle_index_payload(
         "counts": {"written": len(filenames or [])},
     }
 
-# ------------------------- SSOT: Stable hashes for block-like objects -------------------------
-def ssot_stable_blocks_sha(obj) -> str:
-    """
-    Compute stable sha256 of blocks-like objects.
-    Accepts an object with .blocks.__root__ OR a plain dict {"blocks": ...}.
-    """
-    try:
-        data = {"blocks": obj.blocks.__root__} if hasattr(obj, "blocks") else (
-            obj if isinstance(obj, dict) and "blocks" in obj else {"blocks": {}}
-        )
-        s = json.dumps(_deep_intify(data), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
-        return _sha256_hex_text(s)
-    except Exception:
-        return ""
-
 def ssot_frozen_sig_from_ib() -> tuple[str, str, str, str, str]:
     """Read the canonical 5-tuple from st.session_state['_inputs_block'] if present."""
     ib = st.session_state.get("_inputs_block") or {}
@@ -999,25 +984,6 @@ def ssot_frozen_sig_from_ib() -> tuple[str, str, str, str, str]:
     if not any((b, C, H, U, S)):
         return ("", "", "", "", "")
     return (b, C, H, U, S)
-
-
-# ------------------------- SSOT live fingerprint (what’s currently loaded in memory) -------------------------
-def ssot_live_sig(boundaries_obj=None, cmap_obj=None, H_obj=None, shapes_obj=None) -> tuple[str, str, str, str, str]:
-    """
-    Compute the live 5-tuple signature from in-memory objects:
-    (D, C, H, U, SHAPES). In this app U ≡ SHAPES, so we mirror the same hash for both.
-    """
-    boundaries_obj = boundaries_obj or globals().get("boundaries")
-    cmap_obj       = cmap_obj       or globals().get("cmap")
-    H_obj          = H_obj          or (st.session_state.get("overlap_H") or globals().get("H_obj"))
-    shapes_obj     = shapes_obj     or globals().get("shapes")
-
-    hB = ssot_stable_blocks_sha(boundaries_obj) if boundaries_obj else ""
-    hC = ssot_stable_blocks_sha(cmap_obj)       if cmap_obj       else ""
-    hH = ssot_stable_blocks_sha(H_obj)          if H_obj          else ""
-    hU = ssot_stable_blocks_sha(shapes_obj)     if shapes_obj     else ""
-    hS = hU  # mirror by design
-    return (hB, hC, hH, hU, hS)
 
 
 
