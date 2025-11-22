@@ -624,10 +624,6 @@ def district_from_hash(boundaries_hash: str) -> str:
 
 def _canonical_json(d: dict) -> str:
     return _json.dumps(d, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-
-def _sha256_hex(s: bytes) -> str:
-    return _hashlib.sha256(s).hexdigest()
-
 # ────────────────────────────── PACKAGE LOADER ──────────────────────────────
 HERE = Path(__file__).resolve().parent
 OTCORE = HERE / "otcore"
