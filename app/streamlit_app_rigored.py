@@ -1552,23 +1552,6 @@ def new_run_id() -> str:
 def _iso_utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-# ------------------------- Fixture Nonce Utilities -------------------------
-def _ensure_fixture_nonce():
-    ss = st.session_state
-    if "fixture_nonce" not in ss:
-        ss["fixture_nonce"] = int(ss.get("_fixture_nonce", 0)) or 1
-        ss["_fixture_nonce"] = ss["fixture_nonce"]
-
-def _bump_fixture_nonce():
-    ss = st.session_state
-    cur = int(ss.get("fixture_nonce", 0))
-    ss["fixture_nonce"] = cur + 1
-    ss["_fixture_nonce"] = ss["fixture_nonce"]
-
-_mark_fixtures_changed      = _bump_fixture_nonce  # legacy alias
-_soft_reset_before_overlap   = lambda: soft_reset_before_overlap()
-
-
 def _truth_mask_from_d3(d3: list[list[int]]) -> list[int]:
     if not d3 or not d3[0]:
         return []
