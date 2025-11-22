@@ -1409,13 +1409,6 @@ def build_v2_world_snapshot_payload(
         "plan_full_scope": list(plan_full_scope or []),
     }
 
-
-def build_v2_world_snapshot_id(payload: dict) -> str:
-    """Compute content-addressed snapshot_id for a world_snapshot payload."""
-    # We deliberately use the canonical v2 JSON hasher here, ignoring snapshot_id itself.
-    sig8 = hash_json_sig8(payload)
-    return f"ws__{sig8}"
-
 # ------------------------- SSOT: Stable hashes for block-like objects -------------------------
 def ssot_stable_blocks_sha(obj) -> str:
     """
@@ -1431,7 +1424,6 @@ def ssot_stable_blocks_sha(obj) -> str:
     except Exception:
         return ""
 
-# ------------------------- Current Inputs Signature (frozen) -------------------------
 def ssot_frozen_sig_from_ib() -> tuple[str, str, str, str, str]:
     """Read the canonical 5-tuple from st.session_state['_inputs_block'] if present."""
     ib = st.session_state.get("_inputs_block") or {}
