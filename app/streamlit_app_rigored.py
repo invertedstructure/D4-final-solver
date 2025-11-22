@@ -3246,16 +3246,15 @@ with st.expander("Lab — Time(τ) local flip toy (v3-prelude, read-only)", expa
                     c_tag = _Path(pC).stem
                     fixture_label = f"{d_tag}_{h_tag}_{c_tag}"
 
-                    import hashlib, json as _json
                     core0 = time_tau_strict_core_from_blocks(bB, bC, bH)
                     core_repr = {
                         "d3": core0["d3"],
                         "C3": core0["C3"],
                         "H2": core0["H2"],
                     }
-                    strict_sig8 = hashlib.sha256(
-                        _json.dumps(core_repr, sort_keys=True, separators=(",", ":")).encode("utf-8")
-                    ).hexdigest()[:8]
+                    # v2: strict_sig8 via canonical hash_json_sig8(core_repr)
+                    strict_sig8 = hash_json_sig8(core_repr)
+
 
                     run_id = pf.get("run_id")
                     _write_time_tau_artifacts(fixture_label, strict_sig8, toy_out, summary, snapshot_id, run_id)
