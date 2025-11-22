@@ -2832,20 +2832,6 @@ def _svr_apply_sig8(cert: dict, embed_sig: str) -> None:
 # small witness helper
 def _bottom_row(M): return M[-1] if (M and len(M)) else []
 
-
-
-
-
-
-
-
-    
-                                  
-                    
-
-
-
-
 # ========================= Solver entrypoint (v2: emit baseline certs) =========================
 def run_overlap_once(ss=st.session_state):
     """
