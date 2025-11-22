@@ -1674,15 +1674,7 @@ with tab2:
 
     def _bottom_row(M):
         return M[-1] if (M and len(M)) else []
-
-    
-    def _derive_mode_from_cfg(cfg: dict) -> str:
-        if not cfg or not cfg.get("enabled_layers"):
-            return "strict"
-        src = (cfg.get("source", {}) or {}).get("3", "auto")
-        return "projected(columns@k=3,file)" if src == "file" else "projected(columns@k=3,auto)"
-
-   
+  
     def _shape(M):
         return (len(M), len(M[0]) if (M and M[0]) else 0)
 
