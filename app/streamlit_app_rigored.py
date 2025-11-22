@@ -1640,15 +1640,7 @@ def build_v2_suite_row(
         row.update(extra)
     return row
 
-# ------------------------- Fixtures Registry (cache) -------------------------
-def _fixtures_bytes_and_hash(path: str):
-    """Helper to read file bytes and compute hash."""
-    try:
-        b = Path(path).read_bytes()
-        h = _sha256_hex_bytes(b)
-        return b, h, path
-    except Exception:
-        return b"", "", path
+
 # =============================== V2 Artifact Builders (pure constructors) ===============================
 def build_v2_cert_base_header(
     *,
