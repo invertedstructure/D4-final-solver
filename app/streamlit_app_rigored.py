@@ -2591,21 +2591,6 @@ def is_strict_red_lanes(run_ctx: dict | None, overlap_out: dict | None, residual
     tag = ((residual_tags or {}).get("strict") or "")
     return tag == "lanes"
 
-# ------------------------- Hash Key Builders -------------------------
-def gallery_key(row: dict) -> tuple:
-    pol = row.get("policy") or {}; h = row.get("hashes") or {}
-    return (row.get("district",""), pol.get("policy_tag",""),
-            h.get("boundaries_hash",""), h.get("C_hash",""), h.get("H_hash",""), h.get("U_hash",""))
-
-def witness_key(row: dict) -> tuple:
-    pol = row.get("policy") or {}; h = row.get("hashes") or {}
-    return (row.get("district",""), row.get("reason",""), row.get("residual_tag",""),
-            pol.get("policy_tag",""), h.get("boundaries_hash",""), h.get("C_hash",""),
-            h.get("H_hash",""), h.get("U_hash",""))
-
-if "_gallery_keys" not in st.session_state: st.session_state["_gallery_keys"] = set()
-if "_witness_keys" not in st.session_state: st.session_state["_witness_keys"] = set()
-
 # ------------------------- Run Stamp -------------------------
 def run_stamp_line() -> str:
     ss = st.session_state
@@ -2621,8 +2606,6 @@ def run_stamp_line() -> str:
     return f"{pol} | n3={n3} | B {hB} · C {hC} · H {hH} · U {hU} | P {pH} | run {rid}"
 
 
-# ============================= END TOP HELPERS — CANONICAL =============================
-# ---------- Uploaded-file cache ----------
 def _upload_cache() -> dict:
     return st.session_state.setdefault("_upload_cache", {})  # {sha256: {"bytes": b, "json": obj, "name": str}}
 
