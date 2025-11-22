@@ -3084,10 +3084,6 @@ def _hard_co_xor(A,B):
         raise ValueError("shape mismatch for xor")
     return [[(A[i][j]^B[i][j]) for j in range(n)] for i in range(m)]
 
-def _hard_co_bitsig256(bits):
-    import hashlib
-    return hashlib.sha256(_json.dumps([1 if b else 0 for b in bits], separators=(",", ":"), sort_keys=False).encode("utf-8")).hexdigest()
-
 def time_tau_strict_core_from_blocks(blocks_B: dict, blocks_C: dict, blocks_H: dict) -> dict:
     """
     Minimal strict core for the Time(τ) toy:
