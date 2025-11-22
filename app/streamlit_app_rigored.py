@@ -1115,41 +1115,6 @@ def build_embed(*, inputs_sig_5, dims, district_id, fixture_label, policy_tag, p
     }
     sig = _sha256_hex(_canonical_json(payload).encode("utf-8"))
     return payload, sig
-
-
-
-
-# ---------- Policy receipt (B) ----------
-def _policy_receipt(*, mode: str, posed: bool, lane_policy: str = "", lanes: list[int] | None = None,
-                    projector_source: str = "", projector_hash: str | None = None,
-                    n3: int | None = None) -> dict:
-    canon = (
-        "strict" if mode.startswith("strict")
-        else "projected(columns@k=3,auto)" if "auto" in mode
-        else "projected(columns@k=3,file)"
-    )
-    L = [int(x) & 1 for x in (lanes or [])]
-    k = sum(L)
-    n3v = int(n3 if n3 is not None else (len(L) if L else 0))
-    density = (k / n3v) if (n3v > 0) else 0.0
-    rec = {
-        "canon": canon,
-        "posed": bool(posed),
-        "lane_policy": lane_policy or ("file projector" if "file" in canon else ("C bottom row" if "auto" in canon else "")),
-        "lanes": L,
-        "lane_sum": k,
-        "lane_density": density,
-    }
-    if "file" in canon:
-        pj = {}
-        if projector_hash:
-            pj["source"] = "file"
-            pj["hash"]   = str(projector_hash)
-            pj["shape"]  = [n3v, n3v] if n3v else [0, 0]
-            pj["idempotent"] = True  # diagonal boolean Π → idempotent over 𝔽₂
-        rec["projector"] = pj
-    return rec
-
 # ---------- FREEZER mismatch JSONL (C) ----------
 def _log_freezer_mismatch(*, fixture_id: str, auto_lanes: list[int], file_lanes: list[int],
                           verdict_auto: bool | None, verdict_file: bool | None):
