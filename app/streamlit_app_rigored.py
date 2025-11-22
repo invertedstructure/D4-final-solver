@@ -3487,17 +3487,6 @@ def _hard_verdict_class(strict_eq, supp_R3, lanes, ker_mask, posed: bool):
         return "KER-EXPOSED" if exposed else "KER-FILTERED"
     return "RED_BOTH"
 
-def _hard_co_extract_mats(pb):
-    def _blocks(x):
-        if isinstance(x, (list, tuple)) and len(x)>=2:
-            return x[1] or {}
-        return {}
-    bB = _blocks(pb.get("B")); bC = _blocks(pb.get("C")); bH = _blocks(pb.get("H"))
-    H2 = bH.get("2") or []; d3 = bB.get("3") or []; C3 = bC.get("3") or []
-    def _as01(M):
-        return [[1 if (int(x) & 1) else 0 for x in r] for r in (M or [])]
-    return _as01(H2), _as01(d3), _as01(C3)
-
 def _hard_fixture_tuple_from_paths(pB, pH, pC):
     import os, re
     bname = os.path.basename(os.fspath(pB or ""))
