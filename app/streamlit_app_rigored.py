@@ -77,6 +77,9 @@ from pathlib import Path
 import json as _json
 import hashlib as _hash
 from pathlib import Path as _Path
+from pathlib import Path as _Path
+import json as _json, hashlib as _hashlib, time as _time
+import streamlit as _st
 # == EARLY HELPERS (v2 wiring) ==
 
 # --- C1 canonical paths (tuple; JSON-first) ---
@@ -574,22 +577,6 @@ def _as3(ret):
     return False, "runner returned unexpected shape", 0
     
 
-
-# ===== Helper: lanes sig8 + suite message (always defined) =====
-def _lanes_sig8_from_list(L):
-    import hashlib as _hashlib
-    try:
-        b = bytearray(); acc = 0; bit = 0
-        for v in (int(x) for x in (L or [])):
-            if v: acc |= (1 << bit)
-            bit += 1
-            if bit == 8:
-                b.append(acc); acc = 0; bit = 0
-        if bit: b.append(acc)
-        return _hashlib.sha256(bytes(b)).hexdigest()[:8]
-    except Exception:
-        return None
-
 st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
 
 
@@ -637,9 +624,7 @@ def _suite_index_add_row(row: dict) -> None:
 
 # ---------- Suite helpers (v2) ----------
 
-from pathlib import Path as _Path
-import json as _json, hashlib as _hashlib, time as _time
-import streamlit as _st
+
 
 _APP_DIR  = _Path(__file__).resolve().parent         # .../app
 _REPO_DIR = _APP_DIR.parent                          # repo root
