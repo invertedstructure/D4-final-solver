@@ -1574,21 +1574,6 @@ def is_strict_red_lanes(run_ctx: dict | None, overlap_out: dict | None, residual
     tag = ((residual_tags or {}).get("strict") or "")
     return tag == "lanes"
 
-# ------------------------- Run Stamp -------------------------
-def run_stamp_line() -> str:
-    ss = st.session_state
-    rc = ss.get("run_ctx") or {}
-    ib = (ss.get("_inputs_block") or {}).get("hashes", {})
-    pol = rc.get("policy_tag", "?"); n3 = int(rc.get("n3") or 0)
-    hB = (ib.get("boundaries_hash","") or "")[:8]
-    hC = (ib.get("C_hash","")         or "")[:8]
-    hH = (ib.get("H_hash","")         or "")[:8]
-    hU = (ib.get("U_hash","")         or "")[:8]
-    pH = (rc.get("projector_hash","") or "")[:8]
-    rid= (rc.get("run_id","")         or "")[:8]
-    return f"{pol} | n3={n3} | B {hB} · C {hC} · H {hH} · U {hU} | P {pH} | run {rid}"
-
-
 def safe_expander(label: str, expanded: bool = False):
     try:
         return st.expander(label, expanded=expanded)
