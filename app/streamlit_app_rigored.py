@@ -903,22 +903,7 @@ def _lane_mask_from_d3(*args):
 
     # Unknown shape
     return []
-if "_lane_mask_from_d3" not in globals():
-    def _lane_mask_from_d3(*args):
-        # Prefer C3 if present
-        C3 = None
-        if len(args) == 1 and isinstance(args[0], dict):
-            C3 = args[0].get("3")
-        elif len(args) == 1:
-            C3 = args[0]
-        elif len(args) >= 2:
-            C3 = (args[1].get("3") if isinstance(args[1], dict) else args[1])
-        if C3 and isinstance(C3, list) and C3 and len(C3) == len(C3[0]):
-            return [int(x) & 1 for x in (C3[-1] or [])]
-        # fallback: zero mask from d3 width
-        d3 = (args[0].get("3") if len(args) >= 1 and isinstance(args[0], dict) else (args[0] if len(args)>=1 else None))
-        n3 = (len(d3[0]) if d3 and d3 and isinstance(d3[0], list) else 0)
-        return [0]*n3 if n3 else []
+
 
 def _district_signature(*args, prefix: str = "D", size: int = 8, return_hash: bool = False):
     """
