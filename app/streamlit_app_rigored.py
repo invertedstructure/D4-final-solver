@@ -820,60 +820,7 @@ if "_svr_projected_auto_from_blocks" not in globals():
         eq3 = _svr_is_zero(R3p)
         return {"na": False, "policy": "auto_c_bottom"}, lanes, {"2": {"eq": True}, "3": {"eq": bool(eq3)}}
 
-def _inputs_sig_from_frozen_ib() -> list[str]:
-    ib = st.session_state.get("_inputs_block") or {}
-    h  = (ib.get("hashes") or {})
-    return [
-        str(h.get("boundaries_hash","")),
-        str(h.get("C_hash","")),
-        str(h.get("H_hash","")),
-        str(h.get("U_hash","")),
-        str(h.get("shapes_hash","")),
-    ]
 
-def _lanes_from_frozen_C3_bottom() -> list[int]:
-    """Read C3 from the *frozen* SSOT file and return its bottom row as a lane mask (AUTO policy).
-       Returns [] if not square/unavailable."""
-    try:
-        ib = st.session_state.get("_inputs_block") or {}
-        pC = (ib.get("filenames") or {}).get("C", "")
-        if not pC:
-            return []
-        j = _json.loads(Path(pC).read_text(encoding="utf-8"))
-        C3 = (j.get("blocks") or {}).get("3") or []
-        if C3 and len(C3) == len(C3[0]):
-            bottom = C3[-1]
-            return [1 if int(x) == 1 else 0 for x in bottom]
-    except Exception:
-        pass
-    return []
-
-def _embed_sig_unified() -> str:
-    """Single source of truth for A/B freshness: same hash the solver uses in certs."""
-    ib_sig = _inputs_sig_from_frozen_ib()
-    rc     = st.session_state.get("run_ctx") or {}
-    pol    = str(rc.get("policy_tag") or rc.get("mode") or "projected(columns@k=3,auto)")
-
-    # Prefer FILE if explicitly selected
-    if pol.endswith("(file)"):
-        pj_hash = rc.get("projector_hash", "")
-        if "_svr_embed_sig" in globals():
-            return _svr_embed_sig(ib_sig, "projected(columns@k=3,file)", pj_hash)
-        else:
-            # minimal fallback if _svr_embed_sig is not present
-            blob = {"inputs": ib_sig, "policy": "projected(columns@k=3,file)", "projector_hash": pj_hash}
-            return _hashlib.sha256(_json.dumps(blob, separators=(",", ":"), sort_keys=True).encode("ascii")).hexdigest()
-
-    # AUTO policy
-    lanes = list(rc.get("lane_mask_k3") or []) or _lanes_from_frozen_C3_bottom()
-    if "_svr_embed_sig" in globals():
-        return _svr_embed_sig(ib_sig, "projected(columns@k=3,auto)", (lanes if lanes else "ZERO_LANE_PROJECTOR"))
-    else:
-        blob = {"inputs": ib_sig, "policy": "projected(columns@k=3,auto)", "lanes": lanes}
-        return _hashlib.sha256(_json.dumps(blob, separators=(",", ":"), sort_keys=True).encode("ascii")).hexdigest()
-
-# Back-compat: make the old freshness checker use the unified signature
-_abx_embed_sig = _embed_sig_unified
 
 # --- legacy aliases to avoid NameError from older code paths ---
 _json = json                               # some helpers still used _json.*
