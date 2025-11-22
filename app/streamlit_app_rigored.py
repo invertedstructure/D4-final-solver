@@ -2165,38 +2165,6 @@ def _bytes_from_upload(upload) -> tuple[bytes, str]:
         return (bytes(upload), name)
     return b"", ""
 
-def read_json_file(upload):
-    """
-    Robust JSON reader with caching. Returns dict or None.
-    Safe to call multiple times on the same UploadedFile.
-    """
-    # Short-circuit for dict
-    if isinstance(upload, dict):
-        return upload
-
-    data, name = _bytes_from_upload(upload)
-    if not data:
-        return None
-
-    h = hashlib.sha256(data).hexdigest()
-    cache = _upload_cache()
-    entry = cache.get(h)
-    if entry and "json" in entry:
-        return entry["json"]
-
-    # Decode then parse
-    try:
-        # Try utf-8 first, fallback to latin-1 (very rare)
-        try:
-            txt = data.decode("utf-8")
-        except UnicodeDecodeError:
-            txt = data.decode("latin-1")
-        obj = json.loads(txt)
-        cache[h] = {"bytes": data, "json": obj, "name": name}
-        return obj
-    except Exception as e:
-        st.warning(f"Failed to parse JSON from {name}: {e}")
-        return None
 
 def _stamp_filename(state_key: str, upload):
     """
