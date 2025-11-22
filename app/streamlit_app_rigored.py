@@ -2371,13 +2371,7 @@ def run_overlap_once(ss=st.session_state):
     bundle_dir = _Path("logs") / "certs" / district_id / fixture_id / sig8
     bundle_dir.mkdir(parents=True, exist_ok=True)
 
-    # Helpers
-    def _canon_dump_and_sig8(obj: dict) -> tuple[str, str]:
-        can = _v2_canonical_obj(obj)
-        raw = _json.dumps(can, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        h = _hash.sha256(raw).hexdigest()
-        return raw.decode("utf-8"), h[:8]
-
+    #Helpers
     def _write_json(path: _Path, payload: dict) -> str:
         try:
             _guarded_atomic_write_json(path, payload)
