@@ -2123,47 +2123,6 @@ def run_stamp_line() -> str:
     return f"{pol} | n3={n3} | B {hB} · C {hC} · H {hH} · U {hU} | P {pH} | run {rid}"
 
 
-
-def _bytes_from_upload(upload) -> tuple[bytes, str]:
-    """
-    Return (bytes, display_name) from a variety of upload types:
-    - streamlit UploadedFile (getvalue/read)
-    - path-like (str/Path)
-    - raw bytes/bytearray
-    - already a parsed dict -> (None, "<dict>")  (caller should short-circuit)
-    """
-    if upload is None:
-        return b"", ""
-    # Already-parsed dict (some callers pass dicts)
-    if isinstance(upload, dict):
-        return b"", "<dict>"
-    # Streamlit UploadedFile
-    name = getattr(upload, "name", None) or "uploaded.json"
-    if hasattr(upload, "getvalue"):
-        try:
-            return upload.getvalue(), name
-        except Exception:
-            pass
-    if hasattr(upload, "read"):
-        try:
-            # Try not to consume permanently: read then rewind if possible
-            pos = upload.tell() if hasattr(upload, "tell") else None
-            data = upload.read()
-            if pos is not None and hasattr(upload, "seek"):
-                upload.seek(pos)
-            return data, name
-        except Exception:
-            pass
-    # File path
-    if isinstance(upload, (str, Path)):
-        p = Path(upload)
-        return (p.read_bytes(), p.name) if p.exists() else (b"", "")
-    # Bytes-like
-    if isinstance(upload, (bytes, bytearray)):
-        return (bytes(upload), name)
-    return b"", ""
-
-
 def safe_expander(label: str, expanded: bool = False):
     try:
         return st.expander(label, expanded=expanded)
