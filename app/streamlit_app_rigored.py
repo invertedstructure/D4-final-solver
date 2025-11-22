@@ -1545,16 +1545,6 @@ def soft_reset_before_overlap():
         ss.pop(k, None)
 
 # ------------------------- JSONL Helpers -------------------------
-def _atomic_append_jsonl(path: Path, row: dict):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    blob = json.dumps(row, separators=(",", ":"), sort_keys=True, ensure_ascii=False) + "\n"
-    with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as tmp:
-        tmp.write(blob); tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
-    with open(path, "a", encoding="utf-8") as final, open(tmp_name, "r", encoding="utf-8") as src:
-        shutil.copyfileobj(src, final)
-    os.remove(tmp_name)
-
-
 def is_projected_green(run_ctx: dict | None, overlap_out: dict | None) -> bool:
     if not run_ctx or not overlap_out: return False
     mode = str(run_ctx.get("mode") or "")
