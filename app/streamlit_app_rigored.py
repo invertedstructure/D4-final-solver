@@ -3343,39 +3343,6 @@ def _svr_hash_json(obj) -> str:
     except Exception:
         return ""
 
-def _ab_pick_pin(policy: str | None = None):
-    """Pick the right pin from session. policy in {None,'auto','file'}."""
-    ss = st.session_state
-    if policy == "file":
-        return ss.get("ab_pin_file") or ss.get("ab_pin")
-    if policy == "auto":
-        return ss.get("ab_pin_auto") or ss.get("ab_pin")
-    # default: prefer auto
-    return ss.get("ab_pin_auto") or ss.get("ab_pin_file") or ss.get("ab_pin")
-
-def _bundle_last_paths():
-    """Return latest bundle dir and the two A/B file paths if present."""
-    ss = st.session_state
-    bdir = str(ss.get("last_bundle_dir") or "")
-    if not bdir:
-        # try to reconstruct from last run header data in rc/ib
-        rc = ss.get("run_ctx") or {}
-        ib = ss.get("_inputs_block") or {}
-        sig8 = (ss.get("last_run_header") or "").split(" S=")[-1][:8] if ss.get("last_run_header") else ""
-        district = ib.get("district_id") or "DUNKNOWN"
-        # fall back to logs/certs/D*/sig8
-        bdir = str(Path("logs")/ "certs" / district / sig8)
-    p_auto = Path(bdir) / next((p for p in os.listdir(bdir) if p.startswith("ab_compare__strict_vs_projected_auto__")), "") if bdir and os.path.isdir(bdir) else ""
-    p_file = Path(bdir) / next((p for p in os.listdir(bdir) if p.startswith("ab_compare__strict_vs_projected_file__")), "") if bdir and os.path.isdir(bdir) else ""
-    return (bdir, (str(p_auto) if p_auto else ""), (str(p_file) if p_file else ""))
-
-def _ab_expected_embed_sig_from_file(path: str) -> str | None:
-    try:
-        j = _json.loads(Path(path).read_text(encoding="utf-8"))
-        return str(((j or {}).get("ab_pair") or {}).get("embed_sig") or "")
-    except Exception:
-        return None
-
 # =============================== Bundle helpers ===============================
 def _svr_bundle_dir(district_id: str, sig8: str) -> Path:
     base = Path(DIRS.get("certs","logs/certs"))
