@@ -2388,48 +2388,6 @@ if "abx_is_uploaded_file" not in globals():
         # duck-type Streamlit's UploadedFile
         return hasattr(x, "getvalue") and hasattr(x, "name")
 
-if "abx_read_json_any" not in globals():
-    def abx_read_json_any(x, *, kind: str) -> tuple[dict, str, str]:
-        """
-        Accepts a path string/Path, a Streamlit UploadedFile, or a plain dict.
-        Returns (json_obj, canonical_path, origin_tag) where origin_tag∈{"file","upload","dict",""}.
-        For uploads, saves a stable copy under logs/_uploads and returns that path.
-        """
-        if not x:
-            return {}, "", ""
-        # 1) path-like
-        try:
-            if isinstance(x, (str, Path)):
-                p = Path(x)
-                if p.exists():
-                    try:
-                        return _json.loads(p.read_text(encoding="utf-8")), str(p), "file"
-                    except Exception:
-                        return {}, "", ""
-        except Exception:
-            pass
-        # 2) UploadedFile
-        if abx_is_uploaded_file(x):
-            try:
-                raw  = x.getvalue()
-                text = raw.decode("utf-8")
-                j    = _json.loads(text)
-            except Exception:
-                return {}, "", ""
-            uploads_dir = Path(st.session_state.get("LOGS_DIR", "logs")) / "_uploads"
-            uploads_dir.mkdir(parents=True, exist_ok=True)
-            h12  = _hashlib.sha256(raw).hexdigest()[:12]
-            base = Path(getattr(x, "name", f"{kind}.json")).name
-            outp = uploads_dir / f"{kind}__{h12}__{base}"
-            try:
-                outp.write_text(text, encoding="utf-8")
-            except Exception:
-                pass
-            return j, str(outp), "upload"
-        # 3) already-parsed dict
-        if isinstance(x, dict):
-            return x, "", "dict"
-        return {}, "", ""
 
 # dirs
 if "LOGS_DIR" not in globals():
