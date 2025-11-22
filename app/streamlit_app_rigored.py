@@ -2123,8 +2123,6 @@ def run_stamp_line() -> str:
     return f"{pol} | n3={n3} | B {hB} · C {hC} · H {hH} · U {hU} | P {pH} | run {rid}"
 
 
-def _upload_cache() -> dict:
-    return st.session_state.setdefault("_upload_cache", {})  # {sha256: {"bytes": b, "json": obj, "name": str}}
 
 def _bytes_from_upload(upload) -> tuple[bytes, str]:
     """
