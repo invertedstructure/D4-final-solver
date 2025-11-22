@@ -628,22 +628,6 @@ def _canonical_json(d: dict) -> str:
 def _sha256_hex(s: bytes) -> str:
     return _hashlib.sha256(s).hexdigest()
 
-def build_embed(*, inputs_sig_5, dims, district_id, fixture_label, policy_tag, projection_context):
-    payload = {
-        "schema_version": SCHEMA_VERSION,
-        "engine_rev": ENGINE_REV,
-        "inputs_sig_5": inputs_sig_5,
-        "dims": dims,
-        "district_id": district_id,
-        "fixture_label": fixture_label or "",
-        "policy": policy_tag,  # "strict__VS__projected(columns@k=3,auto|file)"
-        "projection_context": projection_context,
-    }
-    sig = _sha256_hex(_canonical_json(payload).encode("utf-8"))
-    return payload, sig
-# --- Canonical tiny helpers (early, guarded) ---
-
-
 if "_normalize_bit" not in globals():
     def _normalize_bit(v) -> int:
         try: return 1 if (int(v) & 1) else 0
