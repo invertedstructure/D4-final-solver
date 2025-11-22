@@ -854,9 +854,6 @@ def _deep_intify(o):
 def _sha256_hex_bytes(b: bytes) -> str:
     return hashlib.sha256(b).hexdigest()
 
-def _sha256_hex_text(s: str) -> str:
-    return hashlib.sha256(s.encode("utf-8")).hexdigest()
-
 def canonical_json(obj) -> str:
     """Canonical JSON string for hashing (bools → 0/1, sorted keys, tight separators).
 
