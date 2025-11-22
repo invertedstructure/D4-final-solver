@@ -4802,40 +4802,6 @@ _MANIFESTS_DIR.mkdir(parents=True, exist_ok=True)
 _REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
 
-# --- Latest bundle discovery (best-effort, by mtime)
-def _v2_latest_bundle_dir() -> _Path | None:
-    cand = []
-    if _CERTS_DIR.exists():
-        for p in _CERTS_DIR.rglob("bundle.json"):
-            try:
-                cand.append((p.stat().st_mtime, p.parent))
-            except Exception:
-                pass
-    if not cand:
-        return None
-    cand.sort(reverse=True)
-    return cand[0][1]  # dir hosting bundle.json
-
-# --- Pull SSOT paths for receipt (prefers session_state)
-def _v2_collect_paths_from_ssot() -> dict:
-    ss = _st.session_state
-    keys = [
-        ("B", ["uploaded_B_path","uploaded_boundaries"]),
-        ("C", ["uploaded_C_path","uploaded_cmap"]),
-        ("H", ["uploaded_H_path","uploaded_H"]),
-        ("U", ["uploaded_U_path","uploaded_shapes"]),
-    ]
-    out = {}
-    for k, opts in keys:
-        val = None
-        for o in opts:
-            v = ss.get(o)
-            if isinstance(v, str) and v:
-                val = v; break
-        out[k] = str(_Path(val).resolve()) if val else None
-    return out
-
-
 # --- Write a loop_receipt (v2) into a given bundle dir
 def _v2_write_loop_receipt_for_bundle(bdir, extra: dict | None = None):
     """
