@@ -80,6 +80,17 @@ from pathlib import Path as _Path
 from pathlib import Path as _Path
 import json as _json, hashlib as _hashlib, time as _time
 import streamlit as _st
+import json as _json
+from pathlib import Path
+import hashlib as _hash
+import json as _json
+import os, json, time, uuid, hashlib
+from pathlib import Path as _Pco
+import os as _os, json as _json, time as _time, uuid as _uuid, hashlib as _hashlib
+from pathlib import Path as _Ph
+from pathlib import Path as _Path
+import json as _json
+import uuid as _uuid
 # == EARLY HELPERS (v2 wiring) ==
 
 # --- C1 canonical paths (tuple; JSON-first) ---
@@ -1515,8 +1526,7 @@ if "_svr_inputs_sig_map" not in globals():
         }
 
 # --- Unified A/B embed signature (lane-aware, cert-aligned) -------------------
-import json as _json
-from pathlib import Path
+
 
 def _inputs_sig_from_frozen_ib() -> list[str]:
     ib = st.session_state.get("_inputs_block") or {}
@@ -2963,8 +2973,7 @@ if "_lane_bottoms_for_diag" not in globals():
                 [bC[j] for j in idx] if (bC and idx) else [])
 # =================== /A/B compat shims ===================
 # ============== A/B policy + embed signature helpers (compat) ==============
-import hashlib as _hash
-import json as _json
+
 
 if "_canonical_policy_tag" not in globals():
     def _canonical_policy_tag(rc: dict | None) -> str:
@@ -3966,15 +3975,6 @@ def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
     return True, f"Completed {ok_count}/{total} fixtures.", ok_count
 
 
-
-
-
-# neutralized (final alias installed at EOF): run_suite_from_manifest = _RUN_SUITE_CANON
-
-# =============================================================================
-#-----------------------------------------------------------
-#---------------------------------------------------------------------------------------------------------
-
 try:
     del run_suite_from_manifest  # avoid shadowing old defs
 except Exception:
@@ -4002,14 +4002,6 @@ def run_suite_from_manifest(manifest_path: str, snapshot_id: str):
             return bool(ok), str(msg), 0
     return bool(ret), str(ret), 0
 
-
-
-
-
-
-# ====================== V2 CANONICAL — COMPUTE-ONLY (no legacy, no harvest) ======================
-import os, json, time, uuid, hashlib
-from pathlib import Path as _Pco
 
 def _co_hash8(obj) -> str:
     import hashlib, json as _j
@@ -4674,8 +4666,6 @@ def _v2_pack_suite_fat_zip(snapshot_id: str):
 
 
 # ====================== V2 COMPUTE-ONLY (HARD) — single source of truth ======================
-import os as _os, json as _json, time as _time, uuid as _uuid, hashlib as _hashlib
-from pathlib import Path as _Ph
 
 def _hard_co_write_json(p: _Ph, obj: dict):
     p.parent.mkdir(parents=True, exist_ok=True)
@@ -4988,20 +4978,7 @@ def time_tau_run_local_flip_toy_from_ssot(max_flips_per_kind: int = 32) -> dict:
         bB, bC, bH,
         max_flips_per_kind=max_flips_per_kind,
     )
-
 # =================== /Time(τ) local flip toy helpers (v0.1) ===================
-
-
-
-
-
-
-
-
-
-
-
-
 def _write_time_tau_artifacts(fixture_label, sig8, toy_out, summary, snapshot_id=None, run_id=None):
     """Write Time(τ) local flip toy artifacts (JSON + CSV) under logs/experiments/.
 
@@ -5076,8 +5053,6 @@ def _write_time_tau_artifacts(fixture_label, sig8, toy_out, summary, snapshot_id
                 row.get("changed_cols_size"),
                 row.get("parity_law_ok"),
             ])
-
-
 # =================== Time(τ) local flip sweep helpers (C2, v0.1) ===================
 
 def _time_tau_c2_build_row_from_manifest(rec: dict, max_flips_per_kind: int = 16) -> dict:
@@ -5353,15 +5328,9 @@ def _time_tau_c2_run_sweep(manifest_path: str | None = None, max_flips_per_kind:
         f"{n_na} NA."
     )
     return True, msg, summary
-
-# ================= /Time(τ) local flip sweep helpers (C2, v0.1) ==================
-
+    
 # --- V2 CORE (64×) — one press → receipts → manifest → suite → hist/zip
 _st.subheader("V2 — 64× → Receipts → Manifest → Suite/Histograms")
-
-from pathlib import Path as _Path
-import json as _json
-import uuid as _uuid
 
 def _repo_root():
     try:
@@ -5539,8 +5508,6 @@ if _st.button("Run V2 core (64× → receipts → manifest → suite/hist/zip)",
         except Exception:
             pass
 
-
-# ───────────────────────────── C1: Coverage rollup + Health ping ─────────────────────────────
 # Helpers are namespaced with _c1_ to avoid collisions.
 
 def _c1_iter_jsonl(p: _Path):
