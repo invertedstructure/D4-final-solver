@@ -2608,13 +2608,7 @@ if "abx_lane_mask_from_d3" not in globals():
         return [1 if any(int(d[i][j]) & 1 for i in range(len(d))) else 0
                 for j in range(len(d[0]) if (d and d[0]) else 0)]
 
-if "abx_hash_json" not in globals():
-    def abx_hash_json(obj):
-        try:
-            blob = _json.dumps(obj, separators=(",", ":"), sort_keys=True)
-            return _hashlib.sha256(blob.encode("utf-8")).hexdigest()
-        except Exception:
-            return ""
+
 
 if "abx_diag_from_mask" not in globals():
     def abx_diag_from_mask(lm_):
