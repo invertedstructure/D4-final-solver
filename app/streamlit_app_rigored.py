@@ -2601,13 +2601,6 @@ if "abx_lane_mask_from_d3" not in globals():
                 for j in range(len(d[0]) if (d and d[0]) else 0)]
 
 
-
-if "abx_diag_from_mask" not in globals():
-    def abx_diag_from_mask(lm_):
-        n = len(lm_ or [])
-        return [[1 if (i == j and int(lm_[j]) == 1) else 0 for j in range(n)] for i in range(n)]
-
-
 # dirs
 if "LOGS_DIR" not in globals():
     LOGS_DIR = Path("logs")
