@@ -1309,10 +1309,6 @@ def _svr_freeze_ssot(pb):
     rc.update({"n2": n2, "n3": n3, "d3": d3})
     st.session_state["run_ctx"] = rc
     return ib, rc
-# === /helpers ===
-if "_svr_hash" not in globals():
-    def _svr_hash(obj):  # sha256(canonical json)
-        return _hashlib.sha256(_json.dumps(obj, separators=(",", ":"), sort_keys=True).encode("utf-8")).hexdigest()
 
 # cert scaffold (v2 header; no integrity payload)
 if "_svr_cert_common" not in globals():
