@@ -1649,8 +1649,7 @@ with tab2:
         r, c = len(A), len(A[0])
         return [[(A[i][j] ^ B[i][j]) & 1 for j in range(c)] for i in range(r)]
 
-    def _bottom_row(M):
-        return M[-1] if (M and len(M)) else []
+   
   
     def _shape(M):
         return (len(M), len(M[0]) if (M and M[0]) else 0)
