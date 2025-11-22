@@ -1437,22 +1437,6 @@ def ssot_frozen_sig_from_ib() -> tuple[str, str, str, str, str]:
         return ("", "", "", "", "")
     return (b, C, H, U, S)
 
-def current_inputs_sig(*, _ib: dict | None = None) -> tuple[str, str, str, str, str]:
-    """
-    Canonical 5-tuple (D, C, H, U, SHAPES). If _ib provided, read from that,
-    otherwise read from the frozen st.session_state['_inputs_block'].
-    """
-    if _ib is not None:
-        h = dict((_ib or {}).get("hashes") or {})
-        return (
-            str(h.get("boundaries_hash") or ""),
-            str(h.get("C_hash")         or ""),
-            str(h.get("H_hash")         or ""),
-            str(h.get("U_hash")         or ""),
-            str(h.get("shapes_hash")    or ""),
-        )
-    return ssot_frozen_sig_from_ib()
-
 # ------------------------- SSOT live fingerprint (what’s currently loaded in memory) -------------------------
 def ssot_live_sig(boundaries_obj=None, cmap_obj=None, H_obj=None, shapes_obj=None) -> tuple[str, str, str, str, str]:
     """
@@ -1471,85 +1455,6 @@ def ssot_live_sig(boundaries_obj=None, cmap_obj=None, H_obj=None, shapes_obj=Non
     hS = hU  # mirror by design
     return (hB, hC, hH, hU, hS)
 
-# --------------------- Publish _inputs_block after Overlap ---------------------
-def ssot_publish_block(*, boundaries_obj, cmap_obj, H_obj, shapes_obj, n3: int, projector_filename: str = "") -> dict:
-    """
-    Publish canonical _inputs_block into session state and return change info.
-    Also stamps dims, filenames, and sets freshness anchors.
-    """
-    ss = st.session_state
-    before = ssot_frozen_sig_from_ib()
-
-    hB, hC, hH, hU, hS = ssot_live_sig(boundaries_obj, cmap_obj, H_obj, shapes_obj)
-    H2 = (H_obj.blocks.__root__.get("2") or []) if (H_obj and hasattr(H_obj, "blocks")) else []
-    dims = {"n2": (len(H2) if H2 else 0), "n3": int(n3 or 0)}
-    files = {
-        "boundaries": ss.get("fname_boundaries", "boundaries.json"),
-        "cmap":       ss.get("fname_cmap",       "cmap.json"),
-        "H":          ss.get("fname_h",         "H.json"),
-        "U":          ss.get("fname_shapes",    "shapes.json"),
-        "shapes":     ss.get("fname_shapes",    "shapes.json"),
-    }
-    if projector_filename:
-        files["projector"] = projector_filename
-
-    hashes = {
-        "boundaries_hash": hB, "C_hash": hC, "H_hash": hH, "U_hash": hU, "shapes_hash": hS,
-    }
-
-    # Save block (SSOT)
-    ss["_inputs_block"] = {
-        "hashes":    hashes,
-        "dims":      dims,
-        "filenames": files,
-        # legacy flatten (readers that still look at top-level fields)
-        "boundaries_hash": hB, "C_hash": hC, "H_hash": hH, "U_hash": hU, "shapes_hash": hS,
-    }
-
-    after = ssot_frozen_sig_from_ib()
-    changed = (before != after)
-
-    # Freshness anchors for stale detection
-    ss["_has_overlap"]        = True
-    ss["_live_fp_at_overlap"] = ssot_live_sig(boundaries_obj, cmap_obj, H_obj, shapes_obj)
-
-    return {"before": before, "after": after, "changed": changed}
-
-# --------------------- Staleness Check (non-blocking) ---------------------
-def ssot_is_stale() -> bool:
-    """True if current live fingerprint differs from frozen _inputs_block."""
-    ss = st.session_state
-    if not ss.get("_has_overlap"):
-        return False
-    frozen = ssot_frozen_sig_from_ib()
-    if not any(frozen):
-        return False
-    live_now = ssot_live_sig()
-    return tuple(frozen) != tuple(live_now)
-
-# ------------------------- Projector helpers -------------------------
-def _auto_pj_hash_from_rc(rc: dict) -> str:
-    """Stable hash for AUTO projector spec derived from lane_mask_k3."""
-    try:
-        lm = rc.get("lane_mask_k3") or []
-        blob = json.dumps(lm, sort_keys=True, separators=(",", ":"))
-        return _sha256_hex_text(blob)
-    except Exception:
-        return ""
-
-# ------------------------- Time/UUID Utilities -------------------------
-def new_run_id() -> str:
-    return str(uuid.uuid4())
-
-def soft_reset_before_overlap():
-    ss = st.session_state
-    for k in (
-        "run_ctx", "overlap_out", "overlap_cfg", "overlap_policy_label",
-        "overlap_H", "residual_tags", "proj_meta", "ab_compare",
-        "cert_payload", "last_cert_path", "_last_cert_write_key",
-        "_projector_cache", "_projector_cache_ab",
-    ):
-        ss.pop(k, None)
 
 # ------------------------- JSONL Helpers -------------------------
 def _atomic_append_jsonl(path: Path, row: dict):
@@ -1562,41 +1467,6 @@ def _atomic_append_jsonl(path: Path, row: dict):
     os.remove(tmp_name)
 
 
-def is_projected_green(run_ctx: dict | None, overlap_out: dict | None) -> bool:
-    if not run_ctx or not overlap_out: return False
-    mode = str(run_ctx.get("mode") or "")
-    return mode.startswith("projected") and bool(((overlap_out.get("3") or {}).get("eq", False)))
-
-def is_strict_red_lanes(run_ctx: dict | None, overlap_out: dict | None, residual_tags: dict | None) -> bool:
-    if not run_ctx or not overlap_out: return False
-    if str(run_ctx.get("mode") or "") != "strict": return False
-    if bool(((overlap_out.get("3") or {}).get("eq", True))): return False
-    tag = ((residual_tags or {}).get("strict") or "")
-    return tag == "lanes"
-
-def safe_expander(label: str, expanded: bool = False):
-    try:
-        return st.expander(label, expanded=expanded)
-    except Exception:
-        @contextlib.contextmanager
-        def _noop():
-            yield
-        return _noop()
-
-# ---- Policy/config helpers (minimal, canonical) ----
-def cfg_strict() -> dict:
-    return {
-        "enabled_layers": [],
-        "source": {},               # no layer sources in strict
-        "projector_files": {},      # none
-    }
-
-def cfg_projected_base() -> dict:
-    return {
-        "enabled_layers": [3],      # we project layer 3
-        "source": {"3": "auto"},    # default projector source
-        "projector_files": {},      # filled only for 'file'
-    }
 
 def policy_label_from_cfg(cfg: dict) -> str:
     if not cfg or not cfg.get("enabled_layers"):
@@ -1605,10 +1475,6 @@ def policy_label_from_cfg(cfg: dict) -> str:
     mode = "file" if src == "file" else "auto"
     # keep your established label shape
     return f"projected(columns@k=3,{mode})"
-
-# (optional) projector-file validator; keep as no-op if you don't need it yet
-def validate_projector_file_strict(P, *, n3: int, lane_mask: list[int]):
-    return  # implement later if you want strict checks for Π
 
 
 # ───────────────────────── Minimal tab scaffold (temporary) ─────────────────────────
@@ -1664,64 +1530,6 @@ with tab2:
                 f"got H2({rH}×{cH}), d3({rD}×{cD}), C3({rC}×{cC})"
             )
         
-# === BEGIN PATCH: READ-ONLY OVERLAP HYDRATOR (uses frozen SSOT only) ===
-def overlap_ui_from_frozen():
-    """
-    Read-only UI refresh that re-computes visuals strictly from the *frozen* SSOT.
-    It does NOT resolve sources, does NOT write fname_*, and does NOT freeze state.
-    Safe to call after the single-button solver completed.
-    """
-
-    from pathlib import Path
-    import json as _json
-
-    ib = st.session_state.get("_inputs_block") or {}
-    fns = (ib.get("filenames") or {})
-    pB, pC, pH = fns.get("boundaries",""), fns.get("C",""), fns.get("H","")
-    if not (pB and pC and pH):
-        st.info("Overlap UI: frozen SSOT missing; run solver first.")
-        return
-
-    def _read_blocks(p):
-        try: return (_json.loads(Path(p).read_text(encoding="utf-8")).get("blocks") or {})
-        except Exception: return {}
-
-    bB = _read_blocks(pB); bC = _read_blocks(pC); bH = _read_blocks(pH)
-    d3 = bB.get("3") or []; C3 = bC.get("3") or []; H2 = bH.get("2") or []
-    n2, n3 = len(d3), (len(d3[0]) if (d3 and d3[0]) else 0)
-
-    # Diagnostics (no writes)
-    st.caption(f"[Overlap UI] n₂×n₃ = {n2}×{n3} · src B:{Path(pB).name} · C:{Path(pC).name} · H:{Path(pH).name}")
-    if C3 and len(C3)==len(C3[0]):
-        I3 = [[1 if i==j else 0 for j in range(len(C3))] for i in range(len(C3))]
-        def _mul(A,B):
-            if not A or not B or not A[0] or not B[0] or len(A[0])!=len(B): return []
-            m,k = len(A), len(A[0]); n = len(B[0])
-            C = [[0]*n for _ in range(m)]
-            for i in range(m):
-                for t in range(k):
-                    if A[i][t] & 1:
-                        for j in range(n): C[i][j] ^= (B[t][j] & 1)
-            return C
-        def _xor(A,B):
-            if not A: return [r[:] for r in (B or [])]
-            if not B: return [r[:] for r in (A or [])]
-            r,c = len(A), len(A[0]); return [[(A[i][j]^B[i][j]) & 1 for j in range(c)] for i in range(r)]
-        R3s = _xor(_mul(H2, d3), _xor(C3, I3)) if (H2 and d3) else []
-        bottom_H = (_mul(H2, d3)[-1] if (H2 and d3) else [])
-        bottom_CI = (_xor(C3, I3)[-1] if C3 else [])
-        lanes_auto = (C3[-1] if C3 else [])
-        st.caption(f"[Overlap UI] (H2·d3)_bottom={bottom_H} · (C3⊕I3)_bottom={bottom_CI} · lanes(auto from C₃ bottom)={lanes_auto}")
-    else:
-        st.caption("[Overlap UI] C₃ not square; projected(columns@k=3,auto) is N/A here.")
-# === END PATCH: READ-ONLY OVERLAP HYDRATOR ===
-
-
-    
-
-
-
-
 
 #----------------------------------------------------------------------------
 
