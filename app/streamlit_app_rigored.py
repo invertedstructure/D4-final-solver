@@ -2099,36 +2099,14 @@ def require_fresh_run_ctx(*, stop_on_error: bool = False):
         _halt("Context mask length mismatch; please click Run Overlap to refresh."); return None
     return rc
 
-# ------------------------- Mask from d3 (truth mask) -------------------------
+
 def _truth_mask_from_d3(d3: list[list[int]]) -> list[int]:
     if not d3 or not d3[0]:
         return []
     rows, cols = len(d3), len(d3[0])
     return [1 if any(int(d3[i][j]) & 1 for i in range(rows)) else 0 for j in range(cols)]
 
-def rectify_run_ctx_mask_from_d3(stop_on_error: bool = False):
-    ss = st.session_state
-    rc = require_fresh_run_ctx(stop_on_error=stop_on_error)
-    if not rc: return None
-    d3 = rc.get("d3") or []
-    n3 = int(rc.get("n3") or 0)
-    if not d3 or n3 <= 0:
-        msg = "STALE_RUN_CTX: d3/n3 unavailable. Run Overlap."
-        st.warning(msg)
-        if stop_on_error: st.stop()
-        return None
-    lm_truth = _truth_mask_from_d3(d3)
-    if len(lm_truth) != n3:
-        msg = f"STALE_RUN_CTX: lane mask length {len(lm_truth)} != n3 {n3}. Run Overlap."
-        st.warning(msg)
-        if stop_on_error: st.stop()
-        return None
-    lm_rc = list(rc.get("lane_mask_k3") or [])
-    if lm_rc != lm_truth:
-        rc["lane_mask_k3"] = lm_truth
-        ss["run_ctx"] = rc
-        st.info(f"Rectified run_ctx.lane_mask_k3 from {lm_rc} → {lm_truth} based on stored d3.")
-    return ss["run_ctx"]
+
 
 # ------------------------- Cache Reset -------------------------
 def soft_reset_before_overlap():
