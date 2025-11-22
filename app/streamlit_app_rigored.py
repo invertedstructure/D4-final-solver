@@ -2148,24 +2148,6 @@ if "_svr_hash" not in globals():
     def _svr_hash(obj):  # sha256(canonical json)
         return _hashlib.sha256(_json.dumps(obj, separators=(",", ":"), sort_keys=True).encode("utf-8")).hexdigest()
 
-
-if "_svr_is_zero" not in globals():
-    def _svr_is_zero(M): return (not M) or all((int(x) & 1) == 0 for row in M for x in row)
-
-if "_svr_mul" not in globals():
-    def _svr_mul(A,B):
-        if not A or not B or not A[0] or not B[0] or len(A[0])!=len(B): return []
-        m,k = len(A), len(A[0]); n = len(B[0])
-        C = [[0]*n for _ in range(m)]
-        for i in range(m):
-            Ai = A[i]
-            for t in range(k):
-                if int(Ai[t]) & 1:
-                    Bt = B[t]
-                    for j in range(n):
-                        C[i][j] ^= (int(Bt[j]) & 1)
-        return C
-
 # cert scaffold (v2 header; no integrity payload)
 if "_svr_cert_common" not in globals():
     def _svr_cert_common(ib, rc, policy_tag: str, extra: dict | None = None) -> dict:
