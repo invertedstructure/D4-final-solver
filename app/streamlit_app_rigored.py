@@ -2593,14 +2593,6 @@ if "abx_read_json_any" not in globals():
             return x, "", "dict"
         return {}, "", ""
 
-
-
-if "abx_lane_mask_from_d3" not in globals():
-    def abx_lane_mask_from_d3(d):
-        return [1 if any(int(d[i][j]) & 1 for i in range(len(d))) else 0
-                for j in range(len(d[0]) if (d and d[0]) else 0)]
-
-
 # dirs
 if "LOGS_DIR" not in globals():
     LOGS_DIR = Path("logs")
