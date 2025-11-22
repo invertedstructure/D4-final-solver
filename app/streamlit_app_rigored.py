@@ -670,62 +670,6 @@ def _svr_current_snapshot_id() -> str | None:
     except Exception:
         return None
 
-def ensure_suite_snapshot(manifest_path: str) -> tuple[bool, str, str | None]:
-    """Create a content-addressed world snapshot from a manifest JSONL.
-    Writes: logs/snapshots/world_snapshot__{sid}.json and world_snapshot.latest.json
-    Returns (ok, message, snapshot_id).
-    """
-    try:
-        mp = _abs_from_manifest(manifest_path)
-        if not mp.exists():
-            return False, f"Manifest not found: {mp}", None
-        import json as _json, hashlib as _hashlib, datetime as _dt
-        rows = []
-        inventory = []
-        seen = {}
-        # walk manifest JSONL
-        for line in mp.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
-            if not line:
-                continue
-            rec = _json.loads(line)
-            # resolve absolute paths
-            B = str(_abs_from_manifest(rec["B"]))
-            C = str(_abs_from_manifest(rec["C"]))
-            H = str(_abs_from_manifest(rec["H"]))
-            U = str(_abs_from_manifest(rec["U"]))
-            fid = rec.get("id") or ""
-            rows.append({"B": B, "C": C, "H": H, "U": U, "id": fid})
-            for tag, path in (("B",B),("C",C),("H",H),("U",U)):
-                if path in seen:
-                    continue
-                try:
-                    h = _sha256_hex(_Path(path).read_bytes())
-                except Exception:
-                    h = None
-                seen[path] = {"tag": tag, "path": path, "sha256": h}
-        inventory = list(seen.values())
-        # canonical payload (no matrices)
-        payload = {
-            "schema_version": "2.0.0",
-            "engine_rev": ENGINE_REV,
-            "created_at_utc": _dt.datetime.utcnow().isoformat() + "Z",
-            "manifests": {"full_scope": str(mp)},
-            "inventory": inventory,
-            "plan_full_scope": rows,
-        }
-        sid = "ws__" + _sha256_hex(_canonical_json(payload).encode("utf-8"))[:8]
-        payload["snapshot_id"] = sid
-        # ensure dirs
-        snaps_dir = _Path(DIRS.get("snapshots", "logs/snapshots"))
-        snaps_dir.mkdir(parents=True, exist_ok=True)
-        # write snapshot & pointer
-        _guarded_atomic_write_json(snaps_dir / f"world_snapshot__{sid}.json", payload)
-        _guarded_atomic_write_json(snaps_dir / "world_snapshot.latest.json", {"snapshot_id": sid, "path": f"world_snapshot__{sid}.json"})
-        return True, f"Snapshot ready: {sid}", sid
-    except Exception as e:
-        return False, f"Snapshot build failed: {e}", None
-
 def _suite_index_paths():
     base = _Path(DIRS.get("suite_runs", "logs/suite_runs"))
     base.mkdir(parents=True, exist_ok=True)
