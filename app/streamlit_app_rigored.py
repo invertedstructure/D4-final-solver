@@ -2946,30 +2946,6 @@ with tab2:
     def _bottom_row(M):
         return M[-1] if (M and len(M)) else []
 
-    def _load_h_local():
-        """Best-effort H loader used in Tab 2; resilient to missing file/var."""
-        try:
-            # prefer a session-uploaded H if your UI stashes it in st.session_state
-            up = st.session_state.get("f_H")
-            if up is not None:
-                return io.parse_cmap(read_json_file(up))
-        except Exception:
-            pass
-        try:
-            # fall back to a module-level f_H if present
-            if 'f_H' in globals() and globals()['f_H'] is not None:
-                return io.parse_cmap(read_json_file(globals()['f_H']))
-        except Exception:
-            pass
-        try:
-            # finally, fall back to whatever was produced by Overlap
-            H_obj = st.session_state.get("overlap_H")
-            if H_obj is not None:
-                return H_obj
-        except Exception:
-            pass
-        # last resort: empty cmap
-        return io.parse_cmap({"blocks": {}})
 
     def _lane_mask_from_d3_strict(boundaries_obj):
         """Derive lane mask directly from d3 by column support (strict truth)."""
