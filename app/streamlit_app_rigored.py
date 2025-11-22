@@ -2164,19 +2164,6 @@ def _bytes_from_upload(upload) -> tuple[bytes, str]:
     return b"", ""
 
 
-def _stamp_filename(state_key: str, upload):
-    """
-    Record the uploaded filename (for provenance) without reading the file.
-    """
-    if upload is None:
-        return
-    name = getattr(upload, "name", None)
-    if not name:
-        # Attempt to infer from cache if we just parsed it
-        data, name2 = _bytes_from_upload(upload)
-        name = name2 or "uploaded.json"
-    st.session_state[state_key] = name
-
 def safe_expander(label: str, expanded: bool = False):
     try:
         return st.expander(label, expanded=expanded)
