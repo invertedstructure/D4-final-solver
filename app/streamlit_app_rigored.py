@@ -1017,7 +1017,6 @@ def run_overlap_once():
     def _is_zero(M): return (not M) or all((int(x)&1)==0 for row in M for x in row)
     def _bottom(M): return M[-1] if (M and len(M)) else []
     def _bits(b): return "".join("1" if (int(x)&1) else "0" for x in (b or []))
-    def _sha256_hex(x): return hashlib.sha256(x).hexdigest()
     def _hash_json(obj): return _sha256_hex(json.dumps(obj, sort_keys=True, separators=(",",":")).encode("utf-8"))
 
     # 1) resolve sources (uploads-first; fallbacks: your sidebar stamps)
