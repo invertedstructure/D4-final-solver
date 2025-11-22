@@ -1656,53 +1656,6 @@ def _embed_sig_unified() -> str:
 
 # Back-compat: make the old freshness checker use the unified signature
 _abx_embed_sig = _embed_sig_unified
-# -------------------------------------------------------------------------------
-
-
-
-def warn_stale_once(msg="STALE_RUN_CTX: Inputs changed; please click Run Overlap to refresh."):
-    ss = st.session_state
-    if not ss.get("_stale_warned_once"):
-        st.warning(msg)
-        ss["_stale_warned_once"] = True
-
-    
-def projector_hash_of(P_blocks: list[list[int]], *, mode: str = "blocks") -> str:
-    """
-    mode="blocks" → sha256(json.dumps({"blocks":{"3":P}}, sort_keys=True, separators=(",",":")))
-    mode="file"   → sha256(file bytes)  # only when you have a filename
-    """
-    import json, hashlib, pathlib
-    if mode == "blocks":
-        blob = json.dumps({"blocks":{"3": P_blocks}}, sort_keys=True, separators=(",",":")).encode("utf-8")
-        return hashlib.sha256(blob).hexdigest()
-    elif mode.startswith("file:"):
-        path = mode.split(":",1)[1]
-        try:    return hashlib.sha256(pathlib.Path(path).read_bytes()).hexdigest()
-        except: return ""
-    return ""
-
-
-# ---- helper for recomputing diag lanes if the snapshot lacks them
-def _ab_lane_vectors_bottom(H2, d3, C3, lm):
-    """Lane vectors as bottom-row probes (matches your earlier UI semantics)."""
-    try:
-        H2d3  = mul(H2, d3) if _ab_shape_ok(H2, d3) else []
-        C3pI3 = _ab_xor(C3, _ab_eye(len(C3))) if (C3 and C3[0]) else []
-    except Exception:
-        H2d3, C3pI3 = [], []
-    def _bottom(M): 
-        try: return M[-1] if (M and len(M)) else []
-        except Exception: return []
-    bH, bC = _bottom(H2d3), _bottom(C3pI3)
-    idx = [j for j,m in enumerate(lm or []) if m]
-    vH = [int(bH[j]) & 1 for j in idx] if (bH and idx and max(idx) < len(bH)) else []
-    vC = [int(bC[j]) & 1 for j in idx] if (bC and idx and max(idx) < len(bC)) else []
-    return vH, vC
-
-    return hv, cv
-
-# ---------------- Fixture helpers (single source of truth) ----------------
 
 def match_fixture_from_snapshot(snap: dict) -> dict:
     reg = _get_fixtures_cached() or {}
