@@ -820,41 +820,6 @@ if "_svr_projected_auto_from_blocks" not in globals():
         eq3 = _svr_is_zero(R3p)
         return {"na": False, "policy": "auto_c_bottom"}, lanes, {"2": {"eq": True}, "3": {"eq": bool(eq3)}}
 
-
-# --- inputs signature helpers (guarded) ----------------------------------------
-if "_svr_inputs_sig" not in globals():
-    def _svr_inputs_sig(ib: dict) -> list[str]:
-        """
-        Legacy 5-tuple used by existing cert writers.
-        Order: boundaries, C, H, U, shapes. Missing entries become "".
-        """
-        h = (ib.get("hashes") or {})
-        return [
-            str(h.get("boundaries_hash", "")),
-            str(h.get("C_hash", "")),
-            str(h.get("H_hash", "")),
-            str(h.get("U_hash", "")),
-            str(h.get("shapes_hash", "")),
-        ]
-
-if "_svr_inputs_sig_map" not in globals():
-    def _svr_inputs_sig_map(ib: dict) -> dict:
-        """
-        Map form for the unified embed signature. If you don’t yet persist
-        separate support-C/H hashes, keep them as "" (stable schema).
-        """
-        h = (ib.get("hashes") or {})
-        return {
-            "hash_d":       str(h.get("boundaries_hash", "")),
-            "hash_U":       str(h.get("U_hash", "")),
-            "hash_suppC":   str(h.get("suppC_hash", "")),   # OK if missing
-            "hash_suppH":   str(h.get("suppH_hash", "")),   # OK if missing
-            "hash_shapes":  str(h.get("shapes_hash", "")),
-        }
-
-# --- Unified A/B embed signature (lane-aware, cert-aligned) -------------------
-
-
 def _inputs_sig_from_frozen_ib() -> list[str]:
     ib = st.session_state.get("_inputs_block") or {}
     h  = (ib.get("hashes") or {})
