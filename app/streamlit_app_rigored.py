@@ -65,6 +65,7 @@ import tempfile as _tempfile
 import shutil as _shutil
 from pathlib import Path as _Path
 from uuid import uuid4
+import copy as _copy
 # == EARLY HELPERS (v2 wiring) ==
 # Safe UI nonce (prevents "no _ui_nonce" warning)
 try:
@@ -3130,35 +3131,8 @@ if ab_pin.get("state") == "pinned":
         st.warning(f"A/B: Pinned · Stale ({reason})")
 else:
     st.caption("A/B: —")
-    
-def _ab_load_h_latest():
-    """
-    Always try to read H from the *current* file path used by SSOT,
-    then fall back to any freezer/local helpers, then session.
-    """
-    ss = st.session_state
-    # 1) _inputs_block.filenames.H (preferred)
-    fn = ((ss.get("_inputs_block") or {}).get("filenames") or {}).get("H") or ""
-    # 2) explicit filename in session (older UIs used fname_h)
-    if not fn:
-        fn = ss.get("fname_h", "") or ""
-    try:
-        if fn and Path(fn).exists():
-            data = _json.loads(Path(fn).read_text(encoding="utf-8"))
-            return io.parse_cmap(data)
-    except Exception:
-        pass
-    # 3) your app’s loader, if present
-    try:
-        if "_load_h_local" in globals() and callable(globals()["_load_h_local"]):
-            return _load_h_local()
-    except Exception:
-        pass
-    # 4) last resort – session snapshot
-    return ss.get("overlap_H") or io.parse_cmap({"blocks": {}})
 
-# ====================== A/B compat shims (define only if missing) ======================
-import copy as _copy
+
 
 if "_shape_ok" not in globals():
     def _shape_ok(A, B):
