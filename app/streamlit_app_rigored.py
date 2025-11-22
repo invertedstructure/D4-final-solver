@@ -1552,13 +1552,6 @@ def new_run_id() -> str:
 def _iso_utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
-def _truth_mask_from_d3(d3: list[list[int]]) -> list[int]:
-    if not d3 or not d3[0]:
-        return []
-    rows, cols = len(d3), len(d3[0])
-    return [1 if any(int(d3[i][j]) & 1 for i in range(rows)) else 0 for j in range(cols)]
-
-
 def soft_reset_before_overlap():
     ss = st.session_state
     for k in (
