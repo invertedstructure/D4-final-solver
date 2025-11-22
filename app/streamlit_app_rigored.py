@@ -2555,30 +2555,7 @@ def _atomic_append_jsonl(path: Path, row: dict):
         shutil.copyfileobj(src, final)
     os.remove(tmp_name)
 
-def _read_jsonl_tail(path: Path, N: int = 200) -> list[dict]:
-    if not path.exists():
-        return []
-    try:
-        with open(path, "rb") as f:
-            f.seek(0, os.SEEK_END)
-            size = f.tell(); chunk = 64 * 1024; data = b""
-            while len(data.splitlines()) <= N + 1 and f.tell() > 0:
-                step = min(chunk, f.tell())
-                f.seek(-step, os.SEEK_CUR)
-                data = f.read(step) + data
-                f.seek(-step, os.SEEK_CUR)
-            lines = data.splitlines()[-N:]
-        return [json.loads(l.decode("utf-8")) for l in lines if l.strip()]
-    except Exception:
-        with open(path, "r", encoding="utf-8") as f:
-            lines = f.readlines()[-N:]
-        out = []
-        for ln in lines:
-            try: out.append(json.loads(ln))
-            except Exception: continue
-        return out
 
-# ------------------------- UI Predicates -------------------------
 def is_projected_green(run_ctx: dict | None, overlap_out: dict | None) -> bool:
     if not run_ctx or not overlap_out: return False
     mode = str(run_ctx.get("mode") or "")
