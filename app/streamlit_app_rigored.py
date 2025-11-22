@@ -628,12 +628,6 @@ def _canonical_json(d: dict) -> str:
 def _sha256_hex(s: bytes) -> str:
     return _hashlib.sha256(s).hexdigest()
 
-if "_normalize_bit" not in globals():
-    def _normalize_bit(v) -> int:
-        try: return 1 if (int(v) & 1) else 0
-        except Exception: return 0
-
-# Page config early so Streamlit is happy
 # ────────────────────────────── PACKAGE LOADER ──────────────────────────────
 HERE = Path(__file__).resolve().parent
 OTCORE = HERE / "otcore"
