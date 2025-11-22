@@ -1401,49 +1401,6 @@ def _svr_hash_json(obj) -> str:
     except Exception:
         return ""
 
-# =============================== Bundle helpers ===============================
-def _svr_bundle_dir(district_id: str, sig8: str) -> Path:
-    base = Path(DIRS.get("certs","logs/certs"))
-    p = base / str(district_id) / str(sig8)
-    p.mkdir(parents=True, exist_ok=True)
-    return p
-
-def _svr_bundle_fname(kind: str, district_id: str, sig8: str) -> str:
-    # Map kind to canonical filenames
-    if kind == "strict":
-        return f"overlap__{district_id}__strict__{sig8}.json"
-    if kind == "projected_auto":
-        return f"overlap__{district_id}__projected_columns_k_3_auto__{sig8}.json"
-    if kind == "ab_auto":
-        return f"ab_compare__strict_vs_projected_auto__{sig8}.json"
-    if kind == "freezer":
-        return f"projector_freezer__{district_id}__{sig8}.json"
-    if kind == "ab_file":
-        return f"ab_compare__strict_vs_projected_file__{sig8}.json"
-    if kind == "projected_file":
-        return f"overlap__{district_id}__projected_columns_k_3_file__{sig8}.json"
-    return f"{kind}__{district_id}__{sig8}.json"
-
-def _svr_write_cert_in_bundle(bundle_dir: Path, filename: str, payload: dict) -> Path:
-    # Compute content hash, write atomically; skip rewrite when unchanged
-    payload.setdefault("integrity", {})
-    payload["integrity"]["content_hash"] = _svr_hash(payload)
-    p = (bundle_dir / filename)
-    tmp = p.with_suffix(".json.tmp") if p.suffix==".json" else p.with_suffix(p.suffix + ".tmp")
-    # Dedup: if exists and same content hash, skip rewrite
-    if p.exists():
-        try:
-            old = json.loads(p.read_text(encoding="utf-8"))
-            if (old or {}).get("integrity", {}).get("content_hash") == payload["integrity"]["content_hash"]:
-                # unchanged — skipping rewrite
-                return p
-        except Exception:
-            pass
-    with open(tmp, "w", encoding="utf-8") as f:
-        _json.dump(payload, f, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-        f.flush(); os.fsync(f.fileno())
-    os.replace(tmp, p)
-    return p
 # ==============================================================================
 def _guarded_atomic_write_json(path: Path, payload: dict):
     tmp = path.with_suffix(path.suffix + ".tmp")
