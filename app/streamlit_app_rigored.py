@@ -2615,18 +2615,6 @@ if "abx_diag_from_mask" not in globals():
         n = len(lm_ or [])
         return [[1 if (i == j and int(lm_[j]) == 1) else 0 for j in range(n)] for i in range(n)]
 
-if "abx_policy_tag" not in globals():
-    def abx_policy_tag():
-        rc0 = st.session_state.get("run_ctx") or {}
-        m = str(rc0.get("mode", "strict")).lower()
-        if m == "strict": return "strict"
-        if "projected" in m and "file" in m: return "projected(columns@k=3,file)"
-        if "projected" in m: return "projected(columns@k=3,auto)"
-        return "strict"
-# ===== /helpers =====
-# === helpers required by the single-button solver (uploads-first source resolver) ===
-import os, json as _json, hashlib as _hashlib
-from pathlib import Path
 
 # dirs
 if "LOGS_DIR" not in globals():
