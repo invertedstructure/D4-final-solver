@@ -2512,9 +2512,6 @@ def _guarded_atomic_write_json(path: Path, payload: dict):
         f.flush(); os.fsync(f.fileno())
     os.replace(tmp, path)
 
-# accept path / UploadedFile / dict
-def _is_uploaded_file(x): return hasattr(x, "getvalue") and hasattr(x, "name")
-
 # --- robust blocks normalizer (handles dicts and parsed cmap objects) ---
 def _svr_as_blocks_v2(j: object, kind: str) -> dict:
     """
