@@ -926,22 +926,6 @@ def _v2_certs_root() -> _Path:
     except NameError:
         return _Path("logs") / "certs"
 
-def make_bundle_dir(
-    district_id: str,
-    fixture_label: str,
-    sig8: str,
-    *,
-    certs_root: _Path | None = None,
-) -> _Path:
-    """Build canonical bundle_dir = certs_root/D*/fixture_label/sig8.
-
-    - district_id and fixture_label are kept as strings (no normalization here;
-      callers should use make_fixture_label/parse_fixture_label as needed).
-    - certs_root defaults to the global v2 certs root (repo_root/logs/certs).
-    """
-    base = certs_root if certs_root is not None else _v2_certs_root()
-    return base / str(district_id) / str(fixture_label) / str(sig8)
-
 def make_strict_cert_path(bundle_dir, district_id: str, sig8: str):
     """Return Path to the strict cert JSON inside a bundle dir.
 
@@ -965,14 +949,6 @@ def make_projected_file_cert_path(bundle_dir, district_id: str, sig8: str):
     """
     b = _Path(bundle_dir)
     return b / f"overlap__{district_id}__projected_columns_k_3_file__{sig8}.json"
-
-def make_loop_receipt_path(bundle_dir, fixture_label: str):
-    """Return Path to the loop_receipt file for a fixture inside a bundle dir.
-
-    Current pattern: loop_receipt__{fixture_label}.json
-    """
-    b = _Path(bundle_dir)
-    return b / f"loop_receipt__{fixture_label}.json"
 
 # ------------------------- V2 Artifact Builders (schemas & invariants) -------------------------
 
