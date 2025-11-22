@@ -1549,9 +1549,6 @@ def _auto_pj_hash_from_rc(rc: dict) -> str:
 def new_run_id() -> str:
     return str(uuid.uuid4())
 
-def _iso_utc_now() -> str:
-    return datetime.now(timezone.utc).isoformat()
-
 def soft_reset_before_overlap():
     ss = st.session_state
     for k in (
