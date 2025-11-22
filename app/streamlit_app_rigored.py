@@ -633,11 +633,6 @@ if "_normalize_bit" not in globals():
         try: return 1 if (int(v) & 1) else 0
         except Exception: return 0
 
-if "_selected_mask_strict" not in globals():
-    def _selected_mask_strict(n3: int) -> List[int]:
-        try: return [1] * int(n3)
-        except Exception: return []
-
 if "_selected_mask_auto" not in globals():
     def _selected_mask_auto(lanes: Iterable[int], n3: int) -> List[int]:
         try:
