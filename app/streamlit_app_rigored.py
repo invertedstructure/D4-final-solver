@@ -3501,20 +3501,6 @@ def _hard_fixture_tuple_from_paths(pB, pH, pC):
     C = f"C{mC.group(1)}" if mC else "C???"
     return D, H, C, f"{D}_{H}_{C}"
 
-def _hard_bundle_dir(district_id: str, fixture_label: str, sig8: str):
-    """Canonical: logs/certs/{district_id}/{fixture_label}/{sig8}."""
-    from pathlib import Path as _Path
-    try:
-        root = _CERTS_DIR
-    except Exception:
-        root = _Path(__file__).resolve().parents[1] / "logs" / "certs"
-    bdir = root / str(district_id) / str(fixture_label) / str(sig8)
-    bdir.mkdir(parents=True, exist_ok=True)
-    return bdir
-
-
-
-
 def time_tau_strict_core_from_blocks(blocks_B: dict, blocks_C: dict, blocks_H: dict) -> dict:
     """
     Minimal strict core for the Time(τ) toy:
