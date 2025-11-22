@@ -1407,62 +1407,7 @@ def _v2_default_engine_rev() -> str:
     return str(globals().get("ENGINE_REV", "rev-UNSET"))
 
 
-def build_v2_cert_payload(
-    *,
-    mode: str,
-    district_id: str,
-    fixture_label: str,
-    inputs: dict | None = None,
-    solver: dict | None = None,
-    payload: dict | None = None,
-    schema_version: str | None = None,
-    engine_rev: str | None = None,
-    kind: str = "cert_v2",
-) -> dict:
-    """Build a canonical v2 cert payload for strict / projected certs.
 
-    This is intentionally header-agnostic: callers may still use _svr_cert_common /
-    _svr_build_embed to construct richer headers and then merge them into `payload`
-    upstream. Here we enforce only the outer envelope + sig8 convention.
-
-    Invariants:
-      - schema_version / engine_rev default from globals.
-      - district_id / fixture_label are stored as strings.
-      - sig8 is computed via hash_json_sig8 over the body *excluding* any existing sig8.
-    """
-
-    district_id = str(district_id)
-    fixture_label = str(fixture_label)
-
-    # Light sanity check: if fixture_label parses cleanly, prefer its D-tag
-    try:
-        d_from_label, _, _ = parse_fixture_label(fixture_label)
-        if d_from_label.startswith("D") and district_id.startswith("D") and d_from_label != district_id:
-            # Do not raise here; just keep the explicit district_id and allow callers to tighten later.
-            pass
-    except Exception:
-        # If label is not canonical yet, skip the check.
-        pass
-
-    sv = str(schema_version or _v2_default_schema_version())
-    ev = str(engine_rev or _v2_default_engine_rev())
-
-    body: dict = {
-        "schema_version": sv,
-        "engine_rev": ev,
-        "kind": str(kind),
-        "mode": str(mode),
-        "district_id": district_id,
-        "fixture_label": fixture_label,
-        "inputs": dict(inputs or {}),
-        "solver": dict(solver or {}),
-        "payload": dict(payload or {}),
-    }
-
-    sig_body = dict(body)
-    sig_body.pop("sig8", None)
-    body["sig8"] = hash_json_sig8(sig_body)
-    return body
 
 
 def build_v2_bundle_manifest(
