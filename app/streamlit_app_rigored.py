@@ -957,12 +957,6 @@ def _district_signature(*args, prefix: str = "D", size: int = 8, return_hash: bo
     sig = f"{prefix}{str(boundaries_hash)[:int(size)]}"
     return (sig, str(boundaries_hash)) if return_hash else sig
 
-
-# Optional convenience alias if you reference "district_from_hash" elsewhere
-if "district_from_hash" not in globals():
-    def district_from_hash(boundaries_hash: str, prefix: str = "D", size: int = 8) -> str:
-        return f"{prefix}{str(boundaries_hash)[:int(size)]}"
-
 # ---------- Frozen inputs signature (SSOT 5-hash) ----------
 def _frozen_inputs_sig_from_ib(ib, as_tuple: bool = True):
     """
