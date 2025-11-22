@@ -1450,18 +1450,6 @@ def ssot_live_sig(boundaries_obj=None, cmap_obj=None, H_obj=None, shapes_obj=Non
     return (hB, hC, hH, hU, hS)
 
 
-# ------------------------- JSONL Helpers -------------------------
-def _atomic_append_jsonl(path: Path, row: dict):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    blob = json.dumps(row, separators=(",", ":"), sort_keys=True, ensure_ascii=False) + "\n"
-    with tempfile.NamedTemporaryFile("w", delete=False, dir=path.parent, encoding="utf-8") as tmp:
-        tmp.write(blob); tmp.flush(); os.fsync(tmp.fileno()); tmp_name = tmp.name
-    with open(path, "a", encoding="utf-8") as final, open(tmp_name, "r", encoding="utf-8") as src:
-        shutil.copyfileobj(src, final)
-    os.remove(tmp_name)
-
-
-
 def policy_label_from_cfg(cfg: dict) -> str:
     if not cfg or not cfg.get("enabled_layers"):
         return "strict"
