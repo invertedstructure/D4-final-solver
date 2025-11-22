@@ -700,19 +700,6 @@ DISTRICT_MAP: dict[str, str] = {
     "aea6404ae680465c539dc4ba16e97fbd5cf95bae5ad1c067dc0f5d38ca1437b5": "D4",
 }
 
-# ---- Optional gallery display helper (Streamlit fallback)
-try:
-    import caas_jupyter_tools as _cj  # not available on Streamlit runner
-    def _display_df(name, df):
-        _cj.display_dataframe_to_user(name, df)
-except Exception:
-    def _display_df(name, df):
-        import pandas as _pd
-        import streamlit as _st
-        # Accept list-of-dicts or DataFrame
-        if not isinstance(df, _pd.DataFrame):
-            df = _pd.DataFrame(df)
-        _st.dataframe(df, use_container_width=True)
 
 def _lane_mask_from_d3(*args):
     """
