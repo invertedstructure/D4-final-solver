@@ -2135,12 +2135,6 @@ def _svr_freeze_ssot(pb):
     st.session_state["run_ctx"] = rc
     return ib, rc
 # === /helpers ===
-# ---------- tiny helpers (only define if missing) ----------
-if "_svr_now_iso" not in globals():
-    def _svr_now_iso():
-        try: return datetime.now(timezone.utc).isoformat().replace("+00:00","Z")
-        except Exception: return ""
-
 if "_svr_hash" not in globals():
     def _svr_hash(obj):  # sha256(canonical json)
         return _hashlib.sha256(_json.dumps(obj, separators=(",", ":"), sort_keys=True).encode("utf-8")).hexdigest()
