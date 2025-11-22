@@ -2371,55 +2371,6 @@ with tab2:
                 f"R3_SHAPE: expected H2({n3}×{n2})·d3({n2}×{n3}) and (C3⊕I3)({n3}×{n3}); "
                 f"got H2({rH}×{cH}), d3({rD}×{cD}), C3({rC}×{cC})"
             )
-
-    
-
-
-
-
-
-def _ab_is_fresh_now(pin=None, expected_embed_sig: str | None = None, **kwargs):
-    """
-    Back-compat freshness check.
-    Accepts extra kwargs (rc, ib, cfg, expected_sig5, ...).
-
-    Priority:
-      1) Compare pin.payload.embed_sig to expected_embed_sig  → AB_FRESH / AB_STALE_EMBED_SIG
-      2) Fallback: compare 5-hash arrays (legacy)            → AB_FRESH / AB_STALE_INPUTS_SIG
-      3) If neither available                                → AB_CANNOT_EVAL
-    """
-    # Validate pin
-    if not isinstance(pin, dict) or pin.get("state") != "pinned":
-        return (False, "AB_PIN_MISSING")
-
-    payload = pin.get("payload") or {}
-    have_embed = str(payload.get("embed_sig") or "")
-    exp_embed  = str(expected_embed_sig or "")
-
-    # 1) Preferred: embed_sig equality
-    if exp_embed:
-        return (have_embed == exp_embed,
-                "AB_FRESH" if have_embed == exp_embed else "AB_STALE_EMBED_SIG")
-
-    # 2) Fallback: legacy 5-hash equality (keeps old reason tag)
-    exp_sig5 = kwargs.get("expected_sig5")
-    pin_sig5 = payload.get("inputs_sig_5")
-    if exp_sig5 is None and "ib" in kwargs and kwargs["ib"] is not None:
-        # If they passed ib, compute canonical 5-hash
-        try:
-            exp_sig5 = _frozen_inputs_sig_from_ib(kwargs["ib"], as_tuple=False)
-        except Exception:
-            exp_sig5 = None
-
-    if exp_sig5 is not None and pin_sig5 is not None:
-        fresh = list(exp_sig5) == list(pin_sig5)
-        return (fresh, "AB_FRESH" if fresh else "AB_STALE_INPUTS_SIG")
-
-    # 3) Couldn’t evaluate freshness
-    return (False, "AB_CANNOT_EVAL")
-
-
-
         
 # === BEGIN PATCH: READ-ONLY OVERLAP HYDRATOR (uses frozen SSOT only) ===
 def overlap_ui_from_frozen():
