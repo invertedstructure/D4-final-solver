@@ -1786,22 +1786,6 @@ if "_is_zero" not in globals():
     def _is_zero(M):
         return (not M) or all((x & 1) == 0 for row in M for x in row)
 
-if "_recompute_strict_out" not in globals():
-    def _recompute_strict_out(*, boundaries_obj, cmap_obj, H_obj, d3) -> dict:
-        H2 = (H_obj.blocks.__root__.get("2") or []) if H_obj else []
-        C3 = (cmap_obj.blocks.__root__.get("3") or [])
-        I3 = _eye(len(C3)) if C3 else []
-        eq3 = False
-        try:
-            if _shape_ok(H2, d3) and C3 and C3[0] and (len(C3) == len(C3[0])):
-                if "mul" not in globals() or not callable(globals()["mul"]):
-                    raise RuntimeError("GF(2) mul(H2,d3) not available.")
-                R3 = _xor_gf2(mul(H2, d3), _xor_gf2(C3, I3))  # type: ignore[name-defined]
-                eq3 = _is_zero(R3)
-        except Exception:
-            eq3 = False
-        return {"2": {"eq": True}, "3": {"eq": bool(eq3), "n_k": (len(d3[0]) if (d3 and d3[0]) else 0)}}
-
 if "_recompute_projected_out" not in globals():
     def _recompute_projected_out(*, rc, boundaries_obj, cmap_obj, H_obj) -> tuple[dict, dict]:
         d3 = rc.get("d3") or (boundaries_obj.blocks.__root__.get("3") or [])
