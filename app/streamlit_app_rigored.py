@@ -3464,19 +3464,6 @@ def _hard_co_bitsig256(bits):
     import hashlib
     return hashlib.sha256(_json.dumps([1 if b else 0 for b in bits], separators=(",", ":"), sort_keys=False).encode("utf-8")).hexdigest()
 
-def _hard_co_zero_mask_from_cols(M):
-    m, n = _hard_co_shape(M)
-    z = [1]*n
-    for i in range(m):
-        row = M[i]
-        for j in range(n):
-            if row[j] == 1:
-                z[j] = 0
-    return z
-
-def _hard_co_subset(maskA, maskB):
-    return all((a == 0) or (b == 1) for a, b in zip(maskA, maskB))
-
 def time_tau_strict_core_from_blocks(blocks_B: dict, blocks_C: dict, blocks_H: dict) -> dict:
     """
     Minimal strict core for the Time(τ) toy:
