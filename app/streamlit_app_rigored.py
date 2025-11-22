@@ -3487,19 +3487,6 @@ def _hard_verdict_class(strict_eq, supp_R3, lanes, ker_mask, posed: bool):
         return "KER-EXPOSED" if exposed else "KER-FILTERED"
     return "RED_BOTH"
 
-def _hard_fixture_tuple_from_paths(pB, pH, pC):
-    import os, re
-    bname = os.path.basename(os.fspath(pB or ""))
-    if "D2" in bname: D = "D2"
-    elif "D3" in bname: D = "D3"
-    else: D = "UNKNOWN_DISTRICT"
-    hname = os.path.basename(os.fspath(pH or ""))
-    mH = re.search(r"[Hh]([01]{2})", hname)
-    H = f"H{mH.group(1)}" if mH else "H??"
-    cname = os.path.basename(os.fspath(pC or ""))
-    mC = re.search(r"[Cc]([01]{3})", cname)
-    C = f"C{mC.group(1)}" if mC else "C???"
-    return D, H, C, f"{D}_{H}_{C}"
 
 def time_tau_strict_core_from_blocks(blocks_B: dict, blocks_C: dict, blocks_H: dict) -> dict:
     """
