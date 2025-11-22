@@ -66,6 +66,10 @@ import shutil as _shutil
 from pathlib import Path as _Path
 from uuid import uuid4
 import copy as _copy
+from pathlib import Path as _Path
+import os as _os, json as _json, time as _time, glob as _glob, math as _math
+import collections as _collections
+import streamlit as _st
 # == EARLY HELPERS (v2 wiring) ==
 # Safe UI nonce (prevents "no _ui_nonce" warning)
 try:
@@ -4787,10 +4791,7 @@ def _svr_run_once_computeonly(ss=None):
 # V2 strict mechanics: receipts → manifest → suite → histograms
 # self-contained helpers, no changes to your 1× pipeline
 # ─────────────────────────────────────────────────────────────────────────────
-from pathlib import Path as _Path
-import os as _os, json as _json, time as _time, glob as _glob, math as _math
-import collections as _collections
-import streamlit as _st
+
 
 # --- Constants & dirs
 _REPO_ROOT = _Path(__file__).resolve().parent.parent
@@ -4800,13 +4801,6 @@ _REPORTS_DIR = _REPO_ROOT / "logs" / "reports"
 _MANIFESTS_DIR.mkdir(parents=True, exist_ok=True)
 _REPORTS_DIR.mkdir(parents=True, exist_ok=True)
 
-# --- Atomic JSON write
-def _v2_atomic_write_json(path: _Path, obj: dict):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    with tmp.open("w", encoding="utf-8") as f:
-        _json.dump(obj, f, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
-    _os.replace(str(tmp), str(path))
 
 # --- Latest bundle discovery (best-effort, by mtime)
 def _v2_latest_bundle_dir() -> _Path | None:
