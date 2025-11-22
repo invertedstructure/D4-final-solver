@@ -1058,33 +1058,6 @@ def _witness_pack(bottom_H2d3_bits=None, bottom_C3pI3_bits=None, lanes=None) -> 
         "lanes": (list(lanes) if lanes is not None else None),
     }
 
-def _predicate_out(eq_bool_or_none, *, na_reason_code=None, bottom_H2d3_bits=None, bottom_C3pI3_bits=None,
-                   selected_cols=None, mismatch_idxs=None, residual_tag_selected=None):
-    return {
-        "k": {"3": {"eq": (True if eq_bool_or_none is True else (False if eq_bool_or_none is False else None)),
-                    "na_reason_code": na_reason_code}},
-        "witness": _witness_pack(bottom_H2d3_bits=bottom_H2d3_bits, bottom_C3pI3_bits=bottom_C3pI3_bits),
-        "selected_cols": list(selected_cols or []),
-        "mismatch_cols_selected": list(mismatch_idxs or []),
-        "residual_tag_selected": (residual_tag_selected or ""),
-    }
-
-def build_embed(*, inputs_sig_5, dims, district_id, fixture_label, policy_tag, projection_context):
-    payload = {
-        "schema_version": SCHEMA_VERSION,
-        "engine_rev": ENGINE_REV,
-        "inputs_sig_5": inputs_sig_5,
-        "dims": dims,
-        "district_id": district_id,
-        "fixture_label": fixture_label or "",
-        "policy": policy_tag,  # "strict__VS__projected(columns@k=3,auto|file)"
-        "projection_context": projection_context,
-    }
-    sig = _sha256_hex(_canonical_json(payload).encode("utf-8"))
-    return payload, sig
-# --- Canonical tiny helpers (early, guarded) ---
-
-
 if "_normalize_bit" not in globals():
     def _normalize_bit(v) -> int:
         try: return 1 if (int(v) & 1) else 0
