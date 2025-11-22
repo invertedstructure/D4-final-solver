@@ -78,28 +78,6 @@ import json as _json
 import hashlib as _hash
 from pathlib import Path as _Path
 # == EARLY HELPERS (v2 wiring) ==
-# Safe UI nonce (prevents "no _ui_nonce" warning)
-try:
-    import streamlit as _st
-except Exception:
-    class _DummyST:
-        session_state = {}
-    _st = _DummyST()
-try:
-    import secrets as _secrets
-except Exception:
-    class _S:
-        @staticmethod
-        def token_hex(n): 
-            return "anon"
-    _secrets = _S()
-try:
-    if "_ui_nonce" not in _st.session_state:
-        _st.session_state["_ui_nonce"] = _secrets.token_hex(4)
-except Exception:
-    pass
-    
-
 
 # --- C1 canonical paths (tuple; JSON-first) ---
 
