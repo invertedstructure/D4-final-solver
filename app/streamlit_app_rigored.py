@@ -35,13 +35,17 @@ def _c1_paths():
     base.mkdir(parents=True, exist_ok=True)
     return (base / "coverage.jsonl", base / "coverage_rollup.csv")
 
-
 def _canon_dump_and_sig8(obj):
-    """Return (canonical_json_text, first_8_of_sha256) for small cert payloads."""
-    can = _v2_canonical_obj(obj)
-    raw = _json.dumps(can, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    h = _hash.sha256(raw).hexdigest()
-    return raw.decode("utf-8"), h[:8]
+    """Return (canonical_json_text, first_8_of_sha256) for small cert payloads (v2).
+
+    Thin wrapper around canonical_json/hash_json_sig8 so all v2 artifacts share the
+    same hashing discipline.
+    """
+    can_text = canonical_json(obj)
+    sig8 = hash_json_sig8(obj)
+    return can_text, sig8
+
+
 def _v2_coverage_path():
     try:
         root = _REPO_DIR
