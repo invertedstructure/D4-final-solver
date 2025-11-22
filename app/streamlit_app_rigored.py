@@ -3485,10 +3485,6 @@ def _hard_co_zero_mask_from_cols(M):
                 z[j] = 0
     return z
 
-def _hard_co_support_mask(M):
-    z = _hard_co_zero_mask_from_cols(M)
-    return [0 if z[j] else 1 for j in range(len(z))]
-
 def _hard_co_subset(maskA, maskB):
     return all((a == 0) or (b == 1) for a, b in zip(maskA, maskB))
 
