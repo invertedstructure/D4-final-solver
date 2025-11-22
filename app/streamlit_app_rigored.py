@@ -2515,38 +2515,6 @@ def _guarded_atomic_write_json(path: Path, payload: dict):
 # accept path / UploadedFile / dict
 def _is_uploaded_file(x): return hasattr(x, "getvalue") and hasattr(x, "name")
 
-def abx_read_json_any(x, *, kind: str):
-    """
-    Return (json_obj, canonical_path_str, origin) where origin ∈ {"file","upload","dict",""}
-    """
-    if not x: return {}, "", ""
-    # path-like
-    try:
-        if isinstance(x, (str, Path)):
-            p = Path(x)
-            if p.exists():
-                return _json.loads(p.read_text(encoding="utf-8")), str(p), "file"
-    except Exception:
-        pass
-    # UploadedFile
-    if _is_uploaded_file(x):
-        try:
-            raw = x.getvalue()
-            text = raw.decode("utf-8")
-            j = _json.loads(text)
-        except Exception:
-            return {}, "", ""
-        h12  = _hashlib.sha256(raw).hexdigest()[:12]
-        base = Path(getattr(x, "name", f"{kind}.json")).name
-        outp = UPLOADS_DIR / f"{kind}__{h12}__{base}"
-        try: outp.write_text(text, encoding="utf-8")
-        except Exception: pass
-        return j, str(outp), "upload"
-    # raw dict
-    if isinstance(x, dict):
-        return x, "", "dict"
-    return {}, "", ""
-
 # --- robust blocks normalizer (handles dicts and parsed cmap objects) ---
 def _svr_as_blocks_v2(j: object, kind: str) -> dict:
     """
