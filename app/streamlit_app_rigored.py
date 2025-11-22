@@ -74,7 +74,9 @@ import streamlit as _st
 import os, json, time, uuid, shutil, tempfile, hashlib
 from datetime import datetime, timezone
 from pathlib import Path
-
+import json as _json
+import hashlib as _hash
+from pathlib import Path as _Path
 # == EARLY HELPERS (v2 wiring) ==
 # Safe UI nonce (prevents "no _ui_nonce" warning)
 try:
@@ -97,11 +99,10 @@ try:
 except Exception:
     pass
     
-import json as _json
-import hashlib as _hash
+
 
 # --- C1 canonical paths (tuple; JSON-first) ---
-from pathlib import Path as _Path
+
 def _c1_paths():
     base = _Path("logs") / "reports"
     base.mkdir(parents=True, exist_ok=True)
