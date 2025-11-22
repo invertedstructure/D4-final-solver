@@ -338,6 +338,25 @@ def _v2_canonical_obj(obj, exclude_keys=_V2_EPHEMERAL_KEYS):
     # primitives pass through
     return obj
 
+# --- Canonical JSON + hashing helpers for v2 artifacts ---
+
+def canonical_json(obj) -> str:
+    """Canonical JSON dump for v2 artifacts.
+
+    - Normalizes via _v2_canonical_obj (drops ephemeral keys / None)
+    - Uses deterministic json.dumps with sorted keys and compact separators
+    """
+    can = _v2_canonical_obj(obj)
+    return _json.dumps(can, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+
+def hash_json(obj) -> str:
+    """Full SHA-256 hex digest of canonical_json(obj)."""
+    raw = canonical_json(obj).encode("utf-8")
+    return _hash.sha256(raw).hexdigest()
+
+def hash_json_sig8(obj) -> str:
+    """First 8 hex characters of hash_json(obj)."""
+    return hash_json(obj)[:8]
 
 def _v2_extract_ids_from_path(bdir: _VPath):
     """
