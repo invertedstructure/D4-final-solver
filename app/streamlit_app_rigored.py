@@ -2398,8 +2398,6 @@ if "_svr_hash" not in globals():
     def _svr_hash(obj):  # sha256(canonical json)
         return _hashlib.sha256(_json.dumps(obj, separators=(",", ":"), sort_keys=True).encode("utf-8")).hexdigest()
 
-if "_svr_eye" not in globals():
-    def _svr_eye(n): return [[1 if i==j else 0 for j in range(n)] for i in range(n)]
 
 if "_svr_is_zero" not in globals():
     def _svr_is_zero(M): return (not M) or all((int(x) & 1) == 0 for row in M for x in row)
