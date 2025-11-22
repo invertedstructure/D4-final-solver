@@ -820,37 +820,6 @@ if "_svr_projected_auto_from_blocks" not in globals():
         eq3 = _svr_is_zero(R3p)
         return {"na": False, "policy": "auto_c_bottom"}, lanes, {"2": {"eq": True}, "3": {"eq": bool(eq3)}}
 
-
-
-# --- legacy aliases to avoid NameError from older code paths ---
-_json = json                               # some helpers still used _json.*
-_sha256_hex_bytes = lambda b: hashlib.sha256(b).hexdigest()
-_sha256_hex = _sha256_hex_bytes            # older helpers referenced this name
-_mul_gf2 = globals().get("mul")            # older helpers referenced _mul_gf2
-_add_gf2 = globals().get("add")            # older helpers referenced _add_gf2
-if _mul_gf2 is None:
-    def _mul_gf2(A,B):
-        if not A or not B or not A[0] or not B[0]: return []
-        m, kA = len(A), len(A[0])
-        kB, n = len(B), len(B[0])
-        if kA != kB: return []
-        C = [[0]*n for _ in range(m)]
-        for i in range(m):
-            Ai = A[i]
-            for k in range(kA):
-                if Ai[k] & 1:
-                    Bk = B[k]
-                    for j in range(n):
-                        C[i][j] ^= (Bk[j] & 1)
-        return C
-if _add_gf2 is None:
-    def _add_gf2(A,B):
-        if not A: return B or []
-        if not B: return A or []
-        r,c = len(A), len(A[0])
-        if len(B)!=r or len(B[0])!=c: return A
-        return [[(A[i][j]^B[i][j]) for j in range(c)] for i in range(r)]
-
 # --- reports/paths (canonical + compat) ---
 if "REPORTS_DIR" not in globals():
     REPORTS_DIR = Path("reports")
