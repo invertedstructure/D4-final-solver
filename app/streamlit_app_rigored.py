@@ -1475,16 +1475,6 @@ def _frozen_inputs_sig5_hex(ib):
     blob = _json.dumps(sig5, separators=(",", ":"), sort_keys=False).encode("ascii")
     return _hashlib.sha256(blob).hexdigest()
 
-# --- pin freshness helper ------------------------------------------------------
-def _pin_status_text(pin_obj, expected_sig: str) -> str:
-    """Return a short freshness badge given a pin object and the expected embed_sig."""
-    payload = (pin_obj or {}).get("payload") or {}
-    have = str(payload.get("embed_sig",""))
-    if not expected_sig:
-        return "—"
-    if not have:
-        return "—"
-    return "🟢 Fresh" if have == expected_sig else "⚠️ Stale"
 # --- strict / projected(columns@k=3,auto) helpers (guarded) --------------------------------
 if "_svr_shape_ok_for_mul" not in globals():
     def _svr_shape_ok_for_mul(A, B):
