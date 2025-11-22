@@ -633,42 +633,6 @@ if "_normalize_bit" not in globals():
         try: return 1 if (int(v) & 1) else 0
         except Exception: return 0
 
-# NEW: full-matrix residual helpers (any 1 in a column across all rows)
-if "_svr_mismatch_cols_from_R3" not in globals():
-    def _svr_mismatch_cols_from_R3(R3, selected_mask_bits):
-        try:
-            n3 = len(R3[0]) if (R3 and R3[0]) else 0
-            sel = [(int(x) & 1) for x in (selected_mask_bits or [])]
-            if len(sel) != n3:
-                sel = (sel + [0] * n3)[:n3]
-            out = []
-            for j in range(n3):
-                if sel[j] and any((int(R3[i][j]) & 1) for i in range(len(R3))):
-                    out.append(j)
-            return out
-        except Exception:
-            return []
-
-if "_svr_residual_tag_from_R3" not in globals():
-    def _svr_residual_tag_from_R3(R3, selected_mask_bits):
-        try:
-            n3 = len(R3[0]) if (R3 and R3[0]) else 0
-            sel = [(int(x) & 1) for x in (selected_mask_bits or [])]
-            if len(sel) != n3:
-                sel = (sel + [0] * n3)[:n3]
-            bits = []
-            for j in range(n3):
-                one = (sel[j] and any((int(R3[i][j]) & 1) for i in range(len(R3))))
-                bits.append("1" if one else "0")
-            return "".join(bits)
-        except Exception:
-            return ""
-
-
-
-
-
-
 # Page config early so Streamlit is happy
 # ────────────────────────────── PACKAGE LOADER ──────────────────────────────
 HERE = Path(__file__).resolve().parent
