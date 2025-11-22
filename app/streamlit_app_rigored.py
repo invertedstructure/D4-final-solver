@@ -5209,26 +5209,6 @@ def _hard_co_xor(A,B):
         raise ValueError("shape mismatch for xor")
     return [[(A[i][j]^B[i][j]) for j in range(n)] for i in range(m)]
 
-def _hard_co_allzero_cols(M):
-    m,n = _hard_co_shape(M)
-    zero = [True]*n
-    for i in range(m):
-        row = M[i]
-        for j in range(n):
-            if row[j] == 1:
-                zero[j] = False
-    return zero
-
-def _hard_co_masked_allzero_cols(M, lanes):
-    m,n = _hard_co_shape(M)
-    if len(lanes) != n:
-        return False
-    for i in range(m):
-        row = M[i]
-        for j in range(n):
-            if lanes[j] and row[j]==1:
-                return False
-    return True
 
 def _hard_co_hash8(obj) -> str:
     import hashlib
