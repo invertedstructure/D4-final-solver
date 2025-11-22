@@ -1023,31 +1023,11 @@ if not all(name in globals() for name in ("tab1", "tab2", "tab3", "tab4", "tab5"
 
 with tab2:
     st.subheader("Overlap")
-    # Your provided code starts here
-    def _xor_mat(A, B):
-        # prefer library add() if available (keeps one implementation)
-        if "add" in globals() and callable(globals()["add"]):
-            return globals()["add"](A, B)
-        if not A: return [r[:] for r in (B or [])]
-        if not B: return [r[:] for r in (A or [])]
-        r, c = len(A), len(A[0])
-        return [[(A[i][j] ^ B[i][j]) & 1 for j in range(c)] for i in range(r)]
-  
+     
     def _shape(M):
         return (len(M), len(M[0]) if (M and M[0]) else 0)
 
-    def _guard_r3_shapes(H2, d3, C3):
-        """Ensure H2·d3 and (C3⊕I3) shapes are consistent; tolerate empty during exploration."""
-        rH, cH = _shape(H2); rD, cD = _shape(d3); rC, cC = _shape(C3)
-        if not (rH and cH and rD and cD and rC and cC):
-            return  # allow empty while exploring
-        n3, n2 = rH, cH
-        if not (rD == n2 and cD == n3 and rC == n3 and cC == n3):
-            raise RuntimeError(
-                f"R3_SHAPE: expected H2({n3}×{n2})·d3({n2}×{n3}) and (C3⊕I3)({n3}×{n3}); "
-                f"got H2({rH}×{cH}), d3({rD}×{cD}), C3({rC}×{cC})"
-            )
-        
+           
 
 if "_shape_ok" not in globals():
     def _shape_ok(A, B):
@@ -1070,67 +1050,6 @@ if "_eye" not in globals():
 if "_is_zero" not in globals():
     def _is_zero(M):
         return (not M) or all((x & 1) == 0 for row in M for x in row)
-
-if "_recompute_projected_out" not in globals():
-    def _recompute_projected_out(*, rc, boundaries_obj, cmap_obj, H_obj) -> tuple[dict, dict]:
-        d3 = rc.get("d3") or (boundaries_obj.blocks.__root__.get("3") or [])
-        n3 = len(d3[0]) if (d3 and d3[0]) else 0
-        lm = list(rc.get("lane_mask_k3") or ([1] * n3))
-        # Use active Π if present; else diagonal(lm)
-        P  = rc.get("P_active") or [[1 if (i == j and int(lm[j]) == 1) else 0 for j in range(n3)] for i in range(n3)]
-
-        H2 = (H_obj.blocks.__root__.get("2") or []) if H_obj else []
-        C3 = (cmap_obj.blocks.__root__.get("3") or [])
-        I3 = _eye(len(C3)) if C3 else []
-
-        shapes = {
-            "H2": (len(H2), len(H2[0]) if H2 else 0),
-            "d3": (len(d3), len(d3[0]) if d3 else 0),
-            "C3": (len(C3), len(C3[0]) if C3 else 0),
-            "P_active": (len(P), len(P[0]) if P else 0),
-        }
-
-        R3s, R3p = [], []
-        try:
-            if "mul" not in globals() or not callable(globals()["mul"]):
-                raise RuntimeError("GF(2) mul missing.")
-            R3s = _xor_gf2(mul(H2, d3), _xor_gf2(C3, I3)) if (_shape_ok(H2, d3) and C3 and C3[0] and (len(C3) == len(C3[0]))) else []
-            R3p = mul(R3s, P) if (R3s and P and len(R3s[0]) == len(P)) else []
-        except Exception:
-            R3s, R3p = [], []
-
-        def _nz_cols(M):
-            if not M: return []
-            r, c = len(M), len(M[0])
-            return [j for j in range(c) if any(M[i][j] & 1 for i in range(r))]
-
-        debug = {
-            "shapes": shapes,
-            "R3_strict_nz_cols": _nz_cols(R3s),
-            "R3_projected_nz_cols": _nz_cols(R3p),
-        }
-        eq3_proj = _is_zero(R3p)
-        return ({"2": {"eq": True}, "3": {"eq": bool(eq3_proj), "n_k": n3}}, debug)
-
-if "_lane_bottoms_for_diag" not in globals():
-    def _lane_bottoms_for_diag(*, H_obj, cmap_obj, d3, lane_mask):
-        def _bottom_row(M): return M[-1] if (M and len(M)) else []
-        H2 = (H_obj.blocks.__root__.get("2") or []) if H_obj else []
-        C3 = (cmap_obj.blocks.__root__.get("3") or [])
-        I3 = _eye(len(C3)) if C3 else []
-        try:
-            if "mul" not in globals() or not callable(globals()["mul"]):
-                raise RuntimeError("GF(2) mul missing.")
-            H2d3  = mul(H2, d3) if _shape_ok(H2, d3) else []
-            C3pI3 = _xor_gf2(C3, I3) if (C3 and C3[0]) else []
-        except Exception:
-            H2d3, C3pI3 = [], []
-        idx = [j for j, m in enumerate(lane_mask or []) if m]
-        bH = _bottom_row(H2d3); bC = _bottom_row(C3pI3)
-        return ([bH[j] for j in idx] if (bH and idx) else [],
-                [bC[j] for j in idx] if (bC and idx) else [])
-# =================== /A/B compat shims ===================
-# ============== A/B policy + embed signature helpers (compat) ==============
 
 
 if "_canonical_policy_tag" not in globals():
@@ -1168,35 +1087,7 @@ if "_inputs_sig_now_from_ib" not in globals():
             str(h.get("shapes_hash",     ib.get("shapes_hash",""))),
         ]
 
-if "_ab_embed_sig" not in globals():
-    def _ab_embed_sig() -> str:
-        """
-        Canonical signature that gates whether a pinned A/B snapshot is still
-        'fresh' enough to embed into the cert/gallery. Includes:
-          - frozen/current inputs_sig
-          - canonical policy tag
-          - projector hash (only for projected(columns@k=3,file))
-        """
-        ss = st.session_state
-        rc = ss.get("run_ctx") or {}
-        ib = ss.get("_inputs_block") or {}
 
-        # Prefer frozen sig if your SSOT helper exists; else current inputs.
-        try:
-            if "ssot_frozen_sig_from_ib" in globals() and callable(globals()["ssot_frozen_sig_from_ib"]):
-                inputs_sig = list(ssot_frozen_sig_from_ib() or [])  # type: ignore[name-defined]
-            else:
-                inputs_sig = _inputs_sig_now_from_ib(ib)
-        except Exception:
-            inputs_sig = _inputs_sig_now_from_ib(ib)
-
-        pol = _canonical_policy_tag(rc)
-        pj  = rc.get("projector_hash","") if str(rc.get("mode","")) == "projected(columns@k=3,file)" else ""
-
-        blob = {"inputs": inputs_sig, "policy": pol, "projector_hash": pj}
-        return _hash.sha256(_json.dumps(blob, separators=(",", ":"), sort_keys=True).encode("ascii")).hexdigest()
-
-# ===== ABX fixture helpers (module-scope, guarded) =====
 
 
 if "abx_is_uploaded_file" not in globals():
