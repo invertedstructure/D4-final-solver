@@ -2593,15 +2593,7 @@ if "abx_read_json_any" not in globals():
             return x, "", "dict"
         return {}, "", ""
 
-if "abx_blocks_view" not in globals():
-    def abx_blocks_view(obj):
-        """Return {'blocks': ...} for your model/dict, or empty structure."""
-        try:
-            if hasattr(obj, "blocks") and hasattr(obj.blocks, "__root__"):
-                return {"blocks": obj.blocks.__root__}
-        except Exception:
-            pass
-        return obj if (isinstance(obj, dict) and "blocks" in obj) else {"blocks": {}}
+
 
 if "abx_lane_mask_from_d3" not in globals():
     def abx_lane_mask_from_d3(d):
