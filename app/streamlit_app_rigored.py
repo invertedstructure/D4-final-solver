@@ -92,7 +92,8 @@ from pathlib import Path as _Path
 import json as _json
 import uuid as _uuid
 # == EARLY HELPERS (v2 wiring) ==
-
+from pathlib import Path as _VPath
+import json as _Vjson, hashlib as _Vhash
 # --- C1 canonical paths (tuple; JSON-first) ---
 
 def _c1_paths():
@@ -144,12 +145,6 @@ def _v2_coverage_count_for_snapshot(snapshot_id: str) -> int:
             if j.get("snapshot_id") == snapshot_id:
                 n += 1
     return n
-
-
-
-# Pass1/2 helpers to write bundle.json and loop_receipt
-from pathlib import Path as _VPath
-import json as _Vjson, hashlib as _Vhash
 
 _V2_EXPECTED = [
     ("strict",               "overlap__", "__strict__"),
