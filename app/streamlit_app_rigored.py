@@ -1304,68 +1304,6 @@ def _svr_freeze_ssot(pb):
     rc.update({"n2": n2, "n3": n3, "d3": d3})
     st.session_state["run_ctx"] = rc
     return ib, rc
-# cert scaffold (v2 header; no integrity payload)
-if "_svr_cert_common" not in globals():
-    def _svr_cert_common(ib, rc, policy_tag: str, extra: dict | None = None) -> dict:
-        """
-        Canonical v2 cert header helper.
-
-        - Pulls schema/engine from globals (SCHEMA_VERSION, ENGINE_REV)
-        - Uses district_id from ib/rc
-        - Treats fixture_label as canonical and keeps fixture_id as alias
-        - Attaches snapshot_id and SSOT 5-hash (inputs_sig_5)
-        - Leaves sig8 to be filled by _svr_apply_sig8 later.
-        """
-        ib = ib or {}
-        rc = rc or {}
-
-        schema_version = str(globals().get("SCHEMA_VERSION", "2.0.0"))
-        engine_rev = str(globals().get("ENGINE_REV", ""))
-
-        district_id = str(
-            ib.get("district_id")
-            or rc.get("district_id")
-            or "DUNKNOWN"
-        )
-
-        fixture_label = str(
-            ib.get("fixture_label")
-            or ib.get("fixture_id")
-            or rc.get("fixture_label")
-            or rc.get("fixture_id")
-            or ""
-        )
-
-        snapshot_id = str(
-            ib.get("snapshot_id")
-            or rc.get("snapshot_id")
-            or ""
-        )
-
-        try:
-            inputs_sig_5 = _frozen_inputs_sig_from_ib(ib, as_tuple=False)
-        except Exception:
-            inputs_sig_5 = list(ib.get("inputs_sig_5") or [])
-
-        base_hdr = {
-            "schema_version": schema_version,
-            "engine_rev": engine_rev,
-            "district_id": district_id,
-            # keep fixture_id for backwards compat, but prefer fixture_label
-            "fixture_id": fixture_label,
-            "fixture_label": fixture_label,
-            "snapshot_id": snapshot_id,
-            "inputs_sig_5": list(inputs_sig_5),
-            "policy": str(policy_tag),
-        }
-
-        run_id = rc.get("run_id")
-        if run_id:
-            base_hdr["run_id"] = str(run_id)
-
-        if extra:
-            base_hdr.update(extra)
-        return base_hdr
 
 # unified embed builder (AUTO/File)
 def _svr_build_embed(ib: dict,
@@ -1422,13 +1360,6 @@ def _svr_build_embed(ib: dict,
     s = _json.dumps(embed, separators=(",", ":"), sort_keys=True).encode("ascii")
     embed_sig = _hashlib.sha256(s).hexdigest()
     return embed, embed_sig
-
-
-def _svr_apply_sig8(cert: dict, embed_sig: str) -> None:
-    cert["sig8"] = (embed_sig or "")[:8]
-
-
-
 # small witness helper
 def _bottom_row(M): return M[-1] if (M and len(M)) else []
 
