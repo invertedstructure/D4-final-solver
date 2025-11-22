@@ -1,96 +1,46 @@
-import streamlit as st
-# === canonical constants / helpers (single source of truth) ===
-
-import os
-import json as _json
-import hashlib as _hashlib
-import uuid as _uuid
-import datetime as _datetime
-from pathlib import Path
-import os, tempfile
-import copy as _copy
-import json as _json
-import hashlib as _hash
-import json as _json
 import csv as _csv
-from pathlib import Path as _Path
 import datetime as _dt
-import random as _random
-import uuid, streamlit as st
-import json as _json
-from pathlib import Path as _Path
-import hashlib as _hash
-# ─────────────────────────────────────────────────────────────────────────────
-import sys
-import os
-import json
-import csv
 import hashlib
-import platform
-import zipfile
-import tempfile
-import shutil
-import importlib.util
-import types
-import secrets
-import math
-import uuid
-from io import BytesIO
-from contextlib import contextmanager
-from datetime import datetime, timezone
-from pathlib import Path
-import random
-# ------------------------- End of Organized Helpers -------------------------
-import uuid
-import os
-import shutil
-import tempfile
-import json
-from pathlib import Path
-from contextlib import contextmanager
-# ======================= Canon Helpers SSOT - Deduped & Organized =======================
-from typing import Iterable, List, Optional
-import json, hashlib, streamlit as st
-from datetime import datetime, timezone
-from pathlib import Path
-import pandas as pd
-from pathlib import Path
-import json as _json, hashlib as _hashlib
-# Underscored aliases for helpers
-import os as _os
-import json as _json
+import hashlib as _hash
 import hashlib as _hashlib
-import csv as _csv
+import hashlib as _Vhash
+import importlib.util
+import json
+import json as _json
+import json as _Vjson
+import json as _j
+import os
+import os as _os
+import re
+import secrets as _secrets
+import shutil
+import sys
+import tempfile
+import time
+import time as _time
+import types
+import uuid
+import uuid as _uuid
+import zipfile
 import zipfile as _zipfile
-import tempfile as _tempfile
-import shutil as _shutil
-from pathlib import Path as _Path
-from uuid import uuid4
-import copy as _copy
-from pathlib import Path as _Path
-import os as _os, json as _json, time as _time, glob as _glob, math as _math
-import collections as _collections
-import streamlit as _st
-import os, json, time, uuid, shutil, tempfile, hashlib
 from datetime import datetime, timezone
 from pathlib import Path
-import json as _json
-import hashlib as _hash
 from pathlib import Path as _Path
-from pathlib import Path as _Path
-import json as _json, hashlib as _hashlib, time as _time
-import streamlit as _st
-import json as _json
-from pathlib import Path
-import hashlib as _hash
-import json as _json
-import os, json, time, uuid, hashlib
+from pathlib import Path as _PathAlias
 from pathlib import Path as _Pco
-import os as _os, json as _json, time as _time, uuid as _uuid, hashlib as _hashlib
 from pathlib import Path as _Ph
-from pathlib import Path as _Path
-import json as _json
-import uuid as _uuid
+from pathlib import Path as _VPath
+from typing import Iterable, List
+
+# Third-party
+import streamlit as st
+import streamlit as _st
+import pandas as _pd
+import caas_jupyter_tools as _cj
+
+# Project-specific
+from otcore.linalg_gf2 import add as _add_lib, eye as _eye_lib, mul as _mul_lib
+
 # == EARLY HELPERS (v2 wiring) ==
 from pathlib import Path as _VPath
 import json as _Vjson, hashlib as _Vhash
