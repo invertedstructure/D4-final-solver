@@ -2138,33 +2138,6 @@ def _svr_freeze_ssot(pb):
     st.session_state["run_ctx"] = rc
     return ib, rc
 # === /helpers ===
-
-# --- legacy A/B embed signature (guarded) --------------------------------------
-# Used by older pin/cert code paths: embed_sig = sha256({"inputs": [...], "policy": "...", lanes|reason})
-if "_svr_embed_sig" not in globals():
-    def _svr_embed_sig(inputs_sig, policy_tag, lanes_or_reason):
-        """
-        inputs_sig: list[str]  # 5-hash in any order you're passing today
-        policy_tag: str        # e.g. "projected(columns@k=3,auto)"
-        lanes_or_reason: list[int] OR str (N/A reason)
-        """
-        try:
-            blob = {"inputs": list(inputs_sig or []), "policy": str(policy_tag)}
-            if isinstance(lanes_or_reason, (list, tuple)):
-                blob["lanes"] = [int(x) & 1 for x in lanes_or_reason]
-            else:
-                blob["projected_na_reason"] = str(lanes_or_reason)
-            payload = _json.dumps(blob, separators=(",", ":"), sort_keys=True).encode("utf-8")
-            return _hashlib.sha256(payload).hexdigest()
-        except Exception:
-            # fail-safe: still return a stable-ish value to avoid crashes
-            return _hashlib.sha256(b"svr-embed-sig-fallback").hexdigest()
-
-# === SINGLE-BUTTON SOLVER — strict → projected(columns@k=3,auto) → A/B(auto) → freezer → A/B(file) ===
-import os, json as _json, hashlib as _hashlib
-from pathlib import Path
-from datetime import datetime, timezone
-
 # ---------- tiny helpers (only define if missing) ----------
 if "_svr_now_iso" not in globals():
     def _svr_now_iso():
