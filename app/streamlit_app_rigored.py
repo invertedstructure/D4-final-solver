@@ -1,5 +1,70 @@
 import streamlit as st
+# === canonical constants / helpers (single source of truth) ===
 
+import os
+import json as _json
+import hashlib as _hashlib
+import uuid as _uuid
+import datetime as _datetime
+from pathlib import Path
+import os, tempfile
+import copy as _copy
+import json as _json
+import hashlib as _hash
+import json as _json
+import csv as _csv
+from pathlib import Path as _Path
+import datetime as _dt
+import random as _random
+import uuid, streamlit as st
+import json as _json
+from pathlib import Path as _Path
+import hashlib as _hash
+# ─────────────────────────────────────────────────────────────────────────────
+import sys
+import os
+import json
+import csv
+import hashlib
+import platform
+import zipfile
+import tempfile
+import shutil
+import importlib.util
+import types
+import secrets
+import math
+import uuid
+from io import BytesIO
+from contextlib import contextmanager
+from datetime import datetime, timezone
+from pathlib import Path
+import random
+# ------------------------- End of Organized Helpers -------------------------
+import uuid
+import os
+import shutil
+import tempfile
+import json
+from pathlib import Path
+from contextlib import contextmanager
+# ======================= Canon Helpers SSOT - Deduped & Organized =======================
+
+import json, hashlib, streamlit as st
+from datetime import datetime, timezone
+from pathlib import Path
+import pandas as pd
+
+# Underscored aliases for helpers
+import os as _os
+import json as _json
+import hashlib as _hashlib
+import csv as _csv
+import zipfile as _zipfile
+import tempfile as _tempfile
+import shutil as _shutil
+from pathlib import Path as _Path
+from uuid import uuid4
 # == EARLY HELPERS (v2 wiring) ==
 # Safe UI nonce (prevents "no _ui_nonce" warning)
 try:
@@ -765,27 +830,7 @@ def _suite_msg_with_lanes(bundle_dir):
 # ===============================================================
 st.set_page_config(page_title="Odd Tetra App (v0.1)", layout="wide")
 
-# === canonical constants / helpers (single source of truth) ===
 
-import os
-import json as _json
-import hashlib as _hashlib
-import uuid as _uuid
-import datetime as _datetime
-from pathlib import Path
-import os, tempfile
-import copy as _copy
-import json as _json
-import hashlib as _hash
-import json as _json
-import csv as _csv
-from pathlib import Path as _Path
-import datetime as _dt
-import random as _random
-import uuid, streamlit as st
-import json as _json
-from pathlib import Path as _Path
-import hashlib as _hash
 # Page config must be the first Streamlit command
 SCHEMA_VERSION = "2.0.0"
 ENGINE_REV     = "rev-20251022-1"
@@ -1465,51 +1510,7 @@ if "_svr_residual_tag_from_R3" not in globals():
 
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-import sys
-import os
-import json
-import csv
-import hashlib
-import platform
-import zipfile
-import tempfile
-import shutil
-import importlib.util
-import types
-import secrets
-import math
-import uuid
-from io import BytesIO
-from contextlib import contextmanager
-from datetime import datetime, timezone
-from pathlib import Path
-import random
-# ------------------------- End of Organized Helpers -------------------------
-import uuid
-import os
-import shutil
-import tempfile
-import json
-from pathlib import Path
-from contextlib import contextmanager
-# ======================= Canon Helpers SSOT - Deduped & Organized =======================
 
-import json, hashlib, streamlit as st
-from datetime import datetime, timezone
-from pathlib import Path
-import pandas as pd
-
-# Underscored aliases for helpers
-import os as _os
-import json as _json
-import hashlib as _hashlib
-import csv as _csv
-import zipfile as _zipfile
-import tempfile as _tempfile
-import shutil as _shutil
-from pathlib import Path as _Path
-from uuid import uuid4
 
 # Page config early so Streamlit is happy
 # ────────────────────────────── PACKAGE LOADER ──────────────────────────────
