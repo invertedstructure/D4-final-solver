@@ -3477,17 +3477,6 @@ def _hard_co_zero_mask_from_cols(M):
 def _hard_co_subset(maskA, maskB):
     return all((a == 0) or (b == 1) for a, b in zip(maskA, maskB))
 
-def _hard_verdict_class(strict_eq, supp_R3, lanes, ker_mask, posed: bool):
-    if not posed:
-        return None
-    if strict_eq is True:
-        return "GREEN"
-    if _hard_co_subset(supp_R3, ker_mask):
-        exposed = any((lanes[j] == 1 and supp_R3[j] == 1) for j in range(len(lanes)))
-        return "KER-EXPOSED" if exposed else "KER-FILTERED"
-    return "RED_BOTH"
-
-
 def time_tau_strict_core_from_blocks(blocks_B: dict, blocks_C: dict, blocks_H: dict) -> dict:
     """
     Minimal strict core for the Time(τ) toy:
