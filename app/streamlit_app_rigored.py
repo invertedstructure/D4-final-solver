@@ -3454,12 +3454,6 @@ def _hard_co_xor(A,B):
         raise ValueError("shape mismatch for xor")
     return [[(A[i][j]^B[i][j]) for j in range(n)] for i in range(m)]
 
-
-def _hard_co_hash8(obj) -> str:
-    import hashlib
-    h = hashlib.sha256(_json.dumps(obj, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
-    return h[:8]
-
 def _hard_co_bitsig256(bits):
     import hashlib
     return hashlib.sha256(_json.dumps([1 if b else 0 for b in bits], separators=(",", ":"), sort_keys=False).encode("utf-8")).hexdigest()
