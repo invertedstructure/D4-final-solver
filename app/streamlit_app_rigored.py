@@ -3901,16 +3901,32 @@ def _time_tau_c2_build_row_from_manifest(rec: dict, max_flips_per_kind: int = 16
     if not isinstance(rec, dict):
         rec = {}
 
-    fixture_label = rec.get("fixture_label") or ""
-    # For now, district_id is the D-tag prefix of the fixture_label (D2, D3, …).
-    district_id = rec.get("district_id") or (fixture_label.split("_")[0] if fixture_label else "DUNKNOWN")
+        fixture_label = rec.get("fixture_label") or ""
+    district_id = rec.get("district_id") or (
+        fixture_label.split("_")[0] if fixture_label else "DUNKNOWN"
+    )
 
-    # Try to pick a snapshot_id from the manifest row, otherwise fall back to the
-    # current v2 run snapshot pointer if available.
-    try:
-        snapshot_id = rec.get("snapshot_id") or _svr_current_run_snapshot_id()
-    except Exception:
-        snapshot_id = None
+    # D3.1.C.E — SSOT alignment (strict).
+    # Resolve the canonical world snapshot once; require it to exist and agree
+    # with any manifest snapshot_id embedded in the row.
+    ssot_snapshot_id = _v2_current_world_snapshot_id(strict=False)
+    if not ssot_snapshot_id:
+        raise RuntimeError(
+            "Time(τ) C2: no canonical v2 world snapshot_id found; "
+            "run the v2 core 64× flow first."
+        )
+
+    rec_snapshot_id = rec.get("snapshot_id")
+    if rec_snapshot_id and str(rec_snapshot_id) != str(ssot_snapshot_id):
+        raise RuntimeError(
+            "Time(τ) C2: manifest row snapshot_id mismatch "
+            f"(fixture={fixture_label!r}, manifest={rec_snapshot_id!r}, "
+            f"SSOT={ssot_snapshot_id!r}). "
+            "Rerun the v2 core 64× flow to regenerate manifest_full_scope.jsonl."
+        )
+
+    snapshot_id = ssot_snapshot_id
+
 
     # Resolve canonical paths from the manifest's "paths" field.
     paths = rec.get("paths") or {}
