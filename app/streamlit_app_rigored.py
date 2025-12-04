@@ -194,7 +194,16 @@ def _d3_integer_pass_stats(snapshot_id: str | None) -> dict:
     D3 helper: compute integer-pass stats for a snapshot.
 
     All arithmetic here is analyzer-only and never gates the pipeline.
+
+    If snapshot_id is falsy, default to the canonical v2 world snapshot (SSOT).
     """
+    # Resolve snapshot to SSOT by default.
+    if not snapshot_id:
+        try:
+            snapshot_id = _v2_current_world_snapshot_id(strict=False)
+        except Exception:
+            snapshot_id = None
+
     # Coverage rows for this snapshot (0 on any error or missing coverage file).
     rows = 0
     if snapshot_id:
