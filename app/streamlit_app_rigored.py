@@ -44,7 +44,12 @@ def _canon_dump_and_sig8(obj):
     can_text = canonical_json(obj)
     sig8 = hash_json_sig8(obj)
     return can_text, sig8
-
+    
+def _repo_root():
+    try:
+        return _REPO_DIR
+    except Exception:
+        return _Path(__file__).resolve().parents[1]
 
 def _v2_coverage_path():
     try:
@@ -7127,11 +7132,7 @@ with st.expander("C4 — C3 stability rollup (v0.2)", expanded=False):  # type: 
 # --- V2 CORE (64×) — one press → receipts → manifest → suite → hist/zip
 _st.subheader("V2 — 64× → Receipts → Manifest → Suite/Histograms")
 
-def _repo_root():
-    try:
-        return _REPO_DIR
-    except Exception:
-        return _Path(__file__).resolve().parents[1]
+
 
 snapshot_id = _st.text_input(
     "Snapshot id",
