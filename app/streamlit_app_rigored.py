@@ -232,9 +232,11 @@ def _d3_integer_pass_stats(snapshot_id: str | None) -> dict:
     }
 
 
-def _c1_debug_snapshot_summary(snapshot_id: str) -> dict:
+def _c1_debug_snapshot_summary(snapshot_id: str | None) -> dict:
     """
     Dev-only helper to sanity-check C1/τ for a given snapshot_id.
+
+    If snapshot_id is falsy, defaults to the canonical v2 world snapshot (SSOT).
 
     Returns a dict with:
       - snapshot_id
@@ -245,6 +247,13 @@ def _c1_debug_snapshot_summary(snapshot_id: str) -> dict:
       - has_integer_passes          (True/False when n_fixtures known; else None)
     """
     cov_path, csv_out = _c1_paths()
+
+    if not snapshot_id:
+        try:
+            snapshot_id = _v2_current_world_snapshot_id(strict=False)
+        except Exception:
+            snapshot_id = None
+
     stats = _d3_integer_pass_stats(snapshot_id)
 
     all_row = None
@@ -252,10 +261,11 @@ def _c1_debug_snapshot_summary(snapshot_id: str) -> dict:
         if csv_out.exists():
             import csv as _csv
             with csv_out.open("r", encoding="utf-8") as f:
-                for row in _csv.DictReader(f):
-                    if row.get("prox_label") == "ALL":
-                        all_row = row
-                        break
+                r = list(_csv.DictReader(f))
+            for row in r:
+                if row.get("prox_label") == "ALL":
+                    all_row = row
+                    break
     except Exception:
         all_row = None
 
