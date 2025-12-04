@@ -102,11 +102,19 @@ def _coverage_row_is_fixture_event(rec: dict) -> bool:
 
 
 def _v2_coverage_count_for_snapshot(snapshot_id: str) -> int:
-    """Count parseable rows matching a snapshot_id (best-effort)."""
+    """Count parseable fixture rows matching a snapshot_id (best-effort).
+
+    Requires a non-empty snapshot_id; returns 0 immediately if snapshot_id is falsy.
+    """
     import json as _json
+
+    if not snapshot_id:
+        return 0
+
     p = _v2_coverage_path()
     if not p.exists():
         return 0
+
     n = 0
     with p.open("r", encoding="utf-8") as f:
         for line in f:
@@ -123,6 +131,7 @@ def _v2_coverage_count_for_snapshot(snapshot_id: str) -> int:
                 continue
             n += 1
     return n
+
 
 
 
