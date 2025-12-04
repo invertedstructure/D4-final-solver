@@ -4231,15 +4231,15 @@ if _st.button("Run V2 core (64× → receipts → manifest → suite/hist/zip)",
         except Exception as e:
             _st.warning(f"World snapshot write failed (non-fatal): {e}")
 
-                # Decide canonical snapshot id for this run (prefer world snapshot if available).
-        try:
-            rc = dict(_st.session_state.get("run_ctx") or {})
-        except Exception:
-            rc = {}
-        run_snapshot_id = rc.get("snapshot_id") or (snapshot_id or _time.strftime("%Y%m%d-%H%M%S", _time.localtime()))
-
-# 2) run 64× to emit receipts — SNAPSHOT __boot
+                       # D3.1.C.E — Bootstrap gating:
+        # The “real” suite run must use exactly the SSOT snapshot_id. We resolve it
+        # here, after writing the world snapshot, and refuse to fall back to any
+        # ad-hoc ids.
+        run_snapshot_id = _v2_current_world_snapshot_id(strict=True)
+    
+        # 2) run 64× to emit receipts — SNAPSHOT __boot
         snap_boot = f"{run_snapshot_id}__boot"
+
         ok1, msg1, cnt1 = run_suite_from_manifest(str(man_boot), snap_boot)
         (_st.success if ok1 else _st.warning)(f"Bootstrap run: {msg1} · rows={cnt1}")
 
