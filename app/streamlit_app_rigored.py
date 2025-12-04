@@ -142,12 +142,12 @@ def _d3_count_fixtures_for_snapshot(snapshot_id: str | None, manifest_path: _Pat
 
     Only counts rows that:
       - have fixture_label set, and
-      - have snapshot_id empty/None or equal to the provided snapshot_id.
+      - when snapshot_id is truthy: have snapshot_id equal to that value;
+      - when snapshot_id is falsy: no snapshot filter is applied.
 
-    Returns None when snapshot_id is falsy, the manifest is missing, or no rows match.
+    Returns None when the manifest is missing or no rows match.
     """
-    if not snapshot_id:
-        return None
+    import json as _json
 
     try:
         if manifest_path is None:
@@ -155,30 +155,38 @@ def _d3_count_fixtures_for_snapshot(snapshot_id: str | None, manifest_path: _Pat
     except Exception:
         manifest_path = None
 
-    if manifest_path is None:
+    if not manifest_path:
         return None
 
-    mp = _Path(manifest_path)
-    if not mp.exists():
-        return None
-
-    n = 0
     try:
-        for rec in iter_v2_suite_rows(mp):
-            if not isinstance(rec, dict):
-                continue
-            sid = rec.get("snapshot_id")
-            if sid not in (None, "", snapshot_id):
-                continue
-            fid = rec.get("fixture_label")
-            if not fid:
-                continue
-            n += 1
+        n = 0
+        with _Path(manifest_path).open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = _json.loads(line)
+                except Exception:
+                    continue
+                sid = rec.get("snapshot_id")
+
+                if snapshot_id:
+                    # When filtering by snapshot, require an explicit match.
+                    if sid and sid != snapshot_id:
+                        continue
+                # else: no snapshot filter (accept all snapshot_id values).
+
+                fid = rec.get("fixture_label")
+                if not fid:
+                    continue
+                n += 1
     except Exception:
         # Analyzer-only helper: on any unexpected error, report no fixtures.
         return None
 
     return n if n > 0 else None
+
 
 
 def _d3_integer_pass_stats(snapshot_id: str | None) -> dict:
