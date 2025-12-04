@@ -4018,191 +4018,9 @@ def _time_tau_c2_run_sweep(manifest_path: str | None = None, max_flips_per_kind:
     )
     return True, msg, summary
     
-def time_tau_c3_build_manifest_from_c2_sweep(
-    manifest_v2_path: str | None = None,
-    c2_sweep_jsonl_path: str | None = None,
-) -> tuple[bool, str, dict]:
-    """Build the Time(τ) C3 sweep manifest from the v2 manifest and C2 sweep.
 
-    Reads:
-      - logs/manifests/manifest_full_scope.jsonl       (v2 manifest)
-      - logs/experiments/time_tau_local_flip_sweep*.jsonl  (C2 sweep)
-
-    Writes:
-      - logs/manifests/time_tau_c3_manifest_full_scope.jsonl
-
-    Each output row has:
-      - fixture_label
-      - district_id
-      - snapshot_id
-      - strict_sig8
-      - paths.{B,C,H,U} (from the v2 manifest)
-      - tau_na_reason
-      - global_tau_law_ok
-
-    Returns:
-        (ok, msg, summary_dict)
-    """
-
-    # Resolve canonical directories.
-    try:
-        manifests_dir = _Path("logs") / "manifests"
-        exps_dir = _Path("logs") / "experiments"
-        manifests_dir.mkdir(parents=True, exist_ok=True)
-        exps_dir.mkdir(parents=True, exist_ok=True)
-    except Exception:
-        manifests_dir = _Path("logs") / "manifests"
-        exps_dir = _Path("logs") / "experiments"
-
-    # v2 manifest (strict/proj suite fixtures).
-    if manifest_v2_path:
-        manifest_v2 = _Path(manifest_v2_path)
-    else:
-        manifest_v2 = _svr_current_run_manifest_path()
-
-    # C2 sweep JSONL (Time(τ) local flip toy).
-    if c2_sweep_jsonl_path:
-        c2_sweep = _Path(c2_sweep_jsonl_path)
-    else:
-        # Pick the lexicographically last sweep JSONL as a simple proxy for "latest".
-        candidates = sorted(exps_dir.glob("time_tau_local_flip_sweep*.jsonl"))
-        if not candidates:
-            return False, "No C2 sweep JSONL found under logs/experiments/.", {}
-        c2_sweep = candidates[-1]
-
-    if not manifest_v2.exists():
-        return False, f"v2 manifest not found at {manifest_v2}", {}
-    if not c2_sweep.exists():
-        return False, f"C2 sweep JSONL not found at {c2_sweep}", {}
-
-    # Load v2 manifest rows and index by fixture_label.
-    manifest_rows: list[dict] = []
-    with manifest_v2.open("r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = _json.loads(line)
-            except Exception:
-                continue
-            if not isinstance(rec, dict):
-                continue
-            manifest_rows.append(rec)
-
-    n_manifest_rows = len(manifest_rows)
-    by_fixture: dict[str, dict] = {}
-    for rec in manifest_rows:
-        fid = rec.get("fixture_label")
-        if isinstance(fid, str):
-            by_fixture[fid] = rec
-
-    # Load C2 sweep rows and index by fixture_label.
-    c2_rows: dict[str, dict] = {}
-    with c2_sweep.open("r", encoding="utf-8") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                rec = _json.loads(line)
-            except Exception:
-                continue
-            if not isinstance(rec, dict):
-                continue
-            fid = rec.get("fixture_label")
-            if isinstance(fid, str):
-                c2_rows[fid] = rec
-
-    n_c2_rows = len(c2_rows)
-
-    # Intersect fixtures: only fixtures that appear in both v2 manifest and C2 sweep.
-    out_rows: list[dict] = []
-    for fid, base in by_fixture.items():
-        sweep_row = c2_rows.get(fid)
-        if not sweep_row:
-            continue
-
-        paths = (base.get("paths") or {}).copy()
-
-        fixture_label = fid
-        district_id = sweep_row.get("district_id") or (
-            fixture_label.split("_")[0] if fixture_label else "DUNKNOWN"
-        )
-        snapshot_id = sweep_row.get("snapshot_id")
-        strict_sig8 = sweep_row.get("strict_sig8") or base.get("strict_sig8") or ""
-        tau_na_reason = sweep_row.get("tau_na_reason")
-        global_tau_law_ok = bool(sweep_row.get("global_tau_law_ok", False))
-
-        out_rows.append(
-            {
-                "fixture_label": fixture_label,
-                "district_id": district_id,
-                "snapshot_id": snapshot_id,
-                "strict_sig8": strict_sig8,
-                "paths": paths,
-                "tau_na_reason": tau_na_reason,
-                "global_tau_law_ok": global_tau_law_ok,
-            }
-        )
-
-    # Write the C3 manifest.
-    manifest_c3 = manifests_dir / "time_tau_c3_manifest_full_scope.jsonl"
-    tmp = manifest_c3.with_suffix(".jsonl.tmp")
-    text = "".join(_json.dumps(r, separators=(",", ":")) + "\n" for r in out_rows)
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(manifest_c3)
-
-    summary = {
-        "manifest_v2_path": str(manifest_v2),
-        "c2_sweep_jsonl_path": str(c2_sweep),
-        "manifest_c3_path": str(manifest_c3),
-        "n_manifest_v2_rows": n_manifest_rows,
-        "n_c2_rows": n_c2_rows,
-        "n_c3_rows": len(out_rows),
-    }
-    msg = (
-        f"C3 manifest built: {len(out_rows)} rows "
-        f"(v2={n_manifest_rows}, c2_sweep={n_c2_rows})."
-    )
-    return True, msg, summary
     
-# --- V2 CORE (64×) — one press → receipts → manifest → suite → hist/zip
-_st.subheader("V2 — 64× → Receipts → Manifest → Suite/Histograms")
 
-def _repo_root():
-    try:
-        return _REPO_DIR
-    except Exception:
-        return _Path(__file__).resolve().parents[1]
-
-snapshot_id = _st.text_input(
-    "Snapshot id",
-    value=_time.strftime("%Y%m%d-%H%M%S", _time.localtime()),
-    key="v2_core_snapshot",
-)
-
-if _st.button("Run v2 core + Time(τ) lab and export bundle", key="btn_v2_bundle_export"):
-    with _st.spinner("Running 64× v2 + τ lab and building bundle..."):
-        try:
-            # Use the explicit snapshot_id from the text box when provided;
-            # fall back to auto-detection when it is empty.
-            zip_path = export_bundle_for_snapshot(snapshot_id=(snapshot_id or None))
-        except Exception as e:
-            _st.error(f"Bundle export failed: {e}")
-        else:
-            _st.success(f"Bundle ready → {zip_path}")
-            try:
-                data = _Path(zip_path).read_bytes()
-            except Exception as e:
-                _st.warning(f"Bundle zip exists but could not be read: {e}")
-            else:
-                _st.download_button(
-                    "Download v2+τ bundle zip",
-                    data=data,
-                    file_name=_Path(zip_path).name,
-                    key="btn_v2_bundle_download",
-                )
 
 
 
@@ -7250,6 +7068,41 @@ with st.expander("C4 — C3 stability rollup (v0.2)", expanded=False):  # type: 
                 except Exception:
                     # Best-effort UI sugar only.
                     pass
+# --- V2 CORE (64×) — one press → receipts → manifest → suite → hist/zip
+_st.subheader("V2 — 64× → Receipts → Manifest → Suite/Histograms")
 
+def _repo_root():
+    try:
+        return _REPO_DIR
+    except Exception:
+        return _Path(__file__).resolve().parents[1]
+
+snapshot_id = _st.text_input(
+    "Snapshot id",
+    value=_time.strftime("%Y%m%d-%H%M%S", _time.localtime()),
+    key="v2_core_snapshot",
+)
+
+if _st.button("Run v2 core + Time(τ) lab and export bundle", key="btn_v2_bundle_export"):
+    with _st.spinner("Running 64× v2 + τ lab and building bundle..."):
+        try:
+            # Use the explicit snapshot_id from the text box when provided;
+            # fall back to auto-detection when it is empty.
+            zip_path = export_bundle_for_snapshot(snapshot_id=(snapshot_id or None))
+        except Exception as e:
+            _st.error(f"Bundle export failed: {e}")
+        else:
+            _st.success(f"Bundle ready → {zip_path}")
+            try:
+                data = _Path(zip_path).read_bytes()
+            except Exception as e:
+                _st.warning(f"Bundle zip exists but could not be read: {e}")
+            else:
+                _st.download_button(
+                    "Download v2+τ bundle zip",
+                    data=data,
+                    file_name=_Path(zip_path).name,
+                    key="btn_v2_bundle_download",
+                )
 
 # --------------
