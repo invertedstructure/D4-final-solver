@@ -5809,29 +5809,41 @@ def _time_tau_c3_load_baseline_context_from_fixture(
     if not district_id:
         district_id = (fixture_label.split("_")[0] if "_" in fixture_label else "DUNKNOWN")
 
-    # Snapshot selection (deterministic priority):
-    #   1) manifest row snapshot_id (rec["snapshot_id"])
-    #   2) strict_cert["snapshot_id"] or strict_cert["embed"]["snapshot_id"]
-    #   3) _svr_current_run_snapshot_id()
-    #   4) None
-    snapshot_id = None
-    try:
-        if isinstance(rec, dict):
-            snapshot_id = rec.get("snapshot_id") or None
-    except Exception:
-        snapshot_id = None
-
-    if not snapshot_id and isinstance(strict_cert, dict):
-        snapshot_id = (
-            strict_cert.get("snapshot_id")
-            or (strict_cert.get("embed") or {}).get("snapshot_id")
+   
+        # D3.1.C.E — SSOT alignment (strict).
+    # Resolve the canonical world snapshot once; require it to exist and agree
+    # with any snapshot_id carried by the manifest row or strict cert.
+    ssot_snapshot_id = _v2_current_world_snapshot_id(strict=False)
+    if not ssot_snapshot_id:
+        raise RuntimeError(
+            "Time(τ) C3 baseline context: no canonical v2 world snapshot_id found; "
+            "run the v2 core 64× flow first."
         )
 
-    if not snapshot_id:
-        try:
-            snapshot_id = _svr_current_run_snapshot_id()
-        except Exception:
-            snapshot_id = None
+    rec_snapshot_id = None
+    if isinstance(rec, dict):
+        rec_snapshot_id = rec.get("snapshot_id") or None
+
+    strict_cert_snapshot_id = None
+    if isinstance(strict_cert, dict):
+        strict_cert_snapshot_id = (
+            strict_cert.get("snapshot_id")
+            or ((strict_cert.get("embed") or {}).get("snapshot_id"))
+        )
+
+    for src_name, sid in (
+        ("manifest", rec_snapshot_id),
+        ("strict_cert", strict_cert_snapshot_id),
+    ):
+        if sid and str(sid) != str(ssot_snapshot_id):
+            raise RuntimeError(
+                "Time(τ) C3 baseline context: snapshot_id mismatch "
+                f"({src_name}={sid!r}, SSOT={ssot_snapshot_id!r}). "
+                "Rerun the v2 core 64× flow to resync artifacts."
+            )
+
+    snapshot_id = ssot_snapshot_id
+
 
     base_ctx = {
         "district_id": str(district_id or "DUNKNOWN"),
