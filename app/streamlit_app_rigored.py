@@ -4290,7 +4290,8 @@ if _st.button("Run V2 core (64× → receipts → manifest → suite/hist/zip)",
 
         # 7) C1 health ping for THIS snapshot (__real)
         try:
-            path_csv = _coverage_rollup_write_csv(snapshot_id=run_snapshot_id)
+            ssot_snapshot_id = _v2_current_world_snapshot_id(strict=False)
+            path_csv = _coverage_rollup_write_csv(snapshot_id=ssot_snapshot_id)
             if path_csv and path_csv.exists():
                 # read the ALL row for quick chip
                 import csv as _csv
@@ -4331,7 +4332,7 @@ if _st.button("Run V2 core (64× → receipts → manifest → suite/hist/zip)",
         # D3.1.B3 — dev-only C1 snapshot vs rollup invariant check
         with _st.expander("D3 debug — C1 snapshot sanity"):
             try:
-                dbg = _c1_debug_snapshot_summary(run_snapshot_id)
+                dbg = _c1_debug_snapshot_summary(_v2_current_world_snapshot_id(strict=False))
                 cov_rows = dbg.get("coverage_rows_for_snapshot")
                 rollup_row = dbg.get("rollup_all_row") or {}
                 n_fixtures = dbg.get("n_fixtures")
