@@ -2332,7 +2332,7 @@ def _RUN_SUITE_CANON(manifest_path: str, snapshot_id: str):
                     if run_label is not None:
                         cov["run_label"] = run_label
 
-_v2_coverage_append(cov)
+                    _v2_coverage_append(cov)
                 except Exception as e:
                     try:
                         _st.warning(f"[{fid}] coverage append failed: {e}")
