@@ -1324,46 +1324,6 @@ def _svr_current_snapshot_id() -> str | None:
     except Exception:
         return None
 
-# --- D4.UI helpers: SSOT + latest cert for UI (D4.UI.A) ---
-
-
-def _ui_current_ssot_snapshot() -> str | None:
-    """
-    Return the current SSOT snapshot_id for the UI.
-
-    This mirrors the semantics we already use elsewhere: prefer the
-    existing v2 world-snapshot SSOT, but do not raise if it's missing.
-    """
-    try:
-        sid = _v2_current_world_snapshot_id(strict=False)
-    except Exception:
-        sid = None
-    if not sid:
-        return None
-    return str(sid)
-
-
-def _ui_latest_d4_cert_for_ssot() -> tuple[_Path | None, dict | None]:
-    """
-    Convenience helper for the UI:
-
-      - resolve the current SSOT snapshot_id
-      - locate the latest D4 certificate for that snapshot
-      - return (path, cert_obj) or (None, None) if nothing is found.
-    """
-    sid = _ui_current_ssot_snapshot()
-    if not sid:
-        return None, None
-
-    try:
-        path, obj = _d4_latest_certificate_for_snapshot(snapshot_id=sid)
-    except Exception:
-        return None, None
-
-    if path is None or not obj:
-        return None, None
-
-    return path, obj
 
 
 
