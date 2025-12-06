@@ -1116,21 +1116,6 @@ def _v2_extract_ids_from_path(bdir: _VPath):
     return None, None
 
 
-def make_fixture_label(district_id: str, h_mask: str, c_mask: str) -> str:
-    """Build canonical fixture label "D*_H*_C*" from components.
-
-    Example:
-      make_fixture_label("D3", "10", "111") -> "D3_H10_C111"
-    """
-    d = str(district_id or "").strip()
-    h = str(h_mask or "").strip()
-    c = str(c_mask or "").strip()
-    # Normalize if caller passed "H10"/"C111" style masks.
-    if h.startswith("H"):
-        h = h[1:]
-    if c.startswith("C"):
-        c = c[1:]
-    return f"{d}_H{h}_C{c}"
 
 
 def parse_fixture_label(label: str) -> tuple[str, str, str]:
