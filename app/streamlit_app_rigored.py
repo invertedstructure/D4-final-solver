@@ -1118,35 +1118,6 @@ def _v2_extract_ids_from_path(bdir: _VPath):
 
 
 
-def parse_fixture_label(label: str) -> tuple[str, str, str]:
-    """Parse a fixture label like "D3_H10_C111" into (district_id, h_mask, c_mask).
-
-    Returns empty strings on failure rather than raising.
-    """
-    import re as _re
-
-    s = str(label or "").strip()
-    if not s:
-        return "", "", ""
-
-    # District: prefer an explicit D\d+ token, fallback to the first chunk.
-    mD = _re.search(r"(?:^|_)(D\d+)", s)
-    if mD:
-        district = mD.group(1)
-    else:
-        district = s.split("_")[0]
-
-    # Masks: capture the numeric part after H*/C*.
-    mH = _re.search(r"_H([A-Za-z0-9]+)", s)
-    mC = _re.search(r"_C([A-Za-z0-9]+)", s)
-    h_mask = mH.group(1) if mH else ""
-    c_mask = mC.group(1) if mC else ""
-
-    return district, h_mask, c_mask
-
-# Dev sanity (kept cheap and local to this module).
-# assert parse_fixture_label(make_fixture_label("D3", "10", "111")) == ("D3", "10", "111")
-
 def _v2_extract_lanes_from_auto(auto_fp: _VPath):
     try:
         payload = _Vjson.loads(auto_fp.read_text("utf-8"))
