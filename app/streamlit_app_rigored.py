@@ -3219,50 +3219,6 @@ def _b1_tau_c2_paths(root: _Path, snapshot_id: str) -> tuple[_Path, _Path]:
     )
 
 
-def _b1_tau_c3_receipt_path(
-    root: _Path,
-    fixture_label: str,
-    strict_sig8: str,
-    kind: str,
-    a_idx: int,
-    b_idx: int,
-) -> _Path:
-    """Bundle-relative path for a single C3 recompute receipt."""
-    base = _b1_rel_dirs_for_root(root)["tau_c3_receipts"]
-    base_name = f"time_tau_c3_recompute__{fixture_label}__{strict_sig8}__{kind}_{int(a_idx)}_{int(b_idx)}"
-    return base / f"{base_name}.json"
-
-
-def _b1_tau_c3_derived_world_path(
-    root: _Path,
-    fixture_label: str,
-    strict_sig8: str,
-    kind: str,
-    i: int | None,
-    j: int | None,
-    k: int | None,
-) -> _Path:
-    """Bundle-relative path for a single C3 derived world (H2 or d3 flip).
-
-    This mirrors the layout used by the live pipeline under
-    ``app/inputs/c3_derived_worlds`` but rooted under ``tau/c3/derived_worlds``.
-    """
-    base = _b1_rel_dirs_for_root(root)["tau_c3_derived_worlds"]
-    fixture_root = base / f"{fixture_label}__{strict_sig8}"
-    if kind == "H2":
-        i_tag = "x" if i is None else int(i)
-        j_tag = "x" if j is None else int(j)
-        fname = f"flip_i{i_tag}_j{j_tag}.json"
-        subdir = "H2"
-    elif kind == "d3":
-        j_tag = "x" if j is None else int(j)
-        k_tag = "x" if k is None else int(k)
-        fname = f"flip_j{j_tag}_k{k_tag}.json"
-        subdir = "d3"
-    else:
-        fname = "flip_unknown.json"
-        subdir = kind or "unknown"
-    return fixture_root / subdir / fname
 
 
 def _b1_tau_c4_rollup_paths(root: _Path) -> tuple[_Path, _Path]:
