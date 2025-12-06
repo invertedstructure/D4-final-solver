@@ -2266,19 +2266,6 @@ def build_v2_suite_row(
     return row
 
 
-def ssot_frozen_sig_from_ib() -> tuple[str, str, str, str, str]:
-    """Read the canonical 5-tuple from st.session_state['_inputs_block'] if present."""
-    ib = st.session_state.get("_inputs_block") or {}
-    h = ib.get("hashes") or {}
-    b = str(h.get("boundaries_hash", ib.get("boundaries_hash", "")))
-    C = str(h.get("C_hash",         ib.get("C_hash", "")))
-    H = str(h.get("H_hash",         ib.get("H_hash", "")))
-    U = str(h.get("U_hash",         ib.get("U_hash", "")))
-    S = str(h.get("shapes_hash",    ib.get("shapes_hash", "")))
-    if not any((b, C, H, U, S)):
-        return ("", "", "", "", "")
-    return (b, C, H, U, S)
-
 
 
 def policy_label_from_cfg(cfg: dict) -> str:
