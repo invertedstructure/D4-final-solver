@@ -4599,65 +4599,6 @@ def run_full_v2_suite_and_tau(snapshot_id: str | None = None) -> tuple[str, dict
 
 
 
-def _bundle_resolve_repo_path(rel: str | None) -> _Path:
-    """Resolve a repo-root-relative path string to an absolute _Path.
-
-    If `rel` is already an absolute path, it is returned as-is. Otherwise we
-    treat it as relative to the repository root.
-    """
-    if not rel:
-        return _Path("")
-    p = _Path(rel)
-    if p.is_absolute():
-        return p
-    try:
-        root = _REPO_ROOT  # type: ignore[name-defined]
-    except Exception:
-        try:
-            root = _repo_root()
-        except Exception:  # pragma: no cover - last resort
-            root = _Path(".")
-    return (root / rel).resolve()
-
-
-
-
-
-def _bundle_add_path_to_zip(zf, path: _Path, repo_root: _Path, *, seen: set[str] | None = None) -> None:
-    """Add a file or directory tree to a ZipFile, using repo-root-relative names.
-
-    - Directories are walked recursively.
-    - Files are added with an archive name relative to `repo_root` when
-      possible, otherwise we fall back to the file name.
-    - `seen` can be used to de-duplicate archive names.
-    """
-    import os as _os
-
-    if seen is None:
-        seen = set()
-
-    path = _Path(path)
-    if not path.exists():
-        return
-
-    def _add_file(p: _Path):
-        try:
-            arc = str(p.relative_to(repo_root))
-        except Exception:
-            arc = p.name
-        if arc in seen:
-            return
-        seen.add(arc)
-        zf.write(str(p), arcname=arc)
-
-    if path.is_dir():
-        for root_dir, _dirs, files in _os.walk(path):
-            root_path = _Path(root_dir)
-            for fname in files:
-                _add_file(root_path / fname)
-    else:
-        _add_file(path)
-
 
 
 
