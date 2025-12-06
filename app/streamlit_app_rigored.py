@@ -5190,54 +5190,7 @@ def _bundle_resolve_repo_path(rel: str | None) -> _Path:
     return (root / rel).resolve()
 
 
-def _bundle_collect_payload_paths(manifest: dict) -> list[_Path]:
-    """Collect all payload paths referenced by a bundle manifest.
 
-    This walks the standard sections:
-
-      - manifests (files)
-      - certs (directories)
-      - time_tau (directories + files)
-      - coverage (files)
-      - logs (directories)
-
-    and returns a de-duplicated list of absolute Paths. Non-existent paths are
-    still returned; the export helper may choose to skip them.
-    """
-    paths: dict[str, _Path] = {}
-
-    def _add(key: str, val: str | None, *, expect_dir: bool | None = None):
-        if not val:
-            return
-        p = _bundle_resolve_repo_path(val)
-        if not str(p):
-            return
-        # Store by string key to de-duplicate.
-        paths[str(p)] = p
-
-    man = manifest.get("manifests") or {}
-    _add("man_v2", man.get("v2_full_scope"), expect_dir=False)
-    _add("man_c3", man.get("time_tau_c3"), expect_dir=False)
-
-    certs = manifest.get("certs") or {}
-    _add("certs_strict", certs.get("strict"), expect_dir=True)
-    _add("certs_projected", certs.get("projected"), expect_dir=True)
-    _add("certs_d4", certs.get("d4_cert_dir"), expect_dir=True)
-
-    tau = manifest.get("time_tau") or {}
-    _add("tau_c2_dir", tau.get("c2_toy_dir"), expect_dir=True)
-    _add("tau_c3_dir", tau.get("c3_receipts_dir"), expect_dir=True)
-    _add("tau_c4_rollup", tau.get("c4_rollup_path"), expect_dir=False)
-
-    cov = manifest.get("coverage") or {}
-    _add("cov_jsonl", cov.get("coverage_jsonl_path"), expect_dir=False)
-    _add("cov_rollup_csv", cov.get("coverage_rollup_csv_path"), expect_dir=False)
-
-    logs = manifest.get("logs") or {}
-    _add("logs_loop", logs.get("loop_receipts_dir"), expect_dir=True)
-    _add("logs_snapshots", logs.get("world_snapshots_dir"), expect_dir=True)
-
-    return sorted(paths.values(), key=lambda p: str(p))
 
 
 def _bundle_add_path_to_zip(zf, path: _Path, repo_root: _Path, *, seen: set[str] | None = None) -> None:
