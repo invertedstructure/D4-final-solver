@@ -4393,45 +4393,6 @@ def _ensure_bundle_dir_for_manifest(manifest: dict) -> _Path:
     return bdir
 
 
-def write_bundle_manifest(
-    snapshot_id: str | None = None,
-    run_ctx: dict | None = None,
-) -> _Path:
-    """Build + sig8 + write bundle_manifest.json for a given 64× v2 run.
-
-    This is the small I/O wrapper around the pure builders:
-
-        manifest = build_bundle_manifest_for_snapshot(...)
-        manifest = stamp_bundle_manifest_sig8(manifest)
-
-    It then writes the manifest to:
-
-        logs/bundle/{snapshot_id}__{sig8}/bundle_manifest.json
-
-    (with the same directory policy as `_ensure_bundle_dir_for_manifest`) and
-    returns the output path as a `_Path`.
-    """
-    manifest = build_bundle_manifest_for_snapshot(
-        snapshot_id=snapshot_id,
-        run_ctx=run_ctx,
-    )
-    # Attach D4 certificate reference into meta (if present) before sig8.
-    try:
-        manifest = _d4_attach_certificate_meta_to_manifest(
-            manifest,
-            snapshot_id=snapshot_id,
-            run_ctx=run_ctx,
-        )
-    except Exception:
-        # If anything goes wrong here, we still write a manifest without D4 meta.
-        pass
-    manifest = stamp_bundle_manifest_sig8(manifest)
-    bdir = _ensure_bundle_dir_for_manifest(manifest)
-    out_path = bdir / "bundle_manifest.json"
-
-    txt = canonical_json(manifest)
-    out_path.write_text(txt, encoding="utf-8")
-    return out_path
 
 
 
