@@ -3989,34 +3989,6 @@ def _b1_write_bundle_tree_for_snapshot(
     return bdir, state
 
 
-# --- B1.E: bundle self-checkers (bundle-only + repo cross-check) ---
-
-
-def _b1_is_probably_absolute_path_str(value: object) -> bool:
-    """Best-effort heuristic: does ``value`` look like an absolute host path?
-
-    We only care about catching obviously-host-specific shapes such as::
-
-        /abs/path/...
-        C:\\Users\\...
-        D:/data/...
-
-    Bundle-stable ``source_id`` values should be POSIX-style, repo-relative
-    fragments like ``"app/inputs/B/foo.json"`` or simple basenames.
-    """
-    if not isinstance(value, str):
-        return False
-    if not value:
-        return False
-    # Unix-style / root or Windows-style backslash root.
-    if value.startswith("/") or value.startswith("\\"):
-        return True
-    # Windows drive letter: C:\... or D:/...
-    if re.match(r"^[A-Za-z]:[\\/]", value):
-        return True
-    return False
-
-
 
 # --- D4 certificate schema & dirs ---
 
