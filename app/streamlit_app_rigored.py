@@ -8118,6 +8118,31 @@ def _time_tau_c3_build_and_write_receipt(
     except Exception:
         # If we cannot ensure the directory, still return the in-memory receipt.
         return receipt
+            # --- B3.1B: canonical emission of the C3 receipt ---
+    # Filename uses fixture, sig8, flip kind + indices (i,j,k).
+    kind = kind or "UNKNOWN"
+    a_idx = i_idx if i_idx is not None else -1
+    b_idx = j_idx if j_idx is not None else -1
+    c_idx = k_idx if k_idx is not None else -1
+
+    base_name = (
+        f"time_tau_c3_recompute__{fixture_label}__{strict_sig8}"
+        f"__{kind}_{a_idx}_{b_idx}_{c_idx}"
+    )
+    outp = exp_dir / f"{base_name}.json"
+
+    # Use canonical writer; C3 receipts keep all keys (no ephemerals stripped).
+    try:
+        _v2_write_canonical_json(outp, receipt)
+    except Exception:
+        # As a fallback, write with the legacy writer.
+        try:
+            _hard_co_write_json(outp, receipt)
+        except Exception:
+            pass
+
+    return receipt
+
 
 # ----------------------------------------------------------------------
 # C3 v0.1 — Pass C: single-fixture driver (max one H2 + one d3 flip)
