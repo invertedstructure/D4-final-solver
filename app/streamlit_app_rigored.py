@@ -2655,8 +2655,7 @@ def _svr_build_embed(ib: dict,
     s = _json.dumps(embed, separators=(",", ":"), sort_keys=True).encode("ascii")
     embed_sig = _hashlib.sha256(s).hexdigest()
     return embed, embed_sig
-# small witness helper
-def _bottom_row(M): return M[-1] if (M and len(M)) else []
+
 
 # ========================= Solver entrypoint (v2: emit baseline certs) =========================
 def run_overlap_once(ss=st.session_state):
