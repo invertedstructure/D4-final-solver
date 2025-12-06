@@ -1541,16 +1541,6 @@ def _svr_current_run_label() -> str | None:
     return str(label)
 
 
-def _v2_assert_snapshot_consistency(snapshot_id: str | None) -> None:
-    """Dev-only helper: compare provided snapshot_id with the SSOT snapshot.
-
-    If both are non-empty and differ, raise a loud error so identity drift
-    cannot go unnoticed while wiring D3.1.C. Safe to remove once the spine
-    is fully hardened.
-    """
-    ssot = _v2_current_world_snapshot_id(strict=False)
-    if snapshot_id and ssot and snapshot_id != ssot:
-        raise ValueError(f"Snapshot mismatch: provided={snapshot_id}, ssot={ssot}")
 
 
 def _svr_current_run_snapshot_id() -> str | None:
