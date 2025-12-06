@@ -5568,22 +5568,6 @@ def iter_v2_suite_rows(manifest_path=None):
                 yield rec
 
 
-def iter_v2_suite_rows_for_run(run_ctx=None):
-    """Yield v2 suite rows for the current run.
-
-    Uses run_ctx['manifest_full_scope_path'] when available; otherwise falls
-    back to the default v2 manifest.
-    """
-    import streamlit as st  # local import
-
-    rc = dict(run_ctx or st.session_state.get("run_ctx") or {})
-    mp = rc.get("manifest_full_scope_path")
-    if mp:
-        yield from iter_v2_suite_rows(mp)
-    else:
-        yield from iter_v2_suite_rows()
-
-
 
 # --- Histogram reductions over coverage.jsonl
 # SSOT: canonical v2 histograms over coverage.jsonl → histograms_v2.json
