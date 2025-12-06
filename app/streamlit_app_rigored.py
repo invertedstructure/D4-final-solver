@@ -4717,16 +4717,21 @@ def _v2_write_loop_receipt_for_bundle(bdir, extra: dict | None = None):
 # SSOT: canonical writer for logs/manifests/manifest_full_scope.jsonl
 def _v2_regen_manifest_from_receipts():
     """
-    Scan logs/certs/**/loop_receipt__*.json (schema=loop_receipt.v2),
-    validate absolute SSOT paths (B,C,H,U), deduplicate by fixture_label,
-    and write logs/manifests/manifest_full_scope.jsonl atomically.
+    B3.2A — Strict regen of v2 manifest from loop_receipt.v2 evidence.
 
-    Returns: (ok: bool, manifest_path: Path, kept_count: int)
+    SSOT identity = (snapshot_id, inputs_sig_5) from current world snapshot.
+    Receipts must match SSOT identity, have valid absolute paths, and
+    satisfy the D-tag constraint. Deterministic scoring chooses exactly
+    one receipt per fixture. The expected number of fixtures is taken
+    from the world snapshot if available, otherwise defaults to 64.
+
+    Returns: (ok: bool, manifest_path: Path, kept_count: int | str)
     """
     import json as _json
     import time as _time
     import re as _re
 
+    # Repo root
     try:
         repo_root = _REPO_DIR
     except Exception:
@@ -4736,32 +4741,38 @@ def _v2_regen_manifest_from_receipts():
     manifests_dir.mkdir(parents=True, exist_ok=True)
     manifest_path = manifests_dir / "manifest_full_scope.jsonl"
 
+    # Receipts root
     try:
-        certs_root = _CERTS_DIR  # preferred if defined
+        certs_root = _CERTS_DIR
     except Exception:
         certs_root = repo_root / "logs" / "certs"
 
     receipts = list(certs_root.rglob("loop_receipt__*.json"))
-    # Best-effort snapshot_id for this manifest: prefer the current world
-    # snapshot pointer if available, otherwise leave blank.
+
+    # --- B3.2A: SSOT identity ---
     try:
-        manifest_snapshot_id = _svr_current_snapshot_id()
+        ssot_snapshot_id = _v2_current_world_snapshot_id(strict=True)
     except Exception:
-        manifest_snapshot_id = None
+        ssot_snapshot_id = ""
 
+    try:
+        ssot_inputs_sig_5 = _frozen_inputs_sig_from_ib()
+    except Exception:
+        ssot_inputs_sig_5 = []
 
-    records = []
+    # Expected number of fixtures from SSOT world snapshot
+    try:
+        ws = _svr_current_world_snapshot_body()
+        expected_n = ws.get("n_fixtures") or 64
+    except Exception:
+        expected_n = 64
+
+    # What snapshot_id should be written into the manifest
+    manifest_snapshot_id = ssot_snapshot_id
+
+    grouped = {}  # fid -> (row, score_tuple, path)
     bad = 0
-    grouped = {}  # fixture_label -> best (rec, score, src_path)
-
-    def _score(rj: dict, pth: _Path) -> float:
-        # prefer explicit receipt_written_at, fall back to file mtime
-        ts = (((rj or {}).get("timestamps") or {}).get("receipt_written_at")) or 0
-        try:
-            ts = float(ts)
-        except Exception:
-            ts = 0.0
-        return max(ts, pth.stat().st_mtime)
+    records = []
 
     for rp in receipts:
         try:
@@ -4774,6 +4785,18 @@ def _v2_regen_manifest_from_receipts():
             bad += 1
             continue
 
+        # --- B3.2A: strict eligibility filter ---
+        rec_snapshot_id = rj.get("snapshot_id", "")
+        rec_inputs_sig_5 = rj.get("inputs_sig_5", [])
+
+        if rec_snapshot_id != ssot_snapshot_id:
+            bad += 1
+            continue
+        if rec_inputs_sig_5 != ssot_inputs_sig_5:
+            bad += 1
+            continue
+
+        # Extract basics
         fid = rj.get("fixture_label") or ""
         paths = rj.get("paths") or {}
         B, C, H, U = paths.get("B"), paths.get("C"), paths.get("H"), paths.get("U")
@@ -4781,7 +4804,7 @@ def _v2_regen_manifest_from_receipts():
             bad += 1
             continue
 
-        # All must be absolute and exist on disk
+        # Validate absolute & existing
         Bp, Cp, Hp, Up = map(_Path, (B, C, H, U))
         if not (Bp.is_absolute() and Cp.is_absolute() and Hp.is_absolute() and Up.is_absolute()):
             bad += 1
@@ -4790,22 +4813,28 @@ def _v2_regen_manifest_from_receipts():
             bad += 1
             continue
 
-        # Enforce B comes from D-tag in fixture_label (never hashed district_id)
+        # Validate D-tag matches B-file stem
         mD = _re.search(r"(?:^|_)D(\d+)", fid or "")
         D_tag = f"D{mD.group(1)}" if mD else None
         if not D_tag or _Path(B).stem != D_tag:
             bad += 1
             continue
 
-        sc = _score(rj, rp)
+        # --- B3.2A deterministic scoring ---
+        has_inputs = bool(rec_inputs_sig_5)
+        ts = (((rj.get("timestamps") or {}).get("receipt_written_at")) or 0)
+        try:
+            ts = float(ts)
+        except Exception:
+            ts = 0.0
+        sc = (has_inputs, ts, str(rp))  # full ordering
+
         keep = grouped.get(fid)
         if (keep is None) or (sc > keep[1]):
-            # Identity fields sourced from the receipt, with gentle fallbacks.
             district_id = rj.get("district_id") or D_tag or "DUNKNOWN"
             strict_sig8 = rj.get("sig8") or ""
             bdir = rj.get("bundle_dir") or str(rp.parent)
 
-            # dims (if present on the receipt)
             dims = None
             if isinstance(rj.get("dims"), dict):
                 dims = {
@@ -4813,7 +4842,6 @@ def _v2_regen_manifest_from_receipts():
                     "n3": rj["dims"].get("n3"),
                 }
 
-            # Base canonical header row.
             header = build_v2_suite_row(
                 snapshot_id=manifest_snapshot_id,
                 district_id=district_id,
@@ -4822,7 +4850,6 @@ def _v2_regen_manifest_from_receipts():
                 bundle_dir=bdir,
             )
 
-            # Preserve existing manifest fields (paths + dims) as top-level keys.
             row = dict(header)
             row["paths"] = paths
             if dims is not None:
@@ -4830,24 +4857,27 @@ def _v2_regen_manifest_from_receipts():
 
             grouped[fid] = (row, sc, rp)
 
-    # finalize rows in stable order
+    # Finalize rows
     for fid in sorted(grouped.keys()):
         records.append(grouped[fid][0])
 
-    # atomic write
+    # --- B3.2A fixture count guard ---
+    if len(records) != expected_n:
+        msg = (
+            f"B3.2A regen failed: expected {expected_n} fixtures but found "
+            f"{len(records)} eligible loop receipts. "
+            f"(snapshot_id={ssot_snapshot_id})"
+        )
+        return False, msg, len(records)
+
+    # --- canonical JSONL atomic write ---
     tmp = manifest_path.with_suffix(".jsonl.tmp")
-    tmp.write_text("\n".join(_json.dumps(r, separators=(",", ":")) for r in records) + "\n", encoding="utf-8")
+    lines = [_json.dumps(r, separators=(",", ":")) for r in records]
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
     tmp.replace(manifest_path)
 
-    # optional: warn if we dropped anything
-    dropped = len(receipts) - bad - len(records)
-    if dropped > 0:
-        try:
-            _st.warning(f"Manifest dedup: kept {len(records)} rows · dropped {dropped} older duplicates · skipped {bad} invalid receipts")
-        except Exception:
-            pass
-
     return True, manifest_path, len(records)
+
 
 
 def iter_v2_suite_rows(manifest_path=None):
